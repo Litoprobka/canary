@@ -3,7 +3,6 @@ module Main (main) where
 import Lang
 import Relude
 import Text.Megaparsec
-import Data.HashMap.Strict qualified as Map
 
 main :: IO ()
 main = do

@@ -1,0 +1,10 @@
+main = (ap id)
+
+id = λx. x
+ap = λf. λx. (f x)
+const = λx. λy. x
+
+
+list = λc. λn. (c 1 (c 2 (c 3 n)))
+map = λf. λxs. λcons. (xs (b cons f)) 
+b = λf. λg. λx. (f (g x))

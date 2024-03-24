@@ -1,6 +1,6 @@
 module Lang where
 
-import Relude hiding (some)
+import Relude hiding (some, many)
 import Text.Megaparsec
 import Text.Megaparsec.Char hiding (space)
 import Text.Megaparsec.Char.Lexer qualified as L
@@ -30,35 +30,34 @@ data Expr
 type Code = HashMap Name Expr
 
 lambdaCalc :: Parser Code
-lambdaCalc = (Map.fromList <$> decl `sepEndBy1` newline)
+lambdaCalc = space *> (Map.fromList <$> declP `sepEndBy1` many (newline *> space))
 
-name :: Parser Name
-name = lexeme $ fromString <$> some letterChar
+nameP :: Parser Name
+nameP = lexeme $ fromString <$> some letterChar
 
-decl :: Parser (Name, Expr)
-decl = lexeme do
-    name' <- name
+declP :: Parser (Name, Expr)
+declP = lexeme do
+    name <- nameP
     symbol "="
-    body <- expr
-    pure $ (name', body)
+    body <- exprP
+    pure (name, body)
 
-expr :: Parser Expr
-expr = choice [lambda, app, Var <$> name, int]
+exprP :: Parser Expr
+exprP = choice [lambdaP, app, Var <$> nameP, intP]
 
-lambda :: Parser Expr
-lambda = lexeme do
+lambdaP :: Parser Expr
+lambdaP = lexeme do
     lexeme $ oneOf ['\\', 'λ']
-    name' <- name
+    name <- nameP
     symbol "."
-    body <- expr
-    pure $ Lam name' body
+    Lam name <$> exprP
 
 app :: Parser Expr
 app = between (symbol "(") (symbol ")") $
-    App <$> expr <*> expr
+    foldl' App <$> exprP <*> some exprP
 
-int :: Parser Expr
-int = Int <$> L.signed space (lexeme L.decimal)
+intP :: Parser Expr
+intP = Int <$> L.signed space (lexeme L.decimal)
 
 data RuntimeError = UnboundVar Name | TypeError deriving Show
 
@@ -72,15 +71,21 @@ reduce decls = do
     main <- lookup' "main" decls
     go decls main
   where
+    go :: HashMap Name Expr -> Expr -> Either RuntimeError Expr
     go scope expr = case expr of
-        lam@Lam{} -> Right lam
+        Lam argName body -> Lam argName <$> go (Map.insert argName (Var argName) scope) body
         App fExpr argExpr -> do
             f <- go scope fExpr
             arg <- go scope argExpr
             case f of
-                Lam varName body -> go (Map.insert varName arg scope) body
+                Lam argName body -> go (Map.insert argName arg scope) body
+                Var{} -> Right $ App f arg
                 _ -> Left TypeError
-        Var name -> lookup' name scope >>= go scope
+        Var name -> do
+            mbBody <- lookup' name scope
+            case mbBody of
+                Var name' | name == name' -> Right $ Var name -- unresolved variable
+                other -> go scope other
         n@Int{} -> Right n
 
 pretty :: Expr -> Text
