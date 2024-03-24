@@ -1,0 +1,78 @@
+cabal-version: 1.12
+
+-- This file has been generated from package.yaml by hpack version 0.36.0.
+--
+-- see: https://github.com/sol/hpack
+
+name:           lang
+version:        0.1.0.0
+description:    Please see the README on GitHub at <https://github.com/Litoprobka/lang#readme>
+homepage:       https://github.com/Litoprobka/lang#readme
+bug-reports:    https://github.com/Litoprobka/lang/issues
+author:         Peter Burtsev
+maintainer:     Peter Burtsev
+copyright:      2024 Peter Burtsev
+license:        BSD2
+license-file:   LICENSE
+build-type:     Simple
+extra-source-files:
+    README.md
+
+source-repository head
+  type: git
+  location: https://github.com/Litoprobka/lang
+
+library
+  exposed-modules:
+      Lang
+  other-modules:
+      Paths_lang
+  hs-source-dirs:
+      src
+  default-extensions:
+      NoImplicitPrelude
+      BlockArguments
+      OverloadedStrings
+  ghc-options: -Wall -Wcompat -Widentities -Wincomplete-record-updates -Wincomplete-uni-patterns -Wmissing-export-lists -Wmissing-home-modules -Wpartial-fields -Wredundant-constraints
+  build-depends:
+      base >=4.7 && <5
+    , megaparsec >=9.5.0 && <10
+    , relude >=1.2.1.0 && <2
+  default-language: GHC2021
+
+executable lang-exe
+  main-is: Main.hs
+  other-modules:
+      Paths_lang
+  hs-source-dirs:
+      app
+  default-extensions:
+      NoImplicitPrelude
+      BlockArguments
+      OverloadedStrings
+  ghc-options: -Wall -Wcompat -Widentities -Wincomplete-record-updates -Wincomplete-uni-patterns -Wmissing-export-lists -Wmissing-home-modules -Wpartial-fields -Wredundant-constraints -threaded -rtsopts -with-rtsopts=-N
+  build-depends:
+      base >=4.7 && <5
+    , lang
+    , megaparsec >=9.5.0 && <10
+    , relude >=1.2.1.0 && <2
+  default-language: GHC2021
+
+test-suite lang-test
+  type: exitcode-stdio-1.0
+  main-is: Spec.hs
+  other-modules:
+      Paths_lang
+  hs-source-dirs:
+      test
+  default-extensions:
+      NoImplicitPrelude
+      BlockArguments
+      OverloadedStrings
+  ghc-options: -Wall -Wcompat -Widentities -Wincomplete-record-updates -Wincomplete-uni-patterns -Wmissing-export-lists -Wmissing-home-modules -Wpartial-fields -Wredundant-constraints -threaded -rtsopts -with-rtsopts=-N
+  build-depends:
+      base >=4.7 && <5
+    , lang
+    , megaparsec >=9.5.0 && <10
+    , relude >=1.2.1.0 && <2
+  default-language: GHC2021
