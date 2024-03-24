@@ -69,23 +69,18 @@ lookup' name scope = case Map.lookup name scope of
 reduce :: Code -> Either RuntimeError Expr
 reduce decls = do
     main <- lookup' "main" decls
-    go decls main
+    go main
   where
-    go :: HashMap Name Expr -> Expr -> Either RuntimeError Expr
-    go scope expr = case expr of
-        Lam argName body -> Lam argName <$> go (Map.insert argName (Var argName) scope) body
+    go :: Expr -> Either RuntimeError Expr
+    go expr = case expr of
+        lam@Lam{} -> Right lam
         App fExpr argExpr -> do
-            f <- go scope fExpr
-            arg <- go scope argExpr
+            f <- go fExpr
+            arg <- go argExpr
             case f of
-                Lam argName body -> go (Map.insert argName arg scope) body
-                Var{} -> Right $ App f arg
+                Lam argName body -> go $ substitute argName arg body
                 _ -> Left TypeError
-        Var name -> do
-            mbBody <- lookup' name scope
-            case mbBody of
-                Var name' | name == name' -> Right $ Var name -- unresolved variable
-                other -> go scope other
+        Var name -> do lookup' name decls
         n@Int{} -> Right n
 
 pretty :: Expr -> Text
@@ -94,13 +89,14 @@ pretty (App f x) = "(" <> pretty f <> " " <> pretty x <> ")"
 pretty (Var var) = var
 pretty (Int n) = show n
 
-{-
+
 substitute :: Name -> Expr -> Expr -> Expr
-substitute varName varBody expr = go expr where
-    go (Lam var' body) = Lam var' $ go body
+substitute varName varBody = go where
+    go (Lam var' body)
+        | var' == varName = Lam var' body
+        | otherwise = Lam var' $ go body
     go (App fExpr argExpr) = App (go fExpr) (go argExpr)
     go (Var name)
         | varName == name = varBody
         | otherwise = Var name
     go n@Int{} = n
--}

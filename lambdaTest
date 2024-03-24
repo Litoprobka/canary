@@ -1,4 +1,4 @@
-main = (ap id)
+main = (b id)
 
 id = λx. x
 ap = λf. λx. (f x)
