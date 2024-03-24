@@ -1,16 +1,17 @@
 module Lang where
 
-import Relude hiding (some, many)
+import Data.Char (isSpace)
+import Data.HashMap.Strict qualified as Map
+import Relude hiding (many, some)
 import Text.Megaparsec
 import Text.Megaparsec.Char hiding (space)
 import Text.Megaparsec.Char.Lexer qualified as L
-import Data.HashMap.Strict qualified as Map
-import Data.Char (isSpace)
 
 type Parser a = Parsec Void Text a
 
 space :: Parser ()
-space = L.space nonNewlineSpace lineComment blockComment where
+space = L.space nonNewlineSpace lineComment blockComment
+  where
     nonNewlineSpace = void $ takeWhile1P (Just "space") \c -> isSpace c && c /= '\n' -- we can ignore \r here
     lineComment = L.skipLineComment "//"
     blockComment = L.skipBlockCommentNested "/*" "*/"
@@ -26,7 +27,8 @@ data Expr
     = Lam Name Expr
     | App Expr Expr
     | Var Name
-    | Int Int deriving (Show, Eq)
+    | Int Int
+    deriving (Show, Eq)
 type Code = HashMap Name Expr
 
 lambdaCalc :: Parser Code
@@ -38,12 +40,14 @@ nameP = lexeme $ fromString <$> some letterChar
 declP :: Parser (Name, Expr)
 declP = lexeme do
     name <- nameP
+    args <- many nameP
     symbol "="
     body <- exprP
-    pure (name, body)
+    let body' = foldr Lam body args
+    pure (name, body')
 
 exprP :: Parser Expr
-exprP = choice [lambdaP, app, Var <$> nameP, intP]
+exprP = foldl' App <$> nonApplication <*> many exprP
 
 lambdaP :: Parser Expr
 lambdaP = lexeme do
@@ -52,14 +56,20 @@ lambdaP = lexeme do
     symbol "."
     Lam name <$> exprP
 
-app :: Parser Expr
-app = between (symbol "(") (symbol ")") $
-    foldl' App <$> exprP <*> some exprP
+nonApplication :: Parser Expr
+nonApplication =
+    lexeme $
+        choice
+            [ between (symbol "(") (symbol ")") exprP
+            , lambdaP
+            , Var <$> nameP
+            , intP
+            ]
 
 intP :: Parser Expr
 intP = Int <$> L.signed space (lexeme L.decimal)
 
-data RuntimeError = UnboundVar Name | TypeError deriving Show
+data RuntimeError = UnboundVar Name | TypeError deriving (Show)
 
 lookup' :: Name -> HashMap Name a -> Either RuntimeError a
 lookup' name scope = case Map.lookup name scope of
@@ -89,9 +99,9 @@ pretty (App f x) = "(" <> pretty f <> " " <> pretty x <> ")"
 pretty (Var var) = var
 pretty (Int n) = show n
 
-
 substitute :: Name -> Expr -> Expr -> Expr
-substitute varName varBody = go where
+substitute varName varBody = go
+  where
     go (Lam var' body)
         | var' == varName = Lam var' body
         | otherwise = Lam var' $ go body

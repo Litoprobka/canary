@@ -1,10 +1,10 @@
-main = (b id)
+main = b id
 
-id = λx. x
-ap = λf. λx. (f x)
-const = λx. λy. x
+id x = x
+ap = λf. λx. f x
+const x y = x
 
 
-list = λc. λn. (c 1 (c 2 (c 3 n)))
-map = λf. λxs. λcons. (xs (b cons f)) 
-b = λf. λg. λx. (f (g x))
+list = λc. λn. c 1 (c 2 (c 3 n))
+map = λf. λxs. λcons. xs (b cons f)
+b f g x = f (g x)
