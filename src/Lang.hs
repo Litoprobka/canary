@@ -47,7 +47,13 @@ declP = lexeme do
     pure (name, body')
 
 exprP :: Parser Expr
-exprP = foldl' App <$> nonApplication <*> many exprP
+exprP = go 0 <$> nonApplication <*> many wildcardOrNA where
+    wildcardOrNA = Nothing <$ symbol "_" <|> Just <$> nonApplication
+    go _ acc [] = acc
+    go i acc (Nothing : xs) =
+        let x = "x" <> show i
+        in Lam x $ go (i+1) (App acc $ Var x) xs
+    go i acc (Just x : xs) = go i (App acc x) xs
 
 lambdaP :: Parser Expr
 lambdaP = lexeme do
