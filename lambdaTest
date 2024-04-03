@@ -1,4 +1,7 @@
-main = b id
+main x = (λx. λy. y) x
+
+test = λx. λy. id x (λx. id x) 2 y
+
 
 id x = x
 ap = λf. λx. f x

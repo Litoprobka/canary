@@ -47,12 +47,13 @@ declP = lexeme do
     pure (name, body')
 
 exprP :: Parser Expr
-exprP = go 0 <$> nonApplication <*> many wildcardOrNA where
+exprP = go 0 <$> nonApplication <*> many wildcardOrNA
+  where
     wildcardOrNA = Nothing <$ symbol "_" <|> Just <$> nonApplication
     go _ acc [] = acc
     go i acc (Nothing : xs) =
         let x = "x" <> show i
-        in Lam x $ go (i+1) (App acc $ Var x) xs
+         in Lam x $ go (i + 1) (App acc $ Var x) xs
     go i acc (Just x : xs) = go i (App acc x) xs
 
 lambdaP :: Parser Expr
@@ -101,7 +102,12 @@ reduce decls = do
 
 pretty :: Expr -> Text
 pretty (Lam arg body) = "λ" <> arg <> ". " <> pretty body
-pretty (App f x) = "(" <> pretty f <> " " <> pretty x <> ")"
+pretty (App f x) = parensLam f <> " " <> parensApp x
+  where
+    parensLam lam@Lam{} = "(" <> pretty lam <> ")"
+    parensLam other = pretty other
+    parensApp app@App{} = "(" <> pretty app <> ")"
+    parensApp other = parensLam other
 pretty (Var var) = var
 pretty (Int n) = show n
 
