@@ -1,4 +1,6 @@
-main x = (λx. λy. y) x
+main x = (λx. λy. y) x where
+	test z = z z
+	f y = y
 
 test = λx. λy. id x 
 	(λx. id x) 

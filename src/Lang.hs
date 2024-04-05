@@ -1,4 +1,4 @@
-module Lang where
+module Lang (lambdaCalc, pretty, reduce) where
 
 import Data.Char (isSpace)
 import Data.HashMap.Strict qualified as Map
@@ -6,6 +6,7 @@ import Relude hiding (many, some)
 import Text.Megaparsec
 import Text.Megaparsec.Char hiding (space)
 import Text.Megaparsec.Char.Lexer qualified as L
+import Data.HashSet qualified as Set
 
 type Parser a = ReaderT Pos (Parsec Void Text) a
 
@@ -44,22 +45,41 @@ lambdaCalc :: Parsec Void Text Code
 lambdaCalc = usingReaderT pos1 $
     space *> (Map.fromList <$> declP `sepEndBy1` newlines)
 
+keywords :: HashSet Text
+keywords = fromList ["where"]
+
 nameP :: Parser Name
-nameP = lexeme $ fromString <$> some letterChar
+nameP = try $ lexeme $ nonKeyword . fromString =<< some letterChar where
+    nonKeyword txt
+        | txt `Set.member` keywords = empty -- todo: a more sensible error message
+        | otherwise = pure txt
+
 
 declP :: Parser (Name, Expr)
 declP = lexeme do
     name <- nameP
     args <- many nameP
-    symbol "="
+    void $ symbol "="
     body <- exprP
-    let body' = foldr Lam body args
-    pure (name, body')
+    localDefs <- Map.toList <$> whereBlock
+    -- desugars local definitions to immediate lambda applications
+    let body' = foldr Lam (foldl' addLocal body localDefs) args
+    pure (name, body') 
+  where
+    addLocal body (name, defBody) = Lam name body `App` defBody
+
+whereBlock :: Parser Code
+whereBlock = option Map.empty $ lexeme do
+    void $ symbol "where"
+    indent <- L.indentLevel
+    defs <- local (const indent) $ declP `sepEndBy` newlines
+    pure $ Map.fromList defs
 
 exprP :: Parser Expr
 exprP = go 0 <$> nonApplication <*> many wildcardOrNA
   where
     wildcardOrNA = Nothing <$ symbol "_" <|> Just <$> nonApplication
+    go :: Int -> Expr -> [Maybe Expr] -> Expr
     go _ acc [] = acc
     go i acc (Nothing : xs) =
         let x = "x" <> show i
@@ -68,9 +88,9 @@ exprP = go 0 <$> nonApplication <*> many wildcardOrNA
 
 lambdaP :: Parser Expr
 lambdaP = lexeme do
-    lexeme $ oneOf ['\\', 'λ']
+    void $ lexeme $ oneOf ['\\', 'λ']
     name <- nameP
-    symbol "."
+    void $ symbol "."
     Lam name <$> exprP
 
 nonApplication :: Parser Expr
