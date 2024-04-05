@@ -7,20 +7,29 @@ import Text.Megaparsec
 import Text.Megaparsec.Char hiding (space)
 import Text.Megaparsec.Char.Lexer qualified as L
 
-type Parser a = Parsec Void Text a
+type Parser a = ReaderT Pos (Parsec Void Text) a
 
 space :: Parser ()
-space = L.space nonNewlineSpace lineComment blockComment
-  where
-    nonNewlineSpace = void $ takeWhile1P (Just "space") \c -> isSpace c && c /= '\n' -- we can ignore \r here
+space = L.space nonNewlineSpace lineComment blockComment where
+    nonNewlineSpace = void $ takeWhile1P (Just "space") \c -> isSpace c && c /= '\n' -- we can ignore \r here        
     lineComment = L.skipLineComment "//"
     blockComment = L.skipBlockCommentNested "/*" "*/"
 
+-- | any amount of newlines and whitespace
+newlines :: Parser ()
+newlines = skipSome $ newline *> space
+
+-- | space or a newline with increased indentation
+spaceNL :: Parser ()
+spaceNL = void $ space `sepBy` try do
+    baseIndent <- ask
+    void $ L.indentGuard newlines GT baseIndent
+
 lexeme :: Parser a -> Parser a
-lexeme = L.lexeme space
+lexeme = L.lexeme spaceNL
 
 symbol :: Text -> Parser Text
-symbol = L.symbol space
+symbol = L.symbol spaceNL
 
 type Name = Text
 data Expr
@@ -31,8 +40,9 @@ data Expr
     deriving (Show, Eq)
 type Code = HashMap Name Expr
 
-lambdaCalc :: Parser Code
-lambdaCalc = space *> (Map.fromList <$> declP `sepEndBy1` many (newline *> space))
+lambdaCalc :: Parsec Void Text Code
+lambdaCalc = usingReaderT pos1 $
+    space *> (Map.fromList <$> declP `sepEndBy1` newlines)
 
 nameP :: Parser Name
 nameP = lexeme $ fromString <$> some letterChar
@@ -97,7 +107,7 @@ reduce decls = do
             case f of
                 Lam argName body -> go $ substitute argName arg body
                 _ -> Left TypeError
-        Var name -> do lookup' name decls
+        Var name -> lookup' name decls
         n@Int{} -> Right n
 
 pretty :: Expr -> Text
