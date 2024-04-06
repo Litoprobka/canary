@@ -16,7 +16,7 @@ space = L.space nonNewlineSpace lineComment blockComment where
     lineComment = L.skipLineComment "//"
     blockComment = L.skipBlockCommentNested "/*" "*/"
 
--- | any amount of newlines and whitespace
+-- | any non-zero amount of newlines and any amount of whitespace
 newlines :: Parser ()
 newlines = skipSome $ newline *> space
 
@@ -43,20 +43,20 @@ type Code = HashMap Name Expr
 
 lambdaCalc :: Parsec Void Text Code
 lambdaCalc = usingReaderT pos1 $
-    space *> (Map.fromList <$> declP `sepEndBy1` newlines)
+    space *> (Map.fromList <$> declP `sepEndBy1` newlines) <* eof
 
 keywords :: HashSet Text
 keywords = fromList ["where"]
 
 nameP :: Parser Name
-nameP = try $ lexeme $ nonKeyword . fromString =<< some letterChar where
+nameP = label "identifier" $ try $ lexeme $ nonKeyword . fromString =<< some letterChar where
     nonKeyword txt
         | txt `Set.member` keywords = empty -- todo: a more sensible error message
         | otherwise = pure txt
 
 
 declP :: Parser (Name, Expr)
-declP = lexeme do
+declP = label "declaration" $ lexeme do
     name <- nameP
     args <- many nameP
     void $ symbol "="
@@ -64,19 +64,20 @@ declP = lexeme do
     localDefs <- Map.toList <$> whereBlock
     -- desugars local definitions to immediate lambda applications
     let body' = foldr Lam (foldl' addLocal body localDefs) args
-    pure (name, body') 
+    pure (name, body')
   where
     addLocal body (name, defBody) = Lam name body `App` defBody
 
 whereBlock :: Parser Code
-whereBlock = option Map.empty $ lexeme do
+whereBlock = option Map.empty do
     void $ symbol "where"
     indent <- L.indentLevel
-    defs <- local (const indent) $ declP `sepEndBy` newlines
+    -- note that `local` is only applied to the inner `declP` here
+    defs <- local (const indent) declP `sepEndBy` spaceNL
     pure $ Map.fromList defs
 
 exprP :: Parser Expr
-exprP = go 0 <$> nonApplication <*> many wildcardOrNA
+exprP = label "expression" $ go 0 <$> nonApplication <*> many wildcardOrNA
   where
     wildcardOrNA = Nothing <$ symbol "_" <|> Just <$> nonApplication
     go :: Int -> Expr -> [Maybe Expr] -> Expr
