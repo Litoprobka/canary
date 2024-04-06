@@ -89,9 +89,10 @@ exprP = go 0 <$> nonApplication <*> many wildcardOrNA
 lambdaP :: Parser Expr
 lambdaP = lexeme do
     void $ lexeme $ oneOf ['\\', 'λ']
-    name <- nameP
+    args <- some nameP
     void $ symbol "."
-    Lam name <$> exprP
+    expr <- exprP
+    pure $ foldr Lam expr args
 
 nonApplication :: Parser Expr
 nonApplication =

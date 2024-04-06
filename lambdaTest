@@ -1,8 +1,8 @@
 main x = (λx. λy. y) x where
 	test z = z z
 	f y = y
-
-test = λx. λy. id x 
+	
+teste = λx. λy. id x what
 	(λx. id x) 
 	2 y
 
