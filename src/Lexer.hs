@@ -3,13 +3,13 @@
 {-# LANGUAGE TemplateHaskell #-}
 {-# OPTIONS_GHC -Wno-name-shadowing #-}
 
-module Lexer (Parser, Token (..), tokens, lambda, keyword, specialSymbol, identifier, typeVariable, newline, intLiteral, textLiteral, charLiteral, operator) where
+module Lexer (Parser, Token (..), tokenise, lambda, keyword, specialSymbol, identifier, typeVariable, newline, intLiteral, textLiteral, charLiteral, operator) where
 
 import Data.Char (isSpace)
 import Data.List.NonEmpty qualified as NE
 import Relude hiding (many, some)
 import TH (matches)
-import Text.Megaparsec hiding (Token, token, tokens)
+import Text.Megaparsec hiding (Token, token)
 import Text.Megaparsec.Char hiding (newline, space)
 import Text.Megaparsec.Char qualified as C (newline)
 import Text.Megaparsec.Char.Lexer qualified as L
@@ -70,10 +70,10 @@ token =
             , Keyword <$> oneSymbolOf keywords
             , SpecialSymbol <$> oneSymbolOf specialSymbols
             , Identifier <$> identifier
-            , TypeVariable <$> typeVariable
             , intLiteral
             , textLiteral
             , charLiteral
+            , TypeVariable <$> typeVariable
             , operator
             ]
   where
@@ -111,23 +111,22 @@ token =
         LexerState{blocks} <- get
         let higherThanCurrentIndent blockIndent = unPos blockIndent > unPos indent
         case NE.span higherThanCurrentIndent blocks of
-            ([], _) -> pure [Newline]
             (toDrop, toKeep) -> do
                 put $ LexerState $ listToNE toKeep
-                pure $ replicate (length toDrop) BlockEnd
+                pure $ replicate (length toDrop) BlockEnd ++ [Newline]
               where
                 listToNE (x : xs) = x :| xs
                 listToNE [] = error "some pos is lower than pos1 (shouldn't be possible)"
 
     intLiteral :: Lexer Token
-    intLiteral = lexeme $ IntLiteral <$> L.signed empty L.decimal
+    intLiteral = try $ lexeme $ IntLiteral <$> L.signed empty L.decimal
 
     -- todo: handle escape sequences and interpolation
     textLiteral :: Lexer Token
-    textLiteral = TextLiteral . fromString <$> between (symbol "\"") (symbol "\"") (many letterChar)
+    textLiteral = TextLiteral . fromString <$> between (symbol "\"") (symbol "\"") (many $ anySingleBut '\"')
 
     charLiteral :: Lexer Token
-    charLiteral = CharLiteral . one <$> between (symbol "'") (symbol "'") letterChar
+    charLiteral = CharLiteral . one <$> between (single '\'') (symbol "'") anySingle
 
     operator :: Lexer Token
     operator = lexeme $ Operator . fromString <$> some (oneOf operatorChars)
@@ -135,8 +134,8 @@ token =
     operatorChars :: [Char]
     operatorChars = "+-*/%^=><&.~!?|"
 
-tokens :: Parsec Void Text [Token]
-tokens = evaluatingStateT (LexerState $ one pos1) $ concat <$> many token -- TODO: better tokeniser errors; consider outputting an `Unexpected` token instead?
+tokenise :: Parsec Void Text [Token]
+tokenise = evaluatingStateT (LexerState $ one pos1) $ concat <$> many token -- TODO: better tokeniser errors; consider outputting an `Unexpected` token instead?
 
 lambda :: Parser ()
 lambda = void $ single Lambda
