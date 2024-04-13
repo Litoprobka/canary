@@ -94,6 +94,28 @@ spec = do
                 ]
         it "parses char literals without escape sequences" do
             forM_ [' '..'~'] \sym -> lex ("'" <> one sym <> "'") `shouldBe` Right [CharLiteral $ one sym]
+
         it "parses text literals" do
             lex "\"this is a string with arbitrary symbols. 123\"" `shouldBe` Right [TextLiteral "this is a string with arbitrary symbols. 123"]
 
+        it "parses semicolons as newlines with correct indent" do
+            lex "test = f x where f y = y + y; x = 777\n" `shouldBe` Right 
+                [ Identifier "test", SpecialSymbol "=", Identifier "f", Identifier "x", BlockKeyword "where"
+                ,     Identifier "f", Identifier "y", SpecialSymbol "=", Identifier "y", Operator "+", Identifier "y", Newline
+                ,     Identifier "x", SpecialSymbol "=", IntLiteral 777
+                , BlockEnd, Newline
+                ]
+
+        it "parses where on a separate line" do
+            let program = Text.unlines
+                    [ "example = expr"
+                    , "  where"
+                    , "    f x = x"
+                    , "    g y = y y"
+                    ]
+            lex program `shouldBe` Right 
+                [ Identifier "example", SpecialSymbol "=", Identifier "expr", BlockKeyword "where"
+                , Identifier "f", Identifier "x", SpecialSymbol "=", Identifier "x", Newline
+                , Identifier "g", Identifier "y", SpecialSymbol "=", Identifier "y", Identifier "y"
+                , BlockEnd, Newline
+                ]

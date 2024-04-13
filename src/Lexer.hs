@@ -105,18 +105,20 @@ token =
 
     -- if a newline hasn't been consumed by `spaceOrLineWrap`, then its indent level is the same or lower
     newlineOrBlockEnd :: Lexer [Token]
-    newlineOrBlockEnd = do
-        newlines
-        indent <- L.indentLevel
-        LexerState{blocks} <- get
-        let higherThanCurrentIndent blockIndent = unPos blockIndent > unPos indent
-        case NE.span higherThanCurrentIndent blocks of
-            (toDrop, toKeep) -> do
-                put $ LexerState $ listToNE toKeep
-                pure $ replicate (length toDrop) BlockEnd ++ [Newline]
-              where
-                listToNE (x : xs) = x :| xs
-                listToNE [] = error "some pos is lower than pos1 (shouldn't be possible)"
+    newlineOrBlockEnd = one Newline <$ symbol ";" <|> blockEnd
+      where
+        blockEnd = do
+            newlines
+            indent <- L.indentLevel
+            LexerState{blocks} <- get
+            let higherThanCurrentIndent blockIndent = unPos blockIndent > unPos indent
+            case NE.span higherThanCurrentIndent blocks of
+                (toDrop, toKeep) -> do
+                    put $ LexerState $ listToNE toKeep
+                    pure $ replicate (length toDrop) BlockEnd ++ [Newline]
+                  where
+                    listToNE (x : xs) = x :| xs
+                    listToNE [] = error "some pos is lower than pos1 (shouldn't be possible)"
 
     intLiteral :: Lexer Token
     intLiteral = try $ lexeme $ IntLiteral <$> L.signed empty L.decimal
