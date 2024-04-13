@@ -1,26 +1,33 @@
 {-# LANGUAGE LambdaCase #-}
+{-# LANGUAGE OverloadedRecordDot #-}
 {-# LANGUAGE TemplateHaskell #-}
 {-# OPTIONS_GHC -Wno-name-shadowing #-}
 
-module Lexer (Parser, Token (..), tokens, lambda, keyword, specialSymbol, identifier, typeVariable, newline, strictNewline, intLiteral, textLiteral, charLiteral, operator) where
+module Lexer (Parser, Token (..), tokens, lambda, keyword, specialSymbol, identifier, typeVariable, newline, intLiteral, textLiteral, charLiteral, operator) where
 
 import Data.Char (isSpace)
+import Data.List.NonEmpty qualified as NE
 import Relude hiding (many, some)
 import TH (matches)
 import Text.Megaparsec hiding (Token, token, tokens)
 import Text.Megaparsec.Char hiding (newline, space)
+import Text.Megaparsec.Char qualified as C (newline)
 import Text.Megaparsec.Char.Lexer qualified as L
 
-type Lexer = StateT Int (Parsec Void Text)
+newtype LexerState = LexerState {blocks :: NonEmpty Pos}
+
+type Lexer = StateT LexerState (Parsec Void Text)
 type Parser = Parsec Void [Token]
 
 data Token
     = Lambda -- special-cased, since \ is an operator symbol and λ is an identifier symbol
-    | Keyword Text
+    | BlockKeyword Text -- a keyword that starts a new indented block
+    | BlockEnd
+    | Keyword Text -- a keyword that doesn't
     | SpecialSymbol Text
     | Identifier Text
     | TypeVariable Text -- an identifier starting with ', i.e. 't
-    | Newline Pos Int -- newline with indent difference
+    | Newline
     | IntLiteral Int
     | TextLiteral Text
     | CharLiteral Text -- TODO: support grapheme clusters (hence the use of Text instead of Char)
@@ -34,31 +41,58 @@ space = L.space nonNewlineSpace lineComment blockComment
     lineComment = L.skipLineComment "//"
     blockComment = L.skipBlockCommentNested "/*" "*/"
 
+-- | any non-zero amount of newlines and any amount of whitespace
+newlines :: Lexer ()
+newlines = skipSome $ C.newline *> space
+
+-- | space or a newline with increased indentation
+spaceOrLineWrap :: Lexer ()
+spaceOrLineWrap = void $ space `sepBy` newlineWithIndent
+  where
+    newlineWithIndent = try do
+        baseIndent :| _ <- gets (.blocks)
+        void $ L.indentGuard newlines GT baseIndent
+
 lexeme :: Lexer a -> Lexer a
-lexeme = L.lexeme space
+lexeme = L.lexeme spaceOrLineWrap
 
 symbol :: Text -> Lexer Text
-symbol = L.symbol space
+symbol = L.symbol spaceOrLineWrap
 
-token :: Lexer Token
+-- returns a single token or multiple BlockEnd-s. The other option would be to store multiple block ends as one `BlockEnd Int`, but that would make consuming them harder
+token :: Lexer [Token]
 token =
-    choice
-        [ Lambda <$ lexeme (oneOf ['\\', 'λ'])
-        , Keyword <$> oneSymbolOf keywords
-        , SpecialSymbol <$> oneSymbolOf specialSymbols
-        , Identifier <$> identifier
-        , TypeVariable <$> typeVariable
-        , newline
-        , intLiteral
-        , textLiteral
-        , charLiteral
-        , operator
-        ]
+    newlineOrBlockEnd -- fourmolu is being dumb
+        <|> one
+        <$> choice
+            [ Lambda <$ lexeme (oneOf ['\\', 'λ'])
+            , blockKeyword
+            , Keyword <$> oneSymbolOf keywords
+            , SpecialSymbol <$> oneSymbolOf specialSymbols
+            , Identifier <$> identifier
+            , TypeVariable <$> typeVariable
+            , intLiteral
+            , textLiteral
+            , charLiteral
+            , operator
+            ]
   where
     oneSymbolOf txts = choice $ symbol <$> txts
 
+    blockKeywords :: [Text]
+    blockKeywords = ["where"]
+
+    blockKeyword :: Lexer Token
+    blockKeyword = do
+        kw <- oneSymbolOf blockKeywords
+        -- `symbol` consumes the indent, so we get the right one here
+        indent <- L.indentLevel
+        LexerState{blocks} <- get
+        put LexerState{blocks = indent `NE.cons` blocks}
+        pure $ BlockKeyword kw
+
     keywords :: [Text]
-    keywords = ["where"]
+    keywords = []
 
     specialSymbols :: [Text]
     specialSymbols = ["=", ":", ".", "(", ")"]
@@ -69,13 +103,21 @@ token =
     typeVariable :: Lexer Text
     typeVariable = single '\'' *> identifier
 
-    newline :: Lexer Token
-    newline = do
-        void $ lexeme eol
-        prevIndent <- get :: Lexer Int
-        curIndent <- L.indentLevel
-        put $ unPos curIndent
-        pure $ Newline curIndent (unPos curIndent - prevIndent)
+    -- if a newline hasn't been consumed by `spaceOrLineWrap`, then its indent level is the same or lower
+    newlineOrBlockEnd :: Lexer [Token]
+    newlineOrBlockEnd = do
+        newlines
+        indent <- L.indentLevel
+        LexerState{blocks} <- get
+        let higherThanCurrentIndent blockIndent = unPos blockIndent > unPos indent
+        case NE.span higherThanCurrentIndent blocks of
+            ([], _) -> pure [Newline]
+            (toDrop, toKeep) -> do
+                put $ LexerState $ listToNE toKeep
+                pure $ replicate (length toDrop) BlockEnd
+              where
+                listToNE (x : xs) = x :| xs
+                listToNE [] = error "some pos is lower than pos1 (shouldn't be possible)"
 
     intLiteral :: Lexer Token
     intLiteral = lexeme $ IntLiteral <$> L.signed empty L.decimal
@@ -94,10 +136,10 @@ token =
     operatorChars = "+-*/%^=><&.~!?|"
 
 tokens :: Parsec Void Text [Token]
-tokens = evaluatingStateT 1 $ many token -- TODO: better tokeniser errors; consider outputting an `Unexpected` token instead?
+tokens = evaluatingStateT (LexerState $ one pos1) $ concat <$> many token -- TODO: better tokeniser errors; consider outputting an `Unexpected` token instead?
 
 lambda :: Parser ()
-lambda = void $ satisfy (== Lambda)
+lambda = void $ single Lambda
 
 keyword, specialSymbol, identifier, typeVariable, textLiteral, charLiteral, operator :: Parser Text
 keyword = $(matches 'Keyword)
@@ -111,13 +153,5 @@ operator = $(matches 'Operator)
 intLiteral :: Parser Int
 intLiteral = $(matches 'IntLiteral)
 
-newline :: Parser (Pos, Int)
-newline =
-    anySingle >>= \case
-        Newline pos offset -> pure (pos, offset)
-        tok -> unexpected $ Tokens $ tok :| []
-
-strictNewline :: Parser ()
-strictNewline = do
-    (_, offset) <- newline
-    guard $ offset >= 0
+newline :: Parser ()
+newline = void $ single Newline
