@@ -11,7 +11,7 @@ matches :: Name -> Q Exp
 matches con =
     -- fourmolu is being weird today
     [|
-        anySingle >>= \case
+        try $ anySingle >>= \case
             $conCase -> pure $(varE txt)
             tok -> unexpected $ Tokens $ tok :| []
         |]

@@ -3,6 +3,7 @@ module Main (main) where
 import Lang
 import Relude
 import Text.Megaparsec
+import Lexer (tokenise)
 
 main :: IO ()
 main = do
@@ -10,6 +11,6 @@ main = do
     input <- case args of
         [] -> getLine
         (path : _) -> readFileText path
-    case parse lambdaCalc "cli" input of
-        Left err -> putStrLn $ errorBundlePretty err
-        Right ast -> putTextLn . either show pretty $ reduce ast
+    input
+        & parseMaybe tokenise >>= parseMaybe lambdaCalc
+        & flip whenJust (putTextLn . either show pretty . reduce)

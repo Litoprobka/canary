@@ -3,7 +3,7 @@
 {-# LANGUAGE TemplateHaskell #-}
 {-# OPTIONS_GHC -Wno-name-shadowing #-}
 
-module Lexer (Parser, Token (..), tokenise, lambda, keyword, specialSymbol, identifier, typeVariable, newline, intLiteral, textLiteral, charLiteral, operator) where
+module Lexer (Parser, Token (..), tokenise, lambda, keyword, specialSymbol, identifier, typeVariable, newline, intLiteral, textLiteral, charLiteral, operator, blockEnd, oneSpecial) where
 
 import Data.Char (isSpace)
 import Data.List.NonEmpty qualified as NE
@@ -98,7 +98,7 @@ token =
     specialSymbols = ["=", ":", ".", "(", ")"]
 
     identifier :: Lexer Text
-    identifier = lexeme $ fromString <$> liftA2 (:) letterChar (many alphaNumChar)
+    identifier = lexeme $ fromString <$> liftA2 (:) (letterChar <|> char '_') (many $ alphaNumChar <|> char '_')
 
     typeVariable :: Lexer Text
     typeVariable = single '\'' *> identifier
@@ -137,7 +137,7 @@ token =
     operatorChars = "+-*/%^=><&.~!?|"
 
 tokenise :: Parsec Void Text [Token]
-tokenise = evaluatingStateT (LexerState $ one pos1) $ concat <$> many token -- TODO: better tokeniser errors; consider outputting an `Unexpected` token instead?
+tokenise = evaluatingStateT (LexerState $ one pos1) $ spaceOrLineWrap *> (concat <$> many token) -- TODO: better tokeniser errors; consider outputting an `Unexpected` token instead?
 
 lambda :: Parser ()
 lambda = void $ single Lambda
@@ -156,3 +156,9 @@ intLiteral = $(matches 'IntLiteral)
 
 newline :: Parser ()
 newline = void $ single Newline
+
+blockEnd :: Parser ()
+blockEnd = void $ single BlockEnd
+
+oneSpecial :: Text -> Parser ()
+oneSpecial = void . single . SpecialSymbol

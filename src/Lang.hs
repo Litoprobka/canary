@@ -1,36 +1,9 @@
 module Lang (lambdaCalc, pretty, reduce) where
 
-import Data.Char (isSpace)
 import Data.HashMap.Strict qualified as Map
+import Lexer
 import Relude hiding (many, some)
-import Text.Megaparsec
-import Text.Megaparsec.Char hiding (space)
-import Text.Megaparsec.Char.Lexer qualified as L
-import Data.HashSet qualified as Set
-
-type Parser a = ReaderT Pos (Parsec Void Text) a
-
-space :: Parser ()
-space = L.space nonNewlineSpace lineComment blockComment where
-    nonNewlineSpace = void $ takeWhile1P (Just "space") \c -> isSpace c && c /= '\n' -- we can ignore \r here        
-    lineComment = L.skipLineComment "//"
-    blockComment = L.skipBlockCommentNested "/*" "*/"
-
--- | any non-zero amount of newlines and any amount of whitespace
-newlines :: Parser ()
-newlines = skipSome $ newline *> space
-
--- | space or a newline with increased indentation
-spaceNL :: Parser ()
-spaceNL = void $ space `sepBy` try do
-    baseIndent <- ask
-    void $ L.indentGuard newlines GT baseIndent
-
-lexeme :: Parser a -> Parser a
-lexeme = L.lexeme spaceNL
-
-symbol :: Text -> Parser Text
-symbol = L.symbol spaceNL
+import Text.Megaparsec hiding (Token)
 
 type Name = Text
 data Expr
@@ -41,25 +14,14 @@ data Expr
     deriving (Show, Eq)
 type Code = HashMap Name Expr
 
-lambdaCalc :: Parsec Void Text Code
-lambdaCalc = usingReaderT pos1 $
-    space *> (Map.fromList <$> declP `sepEndBy1` newlines) <* eof
-
-keywords :: HashSet Text
-keywords = fromList ["where"]
-
-nameP :: Parser Name
-nameP = label "identifier" $ try $ lexeme $ nonKeyword . fromString =<< some letterChar where
-    nonKeyword txt
-        | txt `Set.member` keywords = empty -- todo: a more sensible error message
-        | otherwise = pure txt
-
+lambdaCalc :: Parsec Void [Token] Code
+lambdaCalc = Map.fromList <$> declP `sepEndBy1` newline <* eof
 
 declP :: Parser (Name, Expr)
-declP = label "declaration" $ lexeme do
-    name <- nameP
-    args <- many nameP
-    void $ symbol "="
+declP = label "declaration" $ do
+    name <- identifier
+    args <- many identifier
+    void $ oneSpecial "="
     body <- exprP
     localDefs <- Map.toList <$> whereBlock
     -- desugars local definitions to immediate lambda applications
@@ -70,16 +32,14 @@ declP = label "declaration" $ lexeme do
 
 whereBlock :: Parser Code
 whereBlock = option Map.empty do
-    void $ symbol "where"
-    indent <- L.indentLevel
-    -- note that `local` is only applied to the inner `declP` here
-    defs <- local (const indent) declP `sepEndBy` spaceNL
+    void $ single $ BlockKeyword "where"
+    defs <- declP `sepEndBy` newline <* blockEnd
     pure $ Map.fromList defs
 
 exprP :: Parser Expr
 exprP = label "expression" $ go 0 <$> nonApplication <*> many wildcardOrNA
   where
-    wildcardOrNA = Nothing <$ symbol "_" <|> Just <$> nonApplication
+    wildcardOrNA = Nothing <$ single (Identifier "_") <|> Just <$> nonApplication
     go :: Int -> Expr -> [Maybe Expr] -> Expr
     go _ acc [] = acc
     go i acc (Nothing : xs) =
@@ -88,25 +48,21 @@ exprP = label "expression" $ go 0 <$> nonApplication <*> many wildcardOrNA
     go i acc (Just x : xs) = go i (App acc x) xs
 
 lambdaP :: Parser Expr
-lambdaP = lexeme do
-    void $ lexeme $ oneOf ['\\', 'λ']
-    args <- some nameP
-    void $ symbol "."
+lambdaP = do
+    lambda
+    args <- some identifier
+    void $ oneSpecial "."
     expr <- exprP
     pure $ foldr Lam expr args
 
 nonApplication :: Parser Expr
 nonApplication =
-    lexeme $
-        choice
-            [ between (symbol "(") (symbol ")") exprP
-            , lambdaP
-            , Var <$> nameP
-            , intP
-            ]
-
-intP :: Parser Expr
-intP = Int <$> L.signed space (lexeme L.decimal)
+    choice
+        [ between (oneSpecial "(") (oneSpecial ")") exprP
+        , lambdaP
+        , Var <$> identifier
+        , Int <$> intLiteral
+        ]
 
 data RuntimeError = UnboundVar Name | TypeError deriving (Show)
 
