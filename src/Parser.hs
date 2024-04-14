@@ -57,10 +57,11 @@ type' = prec [const [forall', exists], typeApp, recordOrVariant] terminal
 
     typeApp higherPrec = one $ TypeApplication <$> higherPrec <*> many higherPrec
     recordOrVariant hp =
-      [ RecordType <$> someRecord ":" type'
-      , VariantType <$> brackets (Map.fromList <$> variantItem `sepEndBy` specialSymbol ",")
-      ] where
-      variantItem = (,) <$> variantConstructor <*> many (prec [recordOrVariant] [hp])
+        [ RecordType <$> someRecord ":" type'
+        , VariantType <$> brackets (Map.fromList <$> variantItem `sepEndBy` specialSymbol ",")
+        ]
+      where
+        variantItem = (,) <$> variantConstructor <*> many (prec [recordOrVariant] [hp])
 
 someRecord :: Text -> Parser value -> Parser (HashMap Name value)
 someRecord delim valueP = braces (Map.fromList <$> recordItem `sepEndBy` specialSymbol ",")
@@ -90,7 +91,7 @@ prec :: [Parser a -> [Parser a]] -> [Parser a] -> Parser a
 prec initPs terminals = go initPs
   where
     go [] = parens (prec initPs terminals) <|> choice terminals
-    go (pgroup : groups) = choice (pgroup  higherPrec) <|> higherPrec
+    go (pgroup : groups) = choice (pgroup higherPrec) <|> higherPrec
       where
         higherPrec = go groups
 
