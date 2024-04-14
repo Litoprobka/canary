@@ -3,7 +3,7 @@
 {-# LANGUAGE TemplateHaskell #-}
 {-# OPTIONS_GHC -Wno-name-shadowing #-}
 
-module Lexer (Parser, Token (..), tokenise, lambda, keyword, specialSymbol, newline, intLiteral, textLiteral, charLiteral, operator, blockEnd, someKeyword, someSpecial, termName, typeName, typeVariable, variantConstructor, blockKeyword, parens, brackets, braces) where
+module Lexer (Parser, Token (..), tokenise, lambda, keyword, specialSymbol, newline, intLiteral, textLiteral, charLiteral, operator, blockEnd, someKeyword, someSpecial, termName, typeName, typeVariable, variantConstructor, blockKeyword, parens, brackets, braces, block, block1, recordLens) where
 
 import Data.Char (isSpace, isUpperCase)
 import Data.List.NonEmpty qualified as NE
@@ -13,6 +13,7 @@ import Text.Megaparsec hiding (Token, token)
 import Text.Megaparsec.Char hiding (newline, space)
 import Text.Megaparsec.Char qualified as C (newline)
 import Text.Megaparsec.Char.Lexer qualified as L
+import Control.Monad.Combinators.NonEmpty qualified as NE
 
 newtype LexerState = LexerState {blocks :: NonEmpty Pos}
 
@@ -84,7 +85,7 @@ token =
     oneSymbolOf txts = choice $ symbol <$> txts
 
     blockKeywords :: [Text]
-    blockKeywords = ["where"]
+    blockKeywords = ["where", "let", "match", "of"]
 
     blockKeyword :: Lexer Token
     blockKeyword = do
@@ -96,13 +97,13 @@ token =
         pure $ BlockKeyword kw
 
     keywords :: [Text]
-    keywords = ["if", "then", "else", "type", "alias"]
+    keywords = ["if", "then", "else", "type", "alias", "case"]
 
     specialSymbols :: [Text]
     specialSymbols = ["=", "|", ":", ".", ",", "->", "=>", "<-", "(", ")", "{", "}"]
 
     identifier' :: Lexer (NonEmpty Char)
-    identifier' = liftA2 (:|) (letterChar <|> char '_') (many $ alphaNumChar <|> char '_')
+    identifier' = liftA2 (:|) (letterChar <|> char '_') (many $ alphaNumChar <|> char '_' <|> char '\'')
 
     nonEmptyToText :: NonEmpty Char -> Text
     nonEmptyToText = fromString . toList
@@ -124,7 +125,6 @@ token =
 
     recordLens :: Lexer [Text]
     recordLens = lexeme $ single '.' *> (nonEmptyToText <$> identifier') `sepBy` single '.'
-
 
     -- if a newline hasn't been consumed by `spaceOrLineWrap`, then its indent level is the same or lower
     newlineOrBlockEnd :: Lexer [Token]
@@ -179,6 +179,9 @@ operator = $(matches 'Operator)
 intLiteral :: Parser Int
 intLiteral = $(matches 'IntLiteral)
 
+recordLens :: Parser [Text]
+recordLens = $(matches 'RecordLens)
+
 newline :: Parser ()
 newline = void $ single Newline
 
@@ -194,11 +197,13 @@ blockKeyword = void . single . BlockKeyword
 specialSymbol :: Text -> Parser ()
 specialSymbol = void . single . SpecialSymbol
 
-parens :: Parser a -> Parser a
+parens, brackets, braces :: Parser a -> Parser a
 parens = between (specialSymbol "(") (specialSymbol ")")
-
-brackets :: Parser a -> Parser a
 brackets = between (specialSymbol "[") (specialSymbol "]")
-
-braces :: Parser a -> Parser a
 braces = between (specialSymbol "{") (specialSymbol "}")
+
+block :: Text -> Parser a -> Parser [a]
+block kw p = blockKeyword kw *> p `sepEndBy` newline <* blockEnd
+
+block1 :: Text -> Parser a -> Parser (NonEmpty a)
+block1 kw p = blockKeyword kw *> p `NE.sepEndBy1` newline <* blockEnd

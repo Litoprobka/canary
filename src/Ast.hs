@@ -6,9 +6,9 @@ type Name = Text --
 type TypeVariable = Text
 
 data Term
-    = Lambda [Name] Term
-    | Application Term [Term]
-    | Let [(Pattern, Term)] Term
+    = Lambda (NonEmpty Pattern) Term
+    | Application Term (NonEmpty Term)
+    | Let (NonEmpty (Pattern, Term)) Term
     | Case Term [(Pattern, Term)]
     | Match [([Pattern], Term)] -- | Haskell's \case
     | If Term Term Term

@@ -32,8 +32,7 @@ declP = label "declaration" $ do
 
 whereBlock :: Parser Code
 whereBlock = option Map.empty do
-    void $ single $ BlockKeyword "where"
-    defs <- declP `sepEndBy` newline <* blockEnd
+    defs <- block "where" declP
     pure $ Map.fromList defs
 
 exprP :: Parser Expr
@@ -58,7 +57,7 @@ lambdaP = do
 nonApplication :: Parser Expr
 nonApplication =
     choice
-        [ between (specialSymbol "(") (specialSymbol ")") exprP
+        [ parens exprP
         , lambdaP
         , Var <$> termName
         , Int <$> intLiteral

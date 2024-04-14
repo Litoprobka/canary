@@ -3,8 +3,9 @@ module Parser where
 import Relude hiding (many, some)
 
 import Ast
-import Lexer
+import Lexer hiding (Lambda, RecordLens)
 
+import Control.Monad.Combinators.NonEmpty qualified as NE
 import Data.HashMap.Strict qualified as Map
 import Text.Megaparsec
 
@@ -14,10 +15,8 @@ code = declaration `sepEndBy` newline
 declaration :: Parser Declaration
 declaration = choice [typeDec, valueDec, signature]
   where
-    valueDec = Ast.ValueD <$> termName <*> many pattern' <*> term <*> whereBlock
-    whereBlock = option [] do
-        void $ single $ BlockKeyword "where"
-        valueDec `sepEndBy` newline <* blockEnd
+    valueDec = ValueD <$> termName <*> many pattern' <* specialSymbol "=" <*> term <*> whereBlock
+    whereBlock = option [] $ block "where" valueDec
 
     typeDec = keyword "type" *> (typeAliasDec <|> typeDec')
     typeAliasDec = do
@@ -96,24 +95,40 @@ prec initPs terminals = go initPs
         higherPrec = go groups
 
 term :: Parser Term
-term = undefined
+term = prec [annotation, application, const noPrecGroup] terminals
+  where
+    annotation hp = one $ Annotation <$> hp <* specialSymbol ":" <*> type'
+    application hp = one do
+        f <- hp
+        args <- many hp
+        pure case args of
+            [] -> f
+            (x : xs) -> Application f (x :| xs)
+    -- I'm not sure whether `let` and `if` belong here, since `if ... then ... else ... : ty` should be parsed as `if ... then ... else (... : ty)`
+    noPrecGroup =
+        [ Lambda <$ lambda <*> NE.some pattern' <* specialSymbol "->" <*> term
+        , let'
+        , case'
+        , match'
+        , If <$ keyword "if" <*> term <* keyword "then" <*> term <* keyword "else" <*> term
+        , Record <$> someRecord "=" term
+        , List <$> brackets (term `sepEndBy` specialSymbol ",")
+        ]
+    let' = do
+        let binding = (,) <$> pattern' <* specialSymbol "=" <*> term
+        bindings <- block1 "let" binding
+        blockEnd
+        Let bindings <$> term
+    case' = do
+        keyword "case"
+        arg <- term
+        matches <- block "of" $ (,) <$> pattern' <* specialSymbol "->" <*> term
+        pure $ Case arg matches
+    match' = Match <$> block "match" ((,) <$> some pattern' <* specialSymbol "->" <*> term)
 
-{-
-data Term
-    = Lambda [Name] Term
-    | Application Term [Term]
-    | Let [(Pattern, Term)] Term
-    | Case Term [(Pattern, Term)]
-    | Match [([Pattern], Term)] -- | Haskell's \case
-    | If Term Term Term
-    | -- | value : Type
-      Annotation Term Type'
-    | Name Name
-    | -- | .field.otherField.thirdField
-      RecordLens [Name]
-    | Constructor Name
-    | -- | 'Constructor
-      Variant Name
-    | Record (HashMap Name Term)
-    | List [Term]
--}
+    terminals =
+        [ Name <$> termName
+        , RecordLens <$> recordLens
+        , Constructor <$> typeName
+        , Variant <$> variantConstructor
+        ]
