@@ -19,9 +19,9 @@ lambdaCalc = Map.fromList <$> declP `sepEndBy1` newline <* eof
 
 declP :: Parser (Name, Expr)
 declP = label "declaration" $ do
-    name <- identifier
-    args <- many identifier
-    void $ oneSpecial "="
+    name <- termName
+    args <- many termName
+    specialSymbol "="
     body <- exprP
     localDefs <- Map.toList <$> whereBlock
     -- desugars local definitions to immediate lambda applications
@@ -39,7 +39,7 @@ whereBlock = option Map.empty do
 exprP :: Parser Expr
 exprP = label "expression" $ go 0 <$> nonApplication <*> many wildcardOrNA
   where
-    wildcardOrNA = Nothing <$ single (Identifier "_") <|> Just <$> nonApplication
+    wildcardOrNA = Nothing <$ single (LowerIdentifier "_") <|> Just <$> nonApplication
     go :: Int -> Expr -> [Maybe Expr] -> Expr
     go _ acc [] = acc
     go i acc (Nothing : xs) =
@@ -50,17 +50,17 @@ exprP = label "expression" $ go 0 <$> nonApplication <*> many wildcardOrNA
 lambdaP :: Parser Expr
 lambdaP = do
     lambda
-    args <- some identifier
-    void $ oneSpecial "."
+    args <- some termName
+    specialSymbol "->"
     expr <- exprP
     pure $ foldr Lam expr args
 
 nonApplication :: Parser Expr
 nonApplication =
     choice
-        [ between (oneSpecial "(") (oneSpecial ")") exprP
+        [ between (specialSymbol "(") (specialSymbol ")") exprP
         , lambdaP
-        , Var <$> identifier
+        , Var <$> termName
         , Int <$> intLiteral
         ]
 
@@ -89,7 +89,7 @@ reduce decls = do
         n@Int{} -> Right n
 
 pretty :: Expr -> Text
-pretty (Lam arg body) = "λ" <> arg <> ". " <> pretty body
+pretty (Lam arg body) = "λ" <> arg <> " -> " <> pretty body
 pretty (App f x) = parensLam f <> " " <> parensApp x
   where
     parensLam lam@Lam{} = "(" <> pretty lam <> ")"

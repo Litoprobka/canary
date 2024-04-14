@@ -3,9 +3,9 @@
 {-# LANGUAGE TemplateHaskell #-}
 {-# OPTIONS_GHC -Wno-name-shadowing #-}
 
-module Lexer (Parser, Token (..), tokenise, lambda, keyword, specialSymbol, identifier, typeVariable, newline, intLiteral, textLiteral, charLiteral, operator, blockEnd, oneSpecial) where
+module Lexer (Parser, Token (..), tokenise, lambda, keyword, specialSymbol, newline, intLiteral, textLiteral, charLiteral, operator, blockEnd, someKeyword, someSpecial, termName, typeName, typeVariable, variantConstructor, blockKeyword, parens, brackets, braces) where
 
-import Data.Char (isSpace)
+import Data.Char (isSpace, isUpperCase)
 import Data.List.NonEmpty qualified as NE
 import Relude hiding (many, some)
 import TH (matches)
@@ -24,9 +24,12 @@ data Token
     | BlockKeyword Text -- a keyword that starts a new indented block
     | BlockEnd
     | Keyword Text -- a keyword that doesn't
+    | RecordLens [Text] -- a dot-separated list of identifiers that starts with a dot: `.field.anotherOne.x`
     | SpecialSymbol Text
-    | Identifier Text
-    | TypeVariable Text -- an identifier starting with ', i.e. 't
+    | LowerIdentifier Text -- an identifier that starts with a lowercase letter
+    | UpperIdentifier Text -- an identifier that starts with an uppercase letter
+    | LowerQuoted Text -- an identifier that starts with ' and an uppercase letter, i.e. 't
+    | UpperQuoted Text -- an identifier that starts with ' and a lowercase letter, i.e. 'T
     | Newline
     | IntLiteral Int
     | TextLiteral Text
@@ -68,12 +71,13 @@ token =
             [ Lambda <$ lexeme (oneOf ['\\', 'λ'])
             , blockKeyword
             , Keyword <$> oneSymbolOf keywords
+            , RecordLens <$> recordLens
             , SpecialSymbol <$> oneSymbolOf specialSymbols
-            , Identifier <$> identifier
+            , identifier
             , intLiteral
             , textLiteral
             , charLiteral
-            , TypeVariable <$> typeVariable
+            , quoted
             , operator
             ]
   where
@@ -92,16 +96,35 @@ token =
         pure $ BlockKeyword kw
 
     keywords :: [Text]
-    keywords = []
+    keywords = ["if", "then", "else", "type", "alias"]
 
     specialSymbols :: [Text]
-    specialSymbols = ["=", ":", ".", "(", ")"]
+    specialSymbols = ["=", "|", ":", ".", ",", "->", "=>", "<-", "(", ")", "{", "}"]
 
-    identifier :: Lexer Text
-    identifier = lexeme $ fromString <$> liftA2 (:) (letterChar <|> char '_') (many $ alphaNumChar <|> char '_')
+    identifier' :: Lexer (NonEmpty Char)
+    identifier' = liftA2 (:|) (letterChar <|> char '_') (many $ alphaNumChar <|> char '_')
 
-    typeVariable :: Lexer Text
-    typeVariable = single '\'' *> identifier
+    nonEmptyToText :: NonEmpty Char -> Text
+    nonEmptyToText = fromString . toList
+
+    identifier :: Lexer Token
+    identifier = lexeme do
+        name@(c :| _) <- identifier'
+        if isUpperCase c
+            then pure $ UpperIdentifier $ nonEmptyToText name
+            else pure $ LowerIdentifier $ nonEmptyToText name
+    -- I didn't feel like factoring out the repeating part
+    quoted :: Lexer Token
+    quoted = lexeme do
+        void $ single '\''
+        name@(c :| _) <- identifier'
+        if isUpperCase c
+            then pure $ UpperQuoted $ nonEmptyToText name
+            else pure $ LowerQuoted $ nonEmptyToText name
+
+    recordLens :: Lexer [Text]
+    recordLens = lexeme $ single '.' *> (nonEmptyToText <$> identifier') `sepBy` single '.'
+
 
     -- if a newline hasn't been consumed by `spaceOrLineWrap`, then its indent level is the same or lower
     newlineOrBlockEnd :: Lexer [Token]
@@ -142,11 +165,13 @@ tokenise = evaluatingStateT (LexerState $ one pos1) $ spaceOrLineWrap *> (concat
 lambda :: Parser ()
 lambda = void $ single Lambda
 
-keyword, specialSymbol, identifier, typeVariable, textLiteral, charLiteral, operator :: Parser Text
-keyword = $(matches 'Keyword)
-specialSymbol = $(matches 'SpecialSymbol)
-identifier = $(matches 'Identifier)
-typeVariable = $(matches 'TypeVariable)
+someKeyword, someSpecial, termName, typeVariable, typeName, variantConstructor, textLiteral, charLiteral, operator :: Parser Text
+someKeyword = $(matches 'Keyword)
+someSpecial = $(matches 'SpecialSymbol)
+termName = $(matches 'LowerIdentifier)
+typeName = $(matches 'UpperIdentifier)
+typeVariable = $(matches 'LowerQuoted)
+variantConstructor = $(matches 'UpperQuoted)
 textLiteral = $(matches 'TextLiteral)
 charLiteral = $(matches 'CharLiteral)
 operator = $(matches 'Operator)
@@ -160,5 +185,20 @@ newline = void $ single Newline
 blockEnd :: Parser ()
 blockEnd = void $ single BlockEnd
 
-oneSpecial :: Text -> Parser ()
-oneSpecial = void . single . SpecialSymbol
+keyword :: Text -> Parser ()
+keyword = void . single . Keyword
+
+blockKeyword :: Text -> Parser ()
+blockKeyword = void . single . BlockKeyword
+
+specialSymbol :: Text -> Parser ()
+specialSymbol = void . single . SpecialSymbol
+
+parens :: Parser a -> Parser a
+parens = between (specialSymbol "(") (specialSymbol ")")
+
+brackets :: Parser a -> Parser a
+brackets = between (specialSymbol "[") (specialSymbol "]")
+
+braces :: Parser a -> Parser a
+braces = between (specialSymbol "{") (specialSymbol "}")
