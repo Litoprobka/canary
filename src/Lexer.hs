@@ -99,7 +99,7 @@ token =
             , blockKeyword
             , Keyword <$> oneSymbolOf keywords
             , RecordLens <$> recordLens
-            , SpecialSymbol <$> oneSymbolOf specialSymbols
+            , SpecialSymbol <$> specialSymbol
             , identifier
             , intLiteral
             , textLiteral
@@ -127,6 +127,9 @@ token =
 
     specialSymbols :: [Text]
     specialSymbols = ["=", "|", ":", ".", ",", "->", "=>", "<-", "(", ")", "{", "}"]
+
+    specialSymbol :: Lexer Text
+    specialSymbol = lexeme $ try $ choice (string <$> specialSymbols) <* notFollowedBy operator
 
     identifier' :: Lexer (NonEmpty Char)
     identifier' = liftA2 (:|) (letterChar <|> char '_') (many $ alphaNumChar <|> char '_' <|> char '\'')
@@ -177,7 +180,7 @@ token =
     textLiteral = TextLiteral . fromString <$> between (symbol "\"") (symbol "\"") (many $ anySingleBut '\"')
 
     charLiteral :: Lexer Token
-    charLiteral = CharLiteral . one <$> between (single '\'') (symbol "'") anySingle
+    charLiteral = try $ CharLiteral . one <$> between (single '\'') (symbol "'") anySingle
 
     operator :: Lexer Token
     operator = lexeme $ Operator . fromString <$> some (oneOf operatorChars)

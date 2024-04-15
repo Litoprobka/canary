@@ -9,3 +9,4 @@ data Pattern
     | Constructor Name [Pattern]
     | Variant Name [Pattern]
     | Record (HashMap Name Pattern)
+    deriving (Show, Eq)

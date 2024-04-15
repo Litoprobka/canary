@@ -23,3 +23,7 @@ data Term
       Variant Name
     | Record (HashMap Name Term)
     | List [Term]
+    | IntLiteral Int
+    | TextLiteral Text
+    | CharLiteral Text
+    deriving (Show, Eq)

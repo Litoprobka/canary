@@ -20,9 +20,9 @@ spec = do
                     , "    notADefinition"
                     ]
             lex program `shouldBe` Right 
-                [ Identifier "test", SpecialSymbol "=", Identifier "someExpr", BlockKeyword "where"
-                , Identifier "localDefWithTwoSpaces", SpecialSymbol "="
-                , Identifier "notADefinition"
+                [ LowerIdentifier "test", SpecialSymbol "=", LowerIdentifier "someExpr", BlockKeyword "where"
+                , LowerIdentifier "localDefWithTwoSpaces", SpecialSymbol "="
+                , LowerIdentifier "notADefinition"
                 , BlockEnd, Newline
                 ]
 
@@ -32,8 +32,8 @@ spec = do
                     , "f2 = 1 + 3"
                     ]
             lex program `shouldBe` Right 
-                [ Identifier "f1", Identifier "x", SpecialSymbol "=", Identifier "x", Operator "+", IntLiteral 1, Newline
-                , Identifier "f2", SpecialSymbol "=", IntLiteral 1, Operator "+", IntLiteral 3, Newline
+                [ LowerIdentifier "f1", LowerIdentifier "x", SpecialSymbol "=", LowerIdentifier "x", Operator "+", IntLiteral 1, Newline
+                , LowerIdentifier "f2", SpecialSymbol "=", IntLiteral 1, Operator "+", IntLiteral 3, Newline
                 ]
 
         it "parses multiple definitions with where blocks" do
@@ -51,16 +51,16 @@ spec = do
                     ]
 
             lex program `shouldBe` Right 
-                [ Identifier "f1", Identifier "x", SpecialSymbol "=", Identifier "x", Newline
-                , Identifier "f2", Identifier "y", SpecialSymbol "=", Identifier "expr", BlockKeyword "where"
-                ,    Identifier "g", SpecialSymbol "=", Operator "<!>", Newline
-                ,    Identifier "h", SpecialSymbol "=", IntLiteral 1, Operator "+", IntLiteral 2, Operator "+", IntLiteral 3
+                [ LowerIdentifier "f1", LowerIdentifier "x", SpecialSymbol "=", LowerIdentifier "x", Newline
+                , LowerIdentifier "f2", LowerIdentifier "y", SpecialSymbol "=", LowerIdentifier "expr", BlockKeyword "where"
+                ,    LowerIdentifier "g", SpecialSymbol "=", Operator "<!>", Newline
+                ,    LowerIdentifier "h", SpecialSymbol "=", IntLiteral 1, Operator "+", IntLiteral 2, Operator "+", IntLiteral 3
                 , BlockEnd, Newline
-                , Identifier "f3", SpecialSymbol "=", Identifier "hmmm", BlockKeyword "where"
-                ,    Identifier "oneSpaceWorks", SpecialSymbol "=", IntLiteral 13, Newline
-                ,    Identifier "anotherDef", SpecialSymbol "=", IntLiteral 111
+                , LowerIdentifier "f3", SpecialSymbol "=", LowerIdentifier "hmmm", BlockKeyword "where"
+                ,    LowerIdentifier "oneSpaceWorks", SpecialSymbol "=", IntLiteral 13, Newline
+                ,    LowerIdentifier "anotherDef", SpecialSymbol "=", IntLiteral 111
                 , BlockEnd, Newline
-                , Identifier "main", SpecialSymbol "=", Identifier "pass", Newline
+                , LowerIdentifier "main", SpecialSymbol "=", LowerIdentifier "pass", Newline
                 ]
 
         it "parses nested where blocks" do
@@ -71,10 +71,10 @@ spec = do
                     , "              expr = 42"
                     ]
             lex program `shouldBe` Right 
-                [ Identifier "f", SpecialSymbol "=", Identifier "expr", BlockKeyword "where"
-                ,    Identifier "g", SpecialSymbol "=", Identifier "expr", BlockKeyword "where"
-                ,        Identifier "h", SpecialSymbol "=", Identifier "expr", BlockKeyword "where"
-                ,            Identifier "expr", SpecialSymbol "=", IntLiteral 42
+                [ LowerIdentifier "f", SpecialSymbol "=", LowerIdentifier "expr", BlockKeyword "where"
+                ,    LowerIdentifier "g", SpecialSymbol "=", LowerIdentifier "expr", BlockKeyword "where"
+                ,        LowerIdentifier "h", SpecialSymbol "=", LowerIdentifier "expr", BlockKeyword "where"
+                ,            LowerIdentifier "expr", SpecialSymbol "=", IntLiteral 42
                 ,        BlockEnd
                 ,    BlockEnd
                 , BlockEnd, Newline
@@ -87,9 +87,9 @@ spec = do
                     , "  |> h w"
                     ]
             lex program `shouldBe` Right
-                [ Identifier "f", Identifier "x", Identifier "y"
-                , Operator "|>", Identifier "g", Identifier "z"
-                , Operator "|>", Identifier "h", Identifier "w",
+                [ LowerIdentifier "f", LowerIdentifier "x", LowerIdentifier "y"
+                , Operator "|>", LowerIdentifier "g", LowerIdentifier "z"
+                , Operator "|>", LowerIdentifier "h", LowerIdentifier "w",
                 Newline
                 ]
         it "parses char literals without escape sequences" do
@@ -100,9 +100,9 @@ spec = do
 
         it "parses semicolons as newlines with correct indent" do
             lex "test = f x where f y = y + y; x = 777\n" `shouldBe` Right 
-                [ Identifier "test", SpecialSymbol "=", Identifier "f", Identifier "x", BlockKeyword "where"
-                ,     Identifier "f", Identifier "y", SpecialSymbol "=", Identifier "y", Operator "+", Identifier "y", Newline
-                ,     Identifier "x", SpecialSymbol "=", IntLiteral 777
+                [ LowerIdentifier "test", SpecialSymbol "=", LowerIdentifier "f", LowerIdentifier "x", BlockKeyword "where"
+                ,     LowerIdentifier "f", LowerIdentifier "y", SpecialSymbol "=", LowerIdentifier "y", Operator "+", LowerIdentifier "y", Newline
+                ,     LowerIdentifier "x", SpecialSymbol "=", IntLiteral 777
                 , BlockEnd, Newline
                 ]
 
@@ -114,8 +114,22 @@ spec = do
                     , "    g y = y y"
                     ]
             lex program `shouldBe` Right 
-                [ Identifier "example", SpecialSymbol "=", Identifier "expr", BlockKeyword "where"
-                , Identifier "f", Identifier "x", SpecialSymbol "=", Identifier "x", Newline
-                , Identifier "g", Identifier "y", SpecialSymbol "=", Identifier "y", Identifier "y"
+                [ LowerIdentifier "example", SpecialSymbol "=", LowerIdentifier "expr", BlockKeyword "where"
+                , LowerIdentifier "f", LowerIdentifier "x", SpecialSymbol "=", LowerIdentifier "x", Newline
+                , LowerIdentifier "g", LowerIdentifier "y", SpecialSymbol "=", LowerIdentifier "y", LowerIdentifier "y"
                 , BlockEnd, Newline
                 ]
+        it "parses a pattern match" do
+            let program = Text.unlines
+                    [ "case list of"
+                    , "  Cons x xs -> Yes"
+                    , "  Nil -> No"
+                    ]
+            lex program `shouldBe` Right
+                [ Keyword "case", LowerIdentifier "list", BlockKeyword "of"
+                , UpperIdentifier "Cons", LowerIdentifier "x", LowerIdentifier "xs", SpecialSymbol "->", UpperIdentifier "Yes", Newline
+                , UpperIdentifier "Nil", SpecialSymbol "->", UpperIdentifier "No"
+                , BlockEnd, Newline
+                ]
+        it "parses type variables and variant constructors" do
+            lex "'a 'b 'c 'Yes 'No" `shouldBe` Right [LowerQuoted "a", LowerQuoted "b", LowerQuoted "c", UpperQuoted "Yes", UpperQuoted "No"]

@@ -13,3 +13,4 @@ data Type'
     | -- | Row (HashMap Name Type')
       Variant (HashMap Name [Type'])
     | Record (HashMap Name Type')
+    deriving (Show, Eq)

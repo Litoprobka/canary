@@ -92,7 +92,7 @@ pattern' = prec [nonTerminals] terminals
 -}
 prec :: [Parser a -> [Parser a]] -> [Parser a] -> Parser a
 prec initPs terminals = go initPs
-  where
+  whereb
     go [] = parens (prec initPs terminals) <|> choice terminals
     go (pgroup : groups) = choice (pgroup higherPrec) <|> higherPrec
       where
@@ -116,7 +116,6 @@ term = prec [annotation, application, const noPrecGroup] terminals
     let' = do
         let binding = (,) <$> pattern' <* specialSymbol "=" <*> term
         bindings <- block1 "let" binding
-        blockEnd
         T.Let bindings <$> term
     case' = do
         keyword "case"
