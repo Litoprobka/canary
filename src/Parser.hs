@@ -11,6 +11,7 @@ import Syntax.Type qualified as Ty
 
 import Control.Monad.Combinators.NonEmpty qualified as NE
 import Data.HashMap.Strict qualified as Map
+import Data.List.NonEmpty qualified as NE
 import Text.Megaparsec
 
 code :: Parser [Declaration]
@@ -99,17 +100,28 @@ prec initPs terminals = go initPs
         higherPrec = go groups
 
 term :: Parser Term
-term = prec [annotation, application, const noPrecGroup] terminals
+term = prec [postfixTermGroup, annotation, application, const noPrecGroup] terminals
   where
-    annotation hp = one $ T.Annotation <$> hp <* specialSymbol ":" <*> type'
-    application hp = one $ T.Application <$> hp <*> NE.some hp
-    -- I'm not sure whether `let` and `if` belong here, since `if ... then ... else ... : ty` should be parsed as `if ... then ... else (... : ty)`
-    noPrecGroup =
+    annotation hp = one $ try $ T.Annotation <$> hp <* specialSymbol ":" <*> type'
+    application hp = (one . try) do
+        lhs <- hp
+        nonLastRhs <- many hp
+        lastRhs <- prec [postfixTermGroup] [hp]
+        pure $ T.Application lhs (nonLastRhs `snoc` lastRhs)
+    snoc [] x = x :| []
+    snoc (x' : xs) x = x' `NE.cons` snoc xs x
+
+    -- high precedence rules that end with a term (i.e. they have a low precedence when used as lhs of application or
+    -- or annotation)
+    postfixTermGroup _ =
         [ T.Lambda <$ lambda <*> NE.some pattern' <* specialSymbol "->" <*> term
         , let'
-        , case'
-        , match'
         , T.If <$ keyword "if" <*> term <* keyword "then" <*> term <* keyword "else" <*> term
+        ]
+    -- non-terminals that can be used pretty much anywhere
+    noPrecGroup =
+        [ case'
+        , match'
         , T.Record <$> someRecord "=" term
         , T.List <$> brackets (term `sepEndBy` specialSymbol ",")
         ]
