@@ -1,9 +1,13 @@
-module Parser where
+module Parser (code, declaration, type', pattern', term) where
 
 import Relude hiding (many, some)
 
-import Ast
 import Lexer hiding (Lambda, RecordLens)
+import Syntax.All
+import Syntax.Declaration qualified as D
+import Syntax.Pattern qualified as P
+import Syntax.Term qualified as T
+import Syntax.Type qualified as Ty
 
 import Control.Monad.Combinators.NonEmpty qualified as NE
 import Data.HashMap.Strict qualified as Map
@@ -15,7 +19,7 @@ code = declaration `sepEndBy` newline
 declaration :: Parser Declaration
 declaration = choice [typeDec, valueDec, signature]
   where
-    valueDec = ValueD <$> termName <*> many pattern' <* specialSymbol "=" <*> term <*> whereBlock
+    valueDec = D.Value <$> termName <*> many pattern' <* specialSymbol "=" <*> term <*> whereBlock
     whereBlock = option [] $ block "where" valueDec
 
     typeDec = keyword "type" *> (typeAliasDec <|> typeDec')
@@ -23,12 +27,12 @@ declaration = choice [typeDec, valueDec, signature]
         keyword "alias"
         name <- typeName
         specialSymbol "="
-        AliasD name <$> type'
+        D.Alias name <$> type'
 
     typeDec' = do
         name <- typeName
         vars <- many typeVariable -- placeholder
-        TypeD name vars <$> (typePattern `sepBy` specialSymbol "|")
+        D.Type name vars <$> (typePattern `sepBy` specialSymbol "|")
 
     typePattern :: Parser (Name, [Type'])
     typePattern = do
@@ -40,24 +44,24 @@ declaration = choice [typeDec, valueDec, signature]
     signature = do
         name <- termName
         specialSymbol ":"
-        SigD name <$> type'
+        D.Signature name <$> type'
 
 type' :: Parser Type'
 type' = prec [const [forall', exists], typeApp, recordOrVariant] terminal
   where
-    terminal = [TypeName <$> typeName]
+    terminal = [Ty.Name <$> typeName]
     forall' = do
         keyword "forall" -- todo: unicode
-        Forall <$> some typeVariable <* specialSymbol "." <*> type'
+        Ty.Forall <$> some typeVariable <* specialSymbol "." <*> type'
 
     exists = do
         keyword "exists"
-        Exists <$> some typeVariable <* specialSymbol "." <*> type'
+        Ty.Exists <$> some typeVariable <* specialSymbol "." <*> type'
 
-    typeApp higherPrec = one $ TypeApplication <$> higherPrec <*> many higherPrec
+    typeApp higherPrec = one $ try $ Ty.Application <$> higherPrec <*> NE.some higherPrec
     recordOrVariant hp =
-        [ RecordType <$> someRecord ":" type'
-        , VariantType <$> brackets (Map.fromList <$> variantItem `sepEndBy` specialSymbol ",")
+        [ Ty.Record <$> someRecord ":" type'
+        , Ty.Variant <$> brackets (Map.fromList <$> variantItem `sepEndBy` specialSymbol ",")
         ]
       where
         variantItem = (,) <$> variantConstructor <*> many (prec [recordOrVariant] [hp])
@@ -75,12 +79,12 @@ pattern' :: Parser Pattern
 pattern' = prec [nonTerminals] terminals
   where
     nonTerminals hp =
-        [ ConP <$> typeName <*> many hp
-        , VariantP <$> variantConstructor <*> many hp
+        [ P.Constructor <$> typeName <*> many hp
+        , P.Variant <$> variantConstructor <*> many hp
         ]
     terminals =
-        [ VarP <$> termName
-        , RecordP <$> someRecord "=" pattern'
+        [ P.Var <$> termName
+        , P.Record <$> someRecord "=" pattern'
         ]
 
 {- | given a list of recursive parsers in precedence groups (lowest to highest) and a list of terminals, produces a
@@ -97,38 +101,33 @@ prec initPs terminals = go initPs
 term :: Parser Term
 term = prec [annotation, application, const noPrecGroup] terminals
   where
-    annotation hp = one $ Annotation <$> hp <* specialSymbol ":" <*> type'
-    application hp = one do
-        f <- hp
-        args <- many hp
-        pure case args of
-            [] -> f
-            (x : xs) -> Application f (x :| xs)
+    annotation hp = one $ T.Annotation <$> hp <* specialSymbol ":" <*> type'
+    application hp = one $ T.Application <$> hp <*> NE.some hp
     -- I'm not sure whether `let` and `if` belong here, since `if ... then ... else ... : ty` should be parsed as `if ... then ... else (... : ty)`
     noPrecGroup =
-        [ Lambda <$ lambda <*> NE.some pattern' <* specialSymbol "->" <*> term
+        [ T.Lambda <$ lambda <*> NE.some pattern' <* specialSymbol "->" <*> term
         , let'
         , case'
         , match'
-        , If <$ keyword "if" <*> term <* keyword "then" <*> term <* keyword "else" <*> term
-        , Record <$> someRecord "=" term
-        , List <$> brackets (term `sepEndBy` specialSymbol ",")
+        , T.If <$ keyword "if" <*> term <* keyword "then" <*> term <* keyword "else" <*> term
+        , T.Record <$> someRecord "=" term
+        , T.List <$> brackets (term `sepEndBy` specialSymbol ",")
         ]
     let' = do
         let binding = (,) <$> pattern' <* specialSymbol "=" <*> term
         bindings <- block1 "let" binding
         blockEnd
-        Let bindings <$> term
+        T.Let bindings <$> term
     case' = do
         keyword "case"
         arg <- term
         matches <- block "of" $ (,) <$> pattern' <* specialSymbol "->" <*> term
-        pure $ Case arg matches
-    match' = Match <$> block "match" ((,) <$> some pattern' <* specialSymbol "->" <*> term)
+        pure $ T.Case arg matches
+    match' = T.Match <$> block "match" ((,) <$> some pattern' <* specialSymbol "->" <*> term)
 
     terminals =
-        [ Name <$> termName
-        , RecordLens <$> recordLens
-        , Constructor <$> typeName
-        , Variant <$> variantConstructor
+        [ T.Name <$> termName
+        , T.RecordLens <$> recordLens
+        , T.Constructor <$> typeName
+        , T.Variant <$> variantConstructor
         ]

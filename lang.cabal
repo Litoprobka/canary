@@ -24,10 +24,15 @@ source-repository head
 
 library
   exposed-modules:
-      Ast
+      IL
       Lang
       Lexer
       Parser
+      Syntax.All
+      Syntax.Declaration
+      Syntax.Pattern
+      Syntax.Term
+      Syntax.Type
       TH
   other-modules:
       Paths_lang

@@ -1,4 +1,4 @@
-module IL where
+module IL (Term(..)) where
 
 import Relude
 

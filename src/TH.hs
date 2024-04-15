@@ -11,9 +11,10 @@ matches :: Name -> Q Exp
 matches con =
     -- fourmolu is being weird today
     [|
-        try $ anySingle >>= \case
-            $conCase -> pure $(varE txt)
-            tok -> unexpected $ Tokens $ tok :| []
+        try $
+            anySingle >>= \case
+                $conCase -> pure $(varE txt)
+                tok -> unexpected $ Tokens $ tok :| []
         |]
   where
     conCase = pure $ ConP con [] [VarP txt]

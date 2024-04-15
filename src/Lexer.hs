@@ -3,8 +3,35 @@
 {-# LANGUAGE TemplateHaskell #-}
 {-# OPTIONS_GHC -Wno-name-shadowing #-}
 
-module Lexer (Parser, Token (..), tokenise, lambda, keyword, specialSymbol, newline, intLiteral, textLiteral, charLiteral, operator, blockEnd, someKeyword, someSpecial, termName, typeName, typeVariable, variantConstructor, blockKeyword, parens, brackets, braces, block, block1, recordLens) where
+module Lexer (
+    Parser,
+    Token (..),
+    tokenise,
+    lambda,
+    keyword,
+    specialSymbol,
+    newline,
+    intLiteral,
+    textLiteral,
+    charLiteral,
+    operator,
+    blockEnd,
+    someKeyword,
+    someSpecial,
+    termName,
+    typeName,
+    typeVariable,
+    variantConstructor,
+    blockKeyword,
+    parens,
+    brackets,
+    braces,
+    block,
+    block1,
+    recordLens,
+) where
 
+import Control.Monad.Combinators.NonEmpty qualified as NE
 import Data.Char (isSpace, isUpperCase)
 import Data.List.NonEmpty qualified as NE
 import Relude hiding (many, some)
@@ -13,7 +40,6 @@ import Text.Megaparsec hiding (Token, token)
 import Text.Megaparsec.Char hiding (newline, space)
 import Text.Megaparsec.Char qualified as C (newline)
 import Text.Megaparsec.Char.Lexer qualified as L
-import Control.Monad.Combinators.NonEmpty qualified as NE
 
 newtype LexerState = LexerState {blocks :: NonEmpty Pos}
 
@@ -165,7 +191,16 @@ tokenise = evaluatingStateT (LexerState $ one pos1) $ spaceOrLineWrap *> (concat
 lambda :: Parser ()
 lambda = void $ single Lambda
 
-someKeyword, someSpecial, termName, typeVariable, typeName, variantConstructor, textLiteral, charLiteral, operator :: Parser Text
+someKeyword
+    , someSpecial
+    , termName
+    , typeVariable
+    , typeName
+    , variantConstructor
+    , textLiteral
+    , charLiteral
+    , operator
+        :: Parser Text
 someKeyword = $(matches 'Keyword)
 someSpecial = $(matches 'SpecialSymbol)
 termName = $(matches 'LowerIdentifier)
