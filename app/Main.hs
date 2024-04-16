@@ -1,9 +1,9 @@
+{-# LANGUAGE LambdaCase #-}
 module Main (main) where
 
-import Lang
 import Relude
 import Text.Megaparsec
-import Lexer (tokenise)
+import Parser (code)
 
 main :: IO ()
 main = do
@@ -11,6 +11,6 @@ main = do
     input <- case args of
         [] -> getLine
         (path : _) -> readFileText path
-    input
-        & parseMaybe tokenise >>= parseMaybe lambdaCalc
-        & flip whenJust (putTextLn . either show pretty . reduce)
+    input & parse (usingReaderT pos1 code) "cli" & \case
+        Left err -> putStrLn $ errorBundlePretty err
+        Right decls -> traverse_ print decls

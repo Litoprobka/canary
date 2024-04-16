@@ -1,247 +1,186 @@
-{-# LANGUAGE LambdaCase #-}
-{-# LANGUAGE OverloadedRecordDot #-}
-{-# LANGUAGE TemplateHaskell #-}
-{-# OPTIONS_GHC -Wno-name-shadowing #-}
-
 module Lexer (
     Parser,
-    Token (..),
-    tokenise,
+    keywords,
+    specialSymbols,
+    block,
+    block1,
+    topLevelBlock,
     lambda,
     keyword,
     specialSymbol,
-    newline,
     intLiteral,
     textLiteral,
     charLiteral,
     operator,
-    blockEnd,
-    someKeyword,
-    someSpecial,
     termName,
     typeName,
     typeVariable,
     variantConstructor,
-    blockKeyword,
+    recordLens,
     parens,
     brackets,
     braces,
-    block,
-    block1,
-    recordLens,
+    commaSep,
 ) where
 
 import Control.Monad.Combinators.NonEmpty qualified as NE
-import Data.Char (isSpace, isUpperCase)
-import Data.List.NonEmpty qualified as NE
+import Data.Char (isAlphaNum, isSpace, isUpperCase)
+import Data.HashSet qualified as Set
+import Data.Text qualified as Text
 import Relude hiding (many, some)
-import TH (matches)
 import Text.Megaparsec hiding (Token, token)
 import Text.Megaparsec.Char hiding (newline, space)
 import Text.Megaparsec.Char qualified as C (newline)
 import Text.Megaparsec.Char.Lexer qualified as L
 
-newtype LexerState = LexerState {blocks :: NonEmpty Pos}
+type Parser = ReaderT Pos (Parsec Void Text)
 
-type Lexer = StateT LexerState (Parsec Void Text)
-type Parser = Parsec Void [Token]
-
-data Token
-    = Lambda -- special-cased, since \ is an operator symbol and λ is an identifier symbol
-    | BlockKeyword Text -- a keyword that starts a new indented block
-    | BlockEnd
-    | Keyword Text -- a keyword that doesn't
-    | RecordLens [Text] -- a dot-separated list of identifiers that starts with a dot: `.field.anotherOne.x`
-    | SpecialSymbol Text
-    | LowerIdentifier Text -- an identifier that starts with a lowercase letter
-    | UpperIdentifier Text -- an identifier that starts with an uppercase letter
-    | LowerQuoted Text -- an identifier that starts with ' and an uppercase letter, i.e. 't
-    | UpperQuoted Text -- an identifier that starts with ' and a lowercase letter, i.e. 'T
-    | Newline
-    | IntLiteral Int
-    | TextLiteral Text
-    | CharLiteral Text -- TODO: support grapheme clusters (hence the use of Text instead of Char)
-    | Operator Text
-    deriving (Show, Eq, Ord)
-
-space :: Lexer ()
+space :: Parser ()
 space = L.space nonNewlineSpace lineComment blockComment
   where
     nonNewlineSpace = void $ takeWhile1P (Just "space") \c -> isSpace c && c /= '\n' -- we can ignore \r here
     lineComment = L.skipLineComment "//"
     blockComment = L.skipBlockCommentNested "/*" "*/"
 
--- | any non-zero amount of newlines and any amount of whitespace
-newlines :: Lexer ()
+{- | any non-zero amount of newlines and any amount of whitespace
+| i.e. it skips lines of whitespace entirely
+-}
+newlines :: Parser ()
 newlines = skipSome $ C.newline *> space
 
 -- | space or a newline with increased indentation
-spaceOrLineWrap :: Lexer ()
+spaceOrLineWrap :: Parser ()
 spaceOrLineWrap = void $ space `sepBy` newlineWithIndent
   where
     newlineWithIndent = try do
-        baseIndent :| _ <- gets (.blocks)
+        baseIndent <- ask
         void $ L.indentGuard newlines GT baseIndent
 
-lexeme :: Lexer a -> Lexer a
+{- | parses a statement separator
+a \n should have the same indent as previous blocks. A semicolon always works
+-}
+newline :: Parser ()
+newline = label "separator" $ void (symbol ";") <|> try eqIndent
+  where
+    eqIndent :: Parser ()
+    eqIndent = do
+        void C.newline
+        indent <- ask
+        void $ L.indentGuard newlines EQ indent
+
+lexeme :: Parser a -> Parser a
 lexeme = L.lexeme spaceOrLineWrap
 
-symbol :: Text -> Lexer Text
+symbol :: Text -> Parser Text
 symbol = L.symbol spaceOrLineWrap
 
--- returns a single token or multiple BlockEnd-s. The other option would be to store multiple block ends as one `BlockEnd Int`, but that would make consuming them harder
-token :: Lexer [Token]
-token =
-    newlineOrBlockEnd -- fourmolu is being dumb
-        <|> one
-        <$> choice
-            [ Lambda <$ lexeme (oneOf ['\\', 'λ'])
-            , blockKeyword
-            , Keyword <$> oneSymbolOf keywords
-            , RecordLens <$> recordLens
-            , SpecialSymbol <$> specialSymbol
-            , identifier
-            , intLiteral
-            , textLiteral
-            , charLiteral
-            , quoted
-            , operator
-            ]
-  where
-    oneSymbolOf txts = choice $ symbol <$> txts
+keywords :: HashSet Text
+keywords = Set.fromList ["if", "then", "else", "type", "alias", "case", "where", "let", "match", "of"]
 
-    blockKeywords :: [Text]
-    blockKeywords = ["where", "let", "match", "of"]
-
-    blockKeyword :: Lexer Token
-    blockKeyword = do
-        kw <- oneSymbolOf blockKeywords
-        -- `symbol` consumes the indent, so we get the right one here
-        indent <- L.indentLevel
-        LexerState{blocks} <- get
-        put LexerState{blocks = indent `NE.cons` blocks}
-        pure $ BlockKeyword kw
-
-    keywords :: [Text]
-    keywords = ["if", "then", "else", "type", "alias", "case"]
-
-    specialSymbols :: [Text]
-    specialSymbols = ["=", "|", ":", ".", ",", "->", "=>", "<-", "(", ")", "{", "}"]
-
-    specialSymbol :: Lexer Text
-    specialSymbol = lexeme $ try $ choice (string <$> specialSymbols) <* notFollowedBy operator
-
-    identifier' :: Lexer (NonEmpty Char)
-    identifier' = liftA2 (:|) (letterChar <|> char '_') (many $ alphaNumChar <|> char '_' <|> char '\'')
-
-    nonEmptyToText :: NonEmpty Char -> Text
-    nonEmptyToText = fromString . toList
-
-    identifier :: Lexer Token
-    identifier = lexeme do
-        name@(c :| _) <- identifier'
-        if isUpperCase c
-            then pure $ UpperIdentifier $ nonEmptyToText name
-            else pure $ LowerIdentifier $ nonEmptyToText name
-    -- I didn't feel like factoring out the repeating part
-    quoted :: Lexer Token
-    quoted = lexeme do
-        void $ single '\''
-        name@(c :| _) <- identifier'
-        if isUpperCase c
-            then pure $ UpperQuoted $ nonEmptyToText name
-            else pure $ LowerQuoted $ nonEmptyToText name
-
-    recordLens :: Lexer [Text]
-    recordLens = lexeme $ single '.' *> (nonEmptyToText <$> identifier') `sepBy` single '.'
-
-    -- if a newline hasn't been consumed by `spaceOrLineWrap`, then its indent level is the same or lower
-    newlineOrBlockEnd :: Lexer [Token]
-    newlineOrBlockEnd = one Newline <$ symbol ";" <|> blockEnd
-      where
-        blockEnd = do
-            newlines
-            indent <- L.indentLevel
-            LexerState{blocks} <- get
-            let higherThanCurrentIndent blockIndent = unPos blockIndent > unPos indent
-            case NE.span higherThanCurrentIndent blocks of
-                (toDrop, toKeep) -> do
-                    put $ LexerState $ listToNE toKeep
-                    pure $ replicate (length toDrop) BlockEnd ++ [Newline]
-                  where
-                    listToNE (x : xs) = x :| xs
-                    listToNE [] = error "some pos is lower than pos1 (shouldn't be possible)"
-
-    intLiteral :: Lexer Token
-    intLiteral = try $ lexeme $ IntLiteral <$> L.signed empty L.decimal
-
-    -- todo: handle escape sequences and interpolation
-    textLiteral :: Lexer Token
-    textLiteral = TextLiteral . fromString <$> between (symbol "\"") (symbol "\"") (many $ anySingleBut '\"')
-
-    charLiteral :: Lexer Token
-    charLiteral = try $ CharLiteral . one <$> between (single '\'') (symbol "'") anySingle
-
-    operator :: Lexer Token
-    operator = lexeme $ Operator . fromString <$> some (oneOf operatorChars)
-
-    operatorChars :: [Char]
-    operatorChars = "+-*/%^=><&.~!?|"
-
-tokenise :: Parsec Void Text [Token]
-tokenise = evaluatingStateT (LexerState $ one pos1) $ spaceOrLineWrap *> (concat <$> many token) -- TODO: better tokeniser errors; consider outputting an `Unexpected` token instead?
+specialSymbols :: [Text]
+specialSymbols = ["=", "|", ":", ".", ",", "->", "=>", "<-", "(", ")", "{", "}"]
 
 lambda :: Parser ()
-lambda = void $ single Lambda
+lambda = void $ lexeme $ oneOf ['\'', 'λ']
 
-someKeyword
-    , someSpecial
-    , termName
-    , typeVariable
-    , typeName
-    , variantConstructor
-    , textLiteral
-    , charLiteral
-    , operator
-        :: Parser Text
-someKeyword = $(matches 'Keyword)
-someSpecial = $(matches 'SpecialSymbol)
-termName = $(matches 'LowerIdentifier)
-typeName = $(matches 'UpperIdentifier)
-typeVariable = $(matches 'LowerQuoted)
-variantConstructor = $(matches 'UpperQuoted)
-textLiteral = $(matches 'TextLiteral)
-charLiteral = $(matches 'CharLiteral)
-operator = $(matches 'Operator)
+-- | a helper for `block` and `block1`.
+block'
+    :: (forall b. Parser a -> Parser b -> Parser out)
+    -> Text
+    -- ^ keyword
+    -- ^ `sep` parser. Intended uses are `sepEndBy` and `sepEndBy1`
+    -> Parser a
+    -- ^ statement parser
+    -> Parser out
+block' sep kw p = do
+    keyword kw
+
+    -- make sure that the block is indented at all
+    -- prevents stuff like:
+    --
+    -- f x = expr where
+    -- expr = x + x
+    --
+    -- note that the preceeding whitespace is already consumed by `keyword`
+    void $ ask >>= L.indentGuard pass GT
+
+    blockIndent <- L.indentLevel
+    local (const blockIndent) (sep p newline)
+
+block :: Text -> Parser a -> Parser [a]
+block = block' sepEndBy
+
+block1 :: Text -> Parser a -> Parser (NonEmpty a)
+block1 = block' NE.sepEndBy1
+
+topLevelBlock :: Parser a -> Parser [a]
+topLevelBlock p = L.nonIndented spaceOrLineWrap $ p `sepEndBy` newline <* optional newlines <* eof
+
+-- | intended to be called with one of `specialSymbols`
+specialSymbol :: Text -> Parser ()
+specialSymbol sym = lexeme $ void $ string sym <* notFollowedBy operator -- note that `symbol` isn't used here, since the whitespace matters in this case
+
+-- | parses a keyword, i.e. a symbol not followed by an alphanum character
+keyword :: Text -> Parser ()
+keyword kw = lexeme $ void $ string kw <* notFollowedBy alphaNumChar
+
+-- | an identifier that doesn't start with an uppercase letter
+termName :: Parser Text
+termName = try do
+    ident <- identifier
+    guard (not $ isUpperCase $ Text.head ident)
+    pure ident
+
+-- | an identifier that starts with an uppercase letter
+typeName :: Parser Text
+typeName = try do
+    ident <- identifier
+    guard (isUpperCase $ Text.head ident)
+    pure ident
+
+-- | an identifier that starts with a ' and a lowercase letter, i.e. 'acc
+typeVariable :: Parser Text
+typeVariable = try $ liftA2 Text.cons (single '\'') termName
+
+-- an identifier that starts with a ' and an uppercase letter, i.e. 'Some
+variantConstructor :: Parser Text
+variantConstructor = try $ liftA2 Text.cons (single '\'') typeName
+
+-- a helper for other identifier parsers
+identifier :: Parser Text
+identifier = try do
+    ident <- lexeme $ Text.cons <$> (letterChar <|> char '_') <*> takeWhileP (Just "identifier") identSym
+    when (ident `Set.member` keywords) (fail "expected an identifier, got a keyword")
+    pure ident
+  where
+    identSym c = isAlphaNum c || c == '_' || c == '\''
+
+{- | a record lens, i.e. .field.otherField.thirdField
+Chances are, this parser will only ever be used with T.RecordLens (I should rename Term to Expression)
+-}
+recordLens :: Parser (NonEmpty Text)
+recordLens = lexeme $ single '.' *> identifier `NE.sepBy1` single '.'
 
 intLiteral :: Parser Int
-intLiteral = $(matches 'IntLiteral)
+intLiteral = try $ lexeme $ L.signed empty L.decimal
 
-recordLens :: Parser [Text]
-recordLens = $(matches 'RecordLens)
+-- todo: handle escape sequences and interpolation
+textLiteral :: Parser Text
+textLiteral = between (symbol "\"") (symbol "\"") $ takeWhileP (Just "text literal body") (/= '"')
 
-newline :: Parser ()
-newline = void $ single Newline
+charLiteral :: Parser Text
+charLiteral = try $ one <$> between (single '\'') (symbol "'") anySingle
 
-blockEnd :: Parser ()
-blockEnd = void $ single BlockEnd
+operator :: Parser Text
+operator = lexeme $ takeWhile1P (Just "operator") (`elem` operatorChars)
 
-keyword :: Text -> Parser ()
-keyword = void . single . Keyword
-
-blockKeyword :: Text -> Parser ()
-blockKeyword = void . single . BlockKeyword
-
-specialSymbol :: Text -> Parser ()
-specialSymbol = void . single . SpecialSymbol
+operatorChars :: [Char]
+operatorChars = "+-*/%^=><&.~!?|"
 
 parens, brackets, braces :: Parser a -> Parser a
 parens = between (specialSymbol "(") (specialSymbol ")")
 brackets = between (specialSymbol "[") (specialSymbol "]")
 braces = between (specialSymbol "{") (specialSymbol "}")
 
-block :: Text -> Parser a -> Parser [a]
-block kw p = blockKeyword kw *> p `sepEndBy` newline <* blockEnd
-
-block1 :: Text -> Parser a -> Parser (NonEmpty a)
-block1 kw p = blockKeyword kw *> p `NE.sepEndBy1` newline <* blockEnd
+commaSep :: Parser a -> Parser [a]
+commaSep = (`sepEndBy` specialSymbol ",")

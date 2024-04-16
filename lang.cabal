@@ -25,7 +25,6 @@ source-repository head
 library
   exposed-modules:
       IL
-      Lang
       Lexer
       Parser
       Syntax.All
@@ -33,7 +32,6 @@ library
       Syntax.Pattern
       Syntax.Term
       Syntax.Type
-      TH
   other-modules:
       Paths_lang
   hs-source-dirs:
@@ -75,7 +73,6 @@ test-suite lang-test
   type: exitcode-stdio-1.0
   main-is: Spec.hs
   other-modules:
-      LexerSpec
       ParserSpec
       Paths_lang
   hs-source-dirs:

@@ -17,7 +17,7 @@ data Term
       Annotation Term Type'
     | Name Name
     | -- | .field.otherField.thirdField
-      RecordLens [Name]
+      RecordLens (NonEmpty Name)
     | Constructor Name
     | -- | 'Constructor
       Variant Name

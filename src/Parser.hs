@@ -2,7 +2,7 @@ module Parser (code, declaration, type', pattern', term) where
 
 import Relude hiding (many, some)
 
-import Lexer hiding (Lambda, RecordLens)
+import Lexer
 import Syntax.All
 import Syntax.Declaration qualified as D
 import Syntax.Pattern qualified as P
@@ -14,7 +14,7 @@ import Data.HashMap.Strict qualified as Map
 import Text.Megaparsec
 
 code :: Parser [Declaration]
-code = declaration `sepEndBy` newline
+code = topLevelBlock declaration
 
 declaration :: Parser Declaration
 declaration = choice [typeDec, valueDec, signature]
@@ -61,13 +61,13 @@ type' = prec [const [forall', exists], typeApp, recordOrVariant] terminal
     typeApp higherPrec = one $ try $ Ty.Application <$> higherPrec <*> NE.some higherPrec
     recordOrVariant hp =
         [ Ty.Record <$> someRecord ":" type'
-        , Ty.Variant <$> brackets (Map.fromList <$> variantItem `sepEndBy` specialSymbol ",")
+        , Ty.Variant <$> brackets (Map.fromList <$> commaSep variantItem)
         ]
       where
         variantItem = (,) <$> variantConstructor <*> many (prec [recordOrVariant] [hp])
 
 someRecord :: Text -> Parser value -> Parser (HashMap Name value)
-someRecord delim valueP = braces (Map.fromList <$> recordItem `sepEndBy` specialSymbol ",")
+someRecord delim valueP = braces (Map.fromList <$> commaSep recordItem)
   where
     recordItem = do
         recordLabel <- termName
@@ -92,7 +92,7 @@ pattern' = prec [nonTerminals] terminals
 -}
 prec :: [Parser a -> [Parser a]] -> [Parser a] -> Parser a
 prec initPs terminals = go initPs
-  whereb
+  where
     go [] = parens (prec initPs terminals) <|> choice terminals
     go (pgroup : groups) = choice (pgroup higherPrec) <|> higherPrec
       where
@@ -111,7 +111,7 @@ term = prec [annotation, application, const noPrecGroup] terminals
         , match'
         , T.If <$ keyword "if" <*> term <* keyword "then" <*> term <* keyword "else" <*> term
         , T.Record <$> someRecord "=" term
-        , T.List <$> brackets (term `sepEndBy` specialSymbol ",")
+        , T.List <$> brackets (commaSep term)
         ]
     let' = do
         let binding = (,) <$> pattern' <* specialSymbol "=" <*> term
