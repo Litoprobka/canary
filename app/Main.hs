@@ -8,9 +8,9 @@ import Parser (code)
 main :: IO ()
 main = do
     args <- getArgs
-    input <- case args of
-        [] -> getLine
-        (path : _) -> readFileText path
-    input & parse (usingReaderT pos1 code) "cli" & \case
+    (fileName, input) <- case args of
+        [] -> ("cli", ) <$> getLine
+        (path : _) -> (path, ) <$> readFileText path
+    input & parse (usingReaderT pos1 code) fileName & \case
         Left err -> putStrLn $ errorBundlePretty err
         Right decls -> traverse_ print decls

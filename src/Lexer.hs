@@ -60,11 +60,10 @@ spaceOrLineWrap = void $ space `sepBy` newlineWithIndent
 a \n should have the same indent as previous blocks. A semicolon always works
 -}
 newline :: Parser ()
-newline = label "separator" $ void (symbol ";") <|> try eqIndent
+newline = label "separator" $ void (symbol ";") <|> eqIndent
   where
     eqIndent :: Parser ()
-    eqIndent = do
-        void C.newline
+    eqIndent = try do
         indent <- ask
         void $ L.indentGuard newlines EQ indent
 
@@ -105,7 +104,7 @@ block' sep kw p = do
     void $ ask >>= L.indentGuard pass GT
 
     blockIndent <- L.indentLevel
-    local (const blockIndent) (sep p newline)
+    local (const blockIndent) (p `sep` newline)
 
 block :: Text -> Parser a -> Parser [a]
 block = block' sepEndBy
@@ -114,7 +113,7 @@ block1 :: Text -> Parser a -> Parser (NonEmpty a)
 block1 = block' NE.sepEndBy1
 
 topLevelBlock :: Parser a -> Parser [a]
-topLevelBlock p = L.nonIndented spaceOrLineWrap $ p `sepEndBy` newline <* optional newlines <* eof
+topLevelBlock p = L.nonIndented spaceOrLineWrap $ p `sepEndBy` newline <* hidden (optional newlines) <* eof
 
 -- | intended to be called with one of `specialSymbols`
 specialSymbol :: Text -> Parser ()
