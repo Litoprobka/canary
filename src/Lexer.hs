@@ -30,23 +30,23 @@ import Data.Text qualified as Text
 import Relude hiding (many, some)
 import Text.Megaparsec hiding (Token, token)
 import Text.Megaparsec.Char hiding (newline, space)
-import Text.Megaparsec.Char qualified as C (newline)
+import Text.Megaparsec.Char qualified as C (newline, space1)
 import Text.Megaparsec.Char.Lexer qualified as L
 
 type Parser = ReaderT Pos (Parsec Void Text)
 
+-- |  the usual space parser. Doesn't consume newlines
 space :: Parser ()
-space = L.space nonNewlineSpace lineComment blockComment
-  where
-    nonNewlineSpace = void $ takeWhile1P (Just "space") \c -> isSpace c && c /= '\n' -- we can ignore \r here
-    lineComment = L.skipLineComment "//"
-    blockComment = L.skipBlockCommentNested "/*" "*/"
 
 {- | any non-zero amount of newlines and any amount of whitespace
 | i.e. it skips lines of whitespace entirely
 -}
 newlines :: Parser ()
-newlines = skipSome $ C.newline *> space
+(space, newlines) = (L.space nonNewlineSpace lineComment blockComment, C.newline *> L.space C.space1 lineComment blockComment)
+  where
+    nonNewlineSpace = void $ takeWhile1P (Just "space") \c -> isSpace c && c /= '\n' -- we can ignore \r here
+    lineComment = L.skipLineComment "//"
+    blockComment = L.skipBlockCommentNested "/*" "*/"
 
 -- | space or a newline with increased indentation
 spaceOrLineWrap :: Parser ()
