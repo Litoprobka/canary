@@ -100,7 +100,7 @@ block' sep kw p = do
     -- f x = expr where
     -- expr = x + x
     --
-    -- note that the preceeding whitespace is already consumed by `keyword`
+    -- note that the preceding whitespace is already consumed by `keyword`
     void $ ask >>= L.indentGuard pass GT
 
     blockIndent <- L.indentLevel
@@ -113,15 +113,15 @@ block1 :: Text -> Parser a -> Parser (NonEmpty a)
 block1 = block' NE.sepEndBy1
 
 topLevelBlock :: Parser a -> Parser [a]
-topLevelBlock p = L.nonIndented spaceOrLineWrap $ p `sepEndBy` newline <* hidden (optional newlines) <* eof
+topLevelBlock p = L.nonIndented spaceOrLineWrap $ p `sepEndBy` newline <* eof
 
 -- | intended to be called with one of `specialSymbols`
 specialSymbol :: Text -> Parser ()
-specialSymbol sym = lexeme $ void $ string sym <* notFollowedBy operator -- note that `symbol` isn't used here, since the whitespace matters in this case
+specialSymbol sym = lexeme $ string sym *> notFollowedBy operator -- note that `symbol` isn't used here, since the whitespace matters in this case
 
 -- | parses a keyword, i.e. a symbol not followed by an alphanum character
 keyword :: Text -> Parser ()
-keyword kw = lexeme $ void $ string kw <* notFollowedBy alphaNumChar
+keyword kw = lexeme $ string kw *> notFollowedBy alphaNumChar
 
 -- | an identifier that doesn't start with an uppercase letter
 termName :: Parser Text
