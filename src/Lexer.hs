@@ -117,11 +117,11 @@ topLevelBlock p = L.nonIndented spaceOrLineWrap $ p `sepEndBy` newline <* eof
 
 -- | intended to be called with one of `specialSymbols`
 specialSymbol :: Text -> Parser ()
-specialSymbol sym = lexeme $ string sym *> notFollowedBy operator -- note that `symbol` isn't used here, since the whitespace matters in this case
+specialSymbol sym = lexeme $ string sym *> notFollowedBy (satisfy isOperatorChar) -- note that `symbol` isn't used here, since the whitespace matters in this case
 
 -- | parses a keyword, i.e. a symbol not followed by an alphanum character
 keyword :: Text -> Parser ()
-keyword kw = lexeme $ string kw *> notFollowedBy alphaNumChar
+keyword kw = lexeme $ string kw *> notFollowedBy (satisfy isIdentifierChar)
 
 -- | an identifier that doesn't start with an uppercase letter
 termName :: Parser Text
@@ -148,11 +148,9 @@ variantConstructor = try $ liftA2 Text.cons (single '\'') typeName
 -- a helper for other identifier parsers
 identifier :: Parser Text
 identifier = try do
-    ident <- lexeme $ Text.cons <$> (letterChar <|> char '_') <*> takeWhileP (Just "identifier") identSym
+    ident <- lexeme $ Text.cons <$> (letterChar <|> char '_') <*> takeWhileP (Just "identifier") isIdentifierChar
     when (ident `Set.member` keywords) (fail "expected an identifier, got a keyword")
     pure ident
-  where
-    identSym c = isAlphaNum c || c == '_' || c == '\''
 
 {- | a record lens, i.e. .field.otherField.thirdField
 Chances are, this parser will only ever be used with T.RecordLens (I should rename Term to Expression)
@@ -171,10 +169,13 @@ charLiteral :: Parser Text
 charLiteral = try $ one <$> between (single '\'') (symbol "'") anySingle
 
 operator :: Parser Text
-operator = lexeme $ takeWhile1P (Just "operator") (`elem` operatorChars)
+operator = lexeme $ takeWhile1P (Just "operator") isOperatorChar
 
-operatorChars :: [Char]
-operatorChars = "+-*/%^=><&.~!?|"
+isOperatorChar :: Char -> Bool
+isOperatorChar = (`elem` ("+-*/%^=><&.~!?|" :: String))
+
+isIdentifierChar :: Char -> Bool
+isIdentifierChar c = isAlphaNum c || c == '_' || c == '\''
 
 parens, brackets, braces :: Parser a -> Parser a
 parens = between (specialSymbol "(") (specialSymbol ")")
