@@ -1,17 +1,18 @@
-module Parser (code, declaration, type', pattern', term) where
+module Parser (code, declaration, type', pattern', expression) where
 
 import Relude hiding (many, some)
 
 import Lexer
 import Syntax.All
 import Syntax.Declaration qualified as D
-import Syntax.Pattern qualified as P
 import Syntax.Expression qualified as E
+import Syntax.Pattern qualified as P
 import Syntax.Type qualified as T
 
 import Control.Monad.Combinators.Expr
 import Control.Monad.Combinators.NonEmpty qualified as NE
 import Data.HashMap.Strict qualified as Map
+import Data.IntMap.Strict qualified as IntMap
 import Text.Megaparsec
 
 code :: Parser [Declaration]
@@ -20,7 +21,7 @@ code = topLevelBlock declaration
 declaration :: Parser Declaration
 declaration = choice [typeDec, valueDec, signature]
   where
-    valueDec = D.Value <$> termName <*> many pattern' <* specialSymbol "=" <*> term <*> whereBlock
+    valueDec = D.Value <$> termName <*> many pattern' <* specialSymbol "=" <*> expression <*> whereBlock
     whereBlock = option [] $ block "where" valueDec
 
     typeDec = keyword "type" *> (typeAliasDec <|> typeDec')
@@ -106,33 +107,75 @@ prec initPs terminals = go initPs
       where
         higherPrec = go groups
 
-term :: Parser Expression
-term = prec [annotation, application, const noPrecGroup] terminals
+expression :: Parser Expression
+expression = makeExprParser noPrec (snd <$> IntMap.toDescList precMap)
   where
-    annotation hp = one $ try $ E.Annotation <$> hp <* specialSymbol ":" <*> type'
-    application hp = one $ try $ E.Application <$> hp <*> NE.some hp
-    noPrecGroup =
-        [ E.Lambda <$ lambda <*> NE.some pattern' <* specialSymbol "->" <*> term
+    precMap =
+        IntMap.fromList
+            [ (120, [infixR "."]) -- lens composition
+            , (110, infixL <$> ["^.", "^..", "^?"]) -- lens getters (subject to change)
+            , (100, [application])
+            , (90, [infixL ">>", infixR "<<"]) -- function composition
+            , (80, [infixR "^"])
+            , (70, infixL <$> ["*", "/"])
+            , (60, map infixL ["+", "-"] <> [infixR "<>"])
+            , (50, infixR <$> [".~", "%~", "?~"]) -- lens setters (subject to change)
+            , (40, infixN <$> ["==", "!=", ">", ">=", "<", "<="])
+            , (30, [infixR "&&"])
+            , (20, [infixR "||"])
+            , (0, [infixL "|>", infixR "<|"]) -- pipes
+            , (-100, [annotation]) -- I can't think of anything that should have lower precedence than annotation
+            ]
+      where
+        -- I'm not sure whether multi-arg applications are a good idea at all
+        -- there's no clean way to parse it via `makeExprParser`, so I'm relying on
+        -- the `binApp` function that normalises instead
+        application = InfixL $ pure binApp
+
+        annotation = Postfix do
+            specialSymbol ":"
+            ty <- type'
+            pure (`E.Annotation` ty)
+
+        infixL = infix' InfixL
+        infixR = infix' InfixR
+        infixN = infix' InfixN
+        infix' fixity sym = fixity $ operator sym $> \lhs rhs -> binApp (binApp (E.Name sym) lhs) rhs
+
+        -- E.Application that merges with the lhs if possible
+        -- i.e. f `binApp` x `binApp` y is E.Application f [x, y]
+        -- rather than E.Application (E.Application f [x]) [y]
+        binApp :: Expression -> Expression -> Expression
+        binApp lhs rhs = case lhs of
+            E.Application f args -> E.Application f $ args <> one rhs
+            _ -> E.Application lhs (one rhs)
+
+    noPrec = choice $ keywordBased <> terminals
+
+    keywordBased =
+        [ E.Lambda <$ lambda <*> NE.some pattern' <* specialSymbol "->" <*> expression
         , let'
         , case'
         , match'
-        , E.If <$ keyword "if" <*> term <* keyword "then" <*> term <* keyword "else" <*> term
-        , E.Record <$> someRecord "=" term
-        , E.List <$> brackets (commaSep term)
+        , E.If <$ keyword "if" <*> expression <* keyword "then" <*> expression <* keyword "else" <*> expression
+        , E.Record <$> someRecord "=" expression
+        , E.List <$> brackets (commaSep expression)
         ]
-    let' = do
-        let binding = (,) <$> pattern' <* specialSymbol "=" <*> term
-        bindings <- block1 "let" binding
-        E.Let bindings <$> term
-    case' = do
-        keyword "case"
-        arg <- term
-        matches <- block "of" $ (,) <$> pattern' <* specialSymbol "->" <*> term
-        pure $ E.Case arg matches
-    match' = E.Match <$> block "match" ((,) <$> some pattern' <* specialSymbol "->" <*> term)
+      where
+        let' = do
+            let binding = (,) <$> pattern' <* specialSymbol "=" <*> expression
+            bindings <- block1 "let" binding
+            E.Let bindings <$> expression
+        case' = do
+            keyword "case"
+            arg <- expression
+            matches <- block "of" $ (,) <$> pattern' <* specialSymbol "->" <*> expression
+            pure $ E.Case arg matches
+        match' = E.Match <$> block "match" ((,) <$> some pattern' <* specialSymbol "->" <*> expression)
 
     terminals =
-        [ E.Name <$> termName
+        [ parens expression
+        , E.Name <$> termName
         , E.RecordLens <$> recordLens
         , E.Constructor <$> typeName
         , E.Variant <$> variantConstructor

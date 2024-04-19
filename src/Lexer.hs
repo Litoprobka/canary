@@ -21,6 +21,7 @@ module Lexer (
     brackets,
     braces,
     commaSep,
+    someOperator,
 ) where
 
 import Control.Monad.Combinators.NonEmpty qualified as NE
@@ -168,8 +169,11 @@ textLiteral = between (symbol "\"") (symbol "\"") $ takeWhileP (Just "text liter
 charLiteral :: Parser Text
 charLiteral = try $ one <$> between (single '\'') (symbol "'") anySingle
 
-operator :: Parser Text
-operator = lexeme $ takeWhile1P (Just "operator") isOperatorChar
+operator :: Text -> Parser ()
+operator sym = lexeme $ string sym *> notFollowedBy (satisfy isOperatorChar)
+
+someOperator :: Parser Text
+someOperator = lexeme $ takeWhile1P (Just "operator") isOperatorChar
 
 isOperatorChar :: Char -> Bool
 isOperatorChar = (`elem` ("+-*/%^=><&.~!?|" :: String))

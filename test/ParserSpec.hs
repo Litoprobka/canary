@@ -4,6 +4,7 @@ module ParserSpec (spec) where
 
 import Parser
 import TestPrelude ()
+import Syntax.All
 import Syntax.Declaration qualified as D
 import Syntax.Expression qualified as E
 import Syntax.Pattern qualified as P
@@ -16,6 +17,12 @@ import NeatInterpolation
 
 parsePretty :: Parser a -> Text -> Either String a
 parsePretty parser input = input & parse (usingReaderT pos1 parser) "test" & first errorBundlePretty
+
+app :: Expression -> Expression -> Expression
+app lhs rhs = E.Application lhs [rhs]
+
+binApp :: Expression -> Expression -> Expression -> Expression
+binApp f arg1 arg2 = E.Application f [arg1, arg2]
 
 spec :: Spec
 spec = do
@@ -53,13 +60,24 @@ spec = do
                       y
                       z
                     |]
-            parsePretty term expr `shouldBe` Right (E.Application "f" ["x", "y", "z"])
+            parsePretty expression expr `shouldBe` Right (E.Application "f" ["x", "y", "z"])
+        it "with operators" do
+            let expr = [text|
+                    x
+                      |> f
+                      |> g
+                    |]
+            parsePretty expression expr `shouldBe` Right (E.Application "|>" [E.Application "|>" ["x", "f"], "g"])
 
     describe "if-then-else" do
         it "simple" do
-            parsePretty term "if True then \"yes\" else \"huh???\"" `shouldBe` Right (E.If "True" (E.TextLiteral "yes") (E.TextLiteral "huh???"))
+            parsePretty expression "if True then \"yes\" else \"huh???\"" `shouldBe` Right (E.If "True" (E.TextLiteral "yes") (E.TextLiteral "huh???"))
         it "nested" do
-            parsePretty term "if if True then False else True then 1 else 0" `shouldBe` Right (E.If (E.If "True" "False" "True") (E.IntLiteral 1) (E.IntLiteral 0))
+            parsePretty expression "if if True then False else True then 1 else 0" `shouldBe` Right (E.If (E.If "True" "False" "True") (E.IntLiteral 1) (E.IntLiteral 0))
+        it "partially applied (todo)" do
+            parsePretty expression "if _ then A else B" `shouldBe` Right (E.Lambda ["x"] $ E.If "x" "A" "B")
+        it "with operators" do
+            parsePretty expression "x + if y || z then 4 else 5 * 2" `shouldBe` Right (binApp "+" "x" $ E.If (binApp "||" "y" "z") (E.IntLiteral 4) (binApp "*" (E.IntLiteral 5) (E.IntLiteral 2)))
 
     describe "pattern matching" do
         it "pattern" do
@@ -80,7 +98,7 @@ spec = do
                       Cons x xs -> Yes
                       Nil -> No
                     |]
-            parsePretty term expr `shouldBe` Right (E.Case "list" [(P.Constructor "Cons" ["x", "xs"], "Yes"), (P.Constructor "Nil" [], "No")])
+            parsePretty expression expr `shouldBe` Right (E.Case "list" [(P.Constructor "Cons" ["x", "xs"], "Yes"), (P.Constructor "Nil" [], "No")])
         it "nested case" do
             let expr = [text|
                     case list of
@@ -97,16 +115,16 @@ spec = do
                             ])
                         , (P.Constructor "Nil" [], "Nil")
                         ]
-            parsePretty term expr `shouldBe` result
+            parsePretty expression expr `shouldBe` result
         it "match expression" do
             let expr = [text|
                     match
                       Nothing -> Nothing
                       Just x -> Just (f x)
                     |]
-            parsePretty term expr `shouldBe` Right (E.Match [([P.Constructor "Nothing" []], "Nothing"), ([P.Constructor "Just" ["x"]], E.Application "Just" [E.Application "f" ["x"]])])
+            parsePretty expression expr `shouldBe` Right (E.Match [([P.Constructor "Nothing" []], "Nothing"), ([P.Constructor "Just" ["x"]], E.Application "Just" [E.Application "f" ["x"]])])
         it "inline match" do
-            parsePretty term "match 42 -> True; _ -> False" `shouldBe` Right (E.Match [([P.IntLiteral 42], "True"), ([P.Var "_"], "False")])
+            parsePretty expression "match 42 -> True; _ -> False" `shouldBe` Right (E.Match [([P.IntLiteral 42], "True"), ([P.Var "_"], "False")])
         it "match in parens" do
             let expr = [text|
                     f (match
@@ -114,7 +132,14 @@ spec = do
                          _ -> False)
                       x
                     |]
-            parsePretty term expr `shouldBe` Right (E.Application "f" [E.Match [([P.IntLiteral 42], "True"), ([P.Var "_"], "False")], "x"])
+            parsePretty expression expr `shouldBe` Right (E.Application "f" [E.Match [([P.IntLiteral 42], "True"), ([P.Var "_"], "False")], "x"])
+    describe "operators" do
+        it "2 + 2" do
+            parsePretty expression "x + x" `shouldBe` Right (binApp "+" "x" "x")
+        it "precedence" do
+            parsePretty expression "x + y * z / w" `shouldBe` Right (binApp "+" "x" (binApp "/" (binApp "*" "y" "z") "w"))
+        it "lens composition binds tighter than function application" do
+            parsePretty expression "f x . y" `shouldBe` Right ("f" `app` binApp "." "x" "y")
 
     describe "types" do
         it "simple" do
