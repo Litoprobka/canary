@@ -9,4 +9,8 @@ data Pattern
     | Constructor Name [Pattern]
     | Variant Name [Pattern]
     | Record (HashMap Name Pattern)
+    | List [Pattern]
+    | IntLiteral Int
+    | TextLiteral Text
+    | CharLiteral Text
     deriving (Show, Eq)

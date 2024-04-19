@@ -49,7 +49,10 @@ declaration = choice [typeDec, valueDec, signature]
 type' :: Parser Type'
 type' = prec [const [forall', exists], typeApp, recordOrVariant] terminal
   where
-    terminal = [T.Name <$> typeName]
+    terminal = 
+      [ T.Name <$> typeName
+      , T.Var <$> typeVariable
+      ]
     forall' = do
         keyword "forall" -- todo: unicode
         T.Forall <$> some typeVariable <* specialSymbol "." <*> type'
@@ -85,6 +88,10 @@ pattern' = prec [nonTerminals] terminals
     terminals =
         [ P.Var <$> termName
         , P.Record <$> someRecord "=" pattern'
+        , P.List <$> brackets (commaSep pattern')
+        , P.IntLiteral <$> intLiteral
+        , P.TextLiteral <$> textLiteral
+        , P.CharLiteral <$> charLiteral
         ]
 
 {- | given a list of recursive parsers in precedence groups (lowest to highest) and a list of terminals, produces a
@@ -103,7 +110,6 @@ term = prec [annotation, application, const noPrecGroup] terminals
   where
     annotation hp = one $ try $ E.Annotation <$> hp <* specialSymbol ":" <*> type'
     application hp = one $ try $ E.Application <$> hp <*> NE.some hp
-    -- I'm not sure whether `let` and `if` belong here, since `if ... then ... else ... : ty` should be parsed as `if ... then ... else (... : ty)`
     noPrecGroup =
         [ E.Lambda <$ lambda <*> NE.some pattern' <* specialSymbol "->" <*> term
         , let'

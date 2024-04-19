@@ -29,5 +29,3 @@ instance IsString Type' where
     fromString ('\'' : _) = error "todo: type variables"
     fromString str = str & matchCase T.Name (error "type names shouldn't start with a lowercase letter")
 
-instance Num Term where
-    fromInteger = E.IntLiteral . fromInteger

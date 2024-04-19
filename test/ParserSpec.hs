@@ -63,19 +63,30 @@ spec = do
     describe "pattern matching" do
         it "pattern" do
             parsePretty pattern' "Cons x (Cons y (Cons z xs))" `shouldBe` Right (P.Constructor "Cons" ["x", P.Constructor "Cons" ["y", P.Constructor "Cons" ["z", "xs"]]])
-        it "int literal (todo)" do
-            parsePretty pattern' "123" `shouldBe` Right (P.Variant "todo" [])
+        it "int literal" do
+            parsePretty pattern' "123" `shouldBe` Right (P.IntLiteral 123)
         it "many patterns" do
             parsePretty (some pattern') "(Cons x xs) y ('Hmmm z)" `shouldBe` Right [P.Constructor "Cons" ["x", "xs"], "y", P.Variant "'Hmmm" ["z"]]
         it "record" do
             parsePretty pattern' "{ x = x, y = y, z = z }" `shouldBe` Right (P.Record [("x", "x"), ("y", "y"), ("z", "z")])
-        it "pattern match" do
+        it "list" do
+            parsePretty pattern' "[1, 'a', Just x]" `shouldBe` Right (P.List [P.IntLiteral 1, P.CharLiteral "a", P.Constructor "Just" ["x"]])
+        it "nested lists" do
+            parsePretty pattern' "[x, [y, z], [[w], []]]" `shouldBe` Right (P.List ["x", P.List ["y", "z"], P.List [P.List ["w"], P.List []]])
+        it "case expression" do
             let expr = Text.unlines
                     [ "case list of"
                     , "  Cons x xs -> Yes"
                     , "  Nil -> No"
                     ]
             parsePretty term expr `shouldBe` Right (E.Case "list" [(P.Constructor "Cons" ["x", "xs"], "Yes"), (P.Constructor "Nil" [], "No")])
+        it "match expression" do
+            let expr = Text.unlines
+                    [ "match"
+                    , "  Nothing -> Nothing"
+                    , "  Just x -> Just (f x)"
+                    ]
+            parsePretty term expr `shouldBe` Right (E.Match [([P.Constructor "Nothing" []], "Nothing"), ([P.Constructor "Just" ["x"]], E.Application "Just" [E.Application "f" ["x"]])])
 
     describe "types" do
         it "simple" do
@@ -86,10 +97,10 @@ spec = do
             parsePretty type' "{ x : Int, y : Int, z : Int }" `shouldBe` Right (T.Record [("x", "Int"), ("y", "Int"), ("z", "Int")])
         it "variant" do
             parsePretty type' "['A Int, 'B, 'C Double Unit]" `shouldBe` Right (T.Variant [("'A", ["Int"]), ("'B", []), ("'C", ["Double", "Unit"])])
-        it "type variable (todo)" do
-            parsePretty type' "'var" `shouldBe` Right "Todo"
+        it "type variable" do
+            parsePretty type' "'var" `shouldBe` Right (T.Var "'var")
         it "forall" do
-            parsePretty type' "forall 'a. Maybe Text" `shouldBe` Right (T.Forall ["'a"] $ T.Application "Maybe" ["Text"])
+            parsePretty type' "forall 'a. Maybe 'a" `shouldBe` Right (T.Forall ["'a"] $ T.Application "Maybe" [T.Var "'a"])
 
     describe "full programs" do
         it "parses the old lambdaTest (with tabs)" do
