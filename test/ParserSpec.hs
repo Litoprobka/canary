@@ -69,6 +69,17 @@ spec = do
                     |]
             parsePretty expression expr `shouldBe` Right (E.Application "|>" [E.Application "|>" ["x", "f"], "g"])
 
+    describe "let" do
+        it "inline" do
+            parsePretty expression "let x = y; z" `shouldBe` Right (E.Let ("x", "y") "z")
+        it "nested" do
+            let expr = [text|
+                    let x = y
+                    let z = x
+                    z
+                    |]
+            parsePretty expression expr `shouldBe` Right (E.Let ("x", "y") $ E.Let ("z", "x") "z")
+
     describe "if-then-else" do
         it "simple" do
             parsePretty expression "if True then \"yes\" else \"huh???\"" `shouldBe` Right (E.If "True" (E.TextLiteral "yes") (E.TextLiteral "huh???"))
@@ -133,6 +144,7 @@ spec = do
                       x
                     |]
             parsePretty expression expr `shouldBe` Right (E.Application "f" [E.Match [([P.IntLiteral 42], "True"), ([P.Var "_"], "False")], "x"])
+    
     describe "operators" do
         it "2 + 2" do
             parsePretty expression "x + x" `shouldBe` Right (binApp "+" "x" "x")

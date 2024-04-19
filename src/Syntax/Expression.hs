@@ -8,7 +8,7 @@ import Syntax.Type
 data Expression
     = Lambda (NonEmpty Pattern) Expression
     | Application Expression (NonEmpty Expression)
-    | Let (NonEmpty (Pattern, Expression)) Expression
+    | Let (Pattern, Expression) Expression
     | Case Expression [(Pattern, Expression)]
     | -- | Haskell's \case
       Match [([Pattern], Expression)]

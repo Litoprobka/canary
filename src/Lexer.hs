@@ -5,6 +5,7 @@ module Lexer (
     block,
     block1,
     topLevelBlock,
+    letBlock,
     lambda,
     keyword,
     specialSymbol,
@@ -40,7 +41,8 @@ type Parser = ReaderT Pos (Parsec Void Text)
 space :: Parser ()
 
 {- | any non-zero amount of newlines and any amount of whitespace
-| i.e. it skips lines of whitespace entirely
+  i.e. it skips lines of whitespace entirely
+  should never be used outside of the block-parsing functions
 -}
 newlines :: Parser ()
 (space, newlines) = (L.space nonNewlineSpace lineComment blockComment, C.newline *> L.space C.space1 lineComment blockComment)
@@ -81,7 +83,7 @@ specialSymbols :: [Text]
 specialSymbols = ["=", "|", ":", ".", ",", "->", "=>", "<-", "(", ")", "{", "}"]
 
 lambda :: Parser ()
-lambda = void $ lexeme $ oneOf ['\'', 'λ']
+lambda = void $ lexeme $ satisfy \c -> c == '\\' || c == 'λ'
 
 -- | a helper for `block` and `block1`.
 block'
@@ -97,10 +99,8 @@ block' sep kw p = do
 
     -- make sure that the block is indented at all
     -- prevents stuff like:
-    --
-    -- f x = expr where
-    -- expr = x + x
-    --
+    -- > f x = expr where
+    -- > expr = x + x
     -- note that the preceding whitespace is already consumed by `keyword`
     void $ ask >>= L.indentGuard pass GT
 
@@ -112,6 +112,19 @@ block = block' sepEndBy
 
 block1 :: Text -> Parser a -> Parser (NonEmpty a)
 block1 = block' NE.sepEndBy1
+
+{- | a newline-delimited expression
+> let x = y
+> z
+-}
+letBlock :: Text -> (a -> b -> c) -> Parser a -> Parser b -> Parser c
+letBlock kw f declaration expression = do
+    blockIndent <- L.indentLevel
+    keyword kw
+    dec <- declaration
+    local (const blockIndent) do
+        newline
+        f dec <$> expression
 
 topLevelBlock :: Parser a -> Parser [a]
 topLevelBlock p = L.nonIndented spaceOrLineWrap $ p `sepEndBy` newline <* eof

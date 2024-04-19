@@ -164,8 +164,7 @@ expression = makeExprParser noPrec (snd <$> IntMap.toDescList precMap)
       where
         let' = do
             let binding = (,) <$> pattern' <* specialSymbol "=" <*> expression
-            bindings <- block1 "let" binding
-            E.Let bindings <$> expression
+            letBlock "let" E.Let binding expression
         case' = do
             keyword "case"
             arg <- expression
