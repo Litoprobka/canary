@@ -5,7 +5,7 @@ module TestPrelude (module Syntax.All) where
 
 import Relude
 import Syntax.All
-import Syntax.Term qualified as E
+import Syntax.Expression qualified as E
 import Syntax.Pattern qualified as P
 import Syntax.Type qualified as T
 import Data.Char (isUpperCase)
@@ -18,7 +18,7 @@ matchCase whenUpper whenLower str@(h:_)
     | isUpperCase h = whenUpper $ fromString str
     | otherwise = whenLower $ fromString str
 
-instance IsString Term where
+instance IsString Expression where
     fromString ('\'' : rest) = rest & matchCase (E.Variant . ("'" <>)) (error "type variable at value level")
     fromString str = str & matchCase E.Constructor E.Name
 

@@ -29,8 +29,8 @@ library
       Parser
       Syntax.All
       Syntax.Declaration
+      Syntax.Expression
       Syntax.Pattern
-      Syntax.Term
       Syntax.Type
   other-modules:
       Paths_lang

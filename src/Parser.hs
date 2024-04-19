@@ -6,9 +6,10 @@ import Lexer
 import Syntax.All
 import Syntax.Declaration qualified as D
 import Syntax.Pattern qualified as P
-import Syntax.Term qualified as E -- stand for 'Expression'
+import Syntax.Expression qualified as E
 import Syntax.Type qualified as T
 
+import Control.Monad.Combinators.Expr
 import Control.Monad.Combinators.NonEmpty qualified as NE
 import Data.HashMap.Strict qualified as Map
 import Text.Megaparsec
@@ -49,10 +50,10 @@ declaration = choice [typeDec, valueDec, signature]
 type' :: Parser Type'
 type' = prec [const [forall', exists], typeApp, recordOrVariant] terminal
   where
-    terminal = 
-      [ T.Name <$> typeName
-      , T.Var <$> typeVariable
-      ]
+    terminal =
+        [ T.Name <$> typeName
+        , T.Var <$> typeVariable
+        ]
     forall' = do
         keyword "forall" -- todo: unicode
         T.Forall <$> some typeVariable <* specialSymbol "." <*> type'
@@ -105,7 +106,7 @@ prec initPs terminals = go initPs
       where
         higherPrec = go groups
 
-term :: Parser Term
+term :: Parser Expression
 term = prec [annotation, application, const noPrecGroup] terminals
   where
     annotation hp = one $ try $ E.Annotation <$> hp <* specialSymbol ":" <*> type'

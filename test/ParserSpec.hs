@@ -5,7 +5,7 @@ module ParserSpec (spec) where
 import Parser
 import TestPrelude ()
 import Syntax.Declaration qualified as D
-import Syntax.Term qualified as E
+import Syntax.Expression qualified as E
 import Syntax.Pattern qualified as P
 import Syntax.Type qualified as T
 import Lexer
