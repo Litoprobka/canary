@@ -80,6 +80,23 @@ spec = do
                     , "  Nil -> No"
                     ]
             parsePretty term expr `shouldBe` Right (E.Case "list" [(P.Constructor "Cons" ["x", "xs"], "Yes"), (P.Constructor "Nil" [], "No")])
+        it "nested case" do
+            let expr = Text.unlines
+                    [ "case list of"
+                    , "    Cons x xs -> case x of"
+                    , "        Just _  -> Cons True xs"
+                    , "        Nothing -> Cons False xs"
+                    , "    Nil -> Nil"
+                    ]
+            let result = Right $
+                    E.Case "list"
+                        [ (P.Constructor "Cons" ["x", "xs"], E.Case "x"
+                            [ (P.Constructor "Just" ["_"], E.Application "Cons" ["True", "xs"])
+                            , (P.Constructor "Nothing" [], E.Application "Cons" ["False", "xs"])
+                            ])
+                        , (P.Constructor "Nil" [], "Nil")
+                        ]
+            parsePretty term expr `shouldBe` result
         it "match expression" do
             let expr = Text.unlines
                     [ "match"
@@ -87,6 +104,16 @@ spec = do
                     , "  Just x -> Just (f x)"
                     ]
             parsePretty term expr `shouldBe` Right (E.Match [([P.Constructor "Nothing" []], "Nothing"), ([P.Constructor "Just" ["x"]], E.Application "Just" [E.Application "f" ["x"]])])
+        it "inline match" do
+            parsePretty term "match 42 -> True; _ -> False" `shouldBe` Right (E.Match [([P.IntLiteral 42], "True"), ([P.Var "_"], "False")])
+        it "match in parens" do
+            let expr = Text.unlines
+                    [ "f (match"
+                    , "     42 -> True"
+                    , "     _ -> False)"
+                    , "  x"
+                    ]
+            parsePretty term expr `shouldBe` Right (E.Application "f" [E.Match [([P.IntLiteral 42], "True"), ([P.Var "_"], "False")], "x"])
 
     describe "types" do
         it "simple" do
