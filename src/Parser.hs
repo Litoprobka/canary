@@ -15,10 +15,10 @@ import Data.HashMap.Strict qualified as Map
 import Data.IntMap.Strict qualified as IntMap
 import Text.Megaparsec
 
-code :: Parser [Declaration]
+code :: Parser [Declaration Name]
 code = topLevelBlock declaration
 
-declaration :: Parser Declaration
+declaration :: Parser (Declaration Name)
 declaration = choice [typeDec, valueDec, signature]
   where
     valueDec = D.Value <$> termName <*> many pattern' <* specialSymbol "=" <*> expression <*> whereBlock
@@ -36,19 +36,19 @@ declaration = choice [typeDec, valueDec, signature]
         vars <- many typeVariable -- placeholder
         D.Type name vars <$> (typePattern `sepBy` specialSymbol "|")
 
-    typePattern :: Parser (Name, [Type'])
+    typePattern :: Parser (Name, [Type' Name])
     typePattern = do
         name <- typeName
         args <- many type'
         pure (name, args)
 
-    signature :: Parser Declaration
+    signature :: Parser (Declaration Name)
     signature = do
         name <- termName
         specialSymbol ":"
         D.Signature name <$> type'
 
-type' :: Parser Type'
+type' :: Parser (Type' Name)
 type' = prec [const [forall', exists], typeApp, recordOrVariant] terminal
   where
     terminal =
@@ -80,7 +80,7 @@ someRecord delim valueP = braces (Map.fromList <$> commaSep recordItem)
         valuePattern <- valueP
         pure (recordLabel, valuePattern)
 
-pattern' :: Parser Pattern
+pattern' :: Parser (Pattern Name)
 pattern' = prec [nonTerminals] terminals
   where
     nonTerminals hp =
@@ -107,7 +107,7 @@ prec initPs terminals = go initPs
       where
         higherPrec = go groups
 
-expression :: Parser Expression
+expression :: Parser (Expression Name)
 expression = makeExprParser noPrec (snd <$> IntMap.toDescList precMap)
   where
     precMap =
@@ -145,7 +145,7 @@ expression = makeExprParser noPrec (snd <$> IntMap.toDescList precMap)
         -- E.Application that merges with the lhs if possible
         -- i.e. f `binApp` x `binApp` y is E.Application f [x, y]
         -- rather than E.Application (E.Application f [x]) [y]
-        binApp :: Expression -> Expression -> Expression
+        binApp :: Expression n -> Expression n -> Expression n
         binApp lhs rhs = case lhs of
             E.Application f args -> E.Application f $ args <> one rhs
             _ -> E.Application lhs (one rhs)

@@ -1,16 +1,15 @@
-module Syntax.Type (TypeVariable, Type' (..)) where
+module Syntax.Type (Type' (..)) where
 
 import Relude
 
-type Name = Text
-type TypeVariable = Text
+type OpenName = Text
 
-data Type'
-    = Name Name
-    | Var TypeVariable
-    | Application Type' (NonEmpty Type')
-    | Forall [TypeVariable] Type'
-    | Exists [TypeVariable] Type'
-    | Variant (HashMap Name [Type'])
-    | Record (HashMap Name Type')
+data Type' n
+    = Name n
+    | Var n
+    | Application (Type' n) (NonEmpty (Type' n))
+    | Forall [n] (Type' n)
+    | Exists [n] (Type' n)
+    | Variant (HashMap OpenName [Type' n])
+    | Record (HashMap OpenName (Type' n))
     deriving (Show, Eq)

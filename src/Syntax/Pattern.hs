@@ -1,15 +1,15 @@
-module Syntax.Pattern (Name, Pattern (..)) where
+module Syntax.Pattern (Pattern (..)) where
 
 import Relude
 
-type Name = Text -- I'm not sure where put it
+type OpenName = Text
 
-data Pattern
-    = Var Name
-    | Constructor Name [Pattern]
-    | Variant Name [Pattern]
-    | Record (HashMap Name Pattern)
-    | List [Pattern]
+data Pattern n
+    = Var n
+    | Constructor n [Pattern n]
+    | Variant n [Pattern n]
+    | Record (HashMap OpenName (Pattern n))
+    | List [Pattern n]
     | IntLiteral Int
     | TextLiteral Text
     | CharLiteral Text
