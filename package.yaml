@@ -67,3 +67,4 @@ tests:
     defaults: hspec/hspec@master
     dependencies:
     - lang
+    - neat-interpolation

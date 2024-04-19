@@ -1,4 +1,5 @@
 {-# LANGUAGE OverloadedLists #-}
+{-# LANGUAGE QuasiQuotes #-}
 module ParserSpec (spec) where
 
 import Parser
@@ -11,7 +12,7 @@ import Lexer
 import Relude
 import Text.Megaparsec (parse, errorBundlePretty, pos1)
 import Test.Hspec
-import Data.Text qualified as Text
+import NeatInterpolation
 
 parsePretty :: Parser a -> Text -> Either String a
 parsePretty parser input = input & parse (usingReaderT pos1 parser) "test" & first errorBundlePretty
@@ -28,30 +29,30 @@ spec = do
 
     describe "where clauses" do
         it "one local binding" do
-            let program = Text.unlines
-                    [ "f = x where"
-                    , "  x = 2"
-                    ]
+            let program = [text|
+                    f = x where
+                      x = 2
+                    |]
             let result = Right
                     [D.Value "f" [] "x" [
                         D.Value "x" [] (E.IntLiteral 2) []
                     ]]
             parsePretty code program `shouldBe` result
         it "multiple bindings" do
-            let program = Text.unlines
-                    [ "f = g x where g y = y"
-                    ,  "g y = y"
-                    ,  "x = 111"
-                    ]
+            let program = [text|
+                    f = g x where
+                      g y = y
+                      x = 111
+                    |]
             parsePretty code program `shouldSatisfy` isRight
     describe "line wrapping" do
         it "simple" do
-            let expr = Text.unlines
-                    [ "f"
-                    , "  x"
-                    , "  y"
-                    , "  z"
-                    ]
+            let expr = [text|
+                    f
+                      x
+                      y
+                      z
+                    |]
             parsePretty term expr `shouldBe` Right (E.Application "f" ["x", "y", "z"])
 
     describe "if-then-else" do
@@ -74,20 +75,20 @@ spec = do
         it "nested lists" do
             parsePretty pattern' "[x, [y, z], [[w], []]]" `shouldBe` Right (P.List ["x", P.List ["y", "z"], P.List [P.List ["w"], P.List []]])
         it "case expression" do
-            let expr = Text.unlines
-                    [ "case list of"
-                    , "  Cons x xs -> Yes"
-                    , "  Nil -> No"
-                    ]
+            let expr = [text|
+                    case list of
+                      Cons x xs -> Yes
+                      Nil -> No
+                    |]
             parsePretty term expr `shouldBe` Right (E.Case "list" [(P.Constructor "Cons" ["x", "xs"], "Yes"), (P.Constructor "Nil" [], "No")])
         it "nested case" do
-            let expr = Text.unlines
-                    [ "case list of"
-                    , "    Cons x xs -> case x of"
-                    , "        Just _  -> Cons True xs"
-                    , "        Nothing -> Cons False xs"
-                    , "    Nil -> Nil"
-                    ]
+            let expr = [text|
+                    case list of
+                        Cons x xs -> case x of
+                            Just _  -> Cons True xs
+                            Nothing -> Cons False xs
+                        Nil -> Nil
+                    |]
             let result = Right $
                     E.Case "list"
                         [ (P.Constructor "Cons" ["x", "xs"], E.Case "x"
@@ -98,21 +99,21 @@ spec = do
                         ]
             parsePretty term expr `shouldBe` result
         it "match expression" do
-            let expr = Text.unlines
-                    [ "match"
-                    , "  Nothing -> Nothing"
-                    , "  Just x -> Just (f x)"
-                    ]
+            let expr = [text|
+                    match
+                      Nothing -> Nothing
+                      Just x -> Just (f x)
+                    |]
             parsePretty term expr `shouldBe` Right (E.Match [([P.Constructor "Nothing" []], "Nothing"), ([P.Constructor "Just" ["x"]], E.Application "Just" [E.Application "f" ["x"]])])
         it "inline match" do
             parsePretty term "match 42 -> True; _ -> False" `shouldBe` Right (E.Match [([P.IntLiteral 42], "True"), ([P.Var "_"], "False")])
         it "match in parens" do
-            let expr = Text.unlines
-                    [ "f (match"
-                    , "     42 -> True"
-                    , "     _ -> False)"
-                    , "  x"
-                    ]
+            let expr = [text|
+                    f (match
+                         42 -> True
+                         _ -> False)
+                      x
+                    |]
             parsePretty term expr `shouldBe` Right (E.Application "f" [E.Match [([P.IntLiteral 42], "True"), ([P.Var "_"], "False")], "x"])
 
     describe "types" do
@@ -131,22 +132,22 @@ spec = do
 
     describe "full programs" do
         it "parses the old lambdaTest (with tabs)" do
-            let program = Text.unlines
-                    [ "main = testt (λx y -> y) where"
-                    , " test z = z z"
-                    , " f y = y"
-                    , ""
-                    , "testt = λx y -> id x"
-                    , " (λx -> id x) "
-                    , " 2 y"
-                    , ""
-                    , "id x = x"
-                    , "ap = λf x -> f x"
-                    , "const x y = x"
-                    , ""
-                    , ""
-                    , "list = λc n -> c 1 (c 2 (c 3 n))"
-                    , "map = λf xs cons -> xs (b cons f)"
-                    , "b f g x = f (g x)"
-                    ]
+            let program = [text|
+                    main = testt (λx y -> y) where
+                     test z = z z
+                     f y = y
+                    
+                    testt = λx y -> id x
+                     (λx -> id x) 
+                     2 y
+                    
+                    id x = x
+                    ap = λf x -> f x
+                    const x y = x
+                    
+                    
+                    list = λc n -> c 1 (c 2 (c 3 n))
+                    map = λf xs cons -> xs (b cons f)
+                    b f g x = f (g x)
+                    |]
             parsePretty code program `shouldSatisfy` isRight
