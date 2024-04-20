@@ -97,10 +97,14 @@ resolveNames decls = evaluatingStateT emptyScope do
     mkGlobalScope :: EnvMonad ()
     mkGlobalScope = collectNames decls
 
--- | adds declarations to the current scope
+{- | adds declarations to the current scope
+this function should be used very carefully, since it will
+generate different IDs when called twice on the same data
+-}
 collectNames :: [Declaration Text] -> EnvMonad ()
 collectNames decls = for_ decls \case
-    D.Value name _ _ _ -> void $ declare name
+    D.Value (E.FunctionBinding name _ _) _ -> void $ declare name
+    D.Value (E.ValueBinding pat _) _ -> void $ declarePat pat
     D.Type name _ _ -> void $ declare name
     D.Alias name _ -> void $ declare name
     D.Signature _ _ -> pass
@@ -108,13 +112,10 @@ collectNames decls = for_ decls \case
 -- | resolves names in a declaration. Doesn't change the current scope
 resolveDec :: Declaration Text -> EnvMonad (Declaration Id)
 resolveDec decl = scoped case decl of
-    D.Value name args body locals -> do
-        name' <- resolve name
-        args' <- traverse declarePat args -- todo: handle name conflicts in patterns
-        collectNames locals
-        body' <- resolveExpr body
+    D.Value binding locals -> do
+        binding' <- resolveBinding locals binding
         locals' <- traverse resolveDec locals
-        pure $ D.Value name' args' body' locals'
+        pure $ D.Value binding' locals'
     D.Type name vars constrs -> do
         name' <- resolve name
         vars' <- traverse resolve vars
@@ -126,6 +127,23 @@ resolveDec decl = scoped case decl of
         pure $ D.Type name' vars' constrs'
     D.Alias alias body -> D.Alias <$> resolve alias <*> resolveType body
     D.Signature name ty -> D.Signature <$> resolve name <*> resolveType ty
+
+{- | resolves names in a binding. Unlike the rest of the functions, it also
+takes local definitions as an argument, and uses them after resolving the name / pattern
+-}
+resolveBinding :: [Declaration Text] -> Binding Text -> EnvMonad (Binding Id)
+resolveBinding locals = \case
+    E.FunctionBinding name args body -> do
+        name' <- resolve name
+        args' <- traverse declarePat args
+        collectNames locals
+        body' <- resolveExpr body
+        pure $ E.FunctionBinding name' args' body'
+    E.ValueBinding pat body -> do
+        pat' <- traverse resolve pat -- `traverse` finally works
+        collectNames locals
+        body' <- resolveExpr body
+        pure $ E.ValueBinding pat' body'
 
 {- | resolves names in a pattern. Adds all new names to the current scope
 
@@ -154,11 +172,10 @@ resolveExpr e = scoped case e of
         body' <- resolveExpr body
         pure $ E.Lambda args' body'
     E.Application f args -> E.Application <$> resolveExpr f <*> traverse resolveExpr args
-    E.Let (pat, body) expr -> do
-        pat' <- declarePat pat
-        body' <- resolveExpr body -- should I allow recursive bindings in `let`?
+    E.Let binding expr -> do
+        binding' <- resolveBinding [] binding
         expr' <- resolveExpr expr
-        pure $ E.Let (pat', body') expr'
+        pure $ E.Let binding' expr'
     E.Case body matches ->
         E.Case <$> resolveExpr body <*> forM matches \(pat, expr) -> scoped do
             pat' <- declarePat pat

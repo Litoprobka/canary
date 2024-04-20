@@ -13,4 +13,7 @@ data Pattern n
     | IntLiteral Int
     | TextLiteral Text
     | CharLiteral Text
-    deriving (Show, Eq)
+    deriving (Show, Eq, Functor, Foldable, Traversable)
+
+-- note that the Traversable instance generally
+-- doesn't do what you want

@@ -21,7 +21,7 @@ code = topLevelBlock declaration
 declaration :: Parser (Declaration Name)
 declaration = choice [typeDec, valueDec, signature]
   where
-    valueDec = D.Value <$> termName <*> many pattern' <* specialSymbol "=" <*> expression <*> whereBlock
+    valueDec = D.Value <$> binding <*> whereBlock
     whereBlock = option [] $ block "where" valueDec
 
     typeDec = keyword "type" *> (typeAliasDec <|> typeDec')
@@ -96,6 +96,14 @@ pattern' = prec [nonTerminals] terminals
         , P.CharLiteral <$> charLiteral
         ]
 
+binding :: Parser (Binding Name)
+binding = do
+    f <-
+        try (E.FunctionBinding <$> termName <*> NE.some pattern')
+            <|> (E.ValueBinding <$> pattern')
+    specialSymbol "="
+    f <$> expression
+
 {- | given a list of recursive parsers in precedence groups (lowest to highest) and a list of terminals, produces a
 | parser that parses all options with parentheses where needed
 -}
@@ -163,7 +171,6 @@ expression = makeExprParser noPrec (snd <$> IntMap.toDescList precMap)
         ]
       where
         let' = do
-            let binding = (,) <$> pattern' <* specialSymbol "=" <*> expression
             letBlock "let" E.Let binding expression
         case' = do
             keyword "case"

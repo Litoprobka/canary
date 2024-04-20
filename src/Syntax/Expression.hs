@@ -1,4 +1,4 @@
-module Syntax.Expression (Expression (..)) where
+module Syntax.Expression (Expression (..), Binding (..)) where
 
 import Relude
 
@@ -7,10 +7,15 @@ import Syntax.Type
 
 type OpenName = Text
 
+data Binding n
+    = ValueBinding (Pattern n) (Expression n)
+    | FunctionBinding n (NonEmpty (Pattern n)) (Expression n)
+    deriving (Show, Eq)
+
 data Expression n
     = Lambda (NonEmpty (Pattern n)) (Expression n)
     | Application (Expression n) (NonEmpty (Expression n))
-    | Let (Pattern n, Expression n) (Expression n)
+    | Let (Binding n) (Expression n)
     | Case (Expression n) [(Pattern n, Expression n)]
     | -- | Haskell's \cases
       Match [([Pattern n], Expression n)]
