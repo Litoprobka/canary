@@ -18,21 +18,21 @@ import NeatInterpolation
 parsePretty :: Parser a -> Text -> Either String a
 parsePretty parser input = input & parse (usingReaderT pos1 parser) "test" & first errorBundlePretty
 
-app :: Expression -> Expression -> Expression
+app :: Expression Text -> Expression Text -> Expression Text
 app lhs rhs = E.Application lhs [rhs]
 
-binApp :: Expression -> Expression -> Expression -> Expression
+binApp :: Expression Text -> Expression Text -> Expression Text -> Expression Text
 binApp f arg1 arg2 = E.Application f [arg1, arg2]
 
 spec :: Spec
 spec = do
     describe "small definitions" do
         it "simple binding" do
-            parsePretty code "x = 15" `shouldBe` Right [D.Value "x" [] (E.IntLiteral 15) []]
+            parsePretty code "x = 15" `shouldBe` Right [D.Value (E.ValueBinding "x" (E.IntLiteral 15)) []]
         it "function definition" do
-            parsePretty code "f x = y" `shouldBe` Right [D.Value "f" ["x"] "y" []]
+            parsePretty code "f x = y" `shouldBe` Right [D.Value (E.FunctionBinding "f" ["x"] "y") []]
         it "application" do
-            parsePretty code "f = g x y" `shouldBe` Right [D.Value "f" [] (E.Application "g" ["x", "y"]) []]
+            parsePretty code "f = g x y" `shouldBe` Right [D.Value (E.ValueBinding "f" (E.Application "g" ["x", "y"])) []]
 
     describe "where clauses" do
         it "one local binding" do
@@ -41,8 +41,8 @@ spec = do
                       x = 2
                     |]
             let result = Right
-                    [D.Value "f" [] "x" [
-                        D.Value "x" [] (E.IntLiteral 2) []
+                    [D.Value (E.ValueBinding "f" "x") [
+                        D.Value (E.ValueBinding "x" (E.IntLiteral 2)) []
                     ]]
             parsePretty code program `shouldBe` result
         it "multiple bindings" do
@@ -71,14 +71,14 @@ spec = do
 
     describe "let" do
         it "inline" do
-            parsePretty expression "let x = y; z" `shouldBe` Right (E.Let ("x", "y") "z")
+            parsePretty expression "let x = y; z" `shouldBe` Right (E.Let (E.ValueBinding "x" "y") "z")
         it "nested" do
             let expr = [text|
                     let x = y
                     let z = x
                     z
                     |]
-            parsePretty expression expr `shouldBe` Right (E.Let ("x", "y") $ E.Let ("z", "x") "z")
+            parsePretty expression expr `shouldBe` Right (E.Let (E.ValueBinding "x" "y") $ E.Let (E.ValueBinding "z" "x") "z")
 
     describe "if-then-else" do
         it "simple" do
@@ -144,7 +144,16 @@ spec = do
                       x
                     |]
             parsePretty expression expr `shouldBe` Right (E.Application "f" [E.Match [([P.IntLiteral 42], "True"), ([P.Var "_"], "False")], "x"])
-    
+        it "guard clauses (todo)" do
+            let expr = [text|
+                    match
+                        Nothing
+                            | guess == True -> Just guess
+                            | otherwise = Nothing
+                        Just x = Just x
+                    |]
+            parsePretty expression expr `shouldSatisfy` isRight
+
     describe "operators" do
         it "2 + 2" do
             parsePretty expression "x + x" `shouldBe` Right (binApp "+" "x" "x")

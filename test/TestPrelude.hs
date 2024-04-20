@@ -18,14 +18,14 @@ matchCase whenUpper whenLower str@(h:_)
     | isUpperCase h = whenUpper $ fromString str
     | otherwise = whenLower $ fromString str
 
-instance IsString Expression where
+instance IsString (Expression Text) where
     fromString ('\'' : rest) = rest & matchCase (E.Variant . ("'" <>)) (error "type variable at value level")
     fromString str = str & matchCase E.Constructor E.Name
 
-instance IsString Pattern where
+instance IsString (Pattern Text) where
     fromString = matchCase (error "don't use IsString for constructors") P.Var
 
-instance IsString Type' where
+instance IsString (Type' Text) where
     fromString ('\'' : _) = error "todo: type variables"
     fromString str = str & matchCase T.Name (error "type names shouldn't start with a lowercase letter")
 
