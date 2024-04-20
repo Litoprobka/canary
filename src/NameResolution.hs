@@ -1,7 +1,7 @@
 {-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE OverloadedRecordDot #-}
 
-module NameResolution where
+module NameResolution (resolveNames, UnboundVar (..), Warning (..)) where
 
 import Relude hiding (error)
 
@@ -53,8 +53,6 @@ data Warning = Shadowing Text | UnusedVar Text
 
 type EnvMonad = StateT (Id, Scope) (ScopeErrors UnboundVar Warning)
 
-data NameExists = Resolve | Add
-
 -- | run a state action without changing the `Scope` part of the state
 scoped :: EnvMonad a -> EnvMonad a
 scoped action = do
@@ -63,9 +61,9 @@ scoped action = do
     modify $ second (const prevScope)
     pure output
 
--- todo: handle duplicate names
-addName :: Text -> EnvMonad Id
-addName name = do
+-- todo: handle duplicate names (those that aren't just shadowing)
+declare :: Text -> EnvMonad Id
+declare name = do
     (id', scope) <- get
     case Map.lookup name scope.table of
         Just _ -> lift $ warn (Shadowing name)
@@ -83,12 +81,12 @@ resolve name = do
             lift $ error (UnboundVar name)
             -- this gives a unique id to every occurance of the same unbound name
             -- not sure whether it's the right way to go
-            scoped $ addName name
+            scoped $ declare name
 
 resolveNames :: [Declaration Text] -> ScopeErrors UnboundVar Warning [Declaration Id]
 resolveNames decls = evaluatingStateT emptyScope do
     mkGlobalScope
-    traverse (scoped . resolveDec) decls
+    traverse resolveDec decls
   where
     emptyScope = (Id 0, Scope Map.empty)
 
@@ -99,9 +97,9 @@ resolveNames decls = evaluatingStateT emptyScope do
 -- | adds declarations to the current scope
 collectNames :: [Declaration Text] -> EnvMonad ()
 collectNames decls = for_ decls \case
-    D.Value name _ _ _ -> void $ addName name
-    D.Type name _ _ -> void $ addName name
-    D.Alias name _ -> void $ addName name
+    D.Value name _ _ _ -> void $ declare name
+    D.Type name _ _ -> void $ declare name
+    D.Alias name _ -> void $ declare name
     D.Signature _ _ -> pass
 
 -- | resolves names in a declaration. Doesn't change the current scope
@@ -109,31 +107,91 @@ resolveDec :: Declaration Text -> EnvMonad (Declaration Id)
 resolveDec decl = scoped case decl of
     D.Value name args body locals -> do
         name' <- resolve name
-        args' <- traverse resolvePat args -- todo: handle name conflicts in patterns
+        args' <- traverse declarePat args -- todo: handle name conflicts in patterns
         collectNames locals
-        locals' <- traverse resolveDec locals
         body' <- resolveExpr body
+        locals' <- traverse resolveDec locals
         pure $ D.Value name' args' body' locals'
     D.Type name vars constrs -> do
         name' <- resolve name
         vars' <- traverse resolve vars
         constrs' <-
             constrs & traverse \(con, args) -> do
-                con' <- addName con
+                con' <- declare con
                 args' <- traverse resolveType args
                 pure (con', args')
         pure $ D.Type name' vars' constrs'
     D.Alias alias body -> D.Alias <$> resolve alias <*> resolveType body
     D.Signature name ty -> D.Signature <$> resolve name <*> resolveType ty
 
--- | resolves names in a pattern. Adds all new names to the current scope
-resolvePat :: Pattern Text -> EnvMonad (Pattern Id)
-resolvePat = undefined
+{- | resolves names in a pattern. Adds all new names to the current scope
 
--- | resolves names in an expression. Doesn't change the current scope
+this is *almost* the definition of `traverse` for Pattern, except for `Constructor`
+should I use a separate var and make it a Bitraversable instead?
+-}
+declarePat :: Pattern Text -> EnvMonad (Pattern Id)
+declarePat = \case
+    P.Var name -> P.Var <$> declare name
+    P.Constructor con pats -> P.Constructor <$> resolve con <*> traverse declarePat pats
+    P.Variant con pats -> P.Variant con <$> traverse declarePat pats
+    P.Record fields -> P.Record <$> traverse declarePat fields
+    P.List pats -> P.List <$> traverse declarePat pats
+    P.IntLiteral n -> pure $ P.IntLiteral n
+    P.TextLiteral txt -> pure $ P.TextLiteral txt
+    P.CharLiteral txt -> pure $ P.CharLiteral txt
+
+{- | resolves names in an expression. Doesn't change the current scope
+
+same story here. Most of the expressions use names, but a couple define them
+-}
 resolveExpr :: Expression Text -> EnvMonad (Expression Id)
-resolveExpr = undefined
+resolveExpr e = scoped case e of
+    E.Lambda args body -> do
+        args' <- traverse declarePat args
+        body' <- resolveExpr body
+        pure $ E.Lambda args' body'
+    E.Application f args -> E.Application <$> resolveExpr f <*> traverse resolveExpr args
+    E.Let (pat, body) expr -> do
+        pat' <- declarePat pat
+        body' <- resolveExpr body -- should I allow recursive bindings in `let`?
+        expr' <- resolveExpr expr
+        pure $ E.Let (pat', body') expr'
+    E.Case body matches ->
+        E.Case <$> resolveExpr body <*> forM matches \(pat, expr) -> scoped do
+            pat' <- declarePat pat
+            expr' <- resolveExpr expr
+            pure (pat', expr')
+    E.Match matches ->
+        E.Match <$> forM matches \(pats, expr) -> scoped do
+            pats' <- traverse declarePat pats
+            expr' <- resolveExpr expr
+            pure (pats', expr')
+    E.If cond true false -> E.If <$> resolveExpr cond <*> resolveExpr true <*> resolveExpr false
+    E.Annotation body ty -> E.Annotation <$> resolveExpr body <*> resolveType ty
+    E.Name name -> E.Name <$> resolve name
+    E.Constructor name -> E.Name <$> resolve name
+    E.Variant name -> pure $ E.Variant name
+    E.Record fields -> E.Record <$> traverse resolveExpr fields
+    E.List exprs -> E.List <$> traverse resolveExpr exprs
+    -- terminals
+    E.RecordLens fields -> pure $ E.RecordLens fields
+    E.IntLiteral n -> pure $ E.IntLiteral n
+    E.TextLiteral txt -> pure $ E.TextLiteral txt
+    E.CharLiteral txt -> pure $ E.CharLiteral txt
 
 -- | resolves names in a type. Doesn't change the current scope
 resolveType :: Type' Text -> EnvMonad (Type' Id)
-resolveType = undefined
+resolveType ty = scoped case ty of
+    T.Name name -> T.Name <$> resolve name
+    T.Var var -> T.Var <$> resolve var
+    T.Application fty args -> T.Application <$> resolveType fty <*> traverse resolveType args
+    T.Forall vars body -> do
+        vars' <- traverse declare vars
+        body' <- resolveType body
+        pure $ T.Forall vars' body'
+    T.Exists vars body -> do
+        vars' <- traverse declare vars
+        body' <- resolveType body
+        pure $ T.Forall vars' body'
+    T.Variant variants -> T.Variant <$> traverse (traverse resolveType) variants
+    T.Record fields -> T.Record <$> traverse resolveType fields
