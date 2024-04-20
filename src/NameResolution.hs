@@ -1,13 +1,14 @@
 {-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE OverloadedRecordDot #-}
 
-module NameResolution (resolveNames, UnboundVar (..), Warning (..)) where
+module NameResolution (resolveNames, UnboundVar (..), Warning (..), ScopeErrors (..)) where
 
 import Relude hiding (error)
 
 import Control.Monad (ap)
 import Data.HashMap.Strict qualified as Map
 import Data.These
+import Prelude qualified (show)
 
 import Syntax.All
 import Syntax.Declaration qualified as D
@@ -41,15 +42,17 @@ instance Monad (ScopeErrors e w) where
 
 -- * other types
 
-newtype Id = Id {asInt :: Int} deriving (Show, Eq)
+newtype Id = Id Int deriving (Eq)
+instance Show Id where
+    show (Id n) = "#" <> show n
 
 inc :: Id -> Id
 inc (Id n) = Id $ n + 1
 
 newtype Scope = Scope {table :: HashMap Text Id}
 
-newtype UnboundVar = UnboundVar Text
-data Warning = Shadowing Text | UnusedVar Text
+newtype UnboundVar = UnboundVar Text deriving (Show)
+data Warning = Shadowing Text | UnusedVar Text deriving (Show)
 
 type EnvMonad = StateT (Id, Scope) (ScopeErrors UnboundVar Warning)
 
