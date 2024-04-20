@@ -48,6 +48,7 @@ library
     , parser-combinators >=1.3 && <2
     , relude >=1.2.1.0 && <2
     , template-haskell
+    , these >=1.2 && <2
   default-language: GHC2021
 
 executable lang-exe
@@ -68,6 +69,7 @@ executable lang-exe
     , parser-combinators >=1.3 && <2
     , relude >=1.2.1.0 && <2
     , template-haskell
+    , these >=1.2 && <2
   default-language: GHC2021
 
 test-suite lang-test
@@ -93,5 +95,6 @@ test-suite lang-test
     , parser-combinators >=1.3 && <2
     , relude >=1.2.1.0 && <2
     , template-haskell
+    , these >=1.2 && <2
   default-language: GHC2021
   build-tool-depends: hspec-discover:hspec-discover == 2.*
