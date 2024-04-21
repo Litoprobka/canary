@@ -1,7 +1,7 @@
 {-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE OverloadedRecordDot #-}
 
-module NameResolution (resolveNames, UnboundVar (..), Warning (..), ScopeErrors (..)) where
+module NameResolution (resolveNames, UnboundVar (..), Warning (..), ScopeErrors (..), Id) where
 
 import Relude hiding (error)
 
@@ -154,7 +154,7 @@ declarePat :: Pattern Text -> EnvMonad (Pattern Id)
 declarePat = \case
     P.Var name -> P.Var <$> declare name
     P.Constructor con pats -> P.Constructor <$> resolve con <*> traverse declarePat pats
-    P.Variant con pats -> P.Variant con <$> traverse declarePat pats
+    P.Variant con pat -> P.Variant con <$> declarePat pat
     P.Record fields -> P.Record <$> traverse declarePat fields
     P.List pats -> P.List <$> traverse declarePat pats
     P.IntLiteral n -> pure $ P.IntLiteral n
@@ -171,7 +171,7 @@ resolveExpr e = scoped case e of
         args' <- traverse declarePat args
         body' <- resolveExpr body
         pure $ E.Lambda args' body'
-    E.Application f args -> E.Application <$> resolveExpr f <*> traverse resolveExpr args
+    E.Application f arg -> E.Application <$> resolveExpr f <*> resolveExpr arg
     E.Let binding expr -> do
         binding' <- resolveBinding [] binding
         expr' <- resolveExpr expr
@@ -204,7 +204,7 @@ resolveType :: Type' Text -> EnvMonad (Type' Id)
 resolveType ty = scoped case ty of
     T.Name name -> T.Name <$> resolve name
     T.Var var -> T.Var <$> resolve var
-    T.Application fty args -> T.Application <$> resolveType fty <*> traverse resolveType args
+    T.Application fty arg -> T.Application <$> resolveType fty <*> resolveType arg
     T.Forall vars body -> do
         vars' <- traverse declare vars
         body' <- resolveType body
@@ -213,5 +213,5 @@ resolveType ty = scoped case ty of
         vars' <- traverse declare vars
         body' <- resolveType body
         pure $ T.Forall vars' body'
-    T.Variant variants -> T.Variant <$> traverse (traverse resolveType) variants
+    T.Variant variants -> T.Variant <$> traverse resolveType variants
     T.Record fields -> T.Record <$> traverse resolveType fields

@@ -7,9 +7,10 @@ type OpenName = Text
 data Type' n
     = Name n
     | Var n
-    | Application (Type' n) (NonEmpty (Type' n))
-    | Forall [n] (Type' n)
-    | Exists [n] (Type' n)
-    | Variant (HashMap OpenName [Type' n])
+    | Application (Type' n) (Type' n)
+    | Function (Type' n) (Type' n)
+    | Forall (NonEmpty n) (Type' n)
+    | Exists (NonEmpty n) (Type' n)
+    | Variant (HashMap OpenName (Type' n))
     | Record (HashMap OpenName (Type' n))
     deriving (Show, Eq)

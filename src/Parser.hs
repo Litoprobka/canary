@@ -11,6 +11,7 @@ import Syntax.Type qualified as T
 
 import Control.Monad.Combinators.Expr
 import Control.Monad.Combinators.NonEmpty qualified as NE
+import Data.Foldable1 (foldl1, foldr1)
 import Data.HashMap.Strict qualified as Map
 import Data.IntMap.Strict qualified as IntMap
 import Text.Megaparsec
@@ -49,7 +50,7 @@ declaration = choice [typeDec, valueDec, signature]
         D.Signature name <$> type'
 
 type' :: Parser (Type' Name)
-type' = prec [const [forall', exists], typeApp, recordOrVariant] terminal
+type' = prec [const [forall', exists], function, typeApp, recordOrVariant] terminal
   where
     terminal =
         [ T.Name <$> typeName
@@ -57,19 +58,20 @@ type' = prec [const [forall', exists], typeApp, recordOrVariant] terminal
         ]
     forall' = do
         keyword "forall" -- todo: unicode
-        T.Forall <$> some typeVariable <* specialSymbol "." <*> type'
+        T.Forall <$> NE.some typeVariable <* specialSymbol "." <*> type'
 
     exists = do
         keyword "exists"
-        T.Exists <$> some typeVariable <* specialSymbol "." <*> type'
+        T.Exists <$> NE.some typeVariable <* specialSymbol "." <*> type'
 
-    typeApp higherPrec = one $ try $ T.Application <$> higherPrec <*> NE.some higherPrec
+    typeApp higherPrec = one $ foldl1 T.Application <$> NE.some higherPrec
+    function higherPrec = one $ foldr1 T.Function <$> higherPrec `NE.sepBy1` specialSymbol "->"
     recordOrVariant hp =
         [ T.Record <$> someRecord ":" type'
         , T.Variant <$> brackets (Map.fromList <$> commaSep variantItem)
         ]
       where
-        variantItem = (,) <$> variantConstructor <*> many (prec [recordOrVariant] [hp])
+        variantItem = (,) <$> variantConstructor <*> prec [recordOrVariant] [hp]
 
 someRecord :: Text -> Parser value -> Parser (HashMap Name value)
 someRecord delim valueP = braces (Map.fromList <$> commaSep recordItem)
@@ -85,7 +87,7 @@ pattern' = prec [nonTerminals] terminals
   where
     nonTerminals hp =
         [ P.Constructor <$> typeName <*> many hp
-        , P.Variant <$> variantConstructor <*> many hp
+        , P.Variant <$> variantConstructor <*> hp
         ]
     terminals =
         [ P.Var <$> termName
@@ -122,7 +124,7 @@ expression = makeExprParser noPrec (snd <$> IntMap.toDescList precMap)
         IntMap.fromList
             [ (120, [infixR "."]) -- lens composition
             , (110, infixL <$> ["^.", "^..", "^?"]) -- lens getters (subject to change)
-            , (100, [application])
+            , (100, [InfixL $ pure E.Application])
             , (90, [infixL ">>", infixR "<<"]) -- function composition
             , (80, [infixR "^"])
             , (70, infixL <$> ["*", "/"])
@@ -135,11 +137,6 @@ expression = makeExprParser noPrec (snd <$> IntMap.toDescList precMap)
             , (-100, [annotation]) -- I can't think of anything that should have lower precedence than annotation
             ]
       where
-        -- I'm not sure whether multi-arg applications are a good idea at all
-        -- there's no clean way to parse it via `makeExprParser`, so I'm relying on
-        -- the `binApp` function that normalises instead
-        application = InfixL $ pure binApp
-
         annotation = Postfix do
             specialSymbol ":"
             ty <- type'
@@ -148,15 +145,7 @@ expression = makeExprParser noPrec (snd <$> IntMap.toDescList precMap)
         infixL = infix' InfixL
         infixR = infix' InfixR
         infixN = infix' InfixN
-        infix' fixity sym = fixity $ operator sym $> \lhs rhs -> binApp (binApp (E.Name sym) lhs) rhs
-
-        -- E.Application that merges with the lhs if possible
-        -- i.e. f `binApp` x `binApp` y is E.Application f [x, y]
-        -- rather than E.Application (E.Application f [x]) [y]
-        binApp :: Expression n -> Expression n -> Expression n
-        binApp lhs rhs = case lhs of
-            E.Application f args -> E.Application f $ args <> one rhs
-            _ -> E.Application lhs (one rhs)
+        infix' fixity sym = fixity $ operator sym $> \lhs rhs -> E.Name sym `E.Application` lhs `E.Application` rhs
 
     noPrec = choice $ keywordBased <> terminals
 

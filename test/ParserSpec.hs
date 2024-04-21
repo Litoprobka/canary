@@ -19,10 +19,10 @@ parsePretty :: Parser a -> Text -> Either String a
 parsePretty parser input = input & parse (usingReaderT pos1 parser) "test" & first errorBundlePretty
 
 app :: Expression Text -> Expression Text -> Expression Text
-app lhs rhs = E.Application lhs [rhs]
+app = E.Application
 
 binApp :: Expression Text -> Expression Text -> Expression Text -> Expression Text
-binApp f arg1 arg2 = E.Application f [arg1, arg2]
+binApp f arg1 arg2 = f `app` arg1 `app` arg2
 
 spec :: Spec
 spec = do
@@ -32,7 +32,7 @@ spec = do
         it "function definition" do
             parsePretty code "f x = y" `shouldBe` Right [D.Value (E.FunctionBinding "f" ["x"] "y") []]
         it "application" do
-            parsePretty code "f = g x y" `shouldBe` Right [D.Value (E.ValueBinding "f" (E.Application "g" ["x", "y"])) []]
+            parsePretty code "f = g x y" `shouldBe` Right [D.Value (E.ValueBinding "f" ("g" `app` "x" `app` "y")) []]
 
     describe "where clauses" do
         it "one local binding" do
@@ -60,14 +60,14 @@ spec = do
                       y
                       z
                     |]
-            parsePretty expression expr `shouldBe` Right (E.Application "f" ["x", "y", "z"])
+            parsePretty expression expr `shouldBe` Right ("f" `app` "x" `app` "y" `app` "z")
         it "with operators" do
             let expr = [text|
                     x
                       |> f
                       |> g
                     |]
-            parsePretty expression expr `shouldBe` Right (E.Application "|>" [E.Application "|>" ["x", "f"], "g"])
+            parsePretty expression expr `shouldBe` Right ("|>" `app` ("|>" `app` "x" `app` "f") `app` "g")
 
     describe "let" do
         it "inline" do
@@ -96,7 +96,7 @@ spec = do
         it "int literal" do
             parsePretty pattern' "123" `shouldBe` Right (P.IntLiteral 123)
         it "many patterns" do
-            parsePretty (some pattern') "(Cons x xs) y ('Hmmm z)" `shouldBe` Right [P.Constructor "Cons" ["x", "xs"], "y", P.Variant "'Hmmm" ["z"]]
+            parsePretty (some pattern') "(Cons x xs) y ('Hmmm z)" `shouldBe` Right [P.Constructor "Cons" ["x", "xs"], "y", P.Variant "'Hmmm" "z"]
         it "record" do
             parsePretty pattern' "{ x = x, y = y, z = z }" `shouldBe` Right (P.Record [("x", "x"), ("y", "y"), ("z", "z")])
         it "list" do
@@ -121,8 +121,8 @@ spec = do
             let result = Right $
                     E.Case "list"
                         [ (P.Constructor "Cons" ["x", "xs"], E.Case "x"
-                            [ (P.Constructor "Just" ["_"], E.Application "Cons" ["True", "xs"])
-                            , (P.Constructor "Nothing" [], E.Application "Cons" ["False", "xs"])
+                            [ (P.Constructor "Just" ["_"], "Cons" `app` "True" `app` "xs")
+                            , (P.Constructor "Nothing" [], "Cons" `app` "False" `app` "xs")
                             ])
                         , (P.Constructor "Nil" [], "Nil")
                         ]
@@ -133,7 +133,7 @@ spec = do
                       Nothing -> Nothing
                       Just x -> Just (f x)
                     |]
-            parsePretty expression expr `shouldBe` Right (E.Match [([P.Constructor "Nothing" []], "Nothing"), ([P.Constructor "Just" ["x"]], E.Application "Just" [E.Application "f" ["x"]])])
+            parsePretty expression expr `shouldBe` Right (E.Match [([P.Constructor "Nothing" []], "Nothing"), ([P.Constructor "Just" ["x"]], "Just" `app` ("f" `app` "x"))])
         it "inline match" do
             parsePretty expression "match 42 -> True; _ -> False" `shouldBe` Right (E.Match [([P.IntLiteral 42], "True"), ([P.Var "_"], "False")])
         it "match in parens" do
@@ -143,7 +143,7 @@ spec = do
                          _ -> False)
                       x
                     |]
-            parsePretty expression expr `shouldBe` Right (E.Application "f" [E.Match [([P.IntLiteral 42], "True"), ([P.Var "_"], "False")], "x"])
+            parsePretty expression expr `shouldBe` Right ("f" `app` E.Match [([P.IntLiteral 42], "True"), ([P.Var "_"], "False")] `app` "x")
         it "guard clauses (todo)" do
             let expr = [text|
                     match
@@ -166,15 +166,17 @@ spec = do
         it "simple" do
             parsePretty type' "ThisIsAType" `shouldBe` Right "ThisIsAType"
         it "type application" do
-            parsePretty type' "Either (List Int) Text" `shouldBe` Right (T.Application "Either" [T.Application "List" ["Int"], "Text"])
+            parsePretty type' "Either (List Int) Text" `shouldBe` Right (T.Application (T.Application "Either" (T.Application "List" "Int")) "Text")
+        it "function type" do
+            parsePretty type' "'b -> ('a -> 'b) -> Maybe 'a -> 'b" `shouldBe` Right (T.Function (T.Var "'b") $ T.Function (T.Function (T.Var "'a") (T.Var "'b")) $ T.Function (T.Application "Maybe" $ T.Var "'a") $ T.Var "'b")
         it "record" do
             parsePretty type' "{ x : Int, y : Int, z : Int }" `shouldBe` Right (T.Record [("x", "Int"), ("y", "Int"), ("z", "Int")])
         it "variant" do
-            parsePretty type' "['A Int, 'B, 'C Double Unit]" `shouldBe` Right (T.Variant [("'A", ["Int"]), ("'B", []), ("'C", ["Double", "Unit"])])
+            parsePretty type' "['A Int, 'B Double, 'C Unit]" `shouldBe` Right (T.Variant [("'A", "Int"), ("'B", "Double"), ("'C", "Unit")])
         it "type variable" do
             parsePretty type' "'var" `shouldBe` Right (T.Var "'var")
         it "forall" do
-            parsePretty type' "forall 'a. Maybe 'a" `shouldBe` Right (T.Forall ["'a"] $ T.Application "Maybe" [T.Var "'a"])
+            parsePretty type' "forall 'a. Maybe 'a" `shouldBe` Right (T.Forall ["'a"] $ T.Application "Maybe" $ T.Var "'a")
 
     describe "full programs" do
         it "parses the old lambdaTest (with tabs)" do
