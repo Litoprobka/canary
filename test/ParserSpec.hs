@@ -86,7 +86,7 @@ spec = do
         it "nested" do
             parsePretty expression "if if True then False else True then 1 else 0" `shouldBe` Right (E.If (E.If "True" "False" "True") (E.IntLiteral 1) (E.IntLiteral 0))
         it "partially applied (todo)" do
-            parsePretty expression "if _ then A else B" `shouldBe` Right (E.Lambda ["x"] $ E.If "x" "A" "B")
+            parsePretty expression "if _ then A else B" `shouldBe` Right (E.Lambda "x" $ E.If "x" "A" "B")
         it "with operators" do
             parsePretty expression "x + if y || z then 4 else 5 * 2" `shouldBe` Right (binApp "+" "x" $ E.If (binApp "||" "y" "z") (E.IntLiteral 4) (binApp "*" (E.IntLiteral 5) (E.IntLiteral 2)))
 

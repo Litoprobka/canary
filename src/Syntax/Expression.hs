@@ -13,7 +13,7 @@ data Binding n
     deriving (Show, Eq, Functor, Foldable, Traversable)
 
 data Expression n
-    = Lambda (NonEmpty (Pattern n)) (Expression n)
+    = Lambda (Pattern n) (Expression n)
     | Application (Expression n) (Expression n)
     | Let (Binding n) (Expression n)
     | Case (Expression n) [(Pattern n, Expression n)]

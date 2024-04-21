@@ -161,10 +161,10 @@ same story here. Most of the expressions use names, but a couple define them
 -}
 resolveExpr :: Expression Text -> EnvMonad (Expression Id)
 resolveExpr e = scoped case e of
-    E.Lambda args body -> do
-        args' <- traverse declarePat args
+    E.Lambda arg body -> do
+        arg' <- declarePat arg
         body' <- resolveExpr body
-        pure $ E.Lambda args' body'
+        pure $ E.Lambda arg' body'
     E.Application f arg -> E.Application <$> resolveExpr f <*> resolveExpr arg
     E.Let binding expr -> do
         binding' <- resolveBinding [] binding

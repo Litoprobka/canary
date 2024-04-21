@@ -140,7 +140,7 @@ expression = makeExprParser noPrec (snd <$> IntMap.toDescList precMap)
     noPrec = choice $ keywordBased <> terminals
 
     keywordBased =
-        [ E.Lambda <$ lambda <*> NE.some pattern' <* specialSymbol "->" <*> expression
+        [ lambda'
         , let'
         , case'
         , match'
@@ -149,6 +149,12 @@ expression = makeExprParser noPrec (snd <$> IntMap.toDescList precMap)
         , E.List <$> brackets (commaSep expression)
         ]
       where
+        lambda' = do
+            lambda
+            args <- NE.some pattern'
+            specialSymbol "->"
+            body <- expression
+            pure $ foldr E.Lambda body args
         let' = do
             letBlock "let" E.Let binding expression
         case' = do
