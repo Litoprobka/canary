@@ -11,7 +11,6 @@ import Syntax.Type qualified as T
 
 import Control.Monad.Combinators.Expr
 import Control.Monad.Combinators.NonEmpty qualified as NE
-import Data.Foldable1 (foldl1, foldr1)
 import Data.HashMap.Strict qualified as Map
 import Data.IntMap.Strict qualified as IntMap
 import Text.Megaparsec
@@ -50,28 +49,28 @@ declaration = choice [typeDec, valueDec, signature]
         D.Signature name <$> type'
 
 type' :: Parser (Type' Name)
-type' = prec [const [forall', exists], function, typeApp, recordOrVariant] terminal
+type' = makeExprParser noPrec [[typeApp], [function], [forall', exists]]
   where
-    terminal =
-        [ T.Name <$> typeName
-        , T.Var <$> typeVariable
-        ]
-    forall' = do
-        keyword "forall" -- todo: unicode
-        T.Forall <$> NE.some typeVariable <* specialSymbol "." <*> type'
-
-    exists = do
-        keyword "exists"
-        T.Exists <$> NE.some typeVariable <* specialSymbol "." <*> type'
-
-    typeApp higherPrec = one $ foldl1 T.Application <$> NE.some higherPrec
-    function higherPrec = one $ foldr1 T.Function <$> higherPrec `NE.sepBy1` specialSymbol "->"
-    recordOrVariant hp =
-        [ T.Record <$> someRecord ":" type'
-        , T.Variant <$> brackets (Map.fromList <$> commaSep variantItem)
-        ]
+    noPrec =
+        choice
+            [ T.Name <$> typeName
+            , T.Var <$> typeVariable
+            , parens type'
+            , T.Record <$> someRecord ":" type'
+            , T.Variant <$> brackets (Map.fromList <$> commaSep variantItem)
+            ]
       where
-        variantItem = (,) <$> variantConstructor <*> prec [recordOrVariant] [hp]
+        variantItem = (,) <$> variantConstructor <*> noPrec
+    forall' = Prefix do
+        keyword "forall" -- todo: unicode
+        T.Forall <$> NE.some typeVariable <* specialSymbol "."
+
+    exists = Prefix do
+        keyword "exists"
+        T.Exists <$> NE.some typeVariable <* specialSymbol "."
+
+    typeApp = InfixL $ pure T.Application
+    function = InfixR $ T.Function <$ specialSymbol "->"
 
 someRecord :: Text -> Parser value -> Parser (HashMap Name value)
 someRecord delim valueP = braces (Map.fromList <$> commaSep recordItem)
@@ -83,20 +82,22 @@ someRecord delim valueP = braces (Map.fromList <$> commaSep recordItem)
         pure (recordLabel, valuePattern)
 
 pattern' :: Parser (Pattern Name)
-pattern' = prec [nonTerminals] terminals
+pattern' = choice [nonTerminals, terminals, parens pattern']
   where
-    nonTerminals hp =
-        [ P.Constructor <$> typeName <*> many hp
-        , P.Variant <$> variantConstructor <*> hp
-        ]
+    nonTerminals =
+        choice
+            [ P.Constructor <$> typeName <*> many pattern'
+            , P.Variant <$> variantConstructor <*> pattern'
+            ]
     terminals =
-        [ P.Var <$> termName
-        , P.Record <$> someRecord "=" pattern'
-        , P.List <$> brackets (commaSep pattern')
-        , P.IntLiteral <$> intLiteral
-        , P.TextLiteral <$> textLiteral
-        , P.CharLiteral <$> charLiteral
-        ]
+        choice
+            [ P.Var <$> termName
+            , P.Record <$> someRecord "=" pattern'
+            , P.List <$> brackets (commaSep pattern')
+            , P.IntLiteral <$> intLiteral
+            , P.TextLiteral <$> textLiteral
+            , P.CharLiteral <$> charLiteral
+            ]
 
 binding :: Parser (Binding Name)
 binding = do
@@ -105,17 +106,6 @@ binding = do
             <|> (E.ValueBinding <$> pattern')
     specialSymbol "="
     f <$> expression
-
-{- | given a list of recursive parsers in precedence groups (lowest to highest) and a list of terminals, produces a
-| parser that parses all options with parentheses where needed
--}
-prec :: [Parser a -> [Parser a]] -> [Parser a] -> Parser a
-prec initPs terminals = go initPs
-  where
-    go [] = parens (prec initPs terminals) <|> choice terminals
-    go (pgroup : groups) = choice (pgroup higherPrec) <|> higherPrec
-      where
-        higherPrec = go groups
 
 expression :: Parser (Expression Name)
 expression = makeExprParser noPrec (snd <$> IntMap.toDescList precMap)
