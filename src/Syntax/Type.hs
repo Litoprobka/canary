@@ -4,6 +4,7 @@ import Relude
 
 type OpenName = Text
 
+--  Note: Functor-Foldable-Traversable instances don't do the right thing with `Forall` and `Exists`
 data Type' n
     = Name n
     | Var n
@@ -13,4 +14,4 @@ data Type' n
     | Exists (NonEmpty n) (Type' n)
     | Variant (HashMap OpenName (Type' n))
     | Record (HashMap OpenName (Type' n))
-    deriving (Show, Eq)
+    deriving (Show, Eq, Functor, Foldable, Traversable)

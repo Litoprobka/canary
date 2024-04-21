@@ -10,7 +10,7 @@ type OpenName = Text
 data Binding n
     = ValueBinding (Pattern n) (Expression n)
     | FunctionBinding n (NonEmpty (Pattern n)) (Expression n)
-    deriving (Show, Eq)
+    deriving (Show, Eq, Functor, Foldable, Traversable)
 
 data Expression n
     = Lambda (NonEmpty (Pattern n)) (Expression n)
@@ -35,4 +35,4 @@ data Expression n
     | IntLiteral Int
     | TextLiteral Text
     | CharLiteral Text
-    deriving (Show, Eq)
+    deriving (Show, Eq, Functor, Foldable, Traversable)

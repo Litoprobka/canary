@@ -152,14 +152,8 @@ should I use a separate var and make it a Bitraversable instead?
 -}
 declarePat :: Pattern Text -> EnvMonad (Pattern Id)
 declarePat = \case
-    P.Var name -> P.Var <$> declare name
     P.Constructor con pats -> P.Constructor <$> resolve con <*> traverse declarePat pats
-    P.Variant con pat -> P.Variant con <$> declarePat pat
-    P.Record fields -> P.Record <$> traverse declarePat fields
-    P.List pats -> P.List <$> traverse declarePat pats
-    P.IntLiteral n -> pure $ P.IntLiteral n
-    P.TextLiteral txt -> pure $ P.TextLiteral txt
-    P.CharLiteral txt -> pure $ P.CharLiteral txt
+    nothingToResolve -> traverse declare nothingToResolve
 
 {- | resolves names in an expression. Doesn't change the current scope
 
@@ -186,25 +180,12 @@ resolveExpr e = scoped case e of
             pats' <- traverse declarePat pats
             expr' <- resolveExpr expr
             pure (pats', expr')
-    E.If cond true false -> E.If <$> resolveExpr cond <*> resolveExpr true <*> resolveExpr false
     E.Annotation body ty -> E.Annotation <$> resolveExpr body <*> resolveType ty
-    E.Name name -> E.Name <$> resolve name
-    E.Constructor name -> E.Name <$> resolve name
-    E.Variant name -> pure $ E.Variant name
-    E.Record fields -> E.Record <$> traverse resolveExpr fields
-    E.List exprs -> E.List <$> traverse resolveExpr exprs
-    -- terminals
-    E.RecordLens fields -> pure $ E.RecordLens fields
-    E.IntLiteral n -> pure $ E.IntLiteral n
-    E.TextLiteral txt -> pure $ E.TextLiteral txt
-    E.CharLiteral txt -> pure $ E.CharLiteral txt
+    nothingToDeclare -> traverse resolve nothingToDeclare
 
 -- | resolves names in a type. Doesn't change the current scope
 resolveType :: Type' Text -> EnvMonad (Type' Id)
 resolveType ty = scoped case ty of
-    T.Name name -> T.Name <$> resolve name
-    T.Var var -> T.Var <$> resolve var
-    T.Application fty arg -> T.Application <$> resolveType fty <*> resolveType arg
     T.Forall vars body -> do
         vars' <- traverse declare vars
         body' <- resolveType body
@@ -213,5 +194,4 @@ resolveType ty = scoped case ty of
         vars' <- traverse declare vars
         body' <- resolveType body
         pure $ T.Forall vars' body'
-    T.Variant variants -> T.Variant <$> traverse resolveType variants
-    T.Record fields -> T.Record <$> traverse resolveType fields
+    nothingToDeclare -> traverse resolve nothingToDeclare
