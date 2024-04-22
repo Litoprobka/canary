@@ -56,7 +56,7 @@ type' = makeExprParser noPrec [[typeApp], [function], [forall', exists]]
             [ T.Name <$> typeName
             , T.Var <$> typeVariable
             , parens type'
-            , T.Record <$> someRecord ":" type'
+            , T.Record <$> someRecord ":" type' Nothing
             , T.Variant <$> brackets (Map.fromList <$> commaSep variantItem)
             ]
       where
@@ -72,13 +72,15 @@ type' = makeExprParser noPrec [[typeApp], [function], [forall', exists]]
     typeApp = InfixL $ pure T.Application
     function = InfixR $ T.Function <$ specialSymbol "->"
 
-someRecord :: Text -> Parser value -> Parser (HashMap Name value)
-someRecord delim valueP = braces (Map.fromList <$> commaSep recordItem)
+someRecord :: Text -> Parser value -> Maybe (Text -> value) -> Parser (HashMap Name value)
+someRecord delim valueP missingValue = braces (Map.fromList <$> commaSep recordItem)
   where
+    onMissing txt = case missingValue of
+        Nothing -> id
+        Just textToValue -> option (textToValue txt)
     recordItem = do
         recordLabel <- termName
-        specialSymbol delim
-        valuePattern <- valueP
+        valuePattern <- onMissing recordLabel $ specialSymbol delim *> valueP
         pure (recordLabel, valuePattern)
 
 pattern' :: Parser (Pattern Name)
@@ -92,7 +94,7 @@ pattern' = choice [nonTerminals, terminals, parens pattern']
     terminals =
         choice
             [ P.Var <$> termName
-            , P.Record <$> someRecord "=" pattern'
+            , P.Record <$> someRecord "=" pattern' (Just P.Var)
             , P.List <$> brackets (commaSep pattern')
             , P.IntLiteral <$> intLiteral
             , P.TextLiteral <$> textLiteral
@@ -145,7 +147,7 @@ expression = makeExprParser noPrec (snd <$> IntMap.toDescList precMap)
         , case'
         , match'
         , E.If <$ keyword "if" <*> expression <* keyword "then" <*> expression <* keyword "else" <*> expression
-        , E.Record <$> someRecord "=" expression
+        , E.Record <$> someRecord "=" expression (Just E.Name)
         , E.List <$> brackets (commaSep expression)
         ]
       where

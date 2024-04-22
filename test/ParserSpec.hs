@@ -99,6 +99,8 @@ spec = do
             parsePretty (some pattern') "(Cons x xs) y ('Hmmm z)" `shouldBe` Right [P.Constructor "Cons" ["x", "xs"], "y", P.Variant "'Hmmm" "z"]
         it "record" do
             parsePretty pattern' "{ x = x, y = y, z = z }" `shouldBe` Right (P.Record [("x", "x"), ("y", "y"), ("z", "z")])
+        it "record with implicit names" do
+            parsePretty pattern' "{ x, y, z }" `shouldBe` Right (P.Record [("x", "x"), ("y", "y"), ("z", "z")])
         it "list" do
             parsePretty pattern' "[1, 'a', Just x]" `shouldBe` Right (P.List [P.IntLiteral 1, P.CharLiteral "a", P.Constructor "Just" ["x"]])
         it "nested lists" do
@@ -153,6 +155,12 @@ spec = do
                         Just x = Just x
                     |]
             parsePretty expression expr `shouldSatisfy` isRight
+    
+    describe "misc. builtins" do
+        it "list" do
+            parsePretty expression "[1, 2, 3]" `shouldBe` Right (E.List [E.IntLiteral 1, E.IntLiteral 2, E.IntLiteral 3])
+        it "record construction" do
+            parsePretty expression "{ x = 1, y }" `shouldBe` Right (E.Record [("x", E.IntLiteral 1), ("y", "y")])
 
     describe "operators" do
         it "2 + 2" do
