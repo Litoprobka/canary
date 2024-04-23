@@ -184,7 +184,7 @@ spec = do
         it "type variable" do
             parsePretty type' "'var" `shouldBe` Right (T.Var "'var")
         it "forall" do
-            parsePretty type' "forall 'a. Maybe 'a" `shouldBe` Right (T.Forall ["'a"] $ T.Application "Maybe" $ T.Var "'a")
+            parsePretty type' "forall 'a. Maybe 'a" `shouldBe` Right (T.Forall "'a" $ T.Application "Maybe" $ T.Var "'a")
 
     describe "full programs" do
         it "parses the old lambdaTest (with tabs)" do

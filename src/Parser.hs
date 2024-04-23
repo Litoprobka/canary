@@ -61,13 +61,9 @@ type' = makeExprParser noPrec [[typeApp], [function], [forall', exists]]
             ]
       where
         variantItem = (,) <$> variantConstructor <*> noPrec
-    forall' = Prefix do
-        keyword "forall" -- todo: unicode
-        T.Forall <$> NE.some typeVariable <* specialSymbol "."
 
-    exists = Prefix do
-        keyword "exists"
-        T.Exists <$> NE.some typeVariable <* specialSymbol "."
+    forall' = Prefix $ lambdaLike T.Forall (keyword "forall") typeVariable "."
+    exists = Prefix $ lambdaLike T.Exists (keyword "exists") typeVariable "."
 
     typeApp = InfixL $ pure T.Application
     function = InfixR $ T.Function <$ specialSymbol "->"
@@ -82,6 +78,13 @@ someRecord delim valueP missingValue = braces (Map.fromList <$> commaSep recordI
         recordLabel <- termName
         valuePattern <- onMissing recordLabel $ specialSymbol delim *> valueP
         pure (recordLabel, valuePattern)
+
+lambdaLike :: (a -> b -> b) -> Parser () -> Parser a -> Text -> Parser (b -> b)
+lambdaLike con kw arg endSym = do
+    kw
+    args <- NE.some arg
+    specialSymbol endSym
+    pure \body -> foldr con body args
 
 pattern' :: Parser (Pattern Name)
 pattern' = choice [nonTerminals, terminals, parens pattern']
@@ -142,7 +145,7 @@ expression = makeExprParser noPrec (snd <$> IntMap.toDescList precMap)
     noPrec = choice $ keywordBased <> terminals
 
     keywordBased =
-        [ lambda'
+        [ lambdaLike E.Lambda lambda pattern' "->" <*> expression
         , let'
         , case'
         , match'
@@ -151,12 +154,6 @@ expression = makeExprParser noPrec (snd <$> IntMap.toDescList precMap)
         , E.List <$> brackets (commaSep expression)
         ]
       where
-        lambda' = do
-            lambda
-            args <- NE.some pattern'
-            specialSymbol "->"
-            body <- expression
-            pure $ foldr E.Lambda body args
         let' = do
             letBlock "let" E.Let binding expression
         case' = do

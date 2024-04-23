@@ -186,12 +186,12 @@ resolveExpr e = scoped case e of
 -- | resolves names in a type. Doesn't change the current scope
 resolveType :: Type' Text -> EnvMonad (Type' Id)
 resolveType ty = scoped case ty of
-    T.Forall vars body -> do
-        vars' <- traverse declare vars
+    T.Forall var body -> do
+        var' <- declare var
         body' <- resolveType body
-        pure $ T.Forall vars' body'
-    T.Exists vars body -> do
-        vars' <- traverse declare vars
+        pure $ T.Forall var' body'
+    T.Exists var body -> do
+        var' <- declare var
         body' <- resolveType body
-        pure $ T.Forall vars' body'
+        pure $ T.Forall var' body'
     nothingToDeclare -> traverse resolve nothingToDeclare
