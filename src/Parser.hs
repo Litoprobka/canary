@@ -21,7 +21,7 @@ code = topLevelBlock declaration
 declaration :: Parser (Declaration Name)
 declaration = choice [typeDec, valueDec, signature]
   where
-    valueDec = D.Value <$> binding <*> whereBlock
+    valueDec = try $ D.Value <$> binding <*> whereBlock
     whereBlock = option [] $ block "where" valueDec
 
     typeDec = keyword "type" *> (typeAliasDec <|> typeDec')
