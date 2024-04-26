@@ -4,8 +4,7 @@ import Relude
 
 import Syntax.Pattern
 import Syntax.Type
-
-type OpenName = Text
+import Syntax.Row
 
 data Binding n
     = ValueBinding (Pattern n) (Expression n)
@@ -30,7 +29,7 @@ data Expression n
       -- unlike the rest of the cases, variant tags and record fields
       -- don't need any kind of name resolution
       Variant OpenName
-    | Record (HashMap OpenName (Expression n))
+    | Record (Row (Expression n))
     | List [Expression n]
     | IntLiteral Int
     | TextLiteral Text

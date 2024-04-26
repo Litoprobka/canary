@@ -1,14 +1,13 @@
 module Syntax.Pattern (Pattern (..)) where
 
 import Relude
-
-type OpenName = Text
+import Syntax.Row
 
 data Pattern n
     = Var n
     | Constructor n [Pattern n]
     | Variant OpenName (Pattern n)
-    | Record (HashMap OpenName (Pattern n))
+    | Record (Row (Pattern n))
     | List [Pattern n]
     | IntLiteral Int
     | TextLiteral Text

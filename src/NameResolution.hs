@@ -1,7 +1,7 @@
 {-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE OverloadedRecordDot #-}
 
-module NameResolution (resolveNames, UnboundVar (..), Warning (..), ScopeErrors (..), Id) where
+module NameResolution (resolveNames, UnboundVar (..), Warning (..), ScopeErrors (..), Id (..)) where
 
 import Relude hiding (error)
 

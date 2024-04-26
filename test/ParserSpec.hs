@@ -179,6 +179,8 @@ spec = do
             parsePretty type' "'b -> ('a -> 'b) -> Maybe 'a -> 'b" `shouldBe` Right (T.Function (T.Var "'b") $ T.Function (T.Function (T.Var "'a") (T.Var "'b")) $ T.Function (T.Application "Maybe" $ T.Var "'a") $ T.Var "'b")
         it "record" do
             parsePretty type' "{ x : Int, y : Int, z : Int }" `shouldBe` Right (T.Record [("x", "Int"), ("y", "Int"), ("z", "Int")])
+        it "duplicate record fields" do
+            parsePretty type' "{x : Int, y : Bool, x : Text}" `shouldBe` Right (T.Record [("y", "Bool"), ("x", "Int"), ("x", "Text")])
         it "variant" do
             parsePretty type' "['A Int, 'B Double, 'C Unit]" `shouldBe` Right (T.Variant [("'A", "Int"), ("'B", "Double"), ("'C", "Unit")])
         it "type variable" do

@@ -1,8 +1,7 @@
 module Syntax.Type (Type' (..)) where
 
 import Relude
-
-type OpenName = Text
+import Syntax.Row
 
 --  Note: Functor-Foldable-Traversable instances don't do the right thing with `Forall` and `Exists`
 data Type' n
@@ -12,6 +11,6 @@ data Type' n
     | Function (Type' n) (Type' n)
     | Forall n (Type' n)
     | Exists n (Type' n)
-    | Variant (HashMap OpenName (Type' n))
-    | Record (HashMap OpenName (Type' n))
+    | Variant (Row (Type' n))
+    | Record (Row (Type' n))
     deriving (Show, Eq, Functor, Foldable, Traversable)

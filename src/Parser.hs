@@ -11,7 +11,6 @@ import Syntax.Type qualified as T
 
 import Control.Monad.Combinators.Expr
 import Control.Monad.Combinators.NonEmpty qualified as NE
-import Data.HashMap.Strict qualified as Map
 import Data.IntMap.Strict qualified as IntMap
 import Text.Megaparsec
 
@@ -57,7 +56,7 @@ type' = makeExprParser noPrec [[typeApp], [function], [forall', exists]]
             , T.Var <$> typeVariable
             , parens type'
             , T.Record <$> someRecord ":" type' Nothing
-            , T.Variant <$> brackets (Map.fromList <$> commaSep variantItem)
+            , T.Variant <$> brackets (fromList <$> commaSep variantItem)
             ]
       where
         variantItem = (,) <$> variantConstructor <*> noPrec
@@ -68,8 +67,8 @@ type' = makeExprParser noPrec [[typeApp], [function], [forall', exists]]
     typeApp = InfixL $ pure T.Application
     function = InfixR $ T.Function <$ specialSymbol "->"
 
-someRecord :: Text -> Parser value -> Maybe (Text -> value) -> Parser (HashMap Name value)
-someRecord delim valueP missingValue = braces (Map.fromList <$> commaSep recordItem)
+someRecord :: Text -> Parser value -> Maybe (Text -> value) -> Parser (Row value)
+someRecord delim valueP missingValue = braces (fromList <$> commaSep recordItem)
   where
     onMissing txt = case missingValue of
         Nothing -> id
