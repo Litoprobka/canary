@@ -66,6 +66,8 @@ scoped action = do
 
 -- todo: handle duplicate names (those that aren't just shadowing)
 declare :: Text -> EnvMonad Id
+-- each wildcard gets a unique id
+declare "_" = gets fst <* modify (first inc)
 declare name = do
     (id', scope) <- get
     case Map.lookup name scope.table of
@@ -83,7 +85,6 @@ resolve name = do
         Nothing -> do
             lift $ error (UnboundVar name)
             -- this gives a unique id to every occurance of the same unbound name
-            -- not sure whether it's the right way to go
             scoped $ declare name
 
 resolveNames :: [Declaration Text] -> ScopeErrors UnboundVar Warning [Declaration Id]
