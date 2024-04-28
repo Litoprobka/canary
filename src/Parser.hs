@@ -59,7 +59,7 @@ type' = makeExprParser noPrec [[typeApp], [function], [forall', exists]]
             , T.Variant <$> brackets (fromList <$> commaSep variantItem)
             ]
       where
-        variantItem = (,) <$> variantConstructor <*> noPrec
+        variantItem = (,) <$> variantConstructor <*> option (T.Name "Unit") noPrec
 
     forall' = Prefix $ lambdaLike T.Forall (keyword "forall") typeVariable "."
     exists = Prefix $ lambdaLike T.Exists (keyword "exists") typeVariable "."

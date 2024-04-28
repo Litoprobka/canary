@@ -160,6 +160,13 @@ spec = do
                 , (["x", P.Constructor "Nothing" [], "y"], "case2")
                 , ([P.Constructor "Nothing" [], P.Constructor "Nothing" [], P.Constructor "Just" ["y"]], "case3")
                 ])
+        it "match with unit variant" do
+            let expr = [text|
+                    match
+                        'None -> Nothing
+                        ('Some x) -> Just x
+                    |]
+            parsePretty expression expr `shouldBe` Right (E.Match [([P.Variant "'None" (P.Constructor "Unit" [])], "Nothing"), ([P.Variant "'Some" "x"], "Just" `app` "x")])
         it "guard clauses (todo)" do
             let expr = [text|
                     match
@@ -196,7 +203,7 @@ spec = do
         it "duplicate record fields" do
             parsePretty type' "{x : Int, y : Bool, x : Text}" `shouldBe` Right (T.Record [("y", "Bool"), ("x", "Int"), ("x", "Text")])
         it "variant" do
-            parsePretty type' "['A Int, 'B Double, 'C Unit]" `shouldBe` Right (T.Variant [("'A", "Int"), ("'B", "Double"), ("'C", "Unit")])
+            parsePretty type' "['A Int, 'B, 'C Double]" `shouldBe` Right (T.Variant [("'A", "Int"), ("'B", "Unit"), ("'C", "Double")])
         it "type variable" do
             parsePretty type' "'var" `shouldBe` Right (T.Var "'var")
         it "forall" do

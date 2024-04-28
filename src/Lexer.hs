@@ -131,7 +131,7 @@ topLevelBlock p = L.nonIndented spaceOrLineWrap $ p `sepEndBy` newline <* eof
 
 -- | intended to be called with one of `specialSymbols`
 specialSymbol :: Text -> Parser ()
-specialSymbol sym = lexeme $ string sym *> notFollowedBy (satisfy isOperatorChar) -- note that `symbol` isn't used here, since the whitespace matters in this case
+specialSymbol sym = try $ lexeme $ string sym *> notFollowedBy (satisfy isOperatorChar) -- note that `symbol` isn't used here, since the whitespace matters in this case
 
 -- | parses a keyword, i.e. a symbol not followed by an alphanum character
 keyword :: Text -> Parser ()
