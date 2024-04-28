@@ -33,6 +33,8 @@ spec = do
             parsePretty code "f x = y" `shouldBe` Right [D.Value (E.FunctionBinding "f" ["x"] "y") []]
         it "application" do
             parsePretty code "f = g x y" `shouldBe` Right [D.Value (E.ValueBinding "f" ("g" `app` "x" `app` "y")) []]
+        it "identifiers may contain keywords" do
+            parsePretty expression "matcher case1 diff" `shouldBe` Right ("matcher" `app` "case1" `app` "diff")
 
     describe "where clauses" do
         it "one local binding" do
@@ -132,8 +134,8 @@ spec = do
         it "match expression" do
             let expr = [text|
                     match
-                      Nothing -> Nothing
-                      Just x -> Just (f x)
+                        Nothing -> Nothing
+                        (Just x) -> Just (f x)
                     |]
             parsePretty expression expr `shouldBe` Right (E.Match [([P.Constructor "Nothing" []], "Nothing"), ([P.Constructor "Just" ["x"]], "Just" `app` ("f" `app` "x"))])
         it "inline match" do
@@ -146,6 +148,18 @@ spec = do
                       x
                     |]
             parsePretty expression expr `shouldBe` Right ("f" `app` E.Match [([P.IntLiteral 42], "True"), ([P.Var "_"], "False")] `app` "x")
+        it "multi-arg match" do
+            let expr = [text|
+                    match
+                        Nothing (Just x) y -> case1
+                        x Nothing y -> case2
+                        Nothing Nothing (Just y) -> case3
+                    |]
+            parsePretty expression expr `shouldBe` Right (E.Match 
+                [ ([P.Constructor "Nothing" [], P.Constructor "Just" ["x"], "y"], "case1")
+                , (["x", P.Constructor "Nothing" [], "y"], "case2")
+                , ([P.Constructor "Nothing" [], P.Constructor "Nothing" [], P.Constructor "Just" ["y"]], "case3")
+                ])
         it "guard clauses (todo)" do
             let expr = [text|
                     match

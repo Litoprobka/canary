@@ -135,7 +135,7 @@ specialSymbol sym = lexeme $ string sym *> notFollowedBy (satisfy isOperatorChar
 
 -- | parses a keyword, i.e. a symbol not followed by an alphanum character
 keyword :: Text -> Parser ()
-keyword kw = lexeme $ string kw *> notFollowedBy (satisfy isIdentifierChar)
+keyword kw = try $ lexeme $ string kw *> notFollowedBy (satisfy isIdentifierChar)
 
 -- | an identifier that doesn't start with an uppercase letter
 termName :: Parser Text

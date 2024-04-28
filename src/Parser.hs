@@ -86,27 +86,36 @@ lambdaLike con kw arg endSym = do
     pure \body -> foldr con body args
 
 pattern' :: Parser (Pattern Name)
-pattern' = choice [nonTerminals, terminals, parens pattern']
-  where
-    nonTerminals =
-        choice
-            [ P.Constructor <$> typeName <*> many pattern'
-            , P.Variant <$> variantConstructor <*> pattern'
-            ]
-    terminals =
-        choice
-            [ P.Var <$> termName
-            , P.Record <$> someRecord "=" pattern' (Just P.Var)
-            , P.List <$> brackets (commaSep pattern')
-            , P.IntLiteral <$> intLiteral
-            , P.TextLiteral <$> textLiteral
-            , P.CharLiteral <$> charLiteral
-            ]
+pattern' =
+    choice
+        [ P.Constructor <$> typeName <*> many patternParens
+        , P.Variant <$> variantConstructor <*> patternParens
+        , patternParens
+        ]
+
+{- | parses a pattern with constructors enclosed in parens
+should be used in cases where multiple patterns in a row are accepted, i.e.
+function definitions and match expressions
+-}
+patternParens :: Parser (Pattern Name)
+patternParens =
+    choice
+        [ P.Var <$> termName
+        , P.Record <$> someRecord "=" pattern' (Just P.Var)
+        , P.List <$> brackets (commaSep pattern')
+        , P.IntLiteral <$> intLiteral
+        , P.TextLiteral <$> textLiteral
+        , P.CharLiteral <$> charLiteral
+        , P.Constructor <$> typeName <*> pure [] -- a constructor without arguments
+        , P.Variant <$> variantConstructor <*> pure unit -- some sugar for variants with a unit payload
+        , parens pattern'
+        ]
+    where unit = P.Constructor "Unit" []
 
 binding :: Parser (Binding Name)
 binding = do
     f <-
-        try (E.FunctionBinding <$> termName <*> NE.some pattern')
+        try (E.FunctionBinding <$> termName <*> NE.some patternParens)
             <|> (E.ValueBinding <$> pattern')
     specialSymbol "="
     f <$> expression
@@ -160,7 +169,7 @@ expression = makeExprParser noPrec (snd <$> IntMap.toDescList precMap)
             arg <- expression
             matches <- block "of" $ (,) <$> pattern' <* specialSymbol "->" <*> expression
             pure $ E.Case arg matches
-        match' = E.Match <$> block "match" ((,) <$> some pattern' <* specialSymbol "->" <*> expression)
+        match' = E.Match <$> block "match" ((,) <$> some patternParens <* specialSymbol "->" <*> expression)
 
     terminals =
         [ parens expression
