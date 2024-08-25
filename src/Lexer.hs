@@ -90,10 +90,10 @@ block'
     :: (forall b. Parser a -> Parser b -> Parser out)
     -> Text
     -- ^ keyword
-    -- ^ `sep` parser. Intended uses are `sepEndBy` and `sepEndBy1`
     -> Parser a
-    -- ^ statement parser
+    -- ^ `sep` parser. Intended uses are `sepEndBy` and `sepEndBy1`
     -> Parser out
+    -- ^ statement parser
 block' sep kw p = do
     keyword kw
 

@@ -3,7 +3,7 @@ module Parser (code, declaration, type', pattern', expression) where
 import Relude hiding (many, some)
 
 import Lexer
-import Syntax.All
+import Syntax
 import Syntax.Declaration qualified as D
 import Syntax.Expression qualified as E
 import Syntax.Pattern qualified as P
@@ -11,6 +11,7 @@ import Syntax.Type qualified as T
 
 import Control.Monad.Combinators.Expr
 import Control.Monad.Combinators.NonEmpty qualified as NE
+
 import Data.IntMap.Strict qualified as IntMap
 import Text.Megaparsec
 
@@ -181,3 +182,9 @@ expression = makeExprParser noPrec (snd <$> IntMap.toDescList precMap)
         , E.CharLiteral <$> charLiteral
         , E.TextLiteral <$> textLiteral
         ]
+
+-- todo: handle complicated scoping
+withWildcards :: WriterT Int Parser (Expression Name) -> Parser (Expression Name)
+withWildcards p = do
+    (expr, varCount) <- runWriterT p
+    pure $ foldr (\i -> E.Lambda ("$" <> show i)) expr [1..varCount]

@@ -1,4 +1,4 @@
-module Syntax.All (module Export, Name) where
+module Syntax (module Export, Name) where
 
 -- a re-export of all AST types for convenience
 

@@ -10,7 +10,7 @@ import Data.HashMap.Strict qualified as Map
 import Data.These
 import Prelude qualified (show)
 
-import Syntax.All
+import Syntax
 import Syntax.Declaration qualified as D
 import Syntax.Expression qualified as E
 import Syntax.Pattern qualified as P

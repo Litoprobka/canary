@@ -1,10 +1,10 @@
 {-# OPTIONS_GHC -Wno-orphans #-}
 {-# OPTIONS_GHC -Wno-incomplete-patterns #-}
 {-# OPTIONS_GHC -Wno-missing-methods #-}
-module TestPrelude (module Syntax.All) where
+module TestPrelude (module Syntax) where
 
 import Relude
-import Syntax.All
+import Syntax
 import Syntax.Expression qualified as E
 import Syntax.Pattern qualified as P
 import Syntax.Type qualified as T
