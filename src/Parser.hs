@@ -182,9 +182,10 @@ expression = makeExprParser noPrec (snd <$> IntMap.toDescList precMap)
         , E.CharLiteral <$> charLiteral
         , E.TextLiteral <$> textLiteral
         ]
-
+{-
 -- todo: handle complicated scoping
 withWildcards :: WriterT Int Parser (Expression Name) -> Parser (Expression Name)
 withWildcards p = do
     (expr, varCount) <- runWriterT p
     pure $ foldr (\i -> E.Lambda ("$" <> show i)) expr [1..varCount]
+-}

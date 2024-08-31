@@ -28,7 +28,8 @@ library
       Lexer
       NameResolution
       Parser
-      Syntax.All
+      SmallChecker
+      Syntax
       Syntax.Declaration
       Syntax.Expression
       Syntax.Pattern
