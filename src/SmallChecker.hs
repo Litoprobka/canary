@@ -20,6 +20,7 @@ newtype Scope = Scope Int deriving (Show, Eq, Ord)
 
 data Expr
     = EUnit
+    | EMaybe (Maybe Expr)
     | EName Name
     | EApp Expr Expr
     | ELambda Name Expr
@@ -28,19 +29,13 @@ data Expr
 
 data Type
     = TUnit
-    | TForall Name Type
-    | TUniVar UniVar -- unification variable
     | TVar Name
     | TExists Skolem
-    | -- | TSkolem Skolem -- I'm not sure whether it makes sense to differentiate between explicit 'exists' and skolems
-      TFn Type Type
+    | TUniVar UniVar -- unification variable
+    | TMaybe Type
+    | TForall Name Type
+    | TFn Type Type
     deriving (Show, Eq)
-
-data Monotype
-    = MUnit
-    | MVar Name
-    | MExists Skolem
-    | MFn Monotype Monotype
 
 newtype TypeError = TypeError Text deriving (Show)
 
@@ -60,11 +55,13 @@ pretty = go False
   where
     go parens = \case
         TUnit -> "()"
-        TForall name body -> "∀" <> go parens (TVar name) <> ". " <> go parens body
-        TUniVar (UniVar n) -> "#" <> show n
         TVar (Name name n) -> name <> postfix n "#"
         TExists (Skolem (Name name n)) -> name <> postfix n "?"
-        -- TSkolem (Skolem n) -> "?" <> show n
+        TUniVar (UniVar n) -> "#" <> show n
+        TMaybe body
+            | parens -> "(Maybe " <> go True body <> ")"
+            | otherwise -> "Maybe" <> go True body
+        TForall name body -> "∀" <> go parens (TVar name) <> ". " <> go parens body
         TFn from to
             | parens -> "(" <> go True from <> " -> " <> go False to <> ")"
             | otherwise -> go True from <> " -> " <> go False to
@@ -73,13 +70,6 @@ pretty = go False
     postfix n sym = sym <> show n
 
 -- helpers
-
-fromMonotype :: Monotype -> Type
-fromMonotype = \case
-    MUnit -> TUnit
-    MVar v -> TVar v
-    MExists v -> TExists v
-    MFn in' out' -> TFn (fromMonotype in') (fromMonotype out')
 
 run :: InfMonad a -> Either TypeError a
 run =
@@ -145,7 +135,8 @@ alterUniVar override uni ty = do
   where
     foldUniVars :: (UniVar -> InfMonad ()) -> Type -> InfMonad ()
     foldUniVars action = \case
-        TUniVar uni -> action uni >> lookupUniVar uni >>= either (const pass) (foldUniVars action)
+        TUniVar v -> action v >> lookupUniVar v >>= either (const pass) (foldUniVars action)
+        TMaybe body -> foldUniVars action body
         TForall _ body -> foldUniVars action body
         TFn from to -> foldUniVars action from >> foldUniVars action to
         _terminal -> pass
@@ -166,13 +157,6 @@ scoped :: InfMonad a -> InfMonad a
 scoped action = do
     sigs <- gets (.sigs)
     action <* modify \s -> s{sigs}
-
--- unlike lookupUniVar, this function doesn't collapse nested univars
-isUnsolved :: UniVar -> InfMonad Bool
-isUnsolved uni =
-    gets (HashMap.lookup uni . (.vars)) <&> \case
-        Nothing -> True
-        Just _ -> False
 
 -- turns out it's tricky to get this function right.
 -- just taking all of the new univars and turning them into type vars is not enough,
@@ -198,6 +182,7 @@ forallScope action = do
             Left _ -> pure bodyTy
     isRelevant uni = \case
         TUniVar v | v == uni -> True
+        TMaybe body' -> isRelevant uni body'
         TForall _ body' -> isRelevant uni body'
         TFn from to -> isRelevant uni from || isRelevant uni to
         _terminal -> False
@@ -209,12 +194,13 @@ substitute replacement var = go
   where
     go = \case
         TVar v | v == var -> pure replacement
-        TExists (Skolem v) | v == var -> pure replacement -- this only works if existentials and foralls share the namespace
-        TFn in' out' -> TFn <$> go in' <*> go out'
+        -- TExists (Skolem v) | v == var -> pure replacement -- this only works if existentials and foralls share the namespace
+        TUniVar uni -> TUniVar uni <$ withUniVar uni (go >=> overrideUniVar uni)
+        TMaybe body -> TMaybe <$> go body
         TForall v body
             | v /= var -> TForall v <$> go body
         -- we don't have to do anything in the 'v == var' case, because in `∀a. ∀a. body` the body can't mention the outer a
-        TUniVar uni -> TUniVar uni <$ withUniVar uni (go >=> overrideUniVar uni)
+        TFn in' out' -> TFn <$> go in' <*> go out'
         other -> pure other
 
 substituteTy :: Type -> Type -> Type -> InfMonad Type
@@ -222,19 +208,21 @@ substituteTy from to = go
   where
     go = \case
         ty | ty == from -> pure to
-        TFn in' out' -> TFn <$> go in' <*> go out'
-        TForall v body -> TForall v <$> go body
         TUniVar uni -> TUniVar uni <$ withUniVar uni (go >=> overrideUniVar uni)
+        TMaybe body -> TMaybe <$> go body
+        TForall v body -> TForall v <$> go body
+        TFn in' out' -> TFn <$> go in' <*> go out'
         other -> pure other
 
 -- gets rid of all dangling UniVars
 normalise :: Type -> InfMonad Type
 normalise = \case
-    TForall var body -> TForall var <$> normalise body
     TUniVar uni ->
         lookupUniVar uni >>= \case
             Left _ -> typeError $ "dangling univar " <> pretty (TUniVar uni)
             Right body -> normalise body
+    TMaybe body -> TMaybe <$> normalise body
+    TForall var body -> TForall var <$> normalise body
     TFn from to -> TFn <$> normalise from <*> normalise to
     terminal -> pure terminal
 
@@ -245,6 +233,7 @@ subtype = \cases
     v@(TVar _) _ -> typeError $ "unbound type variable " <> pretty v
     _ v@(TVar _) -> typeError $ "unbound type variable " <> pretty v
     lhs rhs | lhs == rhs -> pass -- simple cases, i.e.  Unit-Unit, two univars or two exvars
+    (TMaybe lhs) (TMaybe rhs) -> subtype lhs rhs
     (TFn inl outl) (TFn inr outr) -> do
         subtype inr inl
         subtype outl outr
@@ -273,6 +262,8 @@ subtype = \cases
 check :: Expr -> Type -> InfMonad ()
 check = \cases
     EUnit TUnit -> pass
+    (EMaybe Nothing) (TMaybe _) -> pass
+    (EMaybe (Just body)) (TMaybe ty) -> check body ty
     (EName name) ty -> do
         ty' <- lookupSig name
         subtype ty' ty
@@ -293,6 +284,11 @@ check = \cases
 infer :: Expr -> InfMonad Type
 infer = \case
     EUnit -> pure TUnit
+    EMaybe Nothing -> do -- TMaybe . TUniVar <$> freshUniVar
+        -- same as: forallScope $ TMaybe . TUniVar <$> freshUniVar
+        tyVar <- freshTypeVar
+        pure $ TForall tyVar $ TMaybe $ TVar tyVar
+    EMaybe (Just x) -> TMaybe <$> infer x
     EName name -> lookupSig name
     EApp f x -> do
         fTy <- infer f
@@ -319,133 +315,3 @@ inferApp fTy arg = case fTy of
             Right newTy -> inferApp newTy arg
     TFn from to -> to <$ check arg from
     _ -> typeError $ pretty fTy <> " is not a function type"
-
-{-
-dropMarker :: ContextItem -> Context -> Context
-dropMarker item = drop 1 . dropWhile (/=item)
-
-substitute :: Type -> TypeVar -> Type -> Monotype
-substitute replacement var = go where
-    go = \case
-        TVar v | v == var -> replacement
-        TExists v | v == v' -> replacement
-        TFn in' out' -> TFn (go in') (go out')
-        -- I don't think this case needs to be handled at all, because name resolution
-        TForall v body | v /= var -> TForall v (go body)
-        other -> other
-
--- new var creation
-
-mkVar :: InfMonad Var
-mkVar = gets fst <* modify \(Var n, tv) -> (Var $ n + 1, tv)
-
-typeVar :: InfMonad TypeVar
-typeVar = gets snd <* modify \(v, TypeVar n) -> (v, TypeVar $ n + 1)
-
--- predicates (kind of)
-
-existentials :: Context -> [TypeVar]
-existentials = mapMaybe \case
-    CUnsolved var -> Just var
-    CSolved var _ -> Just var
-    _ -> Nothing
-
-freeTypeVars :: Type -> Set TypeVar
-freeTypeVars = \case
-    TUnit -> Set.empty
-    TVar v -> one v
-    TForall v body -> Set.delete v $ freeTypeVars body
-    TExists v -> one v
-    TFn in' out' -> freeTypeVars in' <> freeTypeVars out'
-
--- ???
-
--- substitute solved existential variables in a type, I guess?
--- this looks like a `fmap` for an open-recursive type, hmmm
-apply :: Context -> Type -> Type
-apply ctx = \case
-    TUnit -> TUnit
-    TVar v -> TVar v
-    TForall v ty -> TForall v (apply ctx ty)
-    TExists v -> case findSolved v of
-        Nothing -> TExists v
-        Just mono -> apply ctx $ fromMonotype mono
-    TFn in' out' -> TFn (apply ctx in') (apply ctx out')
-  where
-    findSolved :: TypeVar -> Maybe Monotype
-    findSolved var = listToMaybe [ty | CSolved var' ty <- ctx, var' == var]
-
--- todo: well-formedness checks everywhere
-
-subtype :: Context -> Type -> Type -> InfMonad Context
-subtype ctx (TVar a1) (TVar a2) | a1 == a2 = pure ctx
-subtype ctx TUnit TUnit = pure ctx
-subtype ctx (TExists a1) (TExists a2) | a1 == a2 && a1 `elem` existentials ctx = pure ctx
-subtype ctx (TFn in1 out1) (TFn in2 out2) = do
-    ctx' <- subtype ctx in2 in1
-    subtype ctx' (apply ctx' out1) (apply ctx' out2)
-subtype ctx ty (TForall a body) = do
-    -- do we need alpha conversion here?
-    -- I think... it's already handled by name resolution, but idk
-    a' <- typeVar
-    dropMarker (CForall a') <$> subtype (a' : ctx) ty (substitute (TVar a') a body)
-
-subtype ctx (TForall a body) ty = do
-    -- same here
-    a' <- typeVar
-    dropMarker (CMarker a') <$> subtype ([CMarker a', CExists a'] ++ ctx) (substitute (TExists a') a body) ty
-subtype ctx ty (TExists a)
-    | a `elem` existentials ctx && a `Set.notMember` freeTypeVars ty = instantiateL ctx a ty
-subtype ctx (TExists a) ty
-    | a `elem` existentials ctx && a `Set.notMember` freeTypeVars ty = instantiateR ctx ty a
-subtype ctx ty1 ty2 = error $ "not a subtype " ++ show ty1 ++ " " ++ show ty2
-
-instantiateL :: Context -> TypeVar -> Type -> InfMonad Context
-instantiateL = undefined
-
-instantiateR :: Context -> Type -> TypeVar -> InfMonad Context
-instantiateR = undefined
-
-check :: Context -> Expr -> Type -> InfMonad Context
-check ctx = \cases
-    EUnit TUnit -> pure ctx
-    expr (TForall a body) -> do
-        -- again, this should be redundant
-        a' <- typeVar
-        dropMarker (CForall a') <$> check (CForall a' : ctx) expr (substitute (TVar a') a body)
-    (ELambda x body) (TFn in' out') -> do
-        -- x' <- mkVar ?
-        dropMarker (CVar x in') <$> check (CVar x in' : ctx) body out'
-    expr ty -> do
-        (inferred, ctx') <- infer body
-        subtype ctx' (apply ctx' inferred) (apply ctx' ty)
-
-infer :: Context -> Expr -> InfMonad (Type, Context)
-infer ctx = \case
-    EName x -> (findVarType ctx, ctx)
-    EAnn expr ty -> (ty, ) <$> check ctx expr ty
-    EUnit -> pure (TUnit, ctx)
-    ELambda x body -> do
-        -- x' <- mkVar -- we already have unique names here... I think
-        in' <- typeVar
-        out' <- typeVar
-        ctx' <- dropMarker (CVar x (TExists in')) <$>
-            check ([CExists in', CExists out', CVar x (TExists in')] ++ ctx) expr (TExists out')
-        pure (TFn (TExists in') (TExists out'), ctx')
-    EApp f arg -> do
-        (fTy, ctx') <- infer ctx f
-        inferApp ctx' (apply ctx' fTy) arg
-
-inferApp :: Context -> Type -> Expr -> InfMonad (Type, Context)
-inferApp ctx fTy arg = case fTy of
-    TForall a body -> do
-        a' <- typeVar
-        inferApp (CExists a' : ctx) (substitute (TExists a') a body) arg
-    TExists a -> do
-        a1 <- typeVar
-        a2 <- typeVar
-        ctx <- check undefined
-    TFn in' out' -> (out', ) <$> check ctx arg in'
-    _ -> error $ "inferApp failed: " ++ show fty ++ " " ++ show arg
-
--}

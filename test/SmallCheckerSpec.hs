@@ -24,6 +24,7 @@ exprs, errorExprs :: [(Text, Expr)]
       ]
     errorExprs' =
       [ ("\\x y z -> z (y x) (x y) (x y ())", ELambda x' $ ELambda y' $ ELambda z' $ z `EApp` (y `EApp` x) `EApp` (x `EApp` y) `EApp` (x `EApp` y `EApp` EUnit))
+      , ("\\f x y -> f x (f y)", ELambda f' $ ELambda x' $ ELambda y' $ f `EApp` x `EApp` (f `EApp` y))
       ]
     x' = Name "x" 0
     y' = Name "y" 0
