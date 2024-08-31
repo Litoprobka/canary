@@ -7,8 +7,8 @@ module SmallChecker where
 
 import Control.Monad (foldM)
 import Data.HashMap.Strict qualified as HashMap
-import Data.Set qualified as Set
 import Relude hiding (Type)
+import qualified Data.Text as Text
 
 -- a disambiguated name
 data Name = Name Text Int deriving (Show, Eq, Generic, Hashable)
@@ -16,6 +16,7 @@ newtype UniVar = UniVar Int
     deriving (Show, Eq)
     deriving newtype (Hashable)
 newtype Skolem = Skolem Name deriving (Show, Eq)
+newtype Scope = Scope Int deriving (Show, Eq, Ord)
 
 data Expr
     = EUnit
@@ -40,6 +41,19 @@ data Monotype
     | MVar Name
     | MExists Skolem
     | MFn Monotype Monotype
+
+newtype TypeError = TypeError Text deriving (Show)
+
+data InfState = InfState
+    { nextUniVarId :: Int
+    , nextSkolemId :: Int
+    , nextTypeVar :: Name
+    , currentScope :: Scope
+    , sigs :: HashMap Name Type
+    , vars :: HashMap UniVar (Either Scope Type) -- contains either the scope of an unsolved var or a type
+    }
+
+type InfMonad = ExceptT TypeError (State InfState)
 
 pretty :: Type -> Text
 pretty = go False
@@ -69,8 +83,8 @@ pretty' = go False
             pure $ "∀" <> name' <> ". " <> body'
         TUniVar uni@(UniVar n) ->
             lookupUniVar uni >>= \case
-                Nothing -> pure $ "#" <> show n
-                Just ty -> go par ty
+                Left _ -> pure $ "#" <> show n
+                Right ty -> go par ty
         TVar (Name name n) -> pure $ name <> postfix n "#"
         TExists (Skolem (Name name n)) -> pure $ name <> postfix n "?"
         TFn from to -> do
@@ -84,16 +98,6 @@ pretty' = go False
     postfix 0 sym = ""
     postfix n sym = sym <> show n
 
-newtype TypeError = TypeError Text deriving (Show)
-
-data InfState = InfState
-    { nextId :: Int
-    , sigs :: HashMap Name Type
-    , vars :: HashMap UniVar Type
-    }
-
-type InfMonad = ExceptT TypeError (State InfState)
-
 -- helpers
 
 fromMonotype :: Monotype -> Type
@@ -104,36 +108,58 @@ fromMonotype = \case
     MFn in' out' -> TFn (fromMonotype in') (fromMonotype out')
 
 run :: InfMonad a -> Either TypeError a
-run = evaluatingState InfState{nextId = 0, sigs = HashMap.empty, vars = HashMap.empty} . runExceptT
+run = evaluatingState InfState{nextUniVarId = 0, nextSkolemId = 0, nextTypeVar = Name "a" 0, currentScope = Scope 0, sigs = HashMap.empty, vars = HashMap.empty} . runExceptT
 
 typeError :: Text -> InfMonad a
 typeError err = ExceptT $ pure (Left $ TypeError err)
 
-fresh :: InfMonad Int
-fresh = gets (.nextId) <* modify \s -> s{nextId = succ s.nextId}
-
 freshUniVar :: InfMonad UniVar
-freshUniVar = UniVar <$> fresh
+freshUniVar = do
+    -- and this is where I wish I had lens
+    var <- UniVar <$> gets (.nextUniVarId) <* modify \s -> s{nextUniVarId = succ s.nextUniVarId}
+    scope <- gets (.currentScope)
+    modify \s -> s{vars = HashMap.insert var (Left scope) s.vars}
+    pure var
 
 freshSkolem :: Name -> InfMonad Skolem
-freshSkolem (Name name _) = Skolem . Name name <$> fresh
+freshSkolem (Name name _) = Skolem . Name name <$> gets (.nextSkolemId) <* modify \s -> s{nextSkolemId = succ s.nextSkolemId}
 
 freshTypeVar :: InfMonad Name
-freshTypeVar = Name "a" <$> fresh
+freshTypeVar = gets (.nextTypeVar) <* modify \s -> s{nextTypeVar = inc s.nextTypeVar}
+  where
+    inc (Name name n)
+        | Text.head name < 'z' = Name (Text.singleton $ succ $ Text.head name) n
+        | otherwise = Name "a" (succ n)
+        
 
-lookupUniVar :: UniVar -> InfMonad (Maybe Type)
-lookupUniVar uni = gets $ HashMap.lookup uni . (.vars)
+
+lookupUniVar :: UniVar -> InfMonad (Either Scope Type)
+lookupUniVar uni = maybe (typeError $ "missing univar " <> pretty (TUniVar uni)) pure . HashMap.lookup uni =<< gets (.vars)
 
 withUniVar :: UniVar -> (Type -> InfMonad a) -> InfMonad ()
 withUniVar uni f =
     lookupUniVar uni >>= \case
-        Nothing -> pass
-        Just ty -> void $ f ty
+        Left _ -> pass
+        Right ty -> void $ f ty
 
 solveUniVar :: UniVar -> Type -> InfMonad ()
 solveUniVar uni ty
     | ty == TUniVar uni = typeError "infinite cycle in a uni var" -- the other option is to set the var to unsolved
-    | otherwise = modify \s -> s{vars = HashMap.insert uni ty s.vars}
+    | otherwise = do
+        -- here comes the magic. If the new type contains other univars, we change their scope
+        lookupUniVar uni >>= \case
+            Left scope -> rescope scope ty
+            Right _ -> pass
+        modify \s -> s{vars = HashMap.insert uni (Right ty) s.vars}
+  where
+    rescope scope = go where
+        rescopeVar v oldScope = modify \s -> s{vars = HashMap.insert v (Left $ min oldScope scope) s.vars}
+        go = \case
+            TUniVar v -> lookupUniVar v >>= either (rescopeVar v) go
+            TForall _ body' -> go body'
+            TFn from to -> go from >> go to
+            _terminal -> pass
+
 
 lookupSig :: Name -> InfMonad Type
 lookupSig name = maybe (typeError "unbound name???") pure =<< gets (HashMap.lookup name . (.sigs))
@@ -154,21 +180,27 @@ isUnsolved uni =
         Nothing -> True
         Just _ -> False
 
+-- turns out it's tricky to get this function right.
+-- just taking all of the new univars and turning them into type vars is not enough,
+-- since a univar may be produced when specifying a univar from parent scope (i.e. `#a` to `#b -> #c`)
 forallScope :: InfMonad Type -> InfMonad Type
 forallScope action = do
-    start <- gets (.nextId)
+    start <- gets (.nextUniVarId)
+    modify \s@InfState{currentScope = Scope n} -> s{currentScope = Scope $ succ n}
     out <- action
-    end <- pred <$> gets (.nextId)
-    foldM applyVar out (UniVar <$> [start .. end])
+    modify \s@InfState{currentScope = Scope n} -> s{currentScope = Scope $ pred n}
+    end <- pred <$> gets (.nextUniVarId)
+    outerScope <- gets (.currentScope)
+    foldM (applyVar outerScope) out (UniVar <$> [start .. end])
   where
-    applyVar bodyTy uni =
+    applyVar outerScope bodyTy uni =
         lookupUniVar uni >>= \case
-            Just ty -> substituteTy (TUniVar uni) ty bodyTy
-            Nothing | isRelevant uni bodyTy -> do
+            Right ty -> substituteTy (TUniVar uni) ty bodyTy
+            Left scope | scope > outerScope && isRelevant uni bodyTy -> do
                 tyVar <- freshTypeVar
                 solveUniVar uni (TVar tyVar)
                 pure $ TForall tyVar bodyTy
-            Nothing -> pure bodyTy
+            Left _ -> pure bodyTy
     isRelevant uni = \case
         TUniVar v | v == uni -> True
         TForall _ body' -> isRelevant uni body'
@@ -220,13 +252,13 @@ subtype = \cases
         subtype lhs' rhs
     lhs (TUniVar uni) ->
         lookupUniVar uni >>= \case
-            Just ty -> subtype lhs ty
+            Right ty -> subtype lhs ty
             -- todo: cyclic ref check?
-            Nothing -> solveUniVar uni lhs
+            Left _ -> solveUniVar uni lhs
     (TUniVar uni) rhs ->
         lookupUniVar uni >>= \case
-            Just ty -> subtype ty rhs
-            Nothing -> solveUniVar uni rhs
+            Right ty -> subtype ty rhs
+            Left _ -> solveUniVar uni rhs
     {- -- seems like these two cases are redundant
     lhs v@(TExists _) -> do
         typeError $ pretty lhs <> " can't be a subtype of existential " <> pretty v
@@ -264,8 +296,6 @@ infer = \case
         inferApp fTy x
     ELambda arg body -> forallScope do
         -- note that this isn't scoped
-        localVarsStart <- gets (.nextId)
-
         argTy <- freshUniVar
         updateSig arg (TUniVar argTy)
         TFn (TUniVar argTy) <$> infer body
@@ -290,6 +320,7 @@ id' :: Expr
 id' = ELambda x (EName x)
   where
     x = Name "x" 0
+
 -- \x f -> f x
 test :: Expr
 test = ELambda x (ELambda f (EApp (EName f) (EName x)))
