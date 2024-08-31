@@ -7,8 +7,8 @@ module SmallChecker where
 
 import Control.Monad (foldM)
 import Data.HashMap.Strict qualified as HashMap
+import Data.Text qualified as Text
 import Relude hiding (Type)
-import qualified Data.Text as Text
 
 -- a disambiguated name
 data Name = Name Text Int deriving (Show, Eq, Generic, Hashable)
@@ -69,33 +69,7 @@ pretty = go False
             | parens -> "(" <> go True from <> " -> " <> go False to <> ")"
             | otherwise -> go True from <> " -> " <> go False to
 
-    postfix 0 sym = ""
-    postfix n sym = sym <> show n
-
-pretty' :: Type -> InfMonad Text
-pretty' = go False
-  where
-    go par = \case
-        TUnit -> pure "()"
-        TForall name body -> do
-            name' <- go par (TVar name)
-            body' <- go par body
-            pure $ "∀" <> name' <> ". " <> body'
-        TUniVar uni@(UniVar n) ->
-            lookupUniVar uni >>= \case
-                Left _ -> pure $ "#" <> show n
-                Right ty -> go par ty
-        TVar (Name name n) -> pure $ name <> postfix n "#"
-        TExists (Skolem (Name name n)) -> pure $ name <> postfix n "?"
-        TFn from to -> do
-            from' <- go True from
-            to' <- go False to
-            let parens
-                    | par = \txt -> "(" <> txt <> ")"
-                    | otherwise = id
-            pure $ parens $ from' <> " -> " <> to'
-
-    postfix 0 sym = ""
+    postfix 0 _ = ""
     postfix n sym = sym <> show n
 
 -- helpers
@@ -108,7 +82,22 @@ fromMonotype = \case
     MFn in' out' -> TFn (fromMonotype in') (fromMonotype out')
 
 run :: InfMonad a -> Either TypeError a
-run = evaluatingState InfState{nextUniVarId = 0, nextSkolemId = 0, nextTypeVar = Name "a" 0, currentScope = Scope 0, sigs = HashMap.empty, vars = HashMap.empty} . runExceptT
+run =
+    evaluatingState
+        InfState
+            { nextUniVarId = 0
+            , nextSkolemId = 0
+            , nextTypeVar = Name "a" 0
+            , currentScope = Scope 0
+            , sigs = HashMap.empty
+            , vars = HashMap.empty
+            }
+        . runExceptT
+
+inferIO :: Expr -> IO ()
+inferIO expr = case run $ fmap pretty . normalise =<< infer expr of
+    Left (TypeError err) -> putTextLn err
+    Right txt -> putTextLn txt
 
 typeError :: Text -> InfMonad a
 typeError err = ExceptT $ pure (Left $ TypeError err)
@@ -130,8 +119,6 @@ freshTypeVar = gets (.nextTypeVar) <* modify \s -> s{nextTypeVar = inc s.nextTyp
     inc (Name name n)
         | Text.head name < 'z' = Name (Text.singleton $ succ $ Text.head name) n
         | otherwise = Name "a" (succ n)
-        
-
 
 lookupUniVar :: UniVar -> InfMonad (Either Scope Type)
 lookupUniVar uni = maybe (typeError $ "missing univar " <> pretty (TUniVar uni)) pure . HashMap.lookup uni =<< gets (.vars)
@@ -142,24 +129,29 @@ withUniVar uni f =
         Left _ -> pass
         Right ty -> void $ f ty
 
-solveUniVar :: UniVar -> Type -> InfMonad ()
-solveUniVar uni ty
+solveUniVar, overrideUniVar :: UniVar -> Type -> InfMonad ()
+solveUniVar = alterUniVar False
+overrideUniVar = alterUniVar True
+
+alterUniVar :: Bool -> UniVar -> Type -> InfMonad ()
+alterUniVar override uni ty
     | ty == TUniVar uni = typeError "infinite cycle in a uni var" -- the other option is to set the var to unsolved
     | otherwise = do
         -- here comes the magic. If the new type contains other univars, we change their scope
         lookupUniVar uni >>= \case
-            Left scope -> rescope scope ty
+            Right _ | not override -> typeError $ "Internal error (probably a bug): attempted to solve a solved univar " <> pretty (TUniVar uni)
             Right _ -> pass
+            Left scope -> rescope scope ty
         modify \s -> s{vars = HashMap.insert uni (Right ty) s.vars}
   where
-    rescope scope = go where
+    rescope scope = go
+      where
         rescopeVar v oldScope = modify \s -> s{vars = HashMap.insert v (Left $ min oldScope scope) s.vars}
         go = \case
             TUniVar v -> lookupUniVar v >>= either (rescopeVar v) go
             TForall _ body' -> go body'
             TFn from to -> go from >> go to
             _terminal -> pass
-
 
 lookupSig :: Name -> InfMonad Type
 lookupSig name = maybe (typeError "unbound name???") pure =<< gets (HashMap.lookup name . (.sigs))
@@ -195,7 +187,8 @@ forallScope action = do
   where
     applyVar outerScope bodyTy uni =
         lookupUniVar uni >>= \case
-            Right ty -> substituteTy (TUniVar uni) ty bodyTy
+            Right ty -> do
+                substituteTy (TUniVar uni) ty bodyTy
             Left scope | scope > outerScope && isRelevant uni bodyTy -> do
                 tyVar <- freshTypeVar
                 solveUniVar uni (TVar tyVar)
@@ -219,7 +212,7 @@ substitute replacement var = go
         TForall v body
             | v /= var -> TForall v <$> go body
         -- we don't have to do anything in the 'v == var' case, because in `∀a. ∀a. body` the body can't mention the outer a
-        TUniVar uni -> TUniVar uni <$ withUniVar uni (go >=> solveUniVar uni)
+        TUniVar uni -> TUniVar uni <$ withUniVar uni (go >=> overrideUniVar uni)
         other -> pure other
 
 substituteTy :: Type -> Type -> Type -> InfMonad Type
@@ -229,8 +222,19 @@ substituteTy from to = go
         ty | ty == from -> pure to
         TFn in' out' -> TFn <$> go in' <*> go out'
         TForall v body -> TForall v <$> go body
-        TUniVar uni -> TUniVar uni <$ withUniVar uni (go >=> solveUniVar uni)
+        TUniVar uni -> TUniVar uni <$ withUniVar uni (go >=> overrideUniVar uni)
         other -> pure other
+
+-- gets rid of all dangling UniVars
+normalise :: Type -> InfMonad Type
+normalise = \case
+    TForall var body -> TForall var <$> normalise body
+    TUniVar uni ->
+        lookupUniVar uni >>= \case
+            Left _ -> typeError $ "dangling univar " <> pretty (TUniVar uni)
+            Right body -> normalise body
+    TFn from to -> TFn <$> normalise from <*> normalise to
+    terminal -> pure terminal
 
 --
 
@@ -295,7 +299,6 @@ infer = \case
         fTy <- infer f
         inferApp fTy x
     ELambda arg body -> forallScope do
-        -- note that this isn't scoped
         argTy <- freshUniVar
         updateSig arg (TUniVar argTy)
         TFn (TUniVar argTy) <$> infer body
@@ -307,14 +310,16 @@ inferApp fTy arg = case fTy of
         var <- freshUniVar
         fTy' <- substitute (TUniVar var) v body
         inferApp fTy' arg
-    v@(TExists _) -> typeError $ pretty v <> " is not a function"
     TUniVar v -> do
         from <- infer arg
         to <- freshUniVar
-        solveUniVar v $ TFn from (TUniVar to)
-        pure $ TUniVar to
+        lookupUniVar v >>= \case
+            Left _ -> do
+                solveUniVar v $ TFn from (TUniVar to)
+                pure $ TUniVar to
+            Right newTy -> inferApp newTy arg
     TFn from to -> to <$ check arg from
-    _ -> typeError $ "inferApp failed: " <> pretty fTy <> " " <> show arg
+    _ -> typeError $ pretty fTy <> " is not a function type"
 
 id' :: Expr
 id' = ELambda x (EName x)
@@ -323,7 +328,7 @@ id' = ELambda x (EName x)
 
 -- \x f -> f x
 test :: Expr
-test = ELambda x (ELambda f (EApp (EName f) (EName x)))
+test = ELambda x $ ELambda f $ EApp (EName f) (EName x)
   where
     x = Name "x" 0
     f = Name "f" 0
@@ -335,7 +340,7 @@ testTy = TForall a $ TFn (TVar a) $ TFn (TFn (TVar a) (TVar a)) (TVar a)
 
 -- \x f -> f (f x)
 test2 :: Expr
-test2 = ELambda x (ELambda f (EApp (EName f) (EApp (EName f) (EName x))))
+test2 = ELambda x $ ELambda f $ EApp (EName f) (EApp (EName f) (EName x))
   where
     x = Name "x" 0
     f = Name "f" 0
