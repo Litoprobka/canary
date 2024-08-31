@@ -52,9 +52,35 @@ pretty = go 0
         TFn from to
             | prec == 0 -> go (succ prec) from <> " -> " <> go prec to
             | otherwise -> "(" <> go prec from <> " -> " <> go (pred prec) to <> ")"
-      where
-        postfix 0 sym = ""
-        postfix n sym = sym <> show n
+
+    postfix 0 sym = ""
+    postfix n sym = sym <> show n
+
+pretty' :: Type -> InfMonad Text
+pretty' = go 0
+  where
+    go prec = \case
+        TUnit -> pure "()"
+        TForall name body -> do
+            name' <- go prec (TVar name)
+            body' <- go prec body
+            pure $ "∀" <> name' <> ". " <> body'
+        TUniVar uni@(UniVar n) -> lookupUniVar uni >>= \case
+            Nothing -> pure $ "#" <> show n
+            Just ty -> go prec ty
+        TVar (Name name n) -> pure $ name <> postfix n "#"
+        TExists (Skolem (Name name n)) -> pure $ name <> postfix n "?"
+        TFn from to -> do
+            from' <- go (succ prec) from
+            to' <- go prec to
+            let parens
+                  | prec == 0 = id
+                  | otherwise = \txt -> "(" <> txt <> ")"
+            pure $ parens $ from' <> " -> " <> to'
+
+    postfix 0 sym = ""
+    postfix n sym = sym <> show n
+
 
 newtype TypeError = TypeError Text deriving (Show)
 
@@ -212,11 +238,11 @@ infer = \case
         updateSig arg (TUniVar argTy)
         resultTy <- infer body
         lookupUniVar argTy >>= \case
-            Just ty -> TFn ty <$> substituteTy (TUniVar argTy) ty resultTy
+            Just ty -> TFn ty <$> substituteTy (TUniVar argTy) ty resultTy -- this substitution is optional
             Nothing -> do
                 argVar <- freshTypeVar
                 TForall argVar . TFn (TVar argVar) <$> substituteTy (TUniVar argTy) (TVar argVar) resultTy
-                
+
     EAnn expr ty -> ty <$ check expr ty
 
 inferApp :: Type -> Expr -> InfMonad Type
@@ -226,8 +252,44 @@ inferApp fTy arg = case fTy of
         fTy' <- substitute (TUniVar var) v body
         inferApp fTy' arg
     v@(TExists _) -> typeError $ pretty v <> " is not a function"
+    TUniVar v -> do
+        from <- infer arg
+        to <- freshUniVar
+        solveUniVar v $ TFn from (TUniVar to)
+        pure $ TUniVar to
     TFn from to -> to <$ check arg from
     _ -> typeError $ "inferApp failed: " <> pretty fTy <> " " <> show arg
+
+-- \x f -> f x
+test :: Expr
+test = ELambda x (ELambda f (EApp (EName f) (EName x))) where
+    x = Name "x" 0
+    f = Name "f" 0
+
+testTy :: Type
+testTy = TForall a $ TFn (TVar a) $ TFn (TFn (TVar a) (TVar a)) (TVar a) where
+    a = Name "a" 0
+
+-- ELambda x (ELambda f (EApp (EName f) (EName x)))
+-- x ~ #a
+-- resultTy <- infer (ELambda f (EApp (EName f) (EName x)))
+  -- f ~ #b
+  -- resultTy2 <- infer (EApp (EName f) (EName x))
+    -- inferApp #b (EName x)
+      -- from <- #a
+      -- to <- #c
+      -- #b ~ #a -> #c
+      -- #c
+  -- resultTy2 = #c
+  -- #b is solved:
+    -- (#a -> #c) -> #c
+
+
+-- \x f -> f (f x)
+test2 :: Expr
+test2 = ELambda x (ELambda f (EApp (EName f) (EApp (EName f) (EName x)))) where
+    x = Name "x" 0
+    f = Name "f" 0
 
 {-
 dropMarker :: ContextItem -> Context -> Context
