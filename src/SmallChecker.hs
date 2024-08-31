@@ -20,7 +20,8 @@ newtype Scope = Scope Int deriving (Show, Eq, Ord)
 
 data Expr
     = EUnit
-    | EMaybe (Maybe Expr)
+    | ENothing
+    | EJust
     | EName Name
     | EApp Expr Expr
     | ELambda Name Expr
@@ -60,7 +61,7 @@ pretty = go False
         TUniVar (UniVar n) -> "#" <> show n
         TMaybe body
             | parens -> "(Maybe " <> go True body <> ")"
-            | otherwise -> "Maybe" <> go True body
+            | otherwise -> "Maybe " <> go True body
         TForall name body -> "∀" <> go parens (TVar name) <> ". " <> go parens body
         TFn from to
             | parens -> "(" <> go True from <> " -> " <> go False to <> ")"
@@ -262,8 +263,10 @@ subtype = \cases
 check :: Expr -> Type -> InfMonad ()
 check = \cases
     EUnit TUnit -> pass
-    (EMaybe Nothing) (TMaybe _) -> pass
-    (EMaybe (Just body)) (TMaybe ty) -> check body ty
+    ENothing (TMaybe _) -> pass
+    EJust ty -> do
+        uniVar <- freshUniVar
+        subtype (TFn (TUniVar uniVar) (TMaybe $ TUniVar uniVar)) ty
     (EName name) ty -> do
         ty' <- lookupSig name
         subtype ty' ty
@@ -284,11 +287,13 @@ check = \cases
 infer :: Expr -> InfMonad Type
 infer = \case
     EUnit -> pure TUnit
-    EMaybe Nothing -> do -- TMaybe . TUniVar <$> freshUniVar
+    ENothing -> do -- TMaybe . TUniVar <$> freshUniVar
         -- same as: forallScope $ TMaybe . TUniVar <$> freshUniVar
         tyVar <- freshTypeVar
         pure $ TForall tyVar $ TMaybe $ TVar tyVar
-    EMaybe (Just x) -> TMaybe <$> infer x
+    EJust -> do
+        uniVar <- freshUniVar
+        pure $ TFn (TUniVar uniVar) (TMaybe $ TUniVar uniVar)
     EName name -> lookupSig name
     EApp f x -> do
         fTy <- infer f
