@@ -5,13 +5,15 @@
 
 module SmallChecker where
 
+import Control.Monad (foldM)
 import Data.HashMap.Strict qualified as HashMap
 import Data.Set qualified as Set
 import Relude hiding (Type)
 
 -- a disambiguated name
 data Name = Name Text Int deriving (Show, Eq, Generic, Hashable)
-newtype UniVar = UniVar Int deriving (Show, Eq)
+newtype UniVar = UniVar Int
+    deriving (Show, Eq)
     deriving newtype (Hashable)
 newtype Skolem = Skolem Name deriving (Show, Eq)
 
@@ -40,47 +42,47 @@ data Monotype
     | MFn Monotype Monotype
 
 pretty :: Type -> Text
-pretty = go 0
+pretty = go False
   where
-    go prec = \case
+    go parens = \case
         TUnit -> "()"
-        TForall name body -> "∀" <> go prec (TVar name) <> ". " <> go prec body
+        TForall name body -> "∀" <> go parens (TVar name) <> ". " <> go parens body
         TUniVar (UniVar n) -> "#" <> show n
         TVar (Name name n) -> name <> postfix n "#"
         TExists (Skolem (Name name n)) -> name <> postfix n "?"
         -- TSkolem (Skolem n) -> "?" <> show n
         TFn from to
-            | prec == 0 -> go (succ prec) from <> " -> " <> go prec to
-            | otherwise -> "(" <> go prec from <> " -> " <> go (pred prec) to <> ")"
+            | parens -> "(" <> go True from <> " -> " <> go False to <> ")"
+            | otherwise -> go True from <> " -> " <> go False to
 
     postfix 0 sym = ""
     postfix n sym = sym <> show n
 
 pretty' :: Type -> InfMonad Text
-pretty' = go 0
+pretty' = go False
   where
-    go prec = \case
+    go par = \case
         TUnit -> pure "()"
         TForall name body -> do
-            name' <- go prec (TVar name)
-            body' <- go prec body
+            name' <- go par (TVar name)
+            body' <- go par body
             pure $ "∀" <> name' <> ". " <> body'
-        TUniVar uni@(UniVar n) -> lookupUniVar uni >>= \case
-            Nothing -> pure $ "#" <> show n
-            Just ty -> go prec ty
+        TUniVar uni@(UniVar n) ->
+            lookupUniVar uni >>= \case
+                Nothing -> pure $ "#" <> show n
+                Just ty -> go par ty
         TVar (Name name n) -> pure $ name <> postfix n "#"
         TExists (Skolem (Name name n)) -> pure $ name <> postfix n "?"
         TFn from to -> do
-            from' <- go (succ prec) from
-            to' <- go prec to
+            from' <- go True from
+            to' <- go False to
             let parens
-                  | prec == 0 = id
-                  | otherwise = \txt -> "(" <> txt <> ")"
+                    | par = \txt -> "(" <> txt <> ")"
+                    | otherwise = id
             pure $ parens $ from' <> " -> " <> to'
 
     postfix 0 sym = ""
     postfix n sym = sym <> show n
-
 
 newtype TypeError = TypeError Text deriving (Show)
 
@@ -129,11 +131,9 @@ withUniVar uni f =
         Just ty -> void $ f ty
 
 solveUniVar :: UniVar -> Type -> InfMonad ()
-solveUniVar uni ty = do
-    lookupUniVar uni >>= \case
-        Just prevTy | prevTy == TUniVar uni -> typeError "infinite cycle in a uni var" -- the other option is to set the var to unsolved
-        _ -> pass
-    modify \s -> s{vars = HashMap.insert uni ty s.vars}
+solveUniVar uni ty
+    | ty == TUniVar uni = typeError "infinite cycle in a uni var" -- the other option is to set the var to unsolved
+    | otherwise = modify \s -> s{vars = HashMap.insert uni ty s.vars}
 
 lookupSig :: Name -> InfMonad Type
 lookupSig name = maybe (typeError "unbound name???") pure =<< gets (HashMap.lookup name . (.sigs))
@@ -146,6 +146,34 @@ scoped :: InfMonad a -> InfMonad a
 scoped action = do
     sigs <- gets (.sigs)
     action <* modify \s -> s{sigs}
+
+-- unlike lookupUniVar, this function doesn't collapse nested univars
+isUnsolved :: UniVar -> InfMonad Bool
+isUnsolved uni =
+    gets (HashMap.lookup uni . (.vars)) <&> \case
+        Nothing -> True
+        Just _ -> False
+
+forallScope :: InfMonad Type -> InfMonad Type
+forallScope action = do
+    start <- gets (.nextId)
+    out <- action
+    end <- pred <$> gets (.nextId)
+    foldM applyVar out (UniVar <$> [start .. end])
+  where
+    applyVar bodyTy uni =
+        lookupUniVar uni >>= \case
+            Just ty -> substituteTy (TUniVar uni) ty bodyTy
+            Nothing | isRelevant uni bodyTy -> do
+                tyVar <- freshTypeVar
+                solveUniVar uni (TVar tyVar)
+                pure $ TForall tyVar bodyTy
+            Nothing -> pure bodyTy
+    isRelevant uni = \case
+        TUniVar v | v == uni -> True
+        TForall _ body' -> isRelevant uni body'
+        TFn from to -> isRelevant uni from || isRelevant uni to
+        _terminal -> False
 
 --
 
@@ -163,7 +191,8 @@ substitute replacement var = go
         other -> pure other
 
 substituteTy :: Type -> Type -> Type -> InfMonad Type
-substituteTy from to = go where
+substituteTy from to = go
+  where
     go = \case
         ty | ty == from -> pure to
         TFn in' out' -> TFn <$> go in' <*> go out'
@@ -233,16 +262,13 @@ infer = \case
     EApp f x -> do
         fTy <- infer f
         inferApp fTy x
-    ELambda arg body -> do -- note that this isn't scoped
+    ELambda arg body -> forallScope do
+        -- note that this isn't scoped
+        localVarsStart <- gets (.nextId)
+
         argTy <- freshUniVar
         updateSig arg (TUniVar argTy)
-        resultTy <- infer body
-        lookupUniVar argTy >>= \case
-            Just ty -> TFn ty <$> substituteTy (TUniVar argTy) ty resultTy -- this substitution is optional
-            Nothing -> do
-                argVar <- freshTypeVar
-                TForall argVar . TFn (TVar argVar) <$> substituteTy (TUniVar argTy) (TVar argVar) resultTy
-
+        TFn (TUniVar argTy) <$> infer body
     EAnn expr ty -> ty <$ check expr ty
 
 inferApp :: Type -> Expr -> InfMonad Type
@@ -260,34 +286,40 @@ inferApp fTy arg = case fTy of
     TFn from to -> to <$ check arg from
     _ -> typeError $ "inferApp failed: " <> pretty fTy <> " " <> show arg
 
+id' :: Expr
+id' = ELambda x (EName x)
+  where
+    x = Name "x" 0
 -- \x f -> f x
 test :: Expr
-test = ELambda x (ELambda f (EApp (EName f) (EName x))) where
+test = ELambda x (ELambda f (EApp (EName f) (EName x)))
+  where
     x = Name "x" 0
     f = Name "f" 0
 
 testTy :: Type
-testTy = TForall a $ TFn (TVar a) $ TFn (TFn (TVar a) (TVar a)) (TVar a) where
+testTy = TForall a $ TFn (TVar a) $ TFn (TFn (TVar a) (TVar a)) (TVar a)
+  where
     a = Name "a" 0
-
--- ELambda x (ELambda f (EApp (EName f) (EName x)))
--- x ~ #a
--- resultTy <- infer (ELambda f (EApp (EName f) (EName x)))
-  -- f ~ #b
-  -- resultTy2 <- infer (EApp (EName f) (EName x))
-    -- inferApp #b (EName x)
-      -- from <- #a
-      -- to <- #c
-      -- #b ~ #a -> #c
-      -- #c
-  -- resultTy2 = #c
-  -- #b is solved:
-    -- (#a -> #c) -> #c
-
 
 -- \x f -> f (f x)
 test2 :: Expr
-test2 = ELambda x (ELambda f (EApp (EName f) (EApp (EName f) (EName x)))) where
+test2 = ELambda x (ELambda f (EApp (EName f) (EApp (EName f) (EName x))))
+  where
+    x = Name "x" 0
+    f = Name "f" 0
+
+-- \x f -> f x x
+test3 :: Expr
+test3 = ELambda x $ ELambda f $ EApp (EApp (EName f) (EName x)) (EName x)
+  where
+    x = Name "x" 0
+    f = Name "f" 0
+
+-- \f x -> f x
+test4 :: Expr
+test4 = ELambda f $ ELambda x $ EApp (EName f) (EName x)
+  where
     x = Name "x" 0
     f = Name "f" 0
 
