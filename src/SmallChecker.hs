@@ -134,24 +134,26 @@ solveUniVar = alterUniVar False
 overrideUniVar = alterUniVar True
 
 alterUniVar :: Bool -> UniVar -> Type -> InfMonad ()
-alterUniVar override uni ty
-    | ty == TUniVar uni = typeError "infinite cycle in a uni var" -- the other option is to set the var to unsolved
-    | otherwise = do
-        -- here comes the magic. If the new type contains other univars, we change their scope
-        lookupUniVar uni >>= \case
-            Right _ | not override -> typeError $ "Internal error (probably a bug): attempted to solve a solved univar " <> pretty (TUniVar uni)
-            Right _ -> pass
-            Left scope -> rescope scope ty
-        modify \s -> s{vars = HashMap.insert uni (Right ty) s.vars}
+alterUniVar override uni ty = do
+    cycleCheck ty
+    -- here comes the magic. If the new type contains other univars, we change their scope
+    lookupUniVar uni >>= \case
+        Right _ | not override -> typeError $ "Internal error (probably a bug): attempted to solve a solved univar " <> pretty (TUniVar uni)
+        Right _ -> pass
+        Left scope -> rescope scope ty
+    modify \s -> s{vars = HashMap.insert uni (Right ty) s.vars}
   where
-    rescope scope = go
-      where
-        rescopeVar v oldScope = modify \s -> s{vars = HashMap.insert v (Left $ min oldScope scope) s.vars}
-        go = \case
-            TUniVar v -> lookupUniVar v >>= either (rescopeVar v) go
-            TForall _ body' -> go body'
-            TFn from to -> go from >> go to
-            _terminal -> pass
+    foldUniVars :: (UniVar -> InfMonad ()) -> Type -> InfMonad ()
+    foldUniVars action = \case
+        TUniVar uni -> action uni >> lookupUniVar uni >>= either (const pass) (foldUniVars action)
+        TForall _ body -> foldUniVars action body
+        TFn from to -> foldUniVars action from >> foldUniVars action to
+        _terminal -> pass
+
+    cycleCheck = foldUniVars \uni2 -> when (uni == uni2) (typeError "cyclic univar")
+    rescope scope = foldUniVars \v -> lookupUniVar v >>= either (rescopeVar v scope) (const pass)
+    rescopeVar v scope oldScope = modify \s -> s{vars = HashMap.insert v (Left $ min oldScope scope) s.vars}
+
 
 lookupSig :: Name -> InfMonad Type
 lookupSig name = maybe (typeError "unbound name???") pure =<< gets (HashMap.lookup name . (.sigs))
@@ -254,15 +256,8 @@ subtype = \cases
         uniVar <- freshUniVar
         lhs' <- substitute (TUniVar uniVar) var lhs
         subtype lhs' rhs
-    lhs (TUniVar uni) ->
-        lookupUniVar uni >>= \case
-            Right ty -> subtype lhs ty
-            -- todo: cyclic ref check?
-            Left _ -> solveUniVar uni lhs
-    (TUniVar uni) rhs ->
-        lookupUniVar uni >>= \case
-            Right ty -> subtype ty rhs
-            Left _ -> solveUniVar uni rhs
+    lhs (TUniVar uni) -> solveOr lhs (subtype lhs) uni
+    (TUniVar uni) rhs -> solveOr rhs (`subtype` rhs) uni
     {- -- seems like these two cases are redundant
     lhs v@(TExists _) -> do
         typeError $ pretty lhs <> " can't be a subtype of existential " <> pretty v
@@ -270,6 +265,10 @@ subtype = \cases
         typeError $ "existential " <> pretty v <> " can't be a subtype of " <> pretty rhs
     -}
     lhs rhs -> typeError $ pretty lhs <> " is not a subtype of " <> pretty rhs
+  where
+    -- turns out it's different enough from `withUniVar`
+    solveOr :: Type -> (Type -> InfMonad ()) -> UniVar -> InfMonad ()
+    solveOr solveWith whenSolved uni = lookupUniVar uni >>= either (const $ solveUniVar uni solveWith) whenSolved
 
 check :: Expr -> Type -> InfMonad ()
 check = \cases
@@ -320,44 +319,6 @@ inferApp fTy arg = case fTy of
             Right newTy -> inferApp newTy arg
     TFn from to -> to <$ check arg from
     _ -> typeError $ pretty fTy <> " is not a function type"
-
-id' :: Expr
-id' = ELambda x (EName x)
-  where
-    x = Name "x" 0
-
--- \x f -> f x
-test :: Expr
-test = ELambda x $ ELambda f $ EApp (EName f) (EName x)
-  where
-    x = Name "x" 0
-    f = Name "f" 0
-
-testTy :: Type
-testTy = TForall a $ TFn (TVar a) $ TFn (TFn (TVar a) (TVar a)) (TVar a)
-  where
-    a = Name "a" 0
-
--- \x f -> f (f x)
-test2 :: Expr
-test2 = ELambda x $ ELambda f $ EApp (EName f) (EApp (EName f) (EName x))
-  where
-    x = Name "x" 0
-    f = Name "f" 0
-
--- \x f -> f x x
-test3 :: Expr
-test3 = ELambda x $ ELambda f $ EApp (EApp (EName f) (EName x)) (EName x)
-  where
-    x = Name "x" 0
-    f = Name "f" 0
-
--- \f x -> f x
-test4 :: Expr
-test4 = ELambda f $ ELambda x $ EApp (EName f) (EName x)
-  where
-    x = Name "x" 0
-    f = Name "f" 0
 
 {-
 dropMarker :: ContextItem -> Context -> Context
