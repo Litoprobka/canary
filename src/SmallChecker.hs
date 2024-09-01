@@ -25,8 +25,13 @@ data Expr
     = EName Name
     | ECon Name
     | EApp Expr Expr
-    | ELambda Name Expr
+    | ELambda Pattern Expr
     | EAnn Expr Type
+    deriving (Show, Eq)
+
+data Pattern
+    = PVar Name
+    | PCon Name [Pattern]
     deriving (Show, Eq)
 
 data Type
@@ -100,8 +105,8 @@ defaultEnv = HashMap.fromList
   where
     a' = Name "a" 0
     a = TVar a'
-    b' = Name "b" 0
-    b = TVar b'
+    -- b' = Name "b" 0
+    --b = TVar b'
 
 inferIO :: Expr -> IO ()
 inferIO expr = case runDefault $ fmap pretty . normalise =<< infer expr of
@@ -253,6 +258,18 @@ substitute replacement var = go
         name@TName{} -> pure name
         skolem@TSkolem{} -> pure skolem
 
+-- replace all occurences of a type variable with a fresh univar
+substituteUniVar :: Name -> Type -> InfMonad Type
+substituteUniVar var ty = do
+    uni <- freshUniVar
+    substitute (TUniVar uni) var ty
+
+-- replace all occurences of a type variable with a fresh skolem
+substituteSkolem :: Name -> Type -> InfMonad Type
+substituteSkolem var ty = do
+    skolem <- freshSkolem var
+    substitute (TSkolem skolem) var ty
+
 
 -- `substituteTy` shouldn't be used for type vars, because it fails in cases like `forall a. (forall a. body)`
 -- normally those are removed by name resolution, but they may still occur when checking, say `f (f x)`
@@ -269,7 +286,7 @@ substituteTy from to = go
         v@TVar{} -> pure v
         skolem@TSkolem{} -> pure skolem
         name@TName{} -> pure name
-        
+
 
 -- gets rid of all univars
 normalise :: Type -> InfMonad Type
@@ -335,7 +352,7 @@ inferTypeVars = uncurry (foldr TForall) . second snd . go (HashSet.empty, HashSe
         uni@TUniVar{} -> (uni, acc)
         skolem@TSkolem{} -> (skolem, acc)
         name@TName{} -> (name, acc)
-        
+
 
 --
 
@@ -353,20 +370,16 @@ subtype = \cases
         subtype lhs lhs'
         subtype rhs rhs'
     lhs (TForall var rhs) -> do
-        skolem <- freshSkolem var
-        rhs' <- substitute (TSkolem skolem) var rhs
+        rhs' <- substituteSkolem var rhs
         subtype lhs rhs'
     (TForall var lhs) rhs -> do
-        uniVar <- freshUniVar
-        lhs' <- substitute (TUniVar uniVar) var lhs
+        lhs' <- substituteUniVar var lhs
         subtype lhs' rhs
     lhs (TExists var rhs) -> do
-        uniVar <- freshUniVar
-        rhs' <- substitute (TUniVar uniVar) var rhs
+        rhs' <- substituteUniVar var rhs
         subtype lhs rhs'
     (TExists var lhs) rhs -> do
-        skolem <- freshSkolem var
-        lhs' <- substitute (TSkolem skolem) var lhs
+        lhs' <- substituteSkolem var lhs
         subtype lhs' rhs
     lhs (TUniVar uni) -> solveOr lhs (subtype lhs) uni
     (TUniVar uni) rhs -> solveOr rhs (`subtype` rhs) uni
@@ -401,7 +414,7 @@ skolemsToExists, skolemsToForall :: Type -> InfMonad Type
                 pure (TVar tyVar, HashMap.insert skolem tyVar acc)
         TUniVar uni -> pure (TUniVar uni, acc) -- I'm not sure what to do with a univar boundary
         TForall var body -> first (TForall var) <$> go acc body
-        TExists var body -> first (TExists var) <$> go acc body 
+        TExists var body -> first (TExists var) <$> go acc body
         TFn from to -> do
             (from', acc') <- go acc from
             (to', acc'') <- go acc' to
@@ -423,21 +436,31 @@ check = \cases
         ty' <- lookupSig name
         subtype ty' ty
     (ELambda arg body) (TFn from to) -> scoped do
-        updateSig arg from
+        -- `checkPattern` updates signatures of all mentioned variables
+        checkPattern arg from
         check body to
     (EAnn expr ty') ty -> do
         subtype ty' ty
         check expr ty'
     expr (TForall var ty) -> do
-        skolem <- freshSkolem var
-        ty' <- substitute (TSkolem skolem) var ty
+        ty' <- substituteSkolem var ty
         check expr ty'
     expr (TExists var ty) -> do
-        uniVar <- freshUniVar
-        ty' <- substitute (TUniVar uniVar) var ty
+        ty' <- substituteUniVar var ty
         check expr ty'
     expr ty -> do
         ty' <- infer expr
+        subtype ty' ty
+
+-- \f -> f () : (forall a. a -> a) -> ()
+
+
+checkPattern :: Pattern -> Type -> InfMonad ()
+checkPattern = \cases
+    (PVar name) ty -> updateSig name ty
+    -- it's not clear whether value constructors need a separate rule
+    pat ty -> do
+        ty' <- inferPattern pat
         subtype ty' ty
 
 infer :: Expr -> InfMonad Type
@@ -448,10 +471,40 @@ infer = \case
         fTy <- infer f
         inferApp fTy x
     ELambda arg body -> {-forallScope-} do
-        argTy <- freshUniVar
-        updateSig arg (TUniVar argTy)
-        TFn (TUniVar argTy) <$> infer body
+        argTy <- inferPattern arg
+        TFn argTy <$> infer body
     EAnn expr ty -> ty <$ check expr ty
+
+inferPattern :: Pattern -> InfMonad Type
+inferPattern = \case
+    (PVar name) -> do
+        uni <- TUniVar <$> freshUniVar
+        updateSig name uni
+        pure uni
+    p@(PCon name args) -> do
+        (resultType, argTypes) <- conArgTypes name
+        unless (length argTypes == length args) $ typeError $ "incorrect arg count in pattern " <> show p
+        zipWithM_ checkPattern args argTypes
+        pure resultType
+  where
+    -- conArgTypes and the zipM may be unified into a single function
+    conArgTypes = lookupSig >=> go
+    go = \case
+        TFn arg rest -> second (arg :) <$> go rest
+        TForall var body -> go =<< substituteUniVar var body
+        TExists var body -> go =<< substituteSkolem var body
+        v@TVar{} -> typeError $ "unbound type var" <> pretty v
+        -- univars should never appear as the rightmost argument of a value constructor type
+        -- i.e. types of value constructors have the shape `a -> b -> c -> d -> ConcreteType a b c d`
+        -- 
+        -- solved univars cannot appear here either, since `lookupSig` on a pattern returns a type with no univars
+        uni@TUniVar{} -> typeError $ "unexpected univar " <> pretty uni <> " in a constructor type"
+        -- this kind of repetition is necessary to retain missing pattern warnings
+        name@TName{} -> pure (name, [])
+        ty@TApp{} -> pure (ty, [])
+        skolem@TSkolem{} -> pure (skolem, [])
+
+
 
 inferApp :: Type -> Expr -> InfMonad Type
 inferApp fTy arg = case fTy of
