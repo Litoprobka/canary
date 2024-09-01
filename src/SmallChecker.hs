@@ -15,7 +15,7 @@ data Name = Name Text Int deriving (Show, Eq, Generic, Hashable)
 newtype UniVar = UniVar Int
     deriving (Show, Eq)
     deriving newtype (Hashable)
-newtype Skolem = Skolem Name deriving (Show, Eq)
+newtype Skolem = Skolem Name deriving (Show, Eq) deriving newtype Hashable
 newtype Scope = Scope Int deriving (Show, Eq, Ord)
 
 data Expr
@@ -215,7 +215,7 @@ substituteTy from to = go
         TFn in' out' -> TFn <$> go in' <*> go out'
         other -> pure other
 
--- gets rid of all dangling UniVars
+-- gets rid of all univars
 normalise :: Type -> InfMonad Type
 normalise = \case
     TUniVar uni ->
@@ -246,19 +246,36 @@ subtype = \cases
         uniVar <- freshUniVar
         lhs' <- substitute (TUniVar uniVar) var lhs
         subtype lhs' rhs
-    lhs (TUniVar uni) -> solveOr lhs (subtype lhs) uni
-    (TUniVar uni) rhs -> solveOr rhs (`subtype` rhs) uni
-    {- -- seems like these two cases are redundant
-    lhs v@(TExists _) -> do
-        typeError $ pretty lhs <> " can't be a subtype of existential " <> pretty v
-    v@(TExists _) rhs -> do
-        typeError $ "existential " <> pretty v <> " can't be a subtype of " <> pretty rhs
-    -}
+    lhs (TUniVar uni) -> solveOr (skolemsToExists lhs) (subtype lhs) uni
+    (TUniVar uni) rhs -> solveOr (skolemsToForall rhs) (`subtype` rhs) uni
     lhs rhs -> typeError $ pretty lhs <> " is not a subtype of " <> pretty rhs
   where
     -- turns out it's different enough from `withUniVar`
-    solveOr :: Type -> (Type -> InfMonad ()) -> UniVar -> InfMonad ()
-    solveOr solveWith whenSolved uni = lookupUniVar uni >>= either (const $ solveUniVar uni solveWith) whenSolved
+    solveOr :: InfMonad Type -> (Type -> InfMonad ()) -> UniVar -> InfMonad ()
+    solveOr solveWith whenSolved uni = lookupUniVar uni >>= either (const $ solveUniVar uni =<< solveWith) whenSolved
+
+    skolemsToExists = pure -- as of now, existential quantification is not implemented yet
+    -- b <: ∀a. a -> a
+    -- b <: ?a -> ?a
+    -- b ~ ∀a. a -> a
+    skolemsToForall :: Type -> InfMonad Type
+    skolemsToForall ty = uncurry (foldr TForall) <$> go HashMap.empty ty where
+        go acc = \case
+            TExists skolem -> case HashMap.lookup skolem acc of
+                Just tyVar -> pure (TVar tyVar, acc)
+                Nothing -> do
+                    tyVar <- freshTypeVar
+                    pure (TVar tyVar, HashMap.insert skolem tyVar acc)
+            TUniVar uni -> pure (TUniVar uni, acc) -- I'm not sure what to do with a univar boundary
+            TMaybe body -> first TMaybe <$> go acc body
+            TForall var body -> first (TForall var) <$> go acc body
+            TFn from to -> do
+                (from', acc') <- go acc from
+                (to', acc'') <- go acc' to
+                pure (TFn from' to', acc'')
+            terminal -> pure (terminal, acc)
+            
+
 
 check :: Expr -> Type -> InfMonad ()
 check = \cases
@@ -287,11 +304,9 @@ check = \cases
 infer :: Expr -> InfMonad Type
 infer = \case
     EUnit -> pure TUnit
-    ENothing -> do -- TMaybe . TUniVar <$> freshUniVar
-        -- same as: forallScope $ TMaybe . TUniVar <$> freshUniVar
-        tyVar <- freshTypeVar
-        pure $ TForall tyVar $ TMaybe $ TVar tyVar
-    EJust -> do
+    -- if we convert dangling univars to a forall clause, we won't need forallScope here
+    ENothing -> forallScope $ TMaybe . TUniVar <$> freshUniVar
+    EJust -> forallScope do
         uniVar <- freshUniVar
         pure $ TFn (TUniVar uniVar) (TMaybe $ TUniVar uniVar)
     EName name -> lookupSig name

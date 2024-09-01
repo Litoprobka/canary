@@ -1,3 +1,5 @@
+{-# OPTIONS_GHC -Wno-unrecognised-pragmas #-}
+{-# HLINT ignore "Redundant bracket" #-}
 module SmallCheckerSpec (spec) where
 
 import SmallChecker
@@ -20,10 +22,12 @@ exprs, errorExprs :: [(Text, Expr)]
       , ("\\f g x -> f (g x)", ELambda f' $ ELambda g' $ ELambda x' $ f `EApp` (g `EApp` x))
       , ("\\x y -> x (\\a -> x (y a a))", ELambda x' $ ELambda y' $ EApp x $ ELambda a' $ y `EApp` a `EApp` a)
       , ("\\a b c -> c (b a) (c a a)", ELambda a' $ ELambda b' $ ELambda c' $ c `EApp` (b `EApp` a) `EApp` (c `EApp` a `EApp` a))
-      , ("\\a b -> a (\\x -> b x) (\\z -> a b b) ()", ELambda a' $ ELambda b' $ a `EApp` (ELambda x' $ b `EApp` x) `EApp` (ELambda z' $ a `EApp` b `EApp` b) `EApp` EUnit)
+      , ("\\a b -> a (\\x -> b x) (\\z -> a b b) ()", ELambda a' $ ELambda b' $ a `EApp` ELambda x' (b `EApp` x) `EApp` ELambda z' (a `EApp` b `EApp` b) `EApp` EUnit)
       , ("\\x -> Just x", ELambda x' $ EJust `EApp` x)
       , ("\\x -> Just (Just x)", ELambda x' $ EJust `EApp` (EJust `EApp` x))
       , ("\\x -> Just (Just Nothing)", ELambda x' $ EJust `EApp` (EJust `EApp` ENothing))
+      , ("Just", EJust)
+      , ("\\x -> ((\\y -> ()) : forall a. Maybe a -> ()) x", ELambda x' $ EAnn (ELambda y' EUnit) (TForall a' $ TMaybe (TVar a') `TFn` TUnit) `EApp` x)
       ]
     errorExprs' =
       [ ("\\x y z -> z (y x) (x y) (x y ())", ELambda x' $ ELambda y' $ ELambda z' $ z `EApp` (y `EApp` x) `EApp` (x `EApp` y) `EApp` (x `EApp` y `EApp` EUnit))
@@ -47,4 +51,3 @@ spec = do
         run (normalise =<< infer expr) `shouldSatisfy` isLeft
 
 
-    
