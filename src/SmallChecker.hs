@@ -7,6 +7,7 @@ module SmallChecker where
 
 import Control.Monad (foldM)
 import Data.HashMap.Strict qualified as HashMap
+import Data.HashSet qualified as HashSet
 import Data.Text qualified as Text
 import Relude hiding (Type)
 
@@ -15,7 +16,9 @@ data Name = Name Text Int deriving (Show, Eq, Generic, Hashable)
 newtype UniVar = UniVar Int
     deriving (Show, Eq)
     deriving newtype (Hashable)
-newtype Skolem = Skolem Name deriving (Show, Eq) deriving newtype Hashable
+newtype Skolem = Skolem Name
+    deriving (Show, Eq)
+    deriving newtype (Hashable)
 newtype Scope = Scope Int deriving (Show, Eq, Ord)
 
 data Expr
@@ -31,10 +34,11 @@ data Expr
 data Type
     = TUnit
     | TVar Name
-    | TExists Skolem
+    | TSkolem Skolem
     | TUniVar UniVar -- unification variable
     | TMaybe Type
-    | TForall Name Type
+    | TForall Name Type -- ∀a. body
+    | TExists Name Type -- ∃a. body
     | TFn Type Type
     deriving (Show, Eq)
 
@@ -57,15 +61,16 @@ pretty = go False
     go parens = \case
         TUnit -> "()"
         TVar (Name name n) -> name <> postfix n "#"
-        TExists (Skolem (Name name n)) -> name <> postfix n "?"
+        TSkolem (Skolem (Name name n)) -> name <> "?" <> postfix n ""
         TUniVar (UniVar n) -> "#" <> show n
-        TMaybe body
-            | parens -> "(Maybe " <> go True body <> ")"
-            | otherwise -> "Maybe " <> go True body
-        TForall name body -> "∀" <> go parens (TVar name) <> ". " <> go parens body
-        TFn from to
-            | parens -> "(" <> go True from <> " -> " <> go False to <> ")"
-            | otherwise -> go True from <> " -> " <> go False to
+        TMaybe body -> mkParens $ "Maybe " <> go True body
+        TForall name body -> mkParens $ "∀" <> go parens (TVar name) <> ". " <> go parens body
+        TExists name body -> mkParens $ "∃" <> go parens (TVar name) <> ". " <> go parens body
+        TFn from to -> mkParens $ go True from <> " -> " <> go False to
+      where
+        mkParens txt
+            | parens = "(" <> txt <> ")"
+            | otherwise = txt
 
     postfix 0 _ = ""
     postfix n sym = sym <> show n
@@ -139,13 +144,13 @@ alterUniVar override uni ty = do
         TUniVar v -> action v >> lookupUniVar v >>= either (const pass) (foldUniVars action)
         TMaybe body -> foldUniVars action body
         TForall _ body -> foldUniVars action body
+        TExists _ body -> foldUniVars action body
         TFn from to -> foldUniVars action from >> foldUniVars action to
         _terminal -> pass
 
     cycleCheck = foldUniVars \uni2 -> when (uni == uni2) (typeError "cyclic univar")
     rescope scope = foldUniVars \v -> lookupUniVar v >>= either (rescopeVar v scope) (const pass)
     rescopeVar v scope oldScope = modify \s -> s{vars = HashMap.insert v (Left $ min oldScope scope) s.vars}
-
 
 lookupSig :: Name -> InfMonad Type
 lookupSig name = maybe (typeError "unbound name???") pure =<< gets (HashMap.lookup name . (.sigs))
@@ -170,6 +175,9 @@ forallScope action = do
     modify \s@InfState{currentScope = Scope n} -> s{currentScope = Scope $ pred n}
     end <- pred <$> gets (.nextUniVarId)
     outerScope <- gets (.currentScope)
+    -- I'm not sure whether it's sound to convert all skolems in scope
+    -- skolems may need a scope approach similar to univars
+    -- skolemsToExists =<<
     foldM (applyVar outerScope) out (UniVar <$> [start .. end])
   where
     applyVar outerScope bodyTy uni =
@@ -185,6 +193,7 @@ forallScope action = do
         TUniVar v | v == uni -> True
         TMaybe body' -> isRelevant uni body'
         TForall _ body' -> isRelevant uni body'
+        TExists _ body' -> isRelevant uni body'
         TFn from to -> isRelevant uni from || isRelevant uni to
         _terminal -> False
 
@@ -198,12 +207,15 @@ substitute replacement var = go
         -- TExists (Skolem v) | v == var -> pure replacement -- this only works if existentials and foralls share the namespace
         TUniVar uni -> TUniVar uni <$ withUniVar uni (go >=> overrideUniVar uni)
         TMaybe body -> TMaybe <$> go body
-        TForall v body
-            | v /= var -> TForall v <$> go body
+        TForall v body | v /= var -> TForall v <$> go body
         -- we don't have to do anything in the 'v == var' case, because in `∀a. ∀a. body` the body can't mention the outer a
+        TExists v body | v /= var -> TExists v <$> go body
+        -- the same goes for ∃
         TFn in' out' -> TFn <$> go in' <*> go out'
         other -> pure other
 
+-- `substituteTy` shouldn't be used for type vars, because it fails in cases like `forall a. (forall a. body)`
+-- normall those are removed by name resolution, but they may still occur when checking, say `f (f x)`
 substituteTy :: Type -> Type -> Type -> InfMonad Type
 substituteTy from to = go
   where
@@ -212,20 +224,42 @@ substituteTy from to = go
         TUniVar uni -> TUniVar uni <$ withUniVar uni (go >=> overrideUniVar uni)
         TMaybe body -> TMaybe <$> go body
         TForall v body -> TForall v <$> go body
+        TExists v body -> TExists v <$> go body
         TFn in' out' -> TFn <$> go in' <*> go out'
         other -> pure other
 
 -- gets rid of all univars
 normalise :: Type -> InfMonad Type
-normalise = \case
-    TUniVar uni ->
-        lookupUniVar uni >>= \case
-            Left _ -> typeError $ "dangling univar " <> pretty (TUniVar uni)
-            Right body -> normalise body
-    TMaybe body -> TMaybe <$> normalise body
-    TForall var body -> TForall var <$> normalise body
-    TFn from to -> TFn <$> normalise from <*> normalise to
-    terminal -> pure terminal
+normalise = uniVarsToForall >=> skolemsToExists >=> go
+  where
+    go = \case
+        TUniVar uni ->
+            lookupUniVar uni >>= \case
+                Left _ -> typeError $ "dangling univar " <> pretty (TUniVar uni)
+                Right body -> go body
+        TMaybe body -> TMaybe <$> go body
+        TForall var body -> TForall var <$> go body
+        TExists var body -> TExists var <$> go body
+        TFn from to -> TFn <$> go from <*> go to
+        terminal -> pure terminal
+
+    -- this is an alternative to forallScope that's only suitable at the top level
+    uniVarsToForall ty = uncurry (foldr TForall) <$> uniGo HashSet.empty ty
+    uniGo acc = \case
+        TUniVar uni ->
+            lookupUniVar uni >>= \case
+                Left _ -> do
+                    tyVar <- freshTypeVar
+                    solveUniVar uni (TVar tyVar)
+                    pure (TVar tyVar, HashSet.insert tyVar acc)
+                Right body -> first (const $ TUniVar uni) <$> uniGo acc body
+        TMaybe body -> first TMaybe <$> uniGo acc body
+        TForall var body -> first (TForall var) <$> uniGo acc body
+        TFn from to -> do
+            (from', acc') <- uniGo acc from
+            (to', acc'') <- uniGo acc' to
+            pure (TFn from' to', acc'')
+        terminal -> pure (terminal, acc)
 
 --
 
@@ -240,42 +274,59 @@ subtype = \cases
         subtype outl outr
     lhs (TForall var rhs) -> do
         skolem <- freshSkolem var
-        rhs' <- substitute (TExists skolem) var rhs
+        rhs' <- substitute (TSkolem skolem) var rhs
         subtype lhs rhs'
     (TForall var lhs) rhs -> do
         uniVar <- freshUniVar
         lhs' <- substitute (TUniVar uniVar) var lhs
         subtype lhs' rhs
-    lhs (TUniVar uni) -> solveOr (skolemsToExists lhs) (subtype lhs) uni
-    (TUniVar uni) rhs -> solveOr (skolemsToForall rhs) (`subtype` rhs) uni
+    lhs (TExists var rhs) -> do
+        uniVar <- freshUniVar
+        lhs' <- substitute (TUniVar uniVar) var lhs
+        subtype lhs' rhs
+    (TExists var lhs) rhs -> do
+        skolem <- freshSkolem var
+        rhs' <- substitute (TSkolem skolem) var rhs
+        subtype lhs rhs'
+    lhs (TUniVar uni) -> solveOr lhs (subtype lhs) uni
+    (TUniVar uni) rhs -> solveOr rhs (`subtype` rhs) uni
     lhs rhs -> typeError $ pretty lhs <> " is not a subtype of " <> pretty rhs
   where
     -- turns out it's different enough from `withUniVar`
-    solveOr :: InfMonad Type -> (Type -> InfMonad ()) -> UniVar -> InfMonad ()
-    solveOr solveWith whenSolved uni = lookupUniVar uni >>= either (const $ solveUniVar uni =<< solveWith) whenSolved
+    solveOr :: Type -> (Type -> InfMonad ()) -> UniVar -> InfMonad ()
+    solveOr solveWith whenSolved uni = lookupUniVar uni >>= either (const $ solveUniVar uni solveWith) whenSolved
 
-    skolemsToExists = pure -- as of now, existential quantification is not implemented yet
+-- these two functions have the same problem as the old `forallScope` - they capture skolems from an outer scope
+-- it's not clear whether anything should be done about them
+-- the only problem I can see is a univar unifying with a type var from an inner scope, but I'm not sure how would that happen
+--
+-- it is still safe to use these at the top-level, however
+skolemsToExists, skolemsToForall :: Type -> InfMonad Type
+(skolemsToExists, skolemsToForall) = (skolemsToExists', skolemsToForall')
+  where
+    -- ∃a. a -> a <: b
+    -- ?a -> ?a <: b
+    -- b ~ ∃a. a -> a
+    skolemsToExists' ty = uncurry (foldr TExists) <$> go HashMap.empty ty
     -- b <: ∀a. a -> a
     -- b <: ?a -> ?a
     -- b ~ ∀a. a -> a
-    skolemsToForall :: Type -> InfMonad Type
-    skolemsToForall ty = uncurry (foldr TForall) <$> go HashMap.empty ty where
-        go acc = \case
-            TExists skolem -> case HashMap.lookup skolem acc of
-                Just tyVar -> pure (TVar tyVar, acc)
-                Nothing -> do
-                    tyVar <- freshTypeVar
-                    pure (TVar tyVar, HashMap.insert skolem tyVar acc)
-            TUniVar uni -> pure (TUniVar uni, acc) -- I'm not sure what to do with a univar boundary
-            TMaybe body -> first TMaybe <$> go acc body
-            TForall var body -> first (TForall var) <$> go acc body
-            TFn from to -> do
-                (from', acc') <- go acc from
-                (to', acc'') <- go acc' to
-                pure (TFn from' to', acc'')
-            terminal -> pure (terminal, acc)
-            
+    skolemsToForall' ty = uncurry (foldr TForall) <$> go HashMap.empty ty
 
+    go acc = \case
+        TSkolem skolem -> case HashMap.lookup skolem acc of
+            Just tyVar -> pure (TVar tyVar, acc)
+            Nothing -> do
+                tyVar <- freshTypeVar
+                pure (TVar tyVar, HashMap.insert skolem tyVar acc)
+        TUniVar uni -> pure (TUniVar uni, acc) -- I'm not sure what to do with a univar boundary
+        TMaybe body -> first TMaybe <$> go acc body
+        TForall var body -> first (TForall var) <$> go acc body
+        TFn from to -> do
+            (from', acc') <- go acc from
+            (to', acc'') <- go acc' to
+            pure (TFn from' to', acc'')
+        terminal -> pure (terminal, acc)
 
 check :: Expr -> Type -> InfMonad ()
 check = \cases
@@ -295,7 +346,7 @@ check = \cases
         check expr ty'
     expr (TForall var ty) -> do
         skolem <- freshSkolem var
-        ty' <- substitute (TExists skolem) var ty
+        ty' <- substitute (TSkolem skolem) var ty
         check expr ty'
     expr ty -> do
         ty' <- infer expr
@@ -305,15 +356,15 @@ infer :: Expr -> InfMonad Type
 infer = \case
     EUnit -> pure TUnit
     -- if we convert dangling univars to a forall clause, we won't need forallScope here
-    ENothing -> forallScope $ TMaybe . TUniVar <$> freshUniVar
-    EJust -> forallScope do
+    ENothing -> {-forallScope $-} TMaybe . TUniVar <$> freshUniVar
+    EJust -> {-forallScope-} do
         uniVar <- freshUniVar
         pure $ TFn (TUniVar uniVar) (TMaybe $ TUniVar uniVar)
     EName name -> lookupSig name
     EApp f x -> do
         fTy <- infer f
         inferApp fTy x
-    ELambda arg body -> forallScope do
+    ELambda arg body -> {-forallScope-} do
         argTy <- freshUniVar
         updateSig arg (TUniVar argTy)
         TFn (TUniVar argTy) <$> infer body
@@ -324,6 +375,10 @@ inferApp fTy arg = case fTy of
     TForall v body -> do
         var <- freshUniVar
         fTy' <- substitute (TUniVar var) v body
+        inferApp fTy' arg
+    TExists v body -> do
+        skolem <- freshSkolem v
+        fTy' <- substitute (TSkolem skolem) v body
         inferApp fTy' arg
     TUniVar v -> do
         from <- infer arg

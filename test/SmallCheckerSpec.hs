@@ -7,11 +7,6 @@ import Relude
 import Test.Hspec
 import Data.Text qualified as Text
 
-id' :: Expr
-id' = ELambda x (EName x)
-  where
-    x = Name "x" 0
-
 exprs, errorExprs :: [(Text, Expr)]
 (exprs, errorExprs) = (exprs', errorExprs') where
     exprs' =
