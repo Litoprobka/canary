@@ -35,6 +35,8 @@ exprsToCheck =
   [ ("Nothing : ∀a. Maybe a", ENothing, TForall a' $ TMaybe $ TVar a')
   , ("Nothing : Maybe (∃a. a)", ENothing, TMaybe $ TExists a' $ TVar a')
   , ("() : ∃a. a", EUnit, TExists a' $ TVar a')
+  , ("\\x -> Just x : (∃a. a -> Maybe ())", ELambda x' $ EJust `EApp` x, TExists a' $ TVar a' `TFn` TMaybe TUnit)
+  , ("\\x -> Just x : (∃a. a -> Maybe a)", ELambda x' $ EJust `EApp` x, TExists a' $ TVar a' `TFn` TMaybe (TVar a'))
   ]
 
 x' = Name "x" 0

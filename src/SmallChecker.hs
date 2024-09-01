@@ -129,15 +129,17 @@ solveUniVar, overrideUniVar :: UniVar -> Type -> InfMonad ()
 solveUniVar = alterUniVar False
 overrideUniVar = alterUniVar True
 
+data SelfRef = Direct | Indirect
+
 alterUniVar :: Bool -> UniVar -> Type -> InfMonad ()
 alterUniVar override uni ty = do
-    cycleCheck ty
     -- here comes the magic. If the new type contains other univars, we change their scope
     lookupUniVar uni >>= \case
         Right _ | not override -> typeError $ "Internal error (probably a bug): attempted to solve a solved univar " <> pretty (TUniVar uni)
         Right _ -> pass
         Left scope -> rescope scope ty
     modify \s -> s{vars = HashMap.insert uni (Right ty) s.vars}
+    cycleCheck (Direct, HashSet.empty) ty
   where
     foldUniVars :: (UniVar -> InfMonad ()) -> Type -> InfMonad ()
     foldUniVars action = \case
@@ -148,7 +150,21 @@ alterUniVar override uni ty = do
         TFn from to -> foldUniVars action from >> foldUniVars action to
         _terminal -> pass
 
-    cycleCheck = foldUniVars \uni2 -> when (uni == uni2) (typeError "cyclic univar")
+    -- resolves direct univar cycles (i.e. a ~ b, b ~ c, c ~ a) to skolems
+    -- errors out on indirect cycles (i.e. a ~ Maybe a)
+    cycleCheck (selfRefType, acc) = \case
+        TUniVar uni2 | HashSet.member uni2 acc -> case selfRefType of
+            Direct -> do
+                skolem <- freshSkolem $ Name "q" 0
+                modify \s -> s{vars = HashMap.insert uni2 (Right $ TSkolem skolem) s.vars}
+            Indirect -> typeError "self-referential type"
+        TUniVar uni2 -> withUniVar uni2 $ cycleCheck (selfRefType, HashSet.insert uni2 acc)
+        TMaybe body -> cycleCheck (Indirect, acc) body
+        TForall _ body -> cycleCheck (Indirect, acc) body
+        TExists _ body -> cycleCheck (Indirect, acc) body
+        TFn from to -> cycleCheck (Indirect, acc) from >> cycleCheck (Indirect, acc) to
+        _terminal -> pass
+
     rescope scope = foldUniVars \v -> lookupUniVar v >>= either (rescopeVar v scope) (const pass)
     rescopeVar v scope oldScope = modify \s -> s{vars = HashMap.insert v (Left $ min oldScope scope) s.vars}
 
@@ -332,7 +348,7 @@ check :: Expr -> Type -> InfMonad ()
 check = \cases
     EUnit TUnit -> pass
     ENothing (TMaybe _) -> pass
-    EJust ty -> do
+    EJust ty -> do -- this case may be redundant
         uniVar <- freshUniVar
         subtype (TFn (TUniVar uniVar) (TMaybe $ TUniVar uniVar)) ty
     (EName name) ty -> do
