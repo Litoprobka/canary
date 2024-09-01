@@ -82,6 +82,7 @@ test-suite lang-test
   other-modules:
       ParserSpec
       SmallCheckerSpec
+      SmallTestPrelude
       TestPrelude
       Paths_lang
   hs-source-dirs:
