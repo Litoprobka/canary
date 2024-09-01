@@ -348,6 +348,10 @@ check = \cases
         skolem <- freshSkolem var
         ty' <- substitute (TSkolem skolem) var ty
         check expr ty'
+    expr (TExists var ty) -> do
+        uniVar <- freshUniVar
+        ty' <- substitute (TUniVar uniVar) var ty
+        check expr ty'
     expr ty -> do
         ty' <- infer expr
         subtype ty' ty
