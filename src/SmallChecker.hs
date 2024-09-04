@@ -45,6 +45,15 @@ data Type
     | TFn Type Type
     deriving (Show, Eq)
 
+-- а type whose outer constructor is monomorphic
+data MonoLayer
+    = MName Name
+    | MSkolem Skolem
+    | MUniVar UniVar
+    | MApp Type Type
+    | MFn Type Type
+    deriving (Show, Eq)
+
 newtype TypeError = TypeError Text deriving (Show)
 
 data InfState = InfState
@@ -97,16 +106,18 @@ run env =
         . runExceptT
 
 defaultEnv :: HashMap Name Type
-defaultEnv = HashMap.fromList
-    [ (Name "()" 0, TName $ Name "()" 0)
-    , (Name "Nothing" 0, TForall a' $ TName (Name "Maybe" 0) `TApp` a)
-    , (Name "Just" 0, TForall a' $ a `TFn` (TName (Name "Maybe" 0) `TApp` a))
-    ]
+defaultEnv =
+    HashMap.fromList
+        [ (Name "()" 0, TName $ Name "()" 0)
+        , (Name "Nothing" 0, TForall a' $ TName (Name "Maybe" 0) `TApp` a)
+        , (Name "Just" 0, TForall a' $ a `TFn` (TName (Name "Maybe" 0) `TApp` a))
+        ]
   where
     a' = Name "a" 0
     a = TVar a'
-    -- b' = Name "b" 0
-    --b = TVar b'
+
+-- b' = Name "b" 0
+-- b = TVar b'
 
 inferIO :: Expr -> IO ()
 inferIO expr = case runDefault $ fmap pretty . normalise =<< infer expr of
@@ -240,36 +251,71 @@ forallScope action = do
 
 --
 
-substitute :: Type -> Name -> Type -> InfMonad Type
-substitute replacement var = go
+data Variance = In | Out | Inv
+
+{- | Unwraps a polytype until a simple constructor is encountered
+-- >> mono Out (forall a. a -> a)
+-- ?a -> ?a
+-- >> mono In (forall a. a -> a)
+-- #a -> #a
+-- >> mono Out (forall a. forall b. a -> b -> a)
+-- ?a -> ?b -> ?a
+-- >> mono Out (forall a. (forall b. b -> a) -> a)
+-- (forall b. b -> ?a) -> ?a
+-}
+mono :: Variance -> Type -> InfMonad MonoLayer
+mono variance = \case
+    v@TVar{} -> typeError $ "unbound type variable " <> pretty v
+    TName name -> pure $ MName name
+    TSkolem skolem -> pure $ MSkolem skolem
+    TUniVar uni -> pure $ MUniVar uni
+    TApp lhs rhs -> pure $ MApp lhs rhs
+    TFn from to -> pure $ MFn from to
+    TForall var body -> mono variance =<< substitute variance var body
+    TExists var body -> mono variance =<< substitute (flipVariance variance) var body
   where
-    go = \case
+    flipVariance = \case
+        In -> Out
+        Out -> In
+        Inv -> Inv
+
+unMono :: MonoLayer -> Type
+unMono = \case
+    MName name -> TName name
+    MSkolem skolem -> TSkolem skolem
+    MUniVar uniVar -> TUniVar uniVar
+    MApp lhs rhs -> TApp lhs rhs
+    MFn from to -> TFn from to
+
+substitute :: Variance -> Name -> Type -> InfMonad Type
+substitute variance var ty = do
+    someVar <- freshSomething var variance
+    go someVar ty
+  where
+    go replacement = \case
         TVar v | v == var -> pure replacement
-        v@TVar{} -> pure v
-        TUniVar uni -> TUniVar uni <$ withUniVar uni (go >=> overrideUniVar uni)
+        TVar name -> pure $ TVar name
+        TUniVar uni -> TUniVar uni <$ withUniVar uni (go replacement >=> overrideUniVar uni)
         TForall v body
-            | v /= var -> TForall v <$> go body
+            | v /= var -> TForall v <$> go replacement body
             | otherwise -> pure $ TForall v body
         TExists v body
-            | v /= var -> TExists v <$> go body
+            | v /= var -> TExists v <$> go replacement body
             | otherwise -> pure $ TExists v body
-        TFn from to -> TFn <$> go from <*> go to
-        TApp lhs rhs -> TApp <$> go lhs <*> go rhs
+        TFn from to -> TFn <$> go replacement from <*> go replacement to
+        TApp lhs rhs -> TApp <$> go replacement lhs <*> go replacement rhs
         name@TName{} -> pure name
         skolem@TSkolem{} -> pure skolem
 
--- replace all occurences of a type variable with a fresh univar
-substituteUniVar :: Name -> Type -> InfMonad Type
-substituteUniVar var ty = do
-    uni <- freshUniVar
-    substitute (TUniVar uni) var ty
-
--- replace all occurences of a type variable with a fresh skolem
-substituteSkolem :: Name -> Type -> InfMonad Type
-substituteSkolem var ty = do
-    skolem <- freshSkolem var
-    substitute (TSkolem skolem) var ty
-
+    -- freshUniVar or freshSkolem, depending on variance
+    -- should it be the other way around?
+    --
+    -- out: forall a. Int -> a
+    -- in: forall a. a -> Int
+    freshSomething name = \case
+        In -> TUniVar <$> freshUniVar
+        Out -> TSkolem <$> freshSkolem name
+        Inv -> TSkolem <$> freshSkolem name
 
 -- `substituteTy` shouldn't be used for type vars, because it fails in cases like `forall a. (forall a. body)`
 -- normally those are removed by name resolution, but they may still occur when checking, say `f (f x)`
@@ -286,7 +332,6 @@ substituteTy from to = go
         v@TVar{} -> pure v
         skolem@TSkolem{} -> pure skolem
         name@TName{} -> pure name
-
 
 -- gets rid of all univars
 normalise :: Type -> InfMonad Type
@@ -337,8 +382,9 @@ inferTypeVars :: Type -> Type
 inferTypeVars = uncurry (foldr TForall) . second snd . go (HashSet.empty, HashSet.empty)
   where
     go acc@(supplied, new) = \case
-        TVar var | not $ HashSet.member var supplied -> (TVar var, (supplied, HashSet.insert var new))
-                 | otherwise -> (TVar var, acc)
+        TVar var
+            | not $ HashSet.member var supplied -> (TVar var, (supplied, HashSet.insert var new))
+            | otherwise -> (TVar var, acc)
         TForall var body -> first (TForall var) $ go (HashSet.insert var supplied, new) body
         TExists var body -> first (TExists var) $ go (HashSet.insert var supplied, new) body
         TFn from to ->
@@ -353,38 +399,25 @@ inferTypeVars = uncurry (foldr TForall) . second snd . go (HashSet.empty, HashSe
         skolem@TSkolem{} -> (skolem, acc)
         name@TName{} -> (name, acc)
 
-
 --
 
 subtype :: Type -> Type -> InfMonad ()
-subtype = \cases
-    v@(TVar _) _ -> typeError $ "unbound type variable " <> pretty v
-    _ v@(TVar _) -> typeError $ "unbound type variable " <> pretty v
-    lhs rhs | lhs == rhs -> pass -- simple cases, i.e. two type constructors, two univars or two exvars
-    (TFn inl outl) (TFn inr outr) -> do
-        subtype inr inl
-        subtype outl outr
-    (TApp lhs rhs) (TApp lhs' rhs') -> do
-        -- note that we assume the same variance for all type parameters
-        -- some kind of kind system is needed to track variance and prevent stuff like `Maybe a b`
-        subtype lhs lhs'
-        subtype rhs rhs'
-    lhs (TForall var rhs) -> do
-        rhs' <- substituteSkolem var rhs
-        subtype lhs rhs'
-    (TForall var lhs) rhs -> do
-        lhs' <- substituteUniVar var lhs
-        subtype lhs' rhs
-    lhs (TExists var rhs) -> do
-        rhs' <- substituteUniVar var rhs
-        subtype lhs rhs'
-    (TExists var lhs) rhs -> do
-        lhs' <- substituteSkolem var lhs
-        subtype lhs' rhs
-    lhs (TUniVar uni) -> solveOr lhs (subtype lhs) uni
-    (TUniVar uni) rhs -> solveOr rhs (`subtype` rhs) uni
-    lhs rhs -> typeError $ pretty lhs <> " is not a subtype of " <> pretty rhs
+subtype lhsTy rhsTy = join $ match <$> mono In lhsTy <*> mono Out rhsTy
   where
+    match = \cases
+        lhs rhs | lhs == rhs -> pass -- simple cases, i.e. two type constructors, two univars or two exvars
+        (MFn inl outl) (MFn inr outr) -> do
+            subtype inr inl
+            subtype outl outr
+        (MApp lhs rhs) (MApp lhs' rhs') -> do
+            -- note that we assume the same variance for all type parameters
+            -- some kind of kind system is needed to track variance and prevent stuff like `Maybe a b`
+            subtype lhs lhs'
+            subtype rhs rhs'
+        lhs (MUniVar uni) -> solveOr (unMono lhs) (subtype $ unMono lhs) uni
+        (MUniVar uni) rhs -> solveOr (unMono rhs) (`subtype` unMono rhs) uni
+        lhs rhs -> typeError $ pretty (unMono lhs) <> " is not a subtype of " <> pretty (unMono rhs)
+
     -- turns out it's different enough from `withUniVar`
     solveOr :: Type -> (Type -> InfMonad ()) -> UniVar -> InfMonad ()
     solveOr solveWith whenSolved uni = lookupUniVar uni >>= either (const $ solveUniVar uni solveWith) whenSolved
@@ -425,35 +458,27 @@ skolemsToExists, skolemsToForall :: Type -> InfMonad Type
             pure (TApp lhs' rhs', acc'')
         v@TVar{} -> pure (v, acc)
         name@TName{} -> pure (name, acc)
-        --terminal -> pure (terminal, acc)
 
 check :: Expr -> Type -> InfMonad ()
-check = \cases
-    (EName name) ty -> do
-        ty' <- lookupSig name
-        subtype ty' ty
-    (ECon name) ty -> do
-        ty' <- lookupSig name
-        subtype ty' ty
-    (ELambda arg body) (TFn from to) -> scoped do
-        -- `checkPattern` updates signatures of all mentioned variables
-        checkPattern arg from
-        check body to
-    (EAnn expr ty') ty -> do
-        subtype ty' ty
-        check expr ty'
-    expr (TForall var ty) -> do
-        ty' <- substituteSkolem var ty
-        check expr ty'
-    expr (TExists var ty) -> do
-        ty' <- substituteUniVar var ty
-        check expr ty'
-    expr ty -> do
-        ty' <- infer expr
-        subtype ty' ty
-
--- \f -> f () : (forall a. a -> a) -> ()
-
+check e = mono Out >=> match e
+  where
+    match = \cases
+        (EName name) ty -> do
+            ty' <- lookupSig name
+            subtype ty' $ unMono ty
+        (ECon name) ty -> do
+            ty' <- lookupSig name
+            subtype ty' $ unMono ty
+        (ELambda arg body) (MFn from to) -> scoped do
+            -- `checkPattern` updates signatures of all mentioned variables
+            checkPattern arg from
+            check body to
+        (EAnn expr ty') ty -> do
+            subtype ty' $ unMono ty
+            check expr ty'
+        expr ty -> do
+            ty' <- infer expr
+            subtype ty' $ unMono ty
 
 checkPattern :: Pattern -> Type -> InfMonad ()
 checkPattern = \cases
@@ -489,40 +514,29 @@ inferPattern = \case
   where
     -- conArgTypes and the zipM may be unified into a single function
     conArgTypes = lookupSig >=> go
-    go = \case
-        TFn arg rest -> second (arg :) <$> go rest
-        TForall var body -> go =<< substituteUniVar var body
-        TExists var body -> go =<< substituteSkolem var body
-        v@TVar{} -> typeError $ "unbound type var" <> pretty v
-        -- univars should never appear as the rightmost argument of a value constructor type
-        -- i.e. types of value constructors have the shape `a -> b -> c -> d -> ConcreteType a b c d`
-        -- 
-        -- solved univars cannot appear here either, since `lookupSig` on a pattern returns a type with no univars
-        uni@TUniVar{} -> typeError $ "unexpected univar " <> pretty uni <> " in a constructor type"
-        -- this kind of repetition is necessary to retain missing pattern warnings
-        name@TName{} -> pure (name, [])
-        ty@TApp{} -> pure (ty, [])
-        skolem@TSkolem{} -> pure (skolem, [])
-
-
+    go =
+        mono In >=> \case
+            MFn arg rest -> second (arg :) <$> go rest
+            -- univars should never appear as the rightmost argument of a value constructor type
+            -- i.e. types of value constructors have the shape `a -> b -> c -> d -> ConcreteType a b c d`
+            --
+            -- solved univars cannot appear here either, since `lookupSig` on a pattern returns a type with no univars
+            MUniVar uni -> typeError $ "unexpected univar " <> pretty (TUniVar uni) <> " in a constructor type"
+            -- this kind of repetition is necessary to retain missing pattern warnings
+            MName name -> pure (TName name, [])
+            MApp lhs rhs -> pure (TApp lhs rhs, [])
+            MSkolem skolem -> pure (TSkolem skolem, [])
 
 inferApp :: Type -> Expr -> InfMonad Type
-inferApp fTy arg = case fTy of
-    TForall v body -> do
-        var <- freshUniVar
-        fTy' <- substitute (TUniVar var) v body
-        inferApp fTy' arg
-    TExists v body -> do
-        skolem <- freshSkolem v
-        fTy' <- substitute (TSkolem skolem) v body
-        inferApp fTy' arg
-    TUniVar v -> do
-        from <- infer arg
-        to <- freshUniVar
-        lookupUniVar v >>= \case
-            Left _ -> do
-                solveUniVar v $ TFn from (TUniVar to)
-                pure $ TUniVar to
-            Right newTy -> inferApp newTy arg
-    TFn from to -> to <$ check arg from
-    _ -> typeError $ pretty fTy <> " is not a function type"
+inferApp fTy arg =
+    mono In fTy >>= \case
+        MUniVar v -> do
+            from <- infer arg
+            to <- freshUniVar
+            lookupUniVar v >>= \case
+                Left _ -> do
+                    solveUniVar v $ TFn from (TUniVar to)
+                    pure $ TUniVar to
+                Right newTy -> inferApp newTy arg
+        MFn from to -> to <$ check arg from
+        _ -> typeError $ pretty fTy <> " is not a function type"
