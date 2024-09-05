@@ -1,6 +1,7 @@
 {-# OPTIONS_GHC -Wno-unrecognised-pragmas #-}
 
 {-# HLINT ignore "Redundant bracket" #-}
+{-# LANGUAGE LambdaCase #-}
 module SmallCheckerSpec (spec) where
 
 import Data.Text qualified as Text
@@ -8,6 +9,7 @@ import Relude hiding (Type)
 import SmallChecker
 import Test.Hspec
 import SmallTestPrelude ()
+import Prettyprinter (pretty)
 
 infixr 2 -->
 (-->) :: Type -> Type -> Type
@@ -70,6 +72,34 @@ exprsToCheck =
         , TForall "'a" $ TForall "'b" $ TForall "'c" ("'c" --> "'a") --> ("'a" --> "'a" --> "'b") --> "'b"
         )
     ]
+{-
+
+    (:) id ids. The type of the first argument of (:) is a naked p, and we cannot from that figure out how to instantiate p. But the second argument has type [p] and, just like head we can see that (:) must be instantiated at (forall a.a->a). We could write (:) @(forall a. a->a) id ids, but that is much clumsier.
+    head ((:) id ids). To guide the instantiation of head we take a quick look at the argument; but this time the argument is itself an application. So we must recursively Quick Look into the argument ((:) id ids) to work out its result type (here [forall a. a->a]), and use that to decide how to instantiate head.
+    single id :: [forall a. a->a]. Here we cannot figure out how to instantiate single from its argument, but we can from its result.
+
+-}
+quickLookExamples :: [(Text, Expr)]
+quickLookExamples =
+    [ ("cons id ids", "cons" $$ "id" $$ "ids")
+    , ("head (cons id ids)", "head" $$ ("cons" $$ "id" $$ "ids"))
+    , ("single id : List (∀a. a -> a)", EAnn ("single" $$ "id") $ list $ TForall "a" $ "a" --> "a")
+    , ("(\\x -> x) ids)", ELambda "x" "x" $$ "ids")
+    , ("(???) wikiF (Just reverse)", "wikiF" $$ ("Just" $$ "reverse"))
+    ]
+
+quickLookDefs :: HashMap Name Type
+quickLookDefs = defaultEnv <> fromList
+    [ ("head", TForall "'a" $ list "'a" --> "Maybe" $: "'a")
+    , ("cons", TForall "'a" $ "'a" --> (list "'a" --> list "'a"))
+    , ("single", TForall "'a" $ "'a" --> list "'a")
+    , ("ids", list $ TForall "'a" $ "'a" --> "'a")
+    , ("reverse", TForall "'a" $ list "'a" --> "'a")
+    , ("wikiF", "Maybe" $: TForall "'a" (list "'a" --> list "'a") --> "Maybe" $: ("Tuple" $: ("List" $: "Int") $: ("List" $: "Char")))
+    ]
+
+list :: Type -> Type
+list ty = "List" $: ty
 
 spec :: Spec
 spec = do
@@ -79,3 +109,5 @@ spec = do
         runDefault (normalise =<< infer expr) `shouldSatisfy` isLeft
     describe "testing check" $ for_ exprsToCheck \(txt, expr, ty) -> it (Text.unpack txt) do
         runDefault (check expr ty) `shouldSatisfy` isRight
+    describe "quick look-esque impredicativity" $ for_ quickLookExamples \(txt, expr) -> it (Text.unpack txt) do
+        run quickLookDefs (check expr =<< normalise =<< infer expr) `shouldSatisfy` isRight

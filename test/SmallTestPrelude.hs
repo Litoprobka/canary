@@ -18,7 +18,7 @@ matchCase whenUpper whenLower str@(h : _)
 
 instance IsString Name where
     fromString ('\'' : rest) = flip Name 0 $ fromString rest
-    fromString str = str & matchCase (flip Name 0) (error "IsString Name should only be used for type variables and constructor patterns")
+    fromString str = Name (fromString str) 0
 
 instance IsString Expr where
     -- fromString ('\'' : rest) = rest & matchCase (E.Variant . ("'" <>)) (error "type variable at value level")

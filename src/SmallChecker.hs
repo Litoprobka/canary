@@ -10,6 +10,8 @@ import Data.HashMap.Strict qualified as HashMap
 import Data.HashSet qualified as HashSet
 import Data.Text qualified as Text
 import Relude hiding (Type)
+import Prettyprinter (Pretty, pretty, line, parens, (<+>), Doc)
+import Prettyprinter.Render.Text (putDoc)
 
 -- a disambiguated name
 data Name = Name Text Int deriving (Show, Eq, Generic, Hashable)
@@ -54,7 +56,7 @@ data MonoLayer
     | MFn Type Type
     deriving (Show, Eq)
 
-newtype TypeError = TypeError Text deriving (Show)
+newtype TypeError = TypeError (Doc ()) deriving (Show)
 
 data InfState = InfState
     { nextUniVarId :: Int
@@ -63,29 +65,34 @@ data InfState = InfState
     , currentScope :: Scope
     , sigs :: HashMap Name Type -- known bindings and type constructors
     , vars :: HashMap UniVar (Either Scope Type) -- contains either the scope of an unsolved var or a type
-    }
+    } deriving (Show)
 
 type InfMonad = ExceptT TypeError (State InfState)
 
-pretty :: Type -> Text
-pretty = go False
-  where
-    go parens = \case
-        TVar (Name name n) -> name <> postfix n "#"
-        TName (Name name n) -> name <> postfix n "#"
-        TSkolem (Skolem (Name name n)) -> name <> "?" <> postfix n ""
-        TUniVar (UniVar n) -> "#" <> show n
-        TForall name body -> mkParens $ "∀" <> go parens (TVar name) <> ". " <> go parens body
-        TExists name body -> mkParens $ "∃" <> go parens (TVar name) <> ". " <> go parens body
-        TApp lhs rhs -> mkParens $ go False lhs <> " " <> go True rhs -- at some point I'm gonna need proper precedence rules
-        TFn from to -> mkParens $ go True from <> " -> " <> go False to
-      where
-        mkParens txt
-            | parens = "(" <> txt <> ")"
-            | otherwise = txt
+instance Pretty Type where
+    pretty = go 0 where
+        go prec = \case
+            TVar name -> "'" <> pretty name
+            TName name -> pretty name
+            TSkolem skolem -> pretty skolem
+            TUniVar uni -> pretty uni
+            TForall name body -> parensWhen 1 $ "∀" <> pretty name <> "." <+> pretty body
+            TExists name body -> parensWhen 1 $ "∃" <> pretty name <> "." <+> pretty body
+            TApp lhs rhs -> parensWhen 3 $ go 2 lhs <+> go 3 rhs
+            TFn from to -> parensWhen 2 $ go 2 from <+> "->" <+> pretty to
+         where
+          parensWhen minPrec
+            | prec >= minPrec = parens
+            | otherwise = id
 
-    postfix 0 _ = ""
-    postfix n sym = sym <> show n
+instance Pretty Name where
+    pretty (Name name 0) = pretty name
+    pretty (Name name n) = pretty name <> "#" <> pretty n
+instance Pretty UniVar where
+    pretty (UniVar n) = "#" <> pretty n
+instance Pretty Skolem where
+    pretty (Skolem (Name name 0)) = pretty name <> "?"
+    pretty (Skolem (Name name n)) = pretty name <> "?" <> pretty n
 
 -- helpers
 
@@ -105,12 +112,26 @@ run env =
             }
         . runExceptT
 
+runWithFinalEnv :: HashMap Name Type -> InfMonad a -> (Either TypeError a, InfState)
+runWithFinalEnv env =
+    flip runState
+        InfState
+            { nextUniVarId = 0
+            , nextSkolemId = 0
+            , nextTypeVar = Name "a" 0
+            , currentScope = Scope 0
+            , sigs = env
+            , vars = HashMap.empty
+            }
+        . runExceptT
+
 defaultEnv :: HashMap Name Type
 defaultEnv =
     HashMap.fromList
         [ (Name "()" 0, TName $ Name "()" 0)
         , (Name "Nothing" 0, TForall a' $ TName (Name "Maybe" 0) `TApp` a)
         , (Name "Just" 0, TForall a' $ a `TFn` (TName (Name "Maybe" 0) `TApp` a))
+        , (Name "id" 0, TForall a' $ a `TFn` a)
         ]
   where
     a' = Name "a" 0
@@ -120,11 +141,14 @@ defaultEnv =
 -- b = TVar b'
 
 inferIO :: Expr -> IO ()
-inferIO expr = case runDefault $ fmap pretty . normalise =<< infer expr of
-    Left (TypeError err) -> putTextLn err
-    Right txt -> putTextLn txt
+inferIO = inferIO' defaultEnv
 
-typeError :: Text -> InfMonad a
+inferIO' :: HashMap Name Type -> Expr -> IO ()
+inferIO' env expr = case run env $ fmap pretty . normalise =<< infer expr of
+    Left (TypeError err) -> putDoc $ err <> line
+    Right txt -> putDoc $ txt <> line
+
+typeError :: Doc () -> InfMonad a
 typeError err = ExceptT $ pure (Left $ TypeError err)
 
 freshUniVar :: InfMonad UniVar
@@ -146,7 +170,7 @@ freshTypeVar = gets (.nextTypeVar) <* modify \s -> s{nextTypeVar = inc s.nextTyp
         | otherwise = Name "a" (succ n)
 
 lookupUniVar :: UniVar -> InfMonad (Either Scope Type)
-lookupUniVar uni = maybe (typeError $ "missing univar " <> pretty (TUniVar uni)) pure . HashMap.lookup uni =<< gets (.vars)
+lookupUniVar uni = maybe (typeError $ "missing univar " <> pretty uni) pure . HashMap.lookup uni =<< gets (.vars)
 
 withUniVar :: UniVar -> (Type -> InfMonad a) -> InfMonad ()
 withUniVar uni f =
@@ -164,7 +188,7 @@ alterUniVar :: Bool -> UniVar -> Type -> InfMonad ()
 alterUniVar override uni ty = do
     -- here comes the magic. If the new type contains other univars, we change their scope
     lookupUniVar uni >>= \case
-        Right _ | not override -> typeError $ "Internal error (probably a bug): attempted to solve a solved univar " <> pretty (TUniVar uni)
+        Right _ | not override -> typeError $ "Internal error (probably a bug): attempted to solve a solved univar " <> pretty uni
         Right _ -> pass
         Left scope -> rescope scope ty
     modify \s -> s{vars = HashMap.insert uni (Right ty) s.vars}
@@ -253,15 +277,16 @@ forallScope action = do
 
 data Variance = In | Out | Inv
 
-{- | Unwraps a polytype until a simple constructor is encountered
--- >> mono Out (forall a. a -> a)
--- ?a -> ?a
--- >> mono In (forall a. a -> a)
--- #a -> #a
--- >> mono Out (forall a. forall b. a -> b -> a)
--- ?a -> ?b -> ?a
--- >> mono Out (forall a. (forall b. b -> a) -> a)
--- (forall b. b -> ?a) -> ?a
+{-| Unwraps a polytype until a simple constructor is encountered  
+
+> mono Out (forall a. a -> a)  
+> -- ?a -> ?a  
+> mono In (forall a. a -> a)  
+> -- #a -> #a  
+> mono Out (forall a. forall b. a -> b -> a)  
+> -- ?a -> ?b -> ?a  
+> mono Out (forall a. (forall b. b -> a) -> a)  
+> -- (forall b. b -> ?a) -> ?a  
 -}
 mono :: Variance -> Type -> InfMonad MonoLayer
 mono variance = \case
@@ -340,7 +365,7 @@ normalise = uniVarsToForall >=> skolemsToExists >=> go
     go = \case
         TUniVar uni ->
             lookupUniVar uni >>= \case
-                Left _ -> typeError $ "dangling univar " <> pretty (TUniVar uni)
+                Left _ -> typeError $ "dangling univar " <> pretty uni
                 Right body -> go body
         TForall var body -> TForall var <$> go body
         TExists var body -> TExists var <$> go body
@@ -351,7 +376,7 @@ normalise = uniVarsToForall >=> skolemsToExists >=> go
         skolem@TSkolem{} -> typeError $ "skolem " <> pretty skolem <> " remains in code"
 
     -- this is an alternative to forallScope that's only suitable at the top level
-    uniVarsToForall ty = uncurry (foldr TForall) <$> uniGo HashSet.empty ty
+uniVarsToForall ty = uncurry (foldr TForall) <$> uniGo HashSet.empty ty where
     uniGo acc = \case
         TUniVar uni ->
             lookupUniVar uni >>= \case
@@ -402,7 +427,10 @@ inferTypeVars = uncurry (foldr TForall) . second snd . go (HashSet.empty, HashSe
 --
 
 subtype :: Type -> Type -> InfMonad ()
-subtype lhsTy rhsTy = join $ match <$> mono In lhsTy <*> mono Out rhsTy
+subtype = \cases
+    lhs (TUniVar uni) -> solveOr lhs (subtype lhs) uni
+    (TUniVar uni) rhs -> solveOr rhs (`subtype` rhs) uni
+    lhsTy rhsTy -> join $ match <$> mono In lhsTy <*> mono Out rhsTy
   where
     match = \cases
         lhs rhs | lhs == rhs -> pass -- simple cases, i.e. two type constructors, two univars or two exvars
@@ -412,10 +440,11 @@ subtype lhsTy rhsTy = join $ match <$> mono In lhsTy <*> mono Out rhsTy
         (MApp lhs rhs) (MApp lhs' rhs') -> do
             -- note that we assume the same variance for all type parameters
             -- some kind of kind system is needed to track variance and prevent stuff like `Maybe a b`
+            -- higher-kinded types are also problematic when it comes to variance, i.e.
+            -- is `f a` a subtype of `g a`?
             subtype lhs lhs'
             subtype rhs rhs'
-        lhs (MUniVar uni) -> solveOr (unMono lhs) (subtype $ unMono lhs) uni
-        (MUniVar uni) rhs -> solveOr (unMono rhs) (`subtype` unMono rhs) uni
+
         lhs rhs -> typeError $ pretty (unMono lhs) <> " is not a subtype of " <> pretty (unMono rhs)
 
     -- turns out it's different enough from `withUniVar`
@@ -445,7 +474,12 @@ skolemsToExists, skolemsToForall :: Type -> InfMonad Type
             Nothing -> do
                 tyVar <- freshTypeVar
                 pure (TVar tyVar, HashMap.insert skolem tyVar acc)
-        TUniVar uni -> pure (TUniVar uni, acc) -- I'm not sure what to do with a univar boundary
+        TUniVar uni -> lookupUniVar uni >>= \case
+            Left _ -> pure (TUniVar uni, acc)
+            Right body -> do
+                (body', acc') <- go acc body
+                overrideUniVar uni body'
+                pure (body', acc')
         TForall var body -> first (TForall var) <$> go acc body
         TExists var body -> first (TExists var) <$> go acc body
         TFn from to -> do
@@ -521,7 +555,7 @@ inferPattern = \case
             -- i.e. types of value constructors have the shape `a -> b -> c -> d -> ConcreteType a b c d`
             --
             -- solved univars cannot appear here either, since `lookupSig` on a pattern returns a type with no univars
-            MUniVar uni -> typeError $ "unexpected univar " <> pretty (TUniVar uni) <> " in a constructor type"
+            MUniVar uni -> typeError $ "unexpected univar " <> pretty uni <> " in a constructor type"
             -- this kind of repetition is necessary to retain missing pattern warnings
             MName name -> pure (TName name, [])
             MApp lhs rhs -> pure (TApp lhs rhs, [])

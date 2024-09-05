@@ -1,6 +1,6 @@
 {-# LANGUAGE TypeFamilies #-}
 
-module Syntax.Row (OpenName, Row, empty, lookup, has) where
+module Syntax.Row (OpenName, Row, empty, lookup, has, sortedRow) where
 
 import Data.HashMap.Strict qualified as HashMap
 import Data.Sequence.NonEmpty (NESeq)
@@ -23,6 +23,9 @@ lookup k (Row fields) = HashMap.lookup k fields <&> NESeq.head
 
 has :: Eq a => OpenName -> a -> Row a -> Bool
 has k v = (Just v ==) . lookup k
+
+sortedRow :: Row a -> [(OpenName, a)]
+sortedRow (Row fields) = fields & HashMap.toList & sortOn fst & concatMap \(k, vs) -> (k,) <$> toList vs
 
 instance IsList (Row a) where
     type Item (Row a) = (OpenName, a)

@@ -30,6 +30,8 @@ dependencies:
 - megaparsec >= 9.5.0 && < 10
 - nonempty-containers
 - parser-combinators >= 1.3 && < 2
+- prettyprinter >=1.7 && <2
+- prettyprinter-ansi-terminal
 - template-haskell
 - these >= 1.2 && < 2
 
