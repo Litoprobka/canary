@@ -9,7 +9,7 @@ import Control.Monad (foldM)
 import Data.HashMap.Strict qualified as HashMap
 import Data.HashSet qualified as HashSet
 import Data.Text qualified as Text
-import Prettyprinter (Doc, Pretty, line, parens, pretty, (<+>))
+import Prettyprinter (Doc, Pretty, line, parens, pretty, (<+>), sep, braces)
 import Prettyprinter.Render.Text (putDoc)
 import Relude hiding (Type)
 import Data.Traversable (for)
@@ -130,6 +130,18 @@ instance Pretty UniVar where
 instance Pretty Skolem where
     pretty (Skolem (Name name 0)) = pretty name <> "?"
     pretty (Skolem (Name name n)) = pretty name <> "?" <> pretty n
+
+instance Pretty Pattern where
+    pretty = go 0 where
+        go :: Int -> Pattern -> Doc ann
+        go n = \case
+            PVar name -> pretty name
+            PCon name args -> parensWhen 1 $ pretty name <+> sep (map (go 1) args)
+            PList items -> braces $ sep $ map pretty items
+          where
+            parensWhen minPrec
+                | n >= minPrec = parens
+                | otherwise = id
 
 -- helpers
 
@@ -647,7 +659,7 @@ inferPattern = \case
         pure uni
     p@(PCon name args) -> do
         (resultType, argTypes) <- conArgTypes name
-        unless (length argTypes == length args) $ typeError $ "incorrect arg count in pattern " <> show p
+        unless (length argTypes == length args) $ typeError $ "incorrect arg count in pattern" <+> pretty p
         zipWithM_ checkPattern args argTypes
         pure resultType
     PList pats -> do
