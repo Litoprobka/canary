@@ -1,10 +1,10 @@
 {-# LANGUAGE OverloadedLists #-}
 
-module SmallCheckerSpec (spec) where
+module TypeCheckerSpec (spec) where
 
 import Data.Text qualified as Text
 import Relude
-import SmallChecker
+import TypeChecker
 import TestPrelude ()
 import Test.Hspec
 import Syntax hiding (Name)

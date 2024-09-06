@@ -5,6 +5,9 @@ module CheckerTypes (Name(..), UniVar(..), Skolem(..), Scope(..)) where
 import Relude
 import Prettyprinter
 
+-- this file is a bit of a crutch. Perhaps it's better to move the definitions to Type or TypeChecker
+-- however, they don't really to Type, and moving them to TypeChecker introduces a cyclic dependency (which may or may not be fine)
+
 -- a disambiguated name
 data Name = Name Text Int deriving (Show, Eq, Generic, Hashable)
 newtype UniVar = UniVar Int

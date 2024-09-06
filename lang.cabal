@@ -29,13 +29,13 @@ library
       Lexer
       NameResolution
       Parser
-      SmallChecker
       Syntax
       Syntax.Declaration
       Syntax.Expression
       Syntax.Pattern
       Syntax.Row
       Syntax.Type
+      TypeChecker
   other-modules:
       Paths_lang
   hs-source-dirs:
@@ -86,8 +86,8 @@ test-suite lang-test
   main-is: Spec.hs
   other-modules:
       ParserSpec
-      SmallCheckerSpec
       TestPrelude
+      TypeCheckerSpec
       Paths_lang
   hs-source-dirs:
       test

@@ -2,7 +2,7 @@
 {-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE OverloadedRecordDot #-}
 
-module SmallChecker (run, runDefault, runWithFinalEnv, defaultEnv, inferIO, infer, inferPattern, check, checkPattern, inferTypeVars, normalise) where
+module TypeChecker (run, runDefault, runWithFinalEnv, defaultEnv, inferIO, infer, inferPattern, check, checkPattern, inferTypeVars, normalise) where
 
 import CheckerTypes
 import Control.Monad (foldM)
