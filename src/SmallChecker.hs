@@ -11,7 +11,7 @@ import Data.HashSet qualified as HashSet
 import Data.Text qualified as Text
 import Prettyprinter (Doc, Pretty, line, parens, pretty, (<+>), sep, braces)
 import Prettyprinter.Render.Text (putDoc)
-import Relude hiding (Type)
+import Relude hiding (bool, Type)
 import Data.Traversable (for)
 
 -- a disambiguated name
@@ -31,8 +31,8 @@ data Expr
     | ELambda Pattern Expr
     | EAnn Expr Type
     | ECase Expr (NonEmpty (Pattern, Expr))
-    | EIf Expr Expr Expr -- currently hardcoded to use `TName $ Name "Bool" 0`
-    | EList [Expr] -- same as above. `TName $ Name "List" 0`
+    | EIf Expr Expr Expr
+    | EList [Expr]
     deriving (Show, Eq)
 
 {-
@@ -89,6 +89,11 @@ data MonoLayer
 
 newtype TypeError = TypeError (Doc ()) deriving (Show)
 
+data Builtins = Builtins
+    { bool :: Name
+    , list :: Name
+    } deriving (Show)
+
 data InfState = InfState
     { nextUniVarId :: Int
     , nextSkolemId :: Int
@@ -99,7 +104,7 @@ data InfState = InfState
     }
     deriving (Show)
 
-type InfMonad = ExceptT TypeError (State InfState)
+type InfMonad = ExceptT TypeError (ReaderT Builtins (State InfState))
 
 instance Pretty Type where
     pretty = go 0
@@ -149,17 +154,7 @@ runDefault :: InfMonad a -> Either TypeError a
 runDefault = run defaultEnv
 
 run :: HashMap Name Type -> InfMonad a -> Either TypeError a
-run env =
-    evaluatingState
-        InfState
-            { nextUniVarId = 0
-            , nextSkolemId = 0
-            , nextTypeVar = Name "a" 0
-            , currentScope = Scope 0
-            , sigs = env
-            , vars = HashMap.empty
-            }
-        . runExceptT
+run env = fst . runWithFinalEnv env
 
 runWithFinalEnv :: HashMap Name Type -> InfMonad a -> (Either TypeError a, InfState)
 runWithFinalEnv env =
@@ -173,6 +168,7 @@ runWithFinalEnv env =
             , sigs = env
             , vars = HashMap.empty
             }
+        . flip runReaderT Builtins{bool = Name "Bool" 0, list = Name "List" 0}
         . runExceptT
 
 defaultEnv :: HashMap Name Type
@@ -602,7 +598,8 @@ check e = mono Out >=> match e
             subtype ty' $ unMono ty
             check expr ty'
         (EIf cond true false) ty -> do
-            check cond $ TName (Name "Bool" 0)
+            bool <- asks (.bool)
+            check cond $ TName bool
             check true $ unMono ty
             check false $ unMono ty
         (ECase arg matches) ty -> do
@@ -610,6 +607,11 @@ check e = mono Out >=> match e
             for_ matches \(pat, body) -> do
                 checkPattern pat argTy
                 check body $ unMono ty
+        (EList items) ty -> do
+            list <- asks (.list)
+            case ty of
+                MApp (TName name) itemTy | name == list -> for_ items (`check` itemTy)
+                other -> typeError $ "List is not a subtype of" <+> pretty other
         expr ty -> do
             ty' <- infer expr
             subtype ty' $ unMono ty
@@ -634,7 +636,8 @@ infer = \case
         TFn argTy <$> infer body
     EAnn expr ty -> ty <$ check expr ty
     EIf cond true false -> do
-        check cond $ TName (Name "Bool" 0)
+        bool <- asks (.bool)
+        check cond $ TName bool
         trueTy <- infer true
         falseTy <- infer false
         supertype trueTy falseTy
@@ -648,8 +651,9 @@ infer = \case
             infer body
         foldM supertype firstTy rest
     EList items -> do
-        result <- TUniVar <$> freshUniVar
-        foldM supertype result =<< traverse infer items
+        itemTy <- TUniVar <$> freshUniVar
+        list <- asks (.list)
+        TApp (TName list) <$> (foldM supertype itemTy =<< traverse infer items)
 
 inferPattern :: Pattern -> InfMonad Type
 inferPattern = \case
@@ -664,7 +668,8 @@ inferPattern = \case
         pure resultType
     PList pats -> do
         result <- TUniVar <$> freshUniVar
-        foldM supertype result =<< traverse inferPattern pats
+        list <- asks (.list)
+        TApp (TName list) <$> (foldM supertype result =<< traverse inferPattern pats)
   where
     -- conArgTypes and the zipM may be unified into a single function
     conArgTypes = lookupSig >=> go
