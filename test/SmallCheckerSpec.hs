@@ -1,7 +1,5 @@
 {-# OPTIONS_GHC -Wno-unrecognised-pragmas #-}
-
-{-# HLINT ignore "Redundant bracket" #-}
-{-# LANGUAGE LambdaCase #-}
+{-# LANGUAGE OverloadedLists #-}
 module SmallCheckerSpec (spec) where
 
 import Data.Text qualified as Text
@@ -9,7 +7,6 @@ import Relude hiding (Type)
 import SmallChecker
 import Test.Hspec
 import SmallTestPrelude ()
-import Prettyprinter (pretty)
 
 infixr 2 -->
 (-->) :: Type -> Type -> Type
@@ -46,6 +43,8 @@ exprs =
         , ELambda "x" $ EAnn (ELambda "y" "()") (TForall "'a" $ "Maybe" $: "'a" --> "()") $$ "x"
         )
     , ("\\(Just x) -> x", ELambda (PCon "Just" ["x"]) "x")
+    , ("\\def mb -> case mb of { Nothing -> def; Just x -> x }", ELambda "def" $ ELambda "mb" $ ECase "mb" [(PCon "Nothing" [], "def"), (PCon "Just" ["x"], "x")])
+    , ("\\cond -> case cond of { True -> id; False -> reverse }", ELambda "cond" $ ECase "cond" [(PCon "True" [], "id"), (PCon "False" [], "reverse")])
     ]
 
 errorExprs :: [(Text, Expr)]
@@ -62,7 +61,7 @@ exprsToCheck =
     , ("Nothing : Maybe (∀a. a)", "Nothing", "Maybe" $: TForall "'a" "'a")
     , ("Nothing : Maybe (∃a. a)", "Nothing", "Maybe" $: TExists "'a" "'a")
     , ("() : ∃a. a", "()", TExists "'a" "'a")
-    , ("\\x -> () : (∃a. a) -> ()", ELambda "x" "()", (TExists "'a" "'a") --> "()")
+    , ("\\x -> () : (∃a. a) -> ()", ELambda "x" "()", TExists "'a" "'a" --> "()")
     , ("\\x -> Just x : (∃a. a -> Maybe ())", ELambda "x" $ "Just" $$ "x", TExists "'a" $ "'a" --> "Maybe" $: "()")
     , ("\\x -> Just x : (∃a. a -> Maybe a)", ELambda "x" $ "Just" $$ "x", TExists "'a" $ "'a" --> "Maybe" $: "'a")
     , ("\\f -> f () : (∀a. a -> a) -> ()", ELambda "f" $ "f" $$ "()", TForall "'a" ("'a" --> "'a") --> "()")
@@ -85,7 +84,7 @@ quickLookExamples =
     , ("head (cons id ids)", "head" $$ ("cons" $$ "id" $$ "ids"))
     , ("single id : List (∀a. a -> a)", EAnn ("single" $$ "id") $ list $ TForall "a" $ "a" --> "a")
     , ("(\\x -> x) ids)", ELambda "x" "x" $$ "ids")
-    , ("(???) wikiF (Just reverse)", "wikiF" $$ ("Just" $$ "reverse"))
+    , ("wikiF (Just reverse)", "wikiF" $$ ("Just" $$ "reverse"))
     ]
 
 quickLookDefs :: HashMap Name Type
@@ -94,7 +93,6 @@ quickLookDefs = defaultEnv <> fromList
     , ("cons", TForall "'a" $ "'a" --> (list "'a" --> list "'a"))
     , ("single", TForall "'a" $ "'a" --> list "'a")
     , ("ids", list $ TForall "'a" $ "'a" --> "'a")
-    , ("reverse", TForall "'a" $ list "'a" --> "'a")
     , ("wikiF", "Maybe" $: TForall "'a" (list "'a" --> list "'a") --> "Maybe" $: ("Tuple" $: ("List" $: "Int") $: ("List" $: "Char")))
     ]
 
