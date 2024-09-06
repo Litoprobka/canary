@@ -1,122 +1,133 @@
 {-# LANGUAGE OverloadedLists #-}
-{-# OPTIONS_GHC -Wno-unrecognised-pragmas #-}
 
 module SmallCheckerSpec (spec) where
 
 import Data.Text qualified as Text
-import Relude hiding (Type)
+import Relude
 import SmallChecker
-import SmallTestPrelude ()
+import TestPrelude ()
 import Test.Hspec
+import Syntax hiding (Name)
+import Syntax.Expression qualified as E
+import Syntax.Type qualified as T
+import Syntax.Pattern qualified as P
+import CheckerTypes
 
 infixr 2 -->
-(-->) :: Type -> Type -> Type
-(-->) = TFn
+(-->) :: Type' n -> Type' n -> Type' n
+(-->) = T.Function
 
 infixl 1 $$
-($$) :: Expr -> Expr -> Expr
-($$) = EApp
+($$) :: Expression n -> Expression n -> Expression n
+($$) = E.Application
 
 infixl 3 $:
-($:) :: Type -> Type -> Type
-($:) = TApp
+($:) :: Type' n -> Type' n -> Type' n
+($:) = T.Application
 
-exprs :: [(Text, Expr)]
+λ :: Pattern n -> Expression n -> Expression n
+λ = E.Lambda
+
+(∀) :: n -> Type' n -> Type' n
+(∀) = T.Forall
+
+(∃) :: n -> Type' n -> Type' n
+(∃) = T.Exists
+
+con :: n -> [Pattern n] -> Pattern n
+con = P.Constructor
+
+exprs :: [(Text, Expression Name)]
 exprs =
-    [ ("\\x f -> f x", ELambda "x" $ ELambda "f" $ EApp "f" "x")
-    , ("\\x f -> f (f x)", ELambda "x" $ ELambda "f" $ "f" $$ EApp "f" "x")
-    , ("\\x f -> f x x", ELambda "x" $ ELambda "f" $ "f" $$ "x" $$ "x")
-    , ("\\f x -> f x", ELambda "f" $ ELambda "x" $ EApp "f" "x")
-    , ("\\f g x -> f (g x)", ELambda "f" $ ELambda "g" $ ELambda "x" $ "f" $$ EApp "g" "x")
-    , ("\\x y -> x (\\a -> x (y a a))", ELambda "x" $ ELambda "y" $ EApp "x" $ ELambda "a" $ "y" $$ "a" $$ "a")
-    , ("\\a b c -> c (b a) (c a a)", ELambda "a" $ ELambda "b" $ ELambda "c" $ "c" $$ ("b" $$ "a") $$ ("c" $$ "a" $$ "a"))
+    [ ("\\x f -> f x", λ "x" $ λ "f" $ "f" $$ "x")
+    , ("\\x f -> f (f x)", λ "x" $ λ "f" $ "f" $$ ("f" $$ "x"))
+    , ("\\x f -> f x x", λ "x" $ λ "f" $ "f" $$ "x" $$ "x")
+    , ("\\f x -> f x", λ "f" $ λ "x" $ "f" $$ "x")
+    , ("\\f g x -> f (g x)", λ "f" $ λ "g" $ λ "x" $ "f" $$ ("g" $$ "x"))
+    , ("\\x y -> x (\\a -> x (y a a))", λ "x" $ λ "y" $ "x" $$ λ "a" ("y" $$ "a" $$ "a"))
+    , ("\\a b c -> c (b a) (c a a)", λ "a" $ λ "b" $ λ "c" $ "c" $$ ("b" $$ "a") $$ ("c" $$ "a" $$ "a"))
     ,
         ( "\\a b -> a (\\x -> b x) (\\z -> a b b) ()"
-        , ELambda "a" $ ELambda "b" $ "a" $$ ELambda "x" ("b" $$ "x") $$ ELambda "z" ("a" $$ "b" $$ "b") $$ "()"
+        , λ "a" $ λ "b" $ "a" $$ λ "x" ("b" $$ "x") $$ λ "z" ("a" $$ "b" $$ "b") $$ "()"
         )
-    , ("\\x -> Just x", ELambda "x" $ "Just" $$ "x")
-    , ("\\x -> Just (Just x)", ELambda "x" $ "Just" $$ ("Just" $$ "x"))
-    , ("\\x -> Just (Just Nothing)", ELambda "x" $ "Just" $$ ("Just" $$ "Nothing"))
+    , ("\\x -> Just x", λ "x" $ "Just" $$ "x")
+    , ("\\x -> Just (Just x)", λ "x" $ "Just" $$ ("Just" $$ "x"))
+    , ("\\x -> Just (Just Nothing)", λ "x" $ "Just" $$ ("Just" $$ "Nothing"))
     , ("Just", "Just")
-    , ("\\y -> () : forall a. Maybe a -> ()", EAnn (ELambda "y" "()") $ TForall "'a" $ "Maybe" $: "'a" --> "()")
+    , ("\\y -> () : forall a. Maybe a -> ()", E.Annotation (λ "y" "()") $ (∀) "'a" $ "Maybe" $: "'a" --> "Unit")
     ,
         ( "\\x -> ((\\y -> ()) : forall a. Maybe a -> ()) x"
-        , ELambda "x" $ EAnn (ELambda "y" "()") (TForall "'a" $ "Maybe" $: "'a" --> "()") $$ "x"
+        , λ "x" $ E.Annotation (λ "y" "()") ((∀) "'a" $ "Maybe" $: "'a" --> "Unit") $$ "x"
         )
-    , ("\\(Just x) -> x", ELambda (PCon "Just" ["x"]) "x")
+    , ("\\(Just x) -> x", λ (con "Just" ["x"]) "x")
     ,
         ( "\\def mb -> case mb of { Nothing -> def; Just x -> x }"
-        , ELambda "def" $ ELambda "mb" $ ECase "mb" [(PCon "Nothing" [], "def"), (PCon "Just" ["x"], "x")]
+        , λ "def" $ λ "mb" $ E.Case "mb" [("Nothing", "def"), (con "Just" ["x"], "x")]
         )
     ,
         ( "\\cond -> case cond of { True -> id; False -> reverse }"
-        , ELambda "cond" $ ECase "cond" [(PCon "True" [], "id"), (PCon "False" [], "reverse")]
+        , λ "cond" $ E.Case "cond" [("True", "id"), ("False", "reverse")]
         )
-    , ("\\x y -> [x, y]", ELambda "x" $ ELambda "y" $ EList ["x", "y"])
-    , ("\\x y -> [x : ∀'a. 'a -> 'a, y]", ELambda "x" $ ELambda "y" $ EList [EAnn "x" (TForall "'a" $ "'a" --> "'a"), "y"])
-    , ("[\\() -> (), id]", EList ["id", ELambda (PCon "()" []) "()"])
+    , ("\\x y -> [x, y]", λ "x" $ λ "y" $ E.List ["x", "y"])
+    , ("\\x y -> [x : ∀'a. 'a -> 'a, y]", λ "x" $ λ "y" $ E.List [E.Annotation "x" ((∀) "'a" $ "'a" --> "'a"), "y"])
+    , ("[\\() -> (), id]", E.List ["id", λ (con "()" []) "()"])
     ]
 
-errorExprs :: [(Text, Expr)]
+errorExprs :: [(Text, Expression Name)]
 errorExprs =
     [
         ( "\\x y z -> z (y x) (x y) (x y ())"
-        , ELambda "x" $ ELambda "y" $ ELambda "z" $ "z" $$ ("y" $$ "x") $$ ("x" $$ "y") $$ ("x" $$ "y" $$ "()")
+        , λ "x" $ λ "y" $ λ "z" $ "z" $$ ("y" $$ "x") $$ ("x" $$ "y") $$ ("x" $$ "y" $$ "()")
         )
-    , ("\\f x y -> f x (f y)", ELambda "f" $ ELambda "x" $ ELambda "y" $ "f" $$ "x" $$ ("f" $$ "y"))
+    , ("\\f x y -> f x (f y)", λ "f" $ λ "x" $ λ "y" $ "f" $$ "x" $$ ("f" $$ "y"))
     , -- unless we get some magical rank-n inference, this should fail
-      ("\\f g -> g (f ()) (f Nothing)", ELambda "f" $ ELambda "g" $ "g" $$ EApp "f" "()" $$ EApp "f" "Nothing")
+      ("\\f g -> g (f ()) (f Nothing)", λ "f" $ λ "g" $ "g" $$ ("f" $$ "()") $$ ("f" $$ "Nothing"))
     ]
 
-exprsToCheck :: [(Text, Expr, Type)]
+exprsToCheck :: [(Text, Expression Name, Type' Name)]
 exprsToCheck =
-    [ ("Nothing : ∀a. Maybe a", "Nothing", TForall "'a" $ "Maybe" $: "'a")
-    , ("Nothing : Maybe (∀a. a)", "Nothing", "Maybe" $: TForall "'a" "'a")
-    , ("Nothing : Maybe (∃a. a)", "Nothing", "Maybe" $: TExists "'a" "'a")
-    , ("() : ∃a. a", "()", TExists "'a" "'a")
-    , ("\\x -> () : (∃a. a) -> ()", ELambda "x" "()", TExists "'a" "'a" --> "()")
-    , ("\\x -> Just x : (∃a. a -> Maybe ())", ELambda "x" $ "Just" $$ "x", TExists "'a" $ "'a" --> "Maybe" $: "()")
-    , ("\\x -> Just x : (∃a. a -> Maybe a)", ELambda "x" $ "Just" $$ "x", TExists "'a" $ "'a" --> "Maybe" $: "'a")
-    , ("\\f -> f () : (∀a. a -> a) -> ()", ELambda "f" $ "f" $$ "()", TForall "'a" ("'a" --> "'a") --> "()")
+    [ ("Nothing : ∀a. Maybe a", "Nothing", (∀) "'a" $ "Maybe" $: "'a")
+    , ("Nothing : Maybe (∀a. a)", "Nothing", "Maybe" $: (∀) "'a" "'a")
+    , ("Nothing : Maybe (∃a. a)", "Nothing", "Maybe" $: (∃) "'a" "'a")
+    , ("() : ∃a. a", "()", (∃) "'a" "'a")
+    , ("\\x -> () : (∃a. a) -> ()", λ "x" "()", (∃) "'a" "'a" --> "Unit")
+    , ("\\x -> Just x : (∃a. a -> Maybe ())", λ "x" $ "Just" $$ "x", (∃) "'a" $ "'a" --> "Maybe" $: "Unit")
+    , ("\\x -> Just x : (∃a. a -> Maybe a)", λ "x" $ "Just" $$ "x", (∃) "'a" $ "'a" --> "Maybe" $: "'a")
+    , ("\\f -> f () : (∀a. a -> a) -> ()", λ "f" $ "f" $$ "()", (∀) "'a" ("'a" --> "'a") --> "Unit")
     ,
         ( "\\f g -> g (f ()) (f Nothing) : ∀a. ∀b. (∀c. c -> a) -> (a -> a -> b) -> b"
-        , ELambda "f" $ ELambda "g" $ "g" $$ EApp "f" "()" $$ EApp "f" "Nothing"
-        , TForall "'a" $ TForall "'b" $ TForall "'c" ("'c" --> "'a") --> ("'a" --> "'a" --> "'b") --> "'b"
+        , λ "f" $ λ "g" $ "g" $$ ("f" $$ "()") $$ ("f" $$ "Nothing")
+        , (∀) "'a" $ (∀) "'b" $ (∀) "'c" ("'c" --> "'a") --> ("'a" --> "'a" --> "'b") --> "'b"
         )
     ]
 
-{-
-
-    (:) id ids. The type of the first argument of (:) is a naked p, and we cannot from that figure out how to instantiate p. But the second argument has type [p] and, just like head we can see that (:) must be instantiated at (forall a.a->a). We could write (:) @(forall a. a->a) id ids, but that is much clumsier.
-    head ((:) id ids). To guide the instantiation of head we take a quick look at the argument; but this time the argument is itself an application. So we must recursively Quick Look into the argument ((:) id ids) to work out its result type (here [forall a. a->a]), and use that to decide how to instantiate head.
-    single id :: [forall a. a->a]. Here we cannot figure out how to instantiate single from its argument, but we can from its result.
-
--}
-quickLookExamples :: [(Text, Expr)]
+quickLookExamples :: [(Text, Expression Name)]
 quickLookExamples =
     [ ("cons id ids", "cons" $$ "id" $$ "ids")
     , ("head (cons id ids)", "head" $$ ("cons" $$ "id" $$ "ids"))
-    , ("single id : List (∀a. a -> a)", EAnn ("single" $$ "id") $ list $ TForall "a" $ "a" --> "a")
-    , ("(\\x -> x) ids)", ELambda "x" "x" $$ "ids")
+    , ("single id : List (∀a. a -> a)", E.Annotation ("single" $$ "id") $ list $ (∀) "'a" $ "'a" --> "'a")
+    , ("(\\x -> x) ids)", λ "x" "x" $$ "ids")
     , ("wikiF (Just reverse)", "wikiF" $$ ("Just" $$ "reverse"))
     ]
 
-quickLookDefs :: HashMap Name Type
+quickLookDefs :: HashMap Name (Type' Name)
 quickLookDefs =
     defaultEnv
         <> fromList
-            [ ("head", TForall "'a" $ list "'a" --> "Maybe" $: "'a")
-            , ("cons", TForall "'a" $ "'a" --> (list "'a" --> list "'a"))
-            , ("single", TForall "'a" $ "'a" --> list "'a")
-            , ("ids", list $ TForall "'a" $ "'a" --> "'a")
-            , ("wikiF", "Maybe" $: TForall "'a" (list "'a" --> list "'a") --> "Maybe" $: ("Tuple" $: ("List" $: "Int") $: ("List" $: "Char")))
+            [ ("head", (∀) "'a" $ list "'a" --> "Maybe" $: "'a")
+            , ("cons", (∀) "'a" $ "'a" --> (list "'a" --> list "'a"))
+            , ("single", (∀) "'a" $ "'a" --> list "'a")
+            , ("ids", list $ (∀) "'a" $ "'a" --> "'a")
+            , ("wikiF", "Maybe" $: (∀) "'a" (list "'a" --> list "'a") --> "Maybe" $: ("Tuple" $: ("List" $: "Int") $: ("List" $: "Char")))
             ]
 
-list :: Type -> Type
+list :: Type' Name -> Type' Name
 list ty = "List" $: ty
 
 spec :: Spec
 spec = do
+    let eee = λ "x" $ λ "f" $ "f" $$ "x"
+    describe "what" $ it "???" $ inferIO eee
     describe "sanity check" $ for_ exprs \(txt, expr) -> it (Text.unpack txt) do
         runDefault (check expr =<< normalise =<< infer expr) `shouldSatisfy` isRight
     describe "errors" $ for_ errorExprs \(txt, expr) -> it (Text.unpack txt) do

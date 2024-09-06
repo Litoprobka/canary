@@ -5,11 +5,14 @@ module Syntax.Type (Type' (..)) where
 import Prettyprinter (Doc, Pretty, braces, comma, list, pretty, punctuate, sep, (<+>), parens)
 import Relude
 import Syntax.Row
+import CheckerTypes qualified as CT
 
 --  Note: Functor-Foldable-Traversable instances don't do the right thing with `Forall` and `Exists`
 data Type' n
     = Name n
     | Var n
+    | UniVar CT.UniVar
+    | Skolem CT.Skolem
     | Application (Type' n) (Type' n)
     | Function (Type' n) (Type' n)
     | Forall n (Type' n)
@@ -34,6 +37,8 @@ instance Pretty n => Pretty (Type' n) where
         prettyPrec prec = \case
             Name name -> pretty name
             Var name -> pretty name
+            Skolem skolem -> pretty skolem
+            UniVar uni -> pretty uni
             Application lhs rhs -> parensWhen 3 $ prettyPrec 2 lhs <+> prettyPrec 3 rhs
             Function from to -> parensWhen 2 $ prettyPrec 2 from <+> "->" <+> pretty to
             Forall var body -> parensWhen 1 $ "∀" <> pretty var <> "." <+> pretty body

@@ -1,82 +1,29 @@
-{-# LANGUAGE DeriveAnyClass #-}
 {-# LANGUAGE DerivingStrategies #-}
 {-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE OverloadedRecordDot #-}
 
-module SmallChecker where
+module SmallChecker (run, runDefault, runWithFinalEnv, defaultEnv, inferIO, infer, inferPattern, check, checkPattern, inferTypeVars, normalise) where
 
+import CheckerTypes
 import Control.Monad (foldM)
+import Data.Foldable1 (foldlM1)
 import Data.HashMap.Strict qualified as HashMap
 import Data.HashSet qualified as HashSet
+import Data.List.NonEmpty qualified as NE
 import Data.Text qualified as Text
-import Prettyprinter (Doc, Pretty, line, parens, pretty, (<+>), sep, braces)
-import Prettyprinter.Render.Text (putDoc)
-import Relude hiding (bool, Type)
 import Data.Traversable (for)
+import Prettyprinter (Doc, Pretty, line, pretty, (<+>))
+import Prettyprinter.Render.Text (putDoc)
+import Relude hiding (Type, bool)
+import Syntax hiding (Name)
+import Syntax.Expression qualified as E
+import Syntax.Pattern qualified as P
+import Syntax.Type qualified as T
 
--- a disambiguated name
-data Name = Name Text Int deriving (Show, Eq, Generic, Hashable)
-newtype UniVar = UniVar Int
-    deriving (Show, Eq)
-    deriving newtype (Hashable)
-newtype Skolem = Skolem Name
-    deriving (Show, Eq)
-    deriving newtype (Hashable)
-newtype Scope = Scope Int deriving (Show, Eq, Ord)
+type Expr = Expression Name
+type Pattern' = Pattern Name
 
-data Expr
-    = EName Name
-    | ECon Name
-    | EApp Expr Expr
-    | ELambda Pattern Expr
-    | EAnn Expr Type
-    | ECase Expr (NonEmpty (Pattern, Expr))
-    | EIf Expr Expr Expr
-    | EList [Expr]
-    deriving (Show, Eq)
-
-{-
-data Expression n
-    = Lambda (Pattern n) (Expression n)
-    | Application (Expression n) (Expression n)
-    | Let (Binding n) (Expression n)
-    | Case (Expression n) [(Pattern n, Expression n)]
-    | -- | Haskell's \cases
-      Match [([Pattern n], Expression n)]
-    | If (Expression n) (Expression n) (Expression n)
-    | -- | value : Type
-      Annotation (Expression n) (Type' n)
-    | Name n
-    | -- | .field.otherField.thirdField
-      RecordLens (NonEmpty OpenName)
-    | Constructor n
-    | -- | 'Constructor
-      -- unlike the rest of the cases, variant tags and record fields
-      -- don't need any kind of name resolution
-      Variant OpenName
-    | Record (Row (Expression n))
-    | List [Expression n]
-    | IntLiteral Int
-    | TextLiteral Text
-    | CharLiteral Text
--}
-
-data Pattern
-    = PVar Name
-    | PCon Name [Pattern]
-    | PList [Pattern]
-    deriving (Show, Eq)
-
-data Type
-    = TVar Name
-    | TName Name
-    | TSkolem Skolem
-    | TUniVar UniVar -- unification variable
-    | TForall Name Type -- ∀a. body
-    | TExists Name Type -- ∃a. body
-    | TApp Type Type
-    | TFn Type Type
-    deriving (Show, Eq)
+type Type = Type' Name
 
 -- а type whose outer constructor is monomorphic
 data MonoLayer
@@ -85,6 +32,8 @@ data MonoLayer
     | MUniVar UniVar
     | MApp Type Type
     | MFn Type Type
+    | MVariant (Row Type)
+    | MRecord (Row Type)
     deriving (Show, Eq)
 
 newtype TypeError = TypeError (Doc ()) deriving (Show)
@@ -92,7 +41,11 @@ newtype TypeError = TypeError (Doc ()) deriving (Show)
 data Builtins = Builtins
     { bool :: Name
     , list :: Name
-    } deriving (Show)
+    , int :: Name
+    , text :: Name
+    , char :: Name
+    }
+    deriving (Show)
 
 data InfState = InfState
     { nextUniVarId :: Int
@@ -106,47 +59,8 @@ data InfState = InfState
 
 type InfMonad = ExceptT TypeError (ReaderT Builtins (State InfState))
 
-instance Pretty Type where
-    pretty = go 0
-      where
-        go :: Int -> Type -> Doc ann
-        go prec = \case
-            TVar name -> "'" <> pretty name
-            TName name -> pretty name
-            TSkolem skolem -> pretty skolem
-            TUniVar uni -> pretty uni
-            TForall name body -> parensWhen 1 $ "∀" <> pretty name <> "." <+> pretty body
-            TExists name body -> parensWhen 1 $ "∃" <> pretty name <> "." <+> pretty body
-            TApp lhs rhs -> parensWhen 3 $ go 2 lhs <+> go 3 rhs
-            TFn from to -> parensWhen 2 $ go 2 from <+> "->" <+> pretty to
-          where
-            parensWhen minPrec
-                | prec >= minPrec = parens
-                | otherwise = id
-
 instance Pretty MonoLayer where
     pretty = pretty . unMono
-
-instance Pretty Name where
-    pretty (Name name 0) = pretty name
-    pretty (Name name n) = pretty name <> "#" <> pretty n
-instance Pretty UniVar where
-    pretty (UniVar n) = "#" <> pretty n
-instance Pretty Skolem where
-    pretty (Skolem (Name name 0)) = pretty name <> "?"
-    pretty (Skolem (Name name n)) = pretty name <> "?" <> pretty n
-
-instance Pretty Pattern where
-    pretty = go 0 where
-        go :: Int -> Pattern -> Doc ann
-        go n = \case
-            PVar name -> pretty name
-            PCon name args -> parensWhen 1 $ pretty name <+> sep (map (go 1) args)
-            PList items -> braces $ sep $ map pretty items
-          where
-            parensWhen minPrec
-                | n >= minPrec = parens
-                | otherwise = id
 
 -- helpers
 
@@ -168,27 +82,30 @@ runWithFinalEnv env =
             , sigs = env
             , vars = HashMap.empty
             }
-        . flip runReaderT Builtins{bool = Name "Bool" 0, list = Name "List" 0}
+        . flip runReaderT Builtins
+            { bool = Name "Bool" 0
+            , list = Name "List" 0
+            , int = Name "Int" 0
+            , text = Name "Text" 0
+            , char = Name "Char" 0
+            }
         . runExceptT
 
 defaultEnv :: HashMap Name Type
 defaultEnv =
     HashMap.fromList
-        [ (Name "()" 0, TName $ Name "()" 0)
-        , (Name "Nothing" 0, TForall a' $ TName (Name "Maybe" 0) `TApp` a)
-        , (Name "Just" 0, TForall a' $ a `TFn` (TName (Name "Maybe" 0) `TApp` a))
-        , (Name "True" 0, TName $ Name "Bool" 0)
-        , (Name "False" 0, TName $ Name "Bool" 0)
-        , (Name "id" 0, TForall a' $ a `TFn` a)
-        , (Name "reverse" 0, TForall a' $ list a `TFn` list a)
+        [ (Name "()" 0, T.Name $ Name "Unit" 0)
+        , (Name "Nothing" 0, T.Forall a' $ T.Name (Name "Maybe" 0) `T.Application` a)
+        , (Name "Just" 0, T.Forall a' $ a `T.Function` (T.Name (Name "Maybe" 0) `T.Application` a))
+        , (Name "True" 0, T.Name $ Name "Bool" 0)
+        , (Name "False" 0, T.Name $ Name "Bool" 0)
+        , (Name "id" 0, T.Forall a' $ a `T.Function` a)
+        , (Name "reverse" 0, T.Forall a' $ list a `T.Function` list a)
         ]
   where
     a' = Name "'a" 0
-    a = TVar a'
-    list var = TName (Name "List" 0) `TApp` var
-
--- b' = Name "b" 0
--- b = TVar b'
+    a = T.Var a'
+    list var = T.Name (Name "List" 0) `T.Application` var
 
 inferIO :: Expr -> IO ()
 inferIO = inferIO' defaultEnv
@@ -246,31 +163,35 @@ alterUniVar override uni ty = do
   where
     foldUniVars :: (UniVar -> InfMonad ()) -> Type -> InfMonad ()
     foldUniVars action = \case
-        TUniVar v -> action v >> lookupUniVar v >>= either (const pass) (foldUniVars action)
-        TForall _ body -> foldUniVars action body
-        TExists _ body -> foldUniVars action body
-        TApp lhs rhs -> foldUniVars action lhs >> foldUniVars action rhs
-        TFn from to -> foldUniVars action from >> foldUniVars action to
-        TVar _ -> pass
-        TName _ -> pass
-        TSkolem _ -> pass
+        T.UniVar v -> action v >> lookupUniVar v >>= either (const pass) (foldUniVars action)
+        T.Forall _ body -> foldUniVars action body
+        T.Exists _ body -> foldUniVars action body
+        T.Application lhs rhs -> foldUniVars action lhs >> foldUniVars action rhs
+        T.Function from to -> foldUniVars action from >> foldUniVars action to
+        T.Variant row -> traverse_ (foldUniVars action) row
+        T.Record row -> traverse_ (foldUniVars action) row
+        T.Var _ -> pass
+        T.Name _ -> pass
+        T.Skolem _ -> pass
 
     -- resolves direct univar cycles (i.e. a ~ b, b ~ c, c ~ a) to skolems
     -- errors out on indirect cycles (i.e. a ~ Maybe a)
     cycleCheck (selfRefType, acc) = \case
-        TUniVar uni2 | HashSet.member uni2 acc -> case selfRefType of
+        T.UniVar uni2 | HashSet.member uni2 acc -> case selfRefType of
             Direct -> do
                 skolem <- freshSkolem $ Name "q" 0
-                modify \s -> s{vars = HashMap.insert uni2 (Right $ TSkolem skolem) s.vars}
+                modify \s -> s{vars = HashMap.insert uni2 (Right $ T.Skolem skolem) s.vars}
             Indirect -> typeError "self-referential type"
-        TUniVar uni2 -> withUniVar uni2 $ cycleCheck (selfRefType, HashSet.insert uni2 acc)
-        TForall _ body -> cycleCheck (Indirect, acc) body
-        TExists _ body -> cycleCheck (Indirect, acc) body
-        TFn from to -> cycleCheck (Indirect, acc) from >> cycleCheck (Indirect, acc) to
-        TApp lhs rhs -> cycleCheck (Indirect, acc) lhs >> cycleCheck (Indirect, acc) rhs
-        TVar _ -> pass
-        TName _ -> pass
-        TSkolem _ -> pass
+        T.UniVar uni2 -> withUniVar uni2 $ cycleCheck (selfRefType, HashSet.insert uni2 acc)
+        T.Forall _ body -> cycleCheck (Indirect, acc) body
+        T.Exists _ body -> cycleCheck (Indirect, acc) body
+        T.Function from to -> cycleCheck (Indirect, acc) from >> cycleCheck (Indirect, acc) to
+        T.Application lhs rhs -> cycleCheck (Indirect, acc) lhs >> cycleCheck (Indirect, acc) rhs
+        T.Variant row -> traverse_ (cycleCheck (Indirect, acc)) row
+        T.Record row -> traverse_ (cycleCheck (Indirect, acc)) row
+        T.Var _ -> pass
+        T.Name _ -> pass
+        T.Skolem _ -> pass
 
     rescope scope = foldUniVars \v -> lookupUniVar v >>= either (rescopeVar v scope) (const pass)
     rescopeVar v scope oldScope = modify \s -> s{vars = HashMap.insert v (Left $ min oldScope scope) s.vars}
@@ -306,22 +227,23 @@ forallScope action = do
     applyVar outerScope bodyTy uni =
         lookupUniVar uni >>= \case
             Right ty -> do
-                substituteTy (TUniVar uni) ty bodyTy
+                substituteTy (T.UniVar uni) ty bodyTy
             Left scope | scope > outerScope && isRelevant uni bodyTy -> do
                 tyVar <- freshTypeVar
-                solveUniVar uni (TVar tyVar)
-                pure $ TForall tyVar bodyTy
+                solveUniVar uni (T.Var tyVar)
+                pure $ T.Forall tyVar bodyTy
             Left _ -> pure bodyTy
     isRelevant uni = \case
-        TUniVar v | v == uni -> True
-        TUniVar _ -> False
-        TForall _ body' -> isRelevant uni body'
-        TExists _ body' -> isRelevant uni body'
-        TFn from to -> isRelevant uni from || isRelevant uni to
-        TApp lhs rhs -> isRelevant uni lhs || isRelevant uni rhs
-        TName _ -> False
-        TVar _ -> False
-        TSkolem _ -> False
+        T.UniVar v -> v == uni 
+        T.Forall _ body' -> isRelevant uni body'
+        T.Exists _ body' -> isRelevant uni body'
+        T.Function from to -> isRelevant uni from || isRelevant uni to
+        T.Application lhs rhs -> isRelevant uni lhs || isRelevant uni rhs
+        T.Variant row -> any (isRelevant uni) row
+        T.Record row -> any (isRelevant uni) row
+        T.Name _ -> False
+        T.Var _ -> False
+        T.Skolem _ -> False
 
 --
 
@@ -340,14 +262,16 @@ data Variance = In | Out | Inv
 -}
 mono :: Variance -> Type -> InfMonad MonoLayer
 mono variance = \case
-    v@TVar{} -> typeError $ "unbound type variable " <> pretty v
-    TName name -> pure $ MName name
-    TSkolem skolem -> pure $ MSkolem skolem
-    TUniVar uni -> pure $ MUniVar uni
-    TApp lhs rhs -> pure $ MApp lhs rhs
-    TFn from to -> pure $ MFn from to
-    TForall var body -> mono variance =<< substitute variance var body
-    TExists var body -> mono variance =<< substitute (flipVariance variance) var body
+    v@T.Var{} -> typeError $ "unbound type variable " <> pretty v
+    T.Name name -> pure $ MName name
+    T.Skolem skolem -> pure $ MSkolem skolem
+    T.UniVar uni -> pure $ MUniVar uni
+    T.Application lhs rhs -> pure $ MApp lhs rhs
+    T.Function from to -> pure $ MFn from to
+    T.Variant row -> pure $ MVariant row
+    T.Record row -> pure $ MRecord row
+    T.Forall var body -> mono variance =<< substitute variance var body
+    T.Exists var body -> mono variance =<< substitute (flipVariance variance) var body
   where
     flipVariance = \case
         In -> Out
@@ -356,11 +280,13 @@ mono variance = \case
 
 unMono :: MonoLayer -> Type
 unMono = \case
-    MName name -> TName name
-    MSkolem skolem -> TSkolem skolem
-    MUniVar uniVar -> TUniVar uniVar
-    MApp lhs rhs -> TApp lhs rhs
-    MFn from to -> TFn from to
+    MName name -> T.Name name
+    MSkolem skolem -> T.Skolem skolem
+    MUniVar uniVar -> T.UniVar uniVar
+    MApp lhs rhs -> T.Application lhs rhs
+    MFn from to -> T.Function from to
+    MVariant row -> T.Variant row
+    MRecord row -> T.Record row
 
 substitute :: Variance -> Name -> Type -> InfMonad Type
 substitute variance var ty = do
@@ -368,19 +294,21 @@ substitute variance var ty = do
     go someVar ty
   where
     go replacement = \case
-        TVar v | v == var -> pure replacement
-        TVar name -> pure $ TVar name
-        TUniVar uni -> TUniVar uni <$ withUniVar uni (go replacement >=> overrideUniVar uni)
-        TForall v body
-            | v /= var -> TForall v <$> go replacement body
-            | otherwise -> pure $ TForall v body
-        TExists v body
-            | v /= var -> TExists v <$> go replacement body
-            | otherwise -> pure $ TExists v body
-        TFn from to -> TFn <$> go replacement from <*> go replacement to
-        TApp lhs rhs -> TApp <$> go replacement lhs <*> go replacement rhs
-        name@TName{} -> pure name
-        skolem@TSkolem{} -> pure skolem
+        T.Var v | v == var -> pure replacement
+        T.Var name -> pure $ T.Var name
+        T.UniVar uni -> T.UniVar uni <$ withUniVar uni (go replacement >=> overrideUniVar uni)
+        T.Forall v body
+            | v /= var -> T.Forall v <$> go replacement body
+            | otherwise -> pure $ T.Forall v body
+        T.Exists v body
+            | v /= var -> T.Exists v <$> go replacement body
+            | otherwise -> pure $ T.Exists v body
+        T.Function from to -> T.Function <$> go replacement from <*> go replacement to
+        T.Application lhs rhs -> T.Application <$> go replacement lhs <*> go replacement rhs
+        T.Variant row -> T.Variant <$> traverse (go replacement) row
+        T.Record row -> T.Record <$> traverse (go replacement) row
+        name@T.Name{} -> pure name
+        skolem@T.Skolem{} -> pure skolem
 
     -- freshUniVar or freshSkolem, depending on variance
     -- should it be the other way around?
@@ -388,9 +316,9 @@ substitute variance var ty = do
     -- out: forall a. Int -> a
     -- in: forall a. a -> Int
     freshSomething name = \case
-        In -> TUniVar <$> freshUniVar
-        Out -> TSkolem <$> freshSkolem name
-        Inv -> TSkolem <$> freshSkolem name
+        In -> T.UniVar <$> freshUniVar
+        Out -> T.Skolem <$> freshSkolem name
+        Inv -> T.Skolem <$> freshSkolem name
 
 -- `substituteTy` shouldn't be used for type vars, because it fails in cases like `forall a. (forall a. body)`
 -- normally those are removed by name resolution, but they may still occur when checking, say `f (f x)`
@@ -399,55 +327,61 @@ substituteTy from to = go
   where
     go = \case
         ty | ty == from -> pure to
-        TUniVar uni -> TUniVar uni <$ withUniVar uni (go >=> overrideUniVar uni)
-        TForall v body -> TForall v <$> go body
-        TExists v body -> TExists v <$> go body
-        TFn in' out' -> TFn <$> go in' <*> go out'
-        TApp lhs rhs -> TApp <$> go lhs <*> go rhs
-        v@TVar{} -> pure v
-        skolem@TSkolem{} -> pure skolem
-        name@TName{} -> pure name
+        T.UniVar uni -> T.UniVar uni <$ withUniVar uni (go >=> overrideUniVar uni)
+        T.Forall v body -> T.Forall v <$> go body
+        T.Exists v body -> T.Exists v <$> go body
+        T.Function in' out' -> T.Function <$> go in' <*> go out'
+        T.Application lhs rhs -> T.Application <$> go lhs <*> go rhs
+        T.Variant row -> T.Variant <$> traverse go row
+        T.Record row -> T.Record <$> traverse go row
+        v@T.Var{} -> pure v
+        skolem@T.Skolem{} -> pure skolem
+        name@T.Name{} -> pure name
 
 -- gets rid of all univars
 normalise :: Type -> InfMonad Type
 normalise = uniVarsToForall >=> skolemsToExists >=> go
   where
     go = \case
-        TUniVar uni ->
+        T.UniVar uni ->
             lookupUniVar uni >>= \case
                 Left _ -> typeError $ "dangling univar " <> pretty uni
                 Right body -> go body
-        TForall var body -> TForall var <$> go body
-        TExists var body -> TExists var <$> go body
-        TFn from to -> TFn <$> go from <*> go to
-        TApp lhs rhs -> TApp <$> go lhs <*> go rhs
-        v@TVar{} -> pure v
-        name@TName{} -> pure name
-        skolem@TSkolem{} -> typeError $ "skolem " <> pretty skolem <> " remains in code"
+        T.Forall var body -> T.Forall var <$> go body
+        T.Exists var body -> T.Exists var <$> go body
+        T.Function from to -> T.Function <$> go from <*> go to
+        T.Application lhs rhs -> T.Application <$> go lhs <*> go rhs
+        T.Variant row -> T.Variant <$> traverse go row
+        T.Record row -> T.Record <$> traverse go row
+        v@T.Var{} -> pure v
+        name@T.Name{} -> pure name
+        skolem@T.Skolem{} -> typeError $ "skolem " <> pretty skolem <> " remains in code"
 
     -- this is an alternative to forallScope that's only suitable at the top level
-    uniVarsToForall ty = uncurry (foldr TForall) <$> uniGo HashSet.empty ty
+    uniVarsToForall ty = uncurry (foldr T.Forall) <$> uniGo HashSet.empty ty
     uniGo acc = \case
-        TUniVar uni ->
+        T.UniVar uni ->
             lookupUniVar uni >>= \case
                 Left _ -> do
                     tyVar <- freshTypeVar
-                    solveUniVar uni (TVar tyVar)
-                    pure (TVar tyVar, HashSet.insert tyVar acc)
-                Right body -> first (const $ TUniVar uni) <$> uniGo acc body
-        TForall var body -> first (TForall var) <$> uniGo acc body
-        TExists var body -> first (TExists var) <$> uniGo acc body
-        TFn from to -> do
+                    solveUniVar uni (T.Var tyVar)
+                    pure (T.Var tyVar, HashSet.insert tyVar acc)
+                Right body -> first (const $ T.UniVar uni) <$> uniGo acc body
+        T.Forall var body -> first (T.Forall var) <$> uniGo acc body
+        T.Exists var body -> first (T.Exists var) <$> uniGo acc body
+        T.Function from to -> do
             (from', acc') <- uniGo acc from
             (to', acc'') <- uniGo acc' to
-            pure (TFn from' to', acc'')
-        TApp lhs rhs -> do
+            pure (T.Function from' to', acc'')
+        T.Application lhs rhs -> do
             (lhs', acc') <- uniGo acc lhs
             (rhs', acc'') <- uniGo acc' rhs
-            pure (TApp lhs' rhs', acc'')
-        v@TVar{} -> pure (v, acc)
-        name@TName{} -> pure (name, acc)
-        skolem@TSkolem{} -> pure (skolem, acc)
+            pure (T.Application lhs' rhs', acc'')
+        T.Variant _ -> typeError "rows not supported yet"
+        T.Record _ -> typeError "rows not supported yet"
+        v@T.Var{} -> pure (v, acc)
+        name@T.Name{} -> pure (name, acc)
+        skolem@T.Skolem{} -> pure (skolem, acc)
 
 -- these two functions have the same problem as the old `forallScope` - they capture skolems from an outer scope
 -- it's not clear whether anything should be done about them
@@ -460,62 +394,59 @@ skolemsToExists, skolemsToForall :: Type -> InfMonad Type
     -- ∃a. a -> a <: b
     -- ?a -> ?a <: b
     -- b ~ ∃a. a -> a
-    skolemsToExists' ty = uncurry (foldr TExists) <$> go HashMap.empty ty
+    skolemsToExists' ty = uncurry (foldr T.Exists) <$> go HashMap.empty ty
     -- b <: ∀a. a -> a
     -- b <: ?a -> ?a
     -- b ~ ∀a. a -> a
-    skolemsToForall' ty = uncurry (foldr TForall) <$> go HashMap.empty ty
+    skolemsToForall' ty = uncurry (foldr T.Forall) <$> go HashMap.empty ty
 
     go acc = \case
-        TSkolem skolem -> case HashMap.lookup skolem acc of
-            Just tyVar -> pure (TVar tyVar, acc)
+        T.Skolem skolem -> case HashMap.lookup skolem acc of
+            Just tyVar -> pure (T.Var tyVar, acc)
             Nothing -> do
                 tyVar <- freshTypeVar
-                pure (TVar tyVar, HashMap.insert skolem tyVar acc)
-        TUniVar uni ->
+                pure (T.Var tyVar, HashMap.insert skolem tyVar acc)
+        T.UniVar uni ->
             lookupUniVar uni >>= \case
-                Left _ -> pure (TUniVar uni, acc)
+                Left _ -> pure (T.UniVar uni, acc)
                 Right body -> do
                     (body', acc') <- go acc body
                     overrideUniVar uni body'
                     pure (body', acc')
-        TForall var body -> first (TForall var) <$> go acc body
-        TExists var body -> first (TExists var) <$> go acc body
-        TFn from to -> do
+        T.Forall var body -> first (T.Forall var) <$> go acc body
+        T.Exists var body -> first (T.Exists var) <$> go acc body
+        T.Function from to -> do
             (from', acc') <- go acc from
             (to', acc'') <- go acc' to
-            pure (TFn from' to', acc'')
-        TApp lhs rhs -> do
+            pure (T.Function from' to', acc'')
+        T.Application lhs rhs -> do
             (lhs', acc') <- go acc lhs
             (rhs', acc'') <- go acc' rhs
-            pure (TApp lhs' rhs', acc'')
-        v@TVar{} -> pure (v, acc)
-        name@TName{} -> pure (name, acc)
-
-data VarType = Forall | Existential
+            pure (T.Application lhs' rhs', acc'')
+        T.Record _ -> typeError "rows not yet supported"
+        T.Variant _ -> typeError "rows not yet supported"
+        v@T.Var{} -> pure (v, acc)
+        name@T.Name{} -> pure (name, acc)
 
 -- finds all type parameters used in a type and creates corresponding forall clauses
 -- doesn't work with type vars (univars?), because the intended use case is pre-processing user-supplied types
 inferTypeVars :: Type -> Type
-inferTypeVars = uncurry (foldr TForall) . second snd . go (HashSet.empty, HashSet.empty)
+inferTypeVars = uncurry (foldr T.Forall) . second snd . flip runState (HashSet.empty, HashSet.empty) . go
   where
-    go acc@(supplied, new) = \case
-        TVar var
-            | not $ HashSet.member var supplied -> (TVar var, (supplied, HashSet.insert var new))
-            | otherwise -> (TVar var, acc)
-        TForall var body -> first (TForall var) $ go (HashSet.insert var supplied, new) body
-        TExists var body -> first (TExists var) $ go (HashSet.insert var supplied, new) body
-        TFn from to ->
-            let (from', acc') = go acc from
-                (to', acc'') = go acc' to
-             in (TFn from' to', acc'')
-        TApp lhs rhs ->
-            let (lhs', acc') = go acc lhs
-                (rhs', acc'') = go acc' rhs
-             in (TApp lhs' rhs', acc'')
-        uni@TUniVar{} -> (uni, acc)
-        skolem@TSkolem{} -> (skolem, acc)
-        name@TName{} -> (name, acc)
+    go = \case
+        T.Var var -> do
+            isNew <- not . HashSet.member var <$> gets snd
+            when isNew $ modify' (second $ HashSet.insert var)
+            pure $ T.Var var
+        T.Forall var body -> modify' (first $ HashSet.insert var) >> T.Forall var <$> go body
+        T.Exists var body -> modify' (first $ HashSet.insert var) >> T.Exists var <$> go body
+        T.Function from to -> T.Function <$> go from <*> go to
+        T.Application lhs rhs -> T.Application <$> go lhs <*> go rhs
+        T.Variant row -> T.Variant <$> traverse go row
+        T.Record row -> T.Record <$> traverse go row
+        uni@T.UniVar{} -> pure uni
+        skolem@T.Skolem{} -> pure skolem
+        name@T.Name{} -> pure name
 
 --
 
@@ -526,19 +457,19 @@ inferTypeVars = uncurry (foldr TForall) . second snd . go (HashSet.empty, HashSe
 supertype :: Type -> Type -> InfMonad Type
 supertype = \cases
     lhs rhs | lhs == rhs -> pure lhs
-    lhs (TUniVar uni) -> lookupUniVar uni >>= \case
-        Left _ -> lhs <$ solveUniVar uni lhs
-        Right rhs' -> supertype lhs rhs'
-    lhs@TUniVar{} rhs -> supertype rhs lhs
+    lhs (T.UniVar uni) ->
+        lookupUniVar uni >>= \case
+            Left _ -> lhs <$ solveUniVar uni lhs
+            Right rhs' -> supertype lhs rhs'
+    lhs@T.UniVar{} rhs -> supertype rhs lhs
     -- and here comes the interesting part: we get back polymorphism by applying forallScope
     -- a similar function for existentials and skolems is TBD
     lhs rhs -> forallScope $ join $ match <$> mono In lhs <*> mono In rhs
   where
     match = \cases
         lhs rhs | lhs == rhs -> pure $ unMono lhs
-        (MFn from to) (MFn from' to') -> TFn <$> supertype from from' <*> supertype to to'
-        (MApp lhs rhs) (MApp lhs' rhs') -> TApp <$> supertype lhs lhs' <*> supertype rhs rhs'
-
+        (MFn from to) (MFn from' to') -> T.Function <$> supertype from from' <*> supertype to to'
+        (MApp lhs rhs) (MApp lhs' rhs') -> T.Application <$> supertype lhs lhs' <*> supertype rhs rhs'
         -- note that a fresh existential (i.e `exists a. a`) *is* a common supertype of any two types
         -- but using that would make type errors more confusing
         -- (i.e. instead of "Int is not a subtype of Char" we would suddenly get existentials everywhere)
@@ -548,8 +479,8 @@ supertype = \cases
 subtype :: Type -> Type -> InfMonad ()
 subtype = \cases
     lhs rhs | lhs == rhs -> pass -- this case is a bit redundant, since we have to do the same after taking a mono layer anyway
-    lhs (TUniVar uni) -> solveOr lhs (subtype lhs) uni
-    (TUniVar uni) rhs -> solveOr rhs (`subtype` rhs) uni
+    lhs (T.UniVar uni) -> solveOr lhs (subtype lhs) uni
+    (T.UniVar uni) rhs -> solveOr rhs (`subtype` rhs) uni
     lhsTy rhsTy -> join $ match <$> mono In lhsTy <*> mono Out rhsTy
   where
     match = \cases
@@ -584,41 +515,41 @@ check e = mono Out >=> match e
     --
     -- one option is to make `unMono` behave like univarsToForall / univarsToExists
     match = \cases
-        (EName name) ty -> do
+        (E.Name name) ty -> do
             ty' <- lookupSig name
             subtype ty' $ unMono ty
-        (ECon name) ty -> do
+        (E.Constructor name) ty -> do
             ty' <- lookupSig name
             subtype ty' $ unMono ty
-        (ELambda arg body) (MFn from to) -> scoped do
+        (E.Lambda arg body) (MFn from to) -> scoped do
             -- `checkPattern` updates signatures of all mentioned variables
             checkPattern arg from
             check body to
-        (EAnn expr ty') ty -> do
+        (E.Annotation expr ty') ty -> do
             subtype ty' $ unMono ty
             check expr ty'
-        (EIf cond true false) ty -> do
+        (E.If cond true false) ty -> do
             bool <- asks (.bool)
-            check cond $ TName bool
+            check cond $ T.Name bool
             check true $ unMono ty
             check false $ unMono ty
-        (ECase arg matches) ty -> do
+        (E.Case arg matches) ty -> do
             argTy <- infer arg
             for_ matches \(pat, body) -> do
                 checkPattern pat argTy
                 check body $ unMono ty
-        (EList items) ty -> do
+        (E.List items) ty -> do
             list <- asks (.list)
             case ty of
-                MApp (TName name) itemTy | name == list -> for_ items (`check` itemTy)
+                MApp (T.Name name) itemTy | name == list -> for_ items (`check` itemTy)
                 other -> typeError $ "List is not a subtype of" <+> pretty other
         expr ty -> do
             ty' <- infer expr
             subtype ty' $ unMono ty
 
-checkPattern :: Pattern -> Type -> InfMonad ()
+checkPattern :: Pattern' -> Type -> InfMonad ()
 checkPattern = \cases
-    (PVar name) ty -> updateSig name ty
+    (P.Var name) ty -> updateSig name ty
     -- it's not clear whether value constructors need a separate rule
     pat ty -> do
         ty' <- inferPattern pat
@@ -626,50 +557,94 @@ checkPattern = \cases
 
 infer :: Expr -> InfMonad Type
 infer = \case
-    EName name -> lookupSig name
-    ECon name -> lookupSig name
-    EApp f x -> do
+    E.Name name -> lookupSig name
+    E.Constructor name -> lookupSig name
+    E.Variant name -> do
+        var <- freshTypeVar
+        -- rowVar <- freshTypeVar
+        pure $ T.Forall var $ T.Function (T.Var var) (T.Variant $ fromList [(name, T.Var var)])
+    E.Application f x -> do
         fTy <- infer f
         inferApp fTy x
-    ELambda arg body -> {-forallScope-} do
+    E.Lambda arg body -> {-forallScope-} do
         argTy <- inferPattern arg
-        TFn argTy <$> infer body
-    EAnn expr ty -> ty <$ check expr ty
-    EIf cond true false -> do
+        T.Function argTy <$> infer body
+    E.Let binding body -> do
+        inferBinding binding
+        infer body
+    E.Annotation expr ty -> ty <$ check expr ty
+    E.If cond true false -> do
         bool <- asks (.bool)
-        check cond $ TName bool
+        check cond $ T.Name bool
         trueTy <- infer true
         falseTy <- infer false
         supertype trueTy falseTy
-    ECase arg matches -> do
+    E.Case arg matches -> do
         argTy <- infer arg
-        (firstTy :| rest) <- for matches \(pat, body) -> do
+        bodyTypes <- for matches \(pat, body) -> do
             -- overspecification *might* be a problem here if argTy gets inferred to a univar
-            -- and the first pattern has a polymorphic type, like `Nothing : forall a. Maybe a`
+            -- and the first Pattern' has a polymorphic type, like `Nothing : forall a. Maybe a`
             -- there's a test for this, and it passes. Weird.
             checkPattern pat argTy
             infer body
-        foldM supertype firstTy rest
-    EList items -> do
-        itemTy <- TUniVar <$> freshUniVar
-        list <- asks (.list)
-        TApp (TName list) <$> (foldM supertype itemTy =<< traverse infer items)
+        firstTy <- T.UniVar <$> freshUniVar
+        foldM supertype firstTy bodyTypes
+    E.Match [] -> typeError "empty match expression"
+    E.Match (m : ms) -> {-forallScope-} do
+        (patTypes, bodyTypes) <-
+            NE.unzip <$> for (m :| ms) \(pats, body) -> do
+                patTypes <- traverse inferPattern pats
+                bodyTy <- infer body
+                pure (patTypes, bodyTy)
+        unless (all ((== length (NE.head patTypes)) . length) patTypes) $
+            typeError "different amount of arguments in a match statement"
+        finalPatTypes <- foldlM1 (zipWithM supertype) patTypes
+        resultType <- foldlM1 supertype bodyTypes
+        pure $ foldr T.Function resultType finalPatTypes
 
-inferPattern :: Pattern -> InfMonad Type
+    -- unless (length pats == length argTypes) $ typeError "incorrect arg count in a match"
+    E.List items -> do
+        itemTy <- T.UniVar <$> freshUniVar
+        list <- asks (.list)
+        T.Application (T.Name list) <$> (foldM supertype itemTy =<< traverse infer items)
+    E.Record _ -> typeError "records are not supported yet"
+    E.RecordLens _ -> typeError "record lens are not supported yet"
+    E.IntLiteral _ -> T.Name <$> asks (.int)
+    E.TextLiteral _ -> T.Name <$> asks (.text)
+    E.CharLiteral _ -> T.Name <$> asks (.char)
+
+inferBinding :: Binding Name -> InfMonad ()
+inferBinding = \case
+    E.ValueBinding pat body -> do
+        bodyTy <- infer body
+        checkPattern pat bodyTy
+    E.FunctionBinding name args body -> do
+        argTypes <- traverse inferPattern args
+        bodyTy <- infer body
+        updateSig name $ foldr T.Function bodyTy argTypes
+
+inferPattern :: Pattern' -> InfMonad Type
 inferPattern = \case
-    PVar name -> do
-        uni <- TUniVar <$> freshUniVar
+    P.Var name -> do
+        uni <- T.UniVar <$> freshUniVar
         updateSig name uni
         pure uni
-    p@(PCon name args) -> do
+    p@(P.Constructor name args) -> do
         (resultType, argTypes) <- conArgTypes name
-        unless (length argTypes == length args) $ typeError $ "incorrect arg count in pattern" <+> pretty p
+        unless (length argTypes == length args) $ typeError $ "incorrect arg count in Pattern'" <+> pretty p
         zipWithM_ checkPattern args argTypes
         pure resultType
-    PList pats -> do
-        result <- TUniVar <$> freshUniVar
+    P.List pats -> do
+        result <- T.UniVar <$> freshUniVar
         list <- asks (.list)
-        TApp (TName list) <$> (foldM supertype result =<< traverse inferPattern pats)
+        T.Application (T.Name list) <$> (foldM supertype result =<< traverse inferPattern pats)
+    P.Variant name arg -> do
+        argTy <- inferPattern arg
+        pure $ T.Variant $ fromList [(name, argTy)]
+    P.Record _ -> typeError "record patterns are not supported yet"
+    P.IntLiteral _ -> T.Name <$> asks (.int)
+    P.TextLiteral _ -> T.Name <$> asks (.text)
+    P.CharLiteral _ -> T.Name <$> asks (.char)
   where
     -- conArgTypes and the zipM may be unified into a single function
     conArgTypes = lookupSig >=> go
@@ -679,12 +654,14 @@ inferPattern = \case
             -- univars should never appear as the rightmost argument of a value constructor type
             -- i.e. types of value constructors have the shape `a -> b -> c -> d -> ConcreteType a b c d`
             --
-            -- solved univars cannot appear here either, since `lookupSig` on a pattern returns a type with no univars
+            -- solved univars cannot appear here either, since `lookupSig` on a Pattern' returns a type with no univars
             MUniVar uni -> typeError $ "unexpected univar " <> pretty uni <> " in a constructor type"
-            -- this kind of repetition is necessary to retain missing pattern warnings
-            MName name -> pure (TName name, [])
-            MApp lhs rhs -> pure (TApp lhs rhs, [])
-            MSkolem skolem -> pure (TSkolem skolem, [])
+            -- this kind of repetition is necessary to retain missing Pattern' warnings
+            MName name -> pure (T.Name name, [])
+            MApp lhs rhs -> pure (T.Application lhs rhs, [])
+            MVariant row -> pure (T.Variant row, [])
+            MRecord row -> pure (T.Record row, [])
+            MSkolem skolem -> pure (T.Skolem skolem, [])
 
 inferApp :: Type -> Expr -> InfMonad Type
 inferApp fTy arg =
@@ -694,8 +671,8 @@ inferApp fTy arg =
             to <- freshUniVar
             lookupUniVar v >>= \case
                 Left _ -> do
-                    solveUniVar v $ TFn from (TUniVar to)
-                    pure $ TUniVar to
+                    solveUniVar v $ T.Function from (T.UniVar to)
+                    pure $ T.UniVar to
                 Right newTy -> inferApp newTy arg
         MFn from to -> to <$ check arg from
         _ -> typeError $ pretty fTy <> " is not a function type"

@@ -15,6 +15,7 @@ import Syntax.Declaration qualified as D
 import Syntax.Expression qualified as E
 import Syntax.Pattern qualified as P
 import Syntax.Type qualified as T
+import Data.Traversable (for)
 
 -- | a writer-like monad for scope warnings and errors
 data ScopeErrors e w a
@@ -171,13 +172,13 @@ resolveExpr e = scoped case e of
         binding' <- resolveBinding [] binding
         expr' <- resolveExpr expr
         pure $ E.Let binding' expr'
-    E.Case body matches ->
-        E.Case <$> resolveExpr body <*> forM matches \(pat, expr) -> scoped do
+    E.Case arg matches ->
+        E.Case <$> resolveExpr arg <*> for matches \(pat, expr) -> scoped do
             pat' <- declarePat pat
             expr' <- resolveExpr expr
             pure (pat', expr')
     E.Match matches ->
-        E.Match <$> forM matches \(pats, expr) -> scoped do
+        E.Match <$> for matches \(pats, expr) -> scoped do
             pats' <- traverse declarePat pats
             expr' <- resolveExpr expr
             pure (pats', expr')
