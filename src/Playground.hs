@@ -1,21 +1,65 @@
 {-# OPTIONS_GHC -Wno-orphans #-}
 {-# OPTIONS_GHC -Wno-incomplete-patterns #-}
 {-# OPTIONS_GHC -Wno-missing-methods #-}
-module TestPrelude (module Syntax) where
+{-# OPTIONS_GHC -Wno-unused-imports #-}
+
+module Playground where
+
+-- :load this module into a repl
 
 import Relude
+
+import CheckerTypes
+import Data.Char (isUpperCase)
+import Prettyprinter
+import TypeChecker
 import Syntax hiding (Name)
 import Syntax.Expression qualified as E
 import Syntax.Pattern qualified as P
 import Syntax.Type qualified as T
-import CheckerTypes
-import Data.Char (isUpperCase)
+import Parser
+import Text.Megaparsec (errorBundlePretty, pos1, parse)
 
--- yes, this would have been absolutely awful in the actual code,
--- but it's fine for tests
+-- a lot of what is used here is only reasonable for interactive use
+
+infixr 2 -->
+(-->) :: Type' n -> Type' n -> Type' n
+(-->) = T.Function
+
+infixl 1 #
+(#) :: Expression n -> Expression n -> Expression n
+(#) = E.Application
+
+binApp :: Expression Text -> Expression Text -> Expression Text -> Expression Text
+binApp f arg1 arg2 = f # arg1 # arg2
+
+infixl 3 $:
+($:) :: Type' n -> Type' n -> Type' n
+($:) = T.Application
+
+λ :: Pattern n -> Expression n -> Expression n
+λ = E.Lambda
+
+lam :: Pattern n -> Expression n -> Expression n
+lam = E.Lambda
+
+(∃) :: n -> Type' n -> Type' n
+(∃) = T.Exists
+
+con :: n -> [Pattern n] -> Pattern n
+con = P.Constructor
+
+parseInfer :: Text -> IO ()
+parseInfer input = do
+    case input & parse (usingReaderT pos1 expression) "cli" of
+        Left err -> putStrLn $ errorBundlePretty err
+        Right expr -> inferIO $ (`Name` 0) <$> expr
+
+parseInferIO :: IO ()
+parseInferIO = getLine >>= parseInfer
 
 matchCase :: (Text -> a) -> (Text -> a) -> String -> a
-matchCase whenUpper whenLower str@(h:_)
+matchCase whenUpper whenLower str@(h : _)
     | isUpperCase h = whenUpper $ fromString str
     | otherwise = whenLower $ fromString str
 

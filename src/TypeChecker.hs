@@ -492,7 +492,7 @@ subtype = \cases
             -- note that we assume the same variance for all type parameters
             -- some kind of kind system is needed to track variance and prevent stuff like `Maybe a b`
             -- higher-kinded types are also problematic when it comes to variance, i.e.
-            -- is `f a` a subtype of `g a`?
+            -- is `f a` a subtype of `f b` when a is `a` subtype of `b` or the other way around?
             --
             -- QuickLook just assumes that all constructors are invariant and -> is a special case
             subtype lhs lhs'

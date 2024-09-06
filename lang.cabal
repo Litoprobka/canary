@@ -29,6 +29,7 @@ library
       Lexer
       NameResolution
       Parser
+      Playground
       Syntax
       Syntax.Declaration
       Syntax.Expression
@@ -86,7 +87,6 @@ test-suite lang-test
   main-is: Spec.hs
   other-modules:
       ParserSpec
-      TestPrelude
       TypeCheckerSpec
       Paths_lang
   hs-source-dirs:
