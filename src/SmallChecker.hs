@@ -31,7 +31,8 @@ data Expr
     | ELambda Pattern Expr
     | EAnn Expr Type
     | ECase Expr (NonEmpty (Pattern, Expr))
-    | EIf Expr Expr Expr
+    | EIf Expr Expr Expr -- currently hardcoded to use `TName $ Name "Bool" 0`
+    | EList [Expr] -- same as above. `TName $ Name "List" 0`
     deriving (Show, Eq)
 
 {-
@@ -63,6 +64,7 @@ data Expression n
 data Pattern
     = PVar Name
     | PCon Name [Pattern]
+    | PList [Pattern]
     deriving (Show, Eq)
 
 data Type
@@ -102,6 +104,7 @@ type InfMonad = ExceptT TypeError (State InfState)
 instance Pretty Type where
     pretty = go 0
       where
+        go :: Int -> Type -> Doc ann
         go prec = \case
             TVar name -> "'" <> pretty name
             TName name -> pretty name
@@ -172,7 +175,7 @@ defaultEnv =
         , (Name "reverse" 0, TForall a' $ list a `TFn` list a)
         ]
   where
-    a' = Name "a" 0
+    a' = Name "'a" 0
     a = TVar a'
     list var = TName (Name "List" 0) `TApp` var
 
@@ -632,10 +635,13 @@ infer = \case
             checkPattern pat argTy
             infer body
         foldM supertype firstTy rest
+    EList items -> do
+        result <- TUniVar <$> freshUniVar
+        foldM supertype result =<< traverse infer items
 
 inferPattern :: Pattern -> InfMonad Type
 inferPattern = \case
-    (PVar name) -> do
+    PVar name -> do
         uni <- TUniVar <$> freshUniVar
         updateSig name uni
         pure uni
@@ -644,6 +650,9 @@ inferPattern = \case
         unless (length argTypes == length args) $ typeError $ "incorrect arg count in pattern " <> show p
         zipWithM_ checkPattern args argTypes
         pure resultType
+    PList pats -> do
+        result <- TUniVar <$> freshUniVar
+        foldM supertype result =<< traverse inferPattern pats
   where
     -- conArgTypes and the zipM may be unified into a single function
     conArgTypes = lookupSig >=> go

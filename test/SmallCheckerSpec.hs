@@ -1,12 +1,13 @@
-{-# OPTIONS_GHC -Wno-unrecognised-pragmas #-}
 {-# LANGUAGE OverloadedLists #-}
+{-# OPTIONS_GHC -Wno-unrecognised-pragmas #-}
+
 module SmallCheckerSpec (spec) where
 
 import Data.Text qualified as Text
 import Relude hiding (Type)
 import SmallChecker
-import Test.Hspec
 import SmallTestPrelude ()
+import Test.Hspec
 
 infixr 2 -->
 (-->) :: Type -> Type -> Type
@@ -37,19 +38,31 @@ exprs =
     , ("\\x -> Just (Just x)", ELambda "x" $ "Just" $$ ("Just" $$ "x"))
     , ("\\x -> Just (Just Nothing)", ELambda "x" $ "Just" $$ ("Just" $$ "Nothing"))
     , ("Just", "Just")
-    , ( "\\y -> () : forall a. Maybe a -> ()", EAnn (ELambda "y" "()") $ TForall "'a" $ "Maybe" $: "'a" --> "()")
+    , ("\\y -> () : forall a. Maybe a -> ()", EAnn (ELambda "y" "()") $ TForall "'a" $ "Maybe" $: "'a" --> "()")
     ,
         ( "\\x -> ((\\y -> ()) : forall a. Maybe a -> ()) x"
         , ELambda "x" $ EAnn (ELambda "y" "()") (TForall "'a" $ "Maybe" $: "'a" --> "()") $$ "x"
         )
     , ("\\(Just x) -> x", ELambda (PCon "Just" ["x"]) "x")
-    , ("\\def mb -> case mb of { Nothing -> def; Just x -> x }", ELambda "def" $ ELambda "mb" $ ECase "mb" [(PCon "Nothing" [], "def"), (PCon "Just" ["x"], "x")])
-    , ("\\cond -> case cond of { True -> id; False -> reverse }", ELambda "cond" $ ECase "cond" [(PCon "True" [], "id"), (PCon "False" [], "reverse")])
+    ,
+        ( "\\def mb -> case mb of { Nothing -> def; Just x -> x }"
+        , ELambda "def" $ ELambda "mb" $ ECase "mb" [(PCon "Nothing" [], "def"), (PCon "Just" ["x"], "x")]
+        )
+    ,
+        ( "\\cond -> case cond of { True -> id; False -> reverse }"
+        , ELambda "cond" $ ECase "cond" [(PCon "True" [], "id"), (PCon "False" [], "reverse")]
+        )
+    , ("\\x y -> [x, y]", ELambda "x" $ ELambda "y" $ EList ["x", "y"])
+    , ("\\x y -> [x : ∀'a. 'a -> 'a, y]", ELambda "x" $ ELambda "y" $ EList [EAnn "x" (TForall "'a" $ "'a" --> "'a"), "y"])
+    , ("[\\() -> (), id]", EList ["id", ELambda (PCon "()" []) "()"])
     ]
 
 errorExprs :: [(Text, Expr)]
 errorExprs =
-    [ ("\\x y z -> z (y x) (x y) (x y ())", ELambda "x" $ ELambda "y" $ ELambda "z" $ "z" $$ ("y" $$ "x") $$ ("x" $$ "y") $$ ("x" $$ "y" $$ "()"))
+    [
+        ( "\\x y z -> z (y x) (x y) (x y ())"
+        , ELambda "x" $ ELambda "y" $ ELambda "z" $ "z" $$ ("y" $$ "x") $$ ("x" $$ "y") $$ ("x" $$ "y" $$ "()")
+        )
     , ("\\f x y -> f x (f y)", ELambda "f" $ ELambda "x" $ ELambda "y" $ "f" $$ "x" $$ ("f" $$ "y"))
     , -- unless we get some magical rank-n inference, this should fail
       ("\\f g -> g (f ()) (f Nothing)", ELambda "f" $ ELambda "g" $ "g" $$ EApp "f" "()" $$ EApp "f" "Nothing")
@@ -71,6 +84,7 @@ exprsToCheck =
         , TForall "'a" $ TForall "'b" $ TForall "'c" ("'c" --> "'a") --> ("'a" --> "'a" --> "'b") --> "'b"
         )
     ]
+
 {-
 
     (:) id ids. The type of the first argument of (:) is a naked p, and we cannot from that figure out how to instantiate p. But the second argument has type [p] and, just like head we can see that (:) must be instantiated at (forall a.a->a). We could write (:) @(forall a. a->a) id ids, but that is much clumsier.
@@ -88,13 +102,15 @@ quickLookExamples =
     ]
 
 quickLookDefs :: HashMap Name Type
-quickLookDefs = defaultEnv <> fromList
-    [ ("head", TForall "'a" $ list "'a" --> "Maybe" $: "'a")
-    , ("cons", TForall "'a" $ "'a" --> (list "'a" --> list "'a"))
-    , ("single", TForall "'a" $ "'a" --> list "'a")
-    , ("ids", list $ TForall "'a" $ "'a" --> "'a")
-    , ("wikiF", "Maybe" $: TForall "'a" (list "'a" --> list "'a") --> "Maybe" $: ("Tuple" $: ("List" $: "Int") $: ("List" $: "Char")))
-    ]
+quickLookDefs =
+    defaultEnv
+        <> fromList
+            [ ("head", TForall "'a" $ list "'a" --> "Maybe" $: "'a")
+            , ("cons", TForall "'a" $ "'a" --> (list "'a" --> list "'a"))
+            , ("single", TForall "'a" $ "'a" --> list "'a")
+            , ("ids", list $ TForall "'a" $ "'a" --> "'a")
+            , ("wikiF", "Maybe" $: TForall "'a" (list "'a" --> list "'a") --> "Maybe" $: ("Tuple" $: ("List" $: "Int") $: ("List" $: "Char")))
+            ]
 
 list :: Type -> Type
 list ty = "List" $: ty
