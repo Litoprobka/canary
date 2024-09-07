@@ -18,6 +18,7 @@ import Syntax hiding (Name)
 import Syntax.Expression qualified as E
 import Syntax.Pattern qualified as P
 import Syntax.Type qualified as T
+import Syntax.Row
 import Parser
 import Text.Megaparsec (errorBundlePretty, pos1, parse)
 

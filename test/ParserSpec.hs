@@ -14,6 +14,7 @@ import Syntax.Pattern qualified as P
 import Syntax.Type qualified as T
 import Test.Hspec
 import Text.Megaparsec (errorBundlePretty, parse, pos1)
+import Syntax.Row (ExtRow(..))
 
 parsePretty :: Parser a -> Text -> Either String a
 parsePretty parser input = input & parse (usingReaderT pos1 parser) "test" & first errorBundlePretty
@@ -235,11 +236,11 @@ spec = do
                                 T.Var "'b"
                     )
         it "record" do
-            parsePretty type' "{ x : Int, y : Int, z : Int }" `shouldBe` Right (T.Record [("x", "Int"), ("y", "Int"), ("z", "Int")])
+            parsePretty type' "{ x : Int, y : Int, z : Int }" `shouldBe` Right (T.Record $ NoExtRow [("x", "Int"), ("y", "Int"), ("z", "Int")])
         it "duplicate record fields" do
-            parsePretty type' "{x : Int, y : Bool, x : Text}" `shouldBe` Right (T.Record [("y", "Bool"), ("x", "Int"), ("x", "Text")])
+            parsePretty type' "{x : Int, y : Bool, x : Text}" `shouldBe` Right (T.Record $ NoExtRow [("y", "Bool"), ("x", "Int"), ("x", "Text")])
         it "variant" do
-            parsePretty type' "['A Int, 'B, 'C Double]" `shouldBe` Right (T.Variant [("'A", "Int"), ("'B", "Unit"), ("'C", "Double")])
+            parsePretty type' "['A Int, 'B, 'C Double]" `shouldBe` Right (T.Variant $ NoExtRow [("'A", "Int"), ("'B", "Unit"), ("'C", "Double")])
         it "type variable" do
             parsePretty type' "'var" `shouldBe` Right (T.Var "'var")
         it "forall" do

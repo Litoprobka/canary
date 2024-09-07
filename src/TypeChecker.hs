@@ -367,30 +367,29 @@ normalise = uniVarsToForall >=> skolemsToExists >=> go
         skolem@T.Skolem{} -> typeError $ "skolem " <> pretty skolem <> " remains in code"
 
     -- this is an alternative to forallScope that's only suitable at the top level
-    uniVarsToForall ty = uncurry (foldr T.Forall) <$> uniGo HashSet.empty ty
-    uniGo acc = \case
+    -- it also compresses any records found along the way, because I don't feel like
+    -- making that a different pass, and `compress` uses `mono` under the hood, which
+    -- means that it has to be run early
+    uniVarsToForall ty = uncurry (foldr T.Forall) <$> runStateT (uniGo ty) HashSet.empty
+    uniGo :: Type -> StateT (HashSet Name) InfMonad Type
+    uniGo = \case
         T.UniVar uni ->
-            lookupUniVar uni >>= \case
+            lift (lookupUniVar uni) >>= \case
                 Left _ -> do
-                    tyVar <- freshTypeVar
-                    solveUniVar uni (T.Var tyVar)
-                    pure (T.Var tyVar, HashSet.insert tyVar acc)
-                Right body -> first (const $ T.UniVar uni) <$> uniGo acc body
-        T.Forall var body -> first (T.Forall var) <$> uniGo acc body
-        T.Exists var body -> first (T.Exists var) <$> uniGo acc body
-        T.Function from to -> do
-            (from', acc') <- uniGo acc from
-            (to', acc'') <- uniGo acc' to
-            pure (T.Function from' to', acc'')
-        T.Application lhs rhs -> do
-            (lhs', acc') <- uniGo acc lhs
-            (rhs', acc'') <- uniGo acc' rhs
-            pure (T.Application lhs' rhs', acc'')
-        T.Variant row -> flip runStateT acc $ T.Variant <$> traverse (\ty -> StateT (`uniGo` ty)) row
-        T.Record row -> flip runStateT acc $ T.Record <$> traverse (\ty -> StateT (`uniGo` ty)) row
-        v@T.Var{} -> pure (v, acc)
-        name@T.Name{} -> pure (name, acc)
-        skolem@T.Skolem{} -> pure (skolem, acc)
+                    tyVar <- lift freshTypeVar
+                    lift $ solveUniVar uni (T.Var tyVar)
+                    modify' $ HashSet.insert tyVar
+                    pure $ T.Var tyVar
+                Right body -> T.UniVar uni <$ (lift . overrideUniVar uni =<< uniGo body)
+        T.Forall var body -> T.Forall var <$> uniGo body
+        T.Exists var body -> T.Exists var <$> uniGo body
+        T.Function from to -> T.Function <$> uniGo from <*> uniGo to
+        T.Application lhs rhs -> T.Application <$> uniGo lhs <*> uniGo rhs
+        T.Variant row -> T.Variant <$> (traverse uniGo =<< lift (compress Variant row))
+        T.Record row -> T.Record <$> (traverse uniGo =<< lift (compress Record row))
+        v@T.Var{} -> pure v
+        name@T.Name{} -> pure name
+        skolem@T.Skolem{} -> pure skolem
 
 -- these two functions have the same problem as the old `forallScope` - they capture skolems from an outer scope
 -- it's not clear whether anything should be done about them
@@ -403,39 +402,35 @@ skolemsToExists, skolemsToForall :: Type -> InfMonad Type
     -- ∃a. a -> a <: b
     -- ?a -> ?a <: b
     -- b ~ ∃a. a -> a
-    skolemsToExists' ty = uncurry (foldr T.Exists) <$> go HashMap.empty ty
+    skolemsToExists' ty = uncurry (foldr T.Exists) <$> runStateT (go ty) HashMap.empty
     -- b <: ∀a. a -> a
     -- b <: ?a -> ?a
     -- b ~ ∀a. a -> a
-    skolemsToForall' ty = uncurry (foldr T.Forall) <$> go HashMap.empty ty
+    skolemsToForall' ty = uncurry (foldr T.Forall) <$> runStateT (go ty) HashMap.empty
 
-    go acc = \case
-        T.Skolem skolem -> case HashMap.lookup skolem acc of
-            Just tyVar -> pure (T.Var tyVar, acc)
-            Nothing -> do
-                tyVar <- freshTypeVar
-                pure (T.Var tyVar, HashMap.insert skolem tyVar acc)
+    go = \case
+        T.Skolem skolem ->
+            get >>= \acc -> case HashMap.lookup skolem acc of
+                Just tyVar -> pure $ T.Var tyVar
+                Nothing -> do
+                    tyVar <- lift freshTypeVar
+                    modify' $ HashMap.insert skolem tyVar
+                    pure $ T.Var tyVar
         T.UniVar uni ->
-            lookupUniVar uni >>= \case
-                Left _ -> pure (T.UniVar uni, acc)
+            lift (lookupUniVar uni) >>= \case
+                Left _ -> pure $ T.UniVar uni
                 Right body -> do
-                    (body', acc') <- go acc body
-                    overrideUniVar uni body'
-                    pure (body', acc')
-        T.Forall var body -> first (T.Forall var) <$> go acc body
-        T.Exists var body -> first (T.Exists var) <$> go acc body
-        T.Function from to -> do
-            (from', acc') <- go acc from
-            (to', acc'') <- go acc' to
-            pure (T.Function from' to', acc'')
-        T.Application lhs rhs -> do
-            (lhs', acc') <- go acc lhs
-            (rhs', acc'') <- go acc' rhs
-            pure (T.Application lhs' rhs', acc'')
-        T.Record row -> flip runStateT acc $ T.Record <$> traverse (\ty -> StateT (`go` ty)) row
-        T.Variant row -> flip runStateT acc $ T.Variant <$> traverse (\ty -> StateT (`go` ty)) row
-        v@T.Var{} -> pure (v, acc)
-        name@T.Name{} -> pure (name, acc)
+                    body' <- go body
+                    lift $ overrideUniVar uni body'
+                    pure body'
+        T.Forall var body -> T.Forall var <$> go body
+        T.Exists var body -> T.Exists var <$> go body
+        T.Function from to -> T.Function <$> go from <*> go to
+        T.Application lhs rhs -> T.Application <$> go lhs <*> go rhs
+        T.Record row -> T.Record <$> traverse go row
+        T.Variant row -> T.Variant <$> traverse go row
+        v@T.Var{} -> pure v
+        name@T.Name{} -> pure name
 
 -- what to match
 data RecordOrVariant = Record | Variant deriving (Eq)
@@ -519,7 +514,6 @@ diff whatToMatch lhsUncompressed rhs = do
     lhs <- compress whatToMatch lhsUncompressed
     pure $ lhs{row = Row.diff lhs.row rhs}
 
-
 -- finds all type parameters used in a type and creates corresponding forall clauses
 -- doesn't work with type vars (univars?), because the intended use case is pre-processing user-supplied types
 inferTypeVars :: Type -> Type
@@ -602,7 +596,6 @@ subtype = \cases
             subtype rhs rhs'
         (MVariant lhs) (MVariant rhs) -> rowCase Variant lhs rhs
         (MRecord lhs) (MRecord rhs) -> rowCase Record lhs rhs
-
         lhs rhs -> typeError $ pretty lhs <> " is not a subtype of " <> pretty rhs
 
     rowCase whatToMatch lhsRow rhsRow = do
@@ -731,7 +724,6 @@ infer = \case
         list <- asks (.list)
         T.Application (T.Name list) <$> (foldM supertype itemTy =<< traverse infer items)
     E.Record row -> T.Record . NoExtRow <$> traverse infer row
-        
     E.RecordLens fields -> do
         recordParts <- for fields \field -> do
             rowVar <- freshUniVar
