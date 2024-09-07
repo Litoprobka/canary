@@ -49,6 +49,7 @@ data Builtins = Builtins
     , text :: Name
     , char :: Name
     , lens :: Name
+    , subtypeRelations :: HashSet (Name, Name)
     }
     deriving (Show)
 
@@ -97,6 +98,7 @@ runWithFinalEnv env =
                 , text = Name "Text" 0
                 , char = Name "Char" 0
                 , lens = Name "Lens" 0
+                , subtypeRelations = fromList [(Name "Nat" 0, Name "Int" 0)]
                 }
         . runExceptT
 
@@ -550,10 +552,21 @@ supertype = \cases
     lhs@T.UniVar{} rhs -> supertype rhs lhs
     -- and here comes the interesting part: we get back polymorphism by applying forallScope
     -- a similar function for existentials and skolems is TBD
-    lhs rhs -> forallScope $ join $ match <$> mono In lhs <*> mono In rhs
+    lhs rhs -> do
+        rels <- asks (.subtypeRelations)
+        forallScope $ join $ match rels <$> mono In lhs <*> mono In rhs
   where
-    match = \cases
+    match rels = \cases
         lhs rhs | lhs == rhs -> pure $ unMono lhs
+        (MName lhs) (MName rhs)
+            -- for now, it only handles direct subtype/supertype relations
+            -- instead, this case should search for a common supertype
+            -- if we require subtypeRelations to be transitive, searching
+            -- would be as easy as taking all supertypes of lhs and rhs,
+            -- taking the intersection and throwing an error if more than
+            -- one type matches
+            | HashSet.member (lhs, rhs) rels -> pure $ T.Name rhs
+            | HashSet.member (rhs, lhs) rels -> pure $ T.Name lhs
         (MFn from to) (MFn from' to') -> T.Function <$> supertype from from' <*> supertype to to'
         (MApp lhs rhs) (MApp lhs' rhs') -> T.Application <$> supertype lhs lhs' <*> supertype rhs rhs'
         (MVariant lhs) (MVariant rhs) -> rowCase Variant lhs rhs
@@ -582,6 +595,9 @@ subtype = \cases
   where
     match = \cases
         lhs rhs | lhs == rhs -> pass -- simple cases, i.e. two type constructors, two univars or two exvars
+        (MName lhs) (MName rhs) ->
+            unlessM (HashSet.member (lhs, rhs) <$> asks (.subtypeRelations)) $
+                typeError (pretty lhs <+> "is not a subtype of" <+> pretty rhs)
         (MFn inl outl) (MFn inr outr) -> do
             subtype inr inl
             subtype outl outr
@@ -596,7 +612,7 @@ subtype = \cases
             subtype rhs rhs'
         (MVariant lhs) (MVariant rhs) -> rowCase Variant lhs rhs
         (MRecord lhs) (MRecord rhs) -> rowCase Record lhs rhs
-        lhs rhs -> typeError $ pretty lhs <> " is not a subtype of " <> pretty rhs
+        lhs rhs -> typeError $ pretty lhs <+> "is not a subtype of" <+> pretty rhs
 
     rowCase whatToMatch lhsRow rhsRow = do
         let con = conOf whatToMatch
@@ -738,7 +754,9 @@ infer = \case
                 `T.Application` mkNestedRecord b
                 `T.Application` a
                 `T.Application` b
-    E.IntLiteral _ -> T.Name <$> asks (.int)
+    E.IntLiteral num
+        | num >= 0 -> T.Name <$> asks (.nat)
+        | otherwise -> T.Name <$> asks (.int)
     E.TextLiteral _ -> T.Name <$> asks (.text)
     E.CharLiteral _ -> T.Name <$> asks (.char)
 
