@@ -14,6 +14,7 @@ import Control.Monad.Combinators.NonEmpty qualified as NE
 
 import Data.IntMap.Strict qualified as IntMap
 import Text.Megaparsec
+import Syntax.Row
 
 code :: Parser [Declaration Name]
 code = topLevelBlock declaration
@@ -56,8 +57,8 @@ type' = makeExprParser noPrec [[typeApp], [function], [forall', exists]]
             [ T.Name <$> typeName
             , T.Var <$> typeVariable
             , parens type'
-            , T.Record <$> someRecord ":" type' Nothing
-            , T.Variant <$> brackets (fromList <$> commaSep variantItem)
+            , T.Record . NoExtRow <$> someRecord ":" type' Nothing
+            , T.Variant . NoExtRow <$> brackets (fromList <$> commaSep variantItem)
             ]
       where
         variantItem = (,) <$> variantConstructor <*> option (T.Name "Unit") noPrec

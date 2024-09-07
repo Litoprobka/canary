@@ -6,18 +6,21 @@ module TypeChecker (run, runDefault, runWithFinalEnv, defaultEnv, inferIO, infer
 
 import CheckerTypes
 import Control.Monad (foldM)
-import Data.Foldable1 (foldlM1)
+import Data.Foldable1 (foldlM1, foldr1)
 import Data.HashMap.Strict qualified as HashMap
 import Data.HashSet qualified as HashSet
 import Data.List.NonEmpty qualified as NE
 import Data.Text qualified as Text
 import Data.Traversable (for)
+import GHC.IsList qualified as IsList
 import Prettyprinter (Doc, Pretty, line, pretty, (<+>))
 import Prettyprinter.Render.Text (putDoc)
 import Relude hiding (Type, bool)
 import Syntax hiding (Name)
 import Syntax.Expression qualified as E
 import Syntax.Pattern qualified as P
+import Syntax.Row (ExtRow (..))
+import Syntax.Row qualified as Row
 import Syntax.Type qualified as T
 
 type Expr = Expression Name
@@ -32,8 +35,8 @@ data MonoLayer
     | MUniVar UniVar
     | MApp Type Type
     | MFn Type Type
-    | MVariant (Row Type)
-    | MRecord (Row Type)
+    | MVariant (ExtRow Type)
+    | MRecord (ExtRow Type)
     deriving (Show, Eq)
 
 newtype TypeError = TypeError (Doc ()) deriving (Show)
@@ -42,8 +45,10 @@ data Builtins = Builtins
     { bool :: Name
     , list :: Name
     , int :: Name
+    , nat :: Name
     , text :: Name
     , char :: Name
+    , lens :: Name
     }
     deriving (Show)
 
@@ -82,13 +87,17 @@ runWithFinalEnv env =
             , sigs = env
             , vars = HashMap.empty
             }
-        . flip runReaderT Builtins
-            { bool = Name "Bool" 0
-            , list = Name "List" 0
-            , int = Name "Int" 0
-            , text = Name "Text" 0
-            , char = Name "Char" 0
-            }
+        . flip
+            runReaderT
+            Builtins
+                { bool = Name "Bool" 0
+                , list = Name "List" 0
+                , int = Name "Int" 0
+                , nat = Name "Nat" 0
+                , text = Name "Text" 0
+                , char = Name "Char" 0
+                , lens = Name "Lens" 0
+                }
         . runExceptT
 
 defaultEnv :: HashMap Name Type
@@ -118,16 +127,16 @@ inferIO' env expr = case run env $ fmap pretty . normalise =<< infer expr of
 typeError :: Doc () -> InfMonad a
 typeError err = ExceptT $ pure (Left $ TypeError err)
 
-freshUniVar :: InfMonad UniVar
+freshUniVar :: InfMonad (Type' n)
 freshUniVar = do
     -- and this is where I wish I had lens
     var <- UniVar <$> gets (.nextUniVarId) <* modify \s -> s{nextUniVarId = succ s.nextUniVarId}
     scope <- gets (.currentScope)
     modify \s -> s{vars = HashMap.insert var (Left scope) s.vars}
-    pure var
+    pure $ T.UniVar var
 
-freshSkolem :: Name -> InfMonad Skolem
-freshSkolem (Name name _) = Skolem . Name name <$> gets (.nextSkolemId) <* modify \s -> s{nextSkolemId = succ s.nextSkolemId}
+freshSkolem :: Name -> InfMonad Type
+freshSkolem (Name name _) = T.Skolem . Skolem . Name name <$> gets (.nextSkolemId) <* modify \s -> s{nextSkolemId = succ s.nextSkolemId}
 
 freshTypeVar :: InfMonad Name
 freshTypeVar = gets (.nextTypeVar) <* modify \s -> s{nextTypeVar = inc s.nextTypeVar}
@@ -180,7 +189,7 @@ alterUniVar override uni ty = do
         T.UniVar uni2 | HashSet.member uni2 acc -> case selfRefType of
             Direct -> do
                 skolem <- freshSkolem $ Name "q" 0
-                modify \s -> s{vars = HashMap.insert uni2 (Right $ T.Skolem skolem) s.vars}
+                modify \s -> s{vars = HashMap.insert uni2 (Right skolem) s.vars}
             Indirect -> typeError "self-referential type"
         T.UniVar uni2 -> withUniVar uni2 $ cycleCheck (selfRefType, HashSet.insert uni2 acc)
         T.Forall _ body -> cycleCheck (Indirect, acc) body
@@ -234,7 +243,7 @@ forallScope action = do
                 pure $ T.Forall tyVar bodyTy
             Left _ -> pure bodyTy
     isRelevant uni = \case
-        T.UniVar v -> v == uni 
+        T.UniVar v -> v == uni
         T.Forall _ body' -> isRelevant uni body'
         T.Exists _ body' -> isRelevant uni body'
         T.Function from to -> isRelevant uni from || isRelevant uni to
@@ -316,9 +325,9 @@ substitute variance var ty = do
     -- out: forall a. Int -> a
     -- in: forall a. a -> Int
     freshSomething name = \case
-        In -> T.UniVar <$> freshUniVar
-        Out -> T.Skolem <$> freshSkolem name
-        Inv -> T.Skolem <$> freshSkolem name
+        In -> freshUniVar
+        Out -> freshSkolem name
+        Inv -> freshSkolem name
 
 -- `substituteTy` shouldn't be used for type vars, because it fails in cases like `forall a. (forall a. body)`
 -- normally those are removed by name resolution, but they may still occur when checking, say `f (f x)`
@@ -377,8 +386,8 @@ normalise = uniVarsToForall >=> skolemsToExists >=> go
             (lhs', acc') <- uniGo acc lhs
             (rhs', acc'') <- uniGo acc' rhs
             pure (T.Application lhs' rhs', acc'')
-        T.Variant _ -> typeError "rows not supported yet"
-        T.Record _ -> typeError "rows not supported yet"
+        T.Variant row -> flip runStateT acc $ T.Variant <$> traverse (\ty -> StateT (`uniGo` ty)) row
+        T.Record row -> flip runStateT acc $ T.Record <$> traverse (\ty -> StateT (`uniGo` ty)) row
         v@T.Var{} -> pure (v, acc)
         name@T.Name{} -> pure (name, acc)
         skolem@T.Skolem{} -> pure (skolem, acc)
@@ -423,10 +432,93 @@ skolemsToExists, skolemsToForall :: Type -> InfMonad Type
             (lhs', acc') <- go acc lhs
             (rhs', acc'') <- go acc' rhs
             pure (T.Application lhs' rhs', acc'')
-        T.Record _ -> typeError "rows not yet supported"
-        T.Variant _ -> typeError "rows not yet supported"
+        T.Record row -> flip runStateT acc $ T.Record <$> traverse (\ty -> StateT (`go` ty)) row
+        T.Variant row -> flip runStateT acc $ T.Variant <$> traverse (\ty -> StateT (`go` ty)) row
         v@T.Var{} -> pure (v, acc)
         name@T.Name{} -> pure (name, acc)
+
+-- what to match
+data RecordOrVariant = Record | Variant deriving (Eq)
+conOf :: RecordOrVariant -> ExtRow (Type' n) -> Type' n
+conOf Record = T.Record
+conOf Variant = T.Variant
+
+-- lookup a field in a type, assuming that the type is a row type
+-- if a univar is encountered, it's solved to a row type
+--
+-- I'm not sure how to handle polymorphism here yet, so I'll go
+-- with Inv just in case
+--
+-- Note: repetitive calls of deepLookup on an open row turn it into a chain of singular extensions
+-- you should probably call `compress` after that
+deepLookup :: RecordOrVariant -> Row.OpenName -> Type -> InfMonad (Maybe Type)
+deepLookup whatToMatch k =
+    mono Inv >=> \case
+        MRecord nextRow
+            | whatToMatch == Record -> deepLookup' nextRow
+            | otherwise -> pure Nothing
+        MVariant nextRow
+            | whatToMatch == Variant -> deepLookup' nextRow
+            | otherwise -> pure Nothing
+        MUniVar uni ->
+            lookupUniVar uni >>= \case
+                Right ty -> deepLookup whatToMatch k ty
+                Left _ -> do
+                    fieldType <- freshUniVar
+                    rowVar <- freshUniVar
+                    let con = conOf whatToMatch
+                    solveUniVar uni $ con $ ExtRow (one (k, fieldType)) rowVar
+                    pure $ Just fieldType
+
+        -- once again, the cases are listed so that I don't forget to
+        -- update them if I ever need to add a new MonoLayer constructor
+        -- _ -> pure Nothing
+        MSkolem{} -> pure Nothing
+        MName{} -> pure Nothing
+        MApp{} -> pure Nothing
+        MFn{} -> pure Nothing
+  where
+    deepLookup' :: ExtRow Type -> InfMonad (Maybe Type)
+    deepLookup' extRow = case Row.lookup k extRow.row of
+        Just v -> pure $ Just v
+        Nothing -> case Row.extension extRow of
+            Nothing -> pure Nothing
+            Just ext -> deepLookup whatToMatch k ext
+
+{- | compresses known row extensions of a row
+
+@{ x : Int | y : Double | z : Char | r } -> { x : Int, y : Double, z : Char | r }@
+-}
+compress :: RecordOrVariant -> ExtRow Type -> InfMonad (ExtRow Type)
+compress _ row@NoExtRow{} = pure row
+compress whatToMatch r@(ExtRow row ext) = go ext
+  where
+    go =
+        mono Inv >=> \case
+            MRecord nextRow
+                | whatToMatch == Record -> Row.extend row <$> go (T.Record nextRow)
+                | otherwise -> pure r
+            MVariant nextRow
+                | whatToMatch == Variant -> Row.extend row <$> go (T.Variant nextRow)
+                | otherwise -> pure r
+            MUniVar uni ->
+                lookupUniVar uni >>= \case
+                    Right ty -> go ty
+                    Left _ -> pure r
+            -- once again, the cases are listed so that I don't forget to
+            -- update them if I ever need to add a new MonoLayer constructor
+            -- _ -> pure r
+            MSkolem{} -> pure r
+            MName{} -> pure r
+            MApp{} -> pure r
+            MFn{} -> pure r
+
+-- first record minus fields that match with the second one
+diff :: RecordOrVariant -> ExtRow Type -> Row Type -> InfMonad (ExtRow Type)
+diff whatToMatch lhsUncompressed rhs = do
+    lhs <- compress whatToMatch lhsUncompressed
+    pure $ lhs{row = Row.diff lhs.row rhs}
+
 
 -- finds all type parameters used in a type and creates corresponding forall clauses
 -- doesn't work with type vars (univars?), because the intended use case is pre-processing user-supplied types
@@ -470,10 +562,21 @@ supertype = \cases
         lhs rhs | lhs == rhs -> pure $ unMono lhs
         (MFn from to) (MFn from' to') -> T.Function <$> supertype from from' <*> supertype to to'
         (MApp lhs rhs) (MApp lhs' rhs') -> T.Application <$> supertype lhs lhs' <*> supertype rhs rhs'
+        (MVariant lhs) (MVariant rhs) -> rowCase Variant lhs rhs
+        (MRecord lhs) (MRecord rhs) -> rowCase Record lhs rhs
         -- note that a fresh existential (i.e `exists a. a`) *is* a common supertype of any two types
         -- but using that would make type errors more confusing
         -- (i.e. instead of "Int is not a subtype of Char" we would suddenly get existentials everywhere)
         lhs rhs -> typeError $ "cannot unify" <+> pretty lhs <+> "and" <+> pretty rhs
+
+    rowCase whatToMatch lhsUncompressed rhsUncompressed = do
+        let con = conOf whatToMatch
+        lhs <- compress whatToMatch lhsUncompressed
+        rhs <- compress whatToMatch rhsUncompressed
+        baseRow <- Row.unionWithM supertype lhs.row rhs.row
+        con <$> case (Row.extension lhs, Row.extension rhs) of
+            (Just lhsExt, Just rhsExt) -> ExtRow baseRow <$> supertype lhsExt rhsExt
+            _ -> pure $ NoExtRow baseRow
 
 -- | @subtype a b@ checks whether @a@ is a subtype of @b@
 subtype :: Type -> Type -> InfMonad ()
@@ -497,7 +600,22 @@ subtype = \cases
             -- QuickLook just assumes that all constructors are invariant and -> is a special case
             subtype lhs lhs'
             subtype rhs rhs'
+        (MVariant lhs) (MVariant rhs) -> rowCase Variant lhs rhs
+        (MRecord lhs) (MRecord rhs) -> rowCase Record lhs rhs
+
         lhs rhs -> typeError $ pretty lhs <> " is not a subtype of " <> pretty rhs
+
+    rowCase whatToMatch lhsRow rhsRow = do
+        let con = conOf whatToMatch
+        for_ (IsList.toList lhsRow.row) \(name, lhsTy) ->
+            deepLookup whatToMatch name (con rhsRow) >>= \case
+                Nothing ->
+                    typeError $
+                        pretty (con lhsRow) <+> "is not a subtype of" <+> pretty (con rhsRow)
+                            <> ": right hand side does not contain" <+> pretty name
+                Just rhsTy -> subtype lhsTy rhsTy
+        -- if the lhs has an extension, it should be compatible with rhs without the already matched fields
+        for_ (Row.extension lhsRow) \ext -> subtype ext . con =<< diff whatToMatch rhsRow lhsRow.row
 
     -- turns out it's different enough from `withUniVar`
     solveOr :: Type -> (Type -> InfMonad ()) -> UniVar -> InfMonad ()
@@ -515,12 +633,8 @@ check e = mono Out >=> match e
     --
     -- one option is to make `unMono` behave like univarsToForall / univarsToExists
     match = \cases
-        (E.Name name) ty -> do
-            ty' <- lookupSig name
-            subtype ty' $ unMono ty
-        (E.Constructor name) ty -> do
-            ty' <- lookupSig name
-            subtype ty' $ unMono ty
+        -- the cases for E.Name and E.Constructor are redundant, since
+        -- `infer` just looks up their types anyway
         (E.Lambda arg body) (MFn from to) -> scoped do
             -- `checkPattern` updates signatures of all mentioned variables
             checkPattern arg from
@@ -543,6 +657,11 @@ check e = mono Out >=> match e
             case ty of
                 MApp (T.Name name) itemTy | name == list -> for_ items (`check` itemTy)
                 other -> typeError $ "List is not a subtype of" <+> pretty other
+        (E.Record row) ty -> do
+            for_ (IsList.toList row) \(name, expr) ->
+                deepLookup Record name (unMono ty) >>= \case
+                    Nothing -> typeError $ pretty ty <+> "does not contain field" <+> pretty name
+                    Just fieldTy -> check expr fieldTy
         expr ty -> do
             ty' <- infer expr
             subtype ty' $ unMono ty
@@ -551,6 +670,11 @@ checkPattern :: Pattern' -> Type -> InfMonad ()
 checkPattern = \cases
     (P.Var name) ty -> updateSig name ty
     -- it's not clear whether value constructors need a separate rule
+    (P.Record patRow) ty -> do
+        for_ (IsList.toList patRow) \(name, pat) ->
+            deepLookup Record name ty >>= \case
+                Nothing -> typeError $ pretty ty <+> "does not contain field" <+> pretty name
+                Just fieldTy -> checkPattern pat fieldTy
     pat ty -> do
         ty' <- inferPattern pat
         subtype ty' ty
@@ -559,10 +683,11 @@ infer :: Expr -> InfMonad Type
 infer = \case
     E.Name name -> lookupSig name
     E.Constructor name -> lookupSig name
-    E.Variant name -> do
-        var <- freshTypeVar
-        -- rowVar <- freshTypeVar
-        pure $ T.Forall var $ T.Function (T.Var var) (T.Variant $ fromList [(name, T.Var var)])
+    E.Variant name -> {-forallScope-} do
+        var <- freshUniVar
+        rowVar <- freshUniVar
+        -- #a -> [Name #a | #r]
+        pure $ T.Function var (T.Variant $ ExtRow (fromList [(name, var)]) rowVar)
     E.Application f x -> do
         fTy <- infer f
         inferApp fTy x
@@ -583,11 +708,11 @@ infer = \case
         argTy <- infer arg
         bodyTypes <- for matches \(pat, body) -> do
             -- overspecification *might* be a problem here if argTy gets inferred to a univar
-            -- and the first Pattern' has a polymorphic type, like `Nothing : forall a. Maybe a`
+            -- and the first pattern has a polymorphic type, like `Nothing : forall a. Maybe a`
             -- there's a test for this, and it passes. Weird.
             checkPattern pat argTy
             infer body
-        firstTy <- T.UniVar <$> freshUniVar
+        firstTy <- freshUniVar
         foldM supertype firstTy bodyTypes
     E.Match [] -> typeError "empty match expression"
     E.Match (m : ms) -> {-forallScope-} do
@@ -601,14 +726,26 @@ infer = \case
         finalPatTypes <- foldlM1 (zipWithM supertype) patTypes
         resultType <- foldlM1 supertype bodyTypes
         pure $ foldr T.Function resultType finalPatTypes
-
-    -- unless (length pats == length argTypes) $ typeError "incorrect arg count in a match"
     E.List items -> do
-        itemTy <- T.UniVar <$> freshUniVar
+        itemTy <- freshUniVar
         list <- asks (.list)
         T.Application (T.Name list) <$> (foldM supertype itemTy =<< traverse infer items)
-    E.Record _ -> typeError "records are not supported yet"
-    E.RecordLens _ -> typeError "record lens are not supported yet"
+    E.Record row -> T.Record . NoExtRow <$> traverse infer row
+        
+    E.RecordLens fields -> do
+        recordParts <- for fields \field -> do
+            rowVar <- freshUniVar
+            pure \nested -> T.Record $ ExtRow (one (field, nested)) rowVar
+        let mkNestedRecord = foldr1 (.) recordParts
+        a <- freshUniVar
+        b <- freshUniVar
+        lens <- asks (.lens)
+        pure $
+            T.Name lens
+                `T.Application` mkNestedRecord a
+                `T.Application` mkNestedRecord b
+                `T.Application` a
+                `T.Application` b
     E.IntLiteral _ -> T.Name <$> asks (.int)
     E.TextLiteral _ -> T.Name <$> asks (.text)
     E.CharLiteral _ -> T.Name <$> asks (.char)
@@ -626,22 +763,25 @@ inferBinding = \case
 inferPattern :: Pattern' -> InfMonad Type
 inferPattern = \case
     P.Var name -> do
-        uni <- T.UniVar <$> freshUniVar
+        uni <- freshUniVar
         updateSig name uni
         pure uni
+    P.Annotation pat ty -> ty <$ checkPattern pat ty
     p@(P.Constructor name args) -> do
         (resultType, argTypes) <- conArgTypes name
-        unless (length argTypes == length args) $ typeError $ "incorrect arg count in Pattern'" <+> pretty p
+        unless (length argTypes == length args) $ typeError $ "incorrect arg count in pattern" <+> pretty p
         zipWithM_ checkPattern args argTypes
         pure resultType
     P.List pats -> do
-        result <- T.UniVar <$> freshUniVar
+        result <- freshUniVar
         list <- asks (.list)
         T.Application (T.Name list) <$> (foldM supertype result =<< traverse inferPattern pats)
-    P.Variant name arg -> do
+    P.Variant name arg -> {-forallScope-} do
         argTy <- inferPattern arg
-        pure $ T.Variant $ fromList [(name, argTy)]
-    P.Record _ -> typeError "record patterns are not supported yet"
+        T.Variant . ExtRow (fromList [(name, argTy)]) <$> freshUniVar
+    P.Record row -> do
+        typeRow <- traverse inferPattern row
+        T.Record . ExtRow typeRow <$> freshUniVar
     P.IntLiteral _ -> T.Name <$> asks (.int)
     P.TextLiteral _ -> T.Name <$> asks (.text)
     P.CharLiteral _ -> T.Name <$> asks (.char)
@@ -654,9 +794,9 @@ inferPattern = \case
             -- univars should never appear as the rightmost argument of a value constructor type
             -- i.e. types of value constructors have the shape `a -> b -> c -> d -> ConcreteType a b c d`
             --
-            -- solved univars cannot appear here either, since `lookupSig` on a Pattern' returns a type with no univars
-            MUniVar uni -> typeError $ "unexpected univar " <> pretty uni <> " in a constructor type"
-            -- this kind of repetition is necessary to retain missing Pattern' warnings
+            -- solved univars cannot appear here either, since `lookupSig` on a pattern returns a type with no univars
+            MUniVar uni -> typeError $ "unexpected univar" <+> pretty uni <+> "in a constructor type"
+            -- this kind of repetition is necessary to retain missing pattern warnings
             MName name -> pure (T.Name name, [])
             MApp lhs rhs -> pure (T.Application lhs rhs, [])
             MVariant row -> pure (T.Variant row, [])
@@ -671,8 +811,8 @@ inferApp fTy arg =
             to <- freshUniVar
             lookupUniVar v >>= \case
                 Left _ -> do
-                    solveUniVar v $ T.Function from (T.UniVar to)
-                    pure $ T.UniVar to
+                    solveUniVar v $ T.Function from to
+                    pure to
                 Right newTy -> inferApp newTy arg
         MFn from to -> to <$ check arg from
-        _ -> typeError $ pretty fTy <> " is not a function type"
+        _ -> typeError $ pretty fTy <+> "is not a function type"
