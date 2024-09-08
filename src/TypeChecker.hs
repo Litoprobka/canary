@@ -2,7 +2,7 @@
 {-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE OverloadedRecordDot #-}
 
-module TypeChecker (run, runDefault, runWithFinalEnv, defaultEnv, inferIO, infer, inferPattern, check, checkPattern, inferTypeVars, normalise) where
+module TypeChecker (run, runWithFinalEnv, infer, inferPattern, check, checkPattern, inferTypeVars, normalise, TypeError(..), InfMonad) where
 
 import CheckerTypes
 import Control.Monad (foldM)
@@ -13,8 +13,7 @@ import Data.List.NonEmpty qualified as NE
 import Data.Text qualified as Text
 import Data.Traversable (for)
 import GHC.IsList qualified as IsList
-import Prettyprinter (Doc, Pretty, line, pretty, (<+>))
-import Prettyprinter.Render.Text (putDoc)
+import Prettyprinter (Doc, Pretty, pretty, (<+>))
 import Relude hiding (Type, bool)
 import Syntax hiding (Name)
 import Syntax.Expression qualified as E
@@ -70,9 +69,6 @@ instance Pretty MonoLayer where
 
 -- helpers
 
-runDefault :: InfMonad a -> Either TypeError a
-runDefault = run defaultEnv
-
 run :: HashMap Name Type -> InfMonad a -> Either TypeError a
 run env = fst . runWithFinalEnv env
 
@@ -101,30 +97,6 @@ runWithFinalEnv env =
                 , subtypeRelations = fromList [(Name "Nat" 0, Name "Int" 0)]
                 }
         . runExceptT
-
-defaultEnv :: HashMap Name Type
-defaultEnv =
-    HashMap.fromList
-        [ (Name "()" 0, T.Name $ Name "Unit" 0)
-        , (Name "Nothing" 0, T.Forall a' $ T.Name (Name "Maybe" 0) `T.Application` a)
-        , (Name "Just" 0, T.Forall a' $ a `T.Function` (T.Name (Name "Maybe" 0) `T.Application` a))
-        , (Name "True" 0, T.Name $ Name "Bool" 0)
-        , (Name "False" 0, T.Name $ Name "Bool" 0)
-        , (Name "id" 0, T.Forall a' $ a `T.Function` a)
-        , (Name "reverse" 0, T.Forall a' $ list a `T.Function` list a)
-        ]
-  where
-    a' = Name "'a" 0
-    a = T.Var a'
-    list var = T.Name (Name "List" 0) `T.Application` var
-
-inferIO :: Expr -> IO ()
-inferIO = inferIO' defaultEnv
-
-inferIO' :: HashMap Name Type -> Expr -> IO ()
-inferIO' env expr = case run env $ fmap pretty . normalise =<< infer expr of
-    Left (TypeError err) -> putDoc $ err <> line
-    Right txt -> putDoc $ txt <> line
 
 typeError :: Doc () -> InfMonad a
 typeError err = ExceptT $ pure (Left $ TypeError err)

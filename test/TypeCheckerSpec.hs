@@ -91,7 +91,6 @@ quickLookDefs =
     defaultEnv
         <> fromList
             [ ("head", T.Forall "'a" $ list "'a" --> "Maybe" $: "'a")
-            , ("cons", T.Forall "'a" $ "'a" --> (list "'a" --> list "'a"))
             , ("single", T.Forall "'a" $ "'a" --> list "'a")
             , ("ids", list $ T.Forall "'a" $ "'a" --> "'a")
             , ("wikiF", "Maybe" $: T.Forall "'a" (list "'a" --> list "'a") --> "Maybe" $: ("Tuple" $: ("List" $: "Int") $: ("List" $: "Char")))
