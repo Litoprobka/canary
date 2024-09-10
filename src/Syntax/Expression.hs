@@ -1,10 +1,12 @@
+{-# LANGUAGE LambdaCase #-}
 module Syntax.Expression (Expression (..), Binding (..)) where
 
 import Relude
 
-import Syntax.Pattern
-import Syntax.Type
+import Syntax.Pattern (Pattern)
+import Syntax.Type (Type')
 import Syntax.Row
+import Prettyprinter (Pretty, pretty, (<+>), concatWith, parens, sep, nest, vsep, encloseSep, brackets, comma, punctuate, braces, dquotes, line)
 
 data Binding n
     = ValueBinding (Pattern n) (Expression n)
@@ -35,3 +37,33 @@ data Expression n
     | TextLiteral Text
     | CharLiteral Text
     deriving (Show, Eq, Functor, Foldable, Traversable)
+
+instance Pretty n => Pretty (Binding n) where
+    pretty = \case
+        ValueBinding pat body -> pretty pat <+> "=" <+> pretty body
+        FunctionBinding name args body -> pretty name <+> concatWith (<+>) (pretty <$> args) <+> "=" <+> pretty body
+
+instance Pretty n => Pretty (Expression n) where
+    pretty = go (0 :: Int) where
+        go n = \case
+            Lambda arg body -> parensWhen 1 $ "λ" <> pretty arg <+> "->" <+> pretty body
+            Application lhs rhs -> parensWhen 3 $ go 2 lhs <+> go 3 rhs
+            Let binding body -> "let" <+> pretty binding <> ";" <+> pretty body
+            Case arg matches -> "case" <+> pretty arg <+> "of" <> line <> nest 4 (vsep $ matches <&> \(pat, body) -> pretty pat <+> "->" <+> pretty body)
+            Match matches -> "match" <> line <> nest 4 (vsep $ matches <&> \(pats, body) -> sep (parens . pretty <$> pats) <+> "->" <+> pretty body)
+            If cond true false -> "if" <+> pretty cond <+> "then" <+> pretty true <+> "else" <+> pretty false
+            Annotation expr ty -> parensWhen 1 $ pretty expr <+> ":" <+> pretty ty
+            Name name -> pretty name
+            RecordLens fields -> encloseSep "." "" "." $ toList $ pretty <$> fields
+            Constructor name -> pretty name
+            Variant name -> pretty name
+            Record row -> braces . sep . punctuate comma . map recordField $ sortedRow row
+            List xs -> brackets . sep . punctuate comma $ pretty <$> xs
+            IntLiteral num -> pretty num
+            TextLiteral txt -> dquotes $ pretty txt
+            CharLiteral c -> "'" <> pretty c <> "'"
+          where
+            parensWhen minPrec
+                | n >= minPrec = parens
+                | otherwise = id
+            recordField (name, body) = pretty name <+> "=" <+> pretty body

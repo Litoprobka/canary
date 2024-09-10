@@ -27,6 +27,7 @@ library
       CheckerTypes
       IL
       Lexer
+      NameGen
       NameResolution
       Parser
       Playground
@@ -48,6 +49,8 @@ library
   ghc-options: -Wall -Wcompat -Widentities -Wincomplete-record-updates -Wincomplete-uni-patterns -Wmissing-export-lists -Wmissing-home-modules -Wpartial-fields -Wredundant-constraints
   build-depends:
       base >=4.7 && <5
+    , effectful >=2.3 && <3
+    , effectful-th
     , megaparsec >=9.5.0 && <10
     , nonempty-containers
     , parser-combinators >=1.3 && <2
@@ -71,6 +74,8 @@ executable lang-exe
   ghc-options: -Wall -Wcompat -Widentities -Wincomplete-record-updates -Wincomplete-uni-patterns -Wmissing-export-lists -Wmissing-home-modules -Wpartial-fields -Wredundant-constraints -threaded -rtsopts -with-rtsopts=-N
   build-depends:
       base >=4.7 && <5
+    , effectful >=2.3 && <3
+    , effectful-th
     , lang
     , megaparsec >=9.5.0 && <10
     , nonempty-containers
@@ -98,6 +103,8 @@ test-suite lang-test
   ghc-options: -Wall -Wcompat -Widentities -Wincomplete-record-updates -Wincomplete-uni-patterns -Wmissing-export-lists -Wmissing-home-modules -Wpartial-fields -Wredundant-constraints -threaded -rtsopts -with-rtsopts=-N
   build-depends:
       base >=4.7 && <5
+    , effectful >=2.3 && <3
+    , effectful-th
     , hspec ==2.*
     , lang
     , megaparsec >=9.5.0 && <10

@@ -26,6 +26,8 @@ default-extensions:
 
 dependencies:
 - base >= 4.7 && < 5
+- effectful >= 2.3 && < 3
+- effectful-th
 - relude >= 1.2.1.0 && < 2
 - megaparsec >= 9.5.0 && < 10
 - nonempty-containers

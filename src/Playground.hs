@@ -1,28 +1,37 @@
-{-# OPTIONS_GHC -Wno-orphans #-}
+{-# LANGUAGE DataKinds #-}
+{-# LANGUAGE OverloadedRecordDot #-}
 {-# OPTIONS_GHC -Wno-incomplete-patterns #-}
-{-# OPTIONS_GHC -Wno-missing-methods #-}
-{-# OPTIONS_GHC -Wno-unused-imports #-}
 {-# OPTIONS_GHC -Wno-missing-export-lists #-}
+{-# OPTIONS_GHC -Wno-missing-methods #-}
+{-# OPTIONS_GHC -Wno-orphans #-}
+{-# OPTIONS_GHC -Wno-unused-imports #-}
 
 module Playground where
 
 -- :load this module into a repl
 
-import Relude
+import Relude hiding (Reader, State, bool)
 
 import CheckerTypes
 import Data.Char (isUpperCase)
+import Data.HashMap.Strict qualified as HashMap
+import Effectful
+import Effectful.Error.Static (Error)
+import Effectful.Reader.Static (Reader)
+import Effectful.State.Static.Local (State)
+import NameGen (NameGen, freshName, runNameGen)
+import NameResolution (resolveNames)
+import Parser
 import Prettyprinter hiding (list)
-import TypeChecker
-import Syntax hiding (Name)
+import Prettyprinter.Render.Text (putDoc)
+import Syntax
+import Syntax.Declaration qualified as D
 import Syntax.Expression qualified as E
 import Syntax.Pattern qualified as P
-import Syntax.Type qualified as T
 import Syntax.Row
-import Parser
-import Text.Megaparsec (errorBundlePretty, pos1, parse)
-import Prettyprinter.Render.Text (putDoc)
-import qualified Data.HashMap.Strict as HashMap
+import Syntax.Type qualified as T
+import Text.Megaparsec (errorBundlePretty, parse, pos1)
+import TypeChecker
 
 -- a lot of what is used here is only reasonable for interactive use
 
@@ -53,37 +62,96 @@ lam = E.Lambda
 con :: n -> [Pattern n] -> Pattern n
 con = P.Constructor
 
-runDefault :: InfMonad a -> Either TypeError a
-runDefault = run defaultEnv
+runDefault :: Eff '[Error TypeError, Reader (Builtins Name), State InfState, NameGen] a -> Either TypeError a
+runDefault action = runPureEff $ runNameGen do
+    (scope, builtins) <- mkDefaultScope
+    defaultEnv <- mkDefaultEnv scope
+    run defaultEnv builtins action
 
-defaultEnv :: HashMap Name (Type' Name)
-defaultEnv =
-    HashMap.fromList
-        [ ("()", "Unit")
-        , ("Nothing", T.Forall "'a" $ "Maybe" $: "'a")
-        , ("Just", T.Forall "'a" $ "'a" --> "Maybe" $: "'a")
-        , ("True", "Bool")
-        , ("False", "Bool")
-        , ("id", T.Forall "'a" $ "'a" --> "'a")
-        , ("cons", T.Forall "'a" $ "'a" --> list "'a" --> list "'a")
-        , ("reverse", T.Forall "'a" $ list "'a" --> list "'a")
-        ]
+mkDefaultScope :: NameGen :> es => Eff es (HashMap Text Name, Builtins Name)
+mkDefaultScope = do
+    builtins <-
+        traverse
+            freshName
+            Builtins
+                { bool = "Bool"
+                , list = "List"
+                , int = "Int"
+                , nat = "Nat"
+                , text = "Text"
+                , char = "Char"
+                , lens = "Lens"
+                , subtypeRelations = [("Nat", "Int")]
+                }
+    scope <-
+        traverse freshName $
+            HashMap.fromList $
+                (\x -> (x, x))
+                    <$> [ "Unit"
+                        , "Maybe"
+                        -- "List"
+                        -- "Bool"
+                        , "()"
+                        , "Nothing"
+                        , "Just"
+                        , "True"
+                        , "False"
+                        , "id"
+                        , "cons"
+                        , "reverse"
+                        ]
+
+    pure (HashMap.insert "List" builtins.list $ HashMap.insert "Bool" builtins.bool scope, builtins)
+
+mkDefaultEnv :: NameGen :> es => HashMap Text Name -> Eff es (HashMap Name (Type' Name))
+mkDefaultEnv scope =
+    HashMap.fromList . mapMaybe sig . fst
+        <$> resolveNames
+            scope
+            ( fmap
+                (uncurry D.Signature)
+                [ ("()", "Unit")
+                , ("Nothing", T.Forall "'a" $ "Maybe" $: "'a")
+                , ("Just", T.Forall "'a" $ "'a" --> "Maybe" $: "'a")
+                , ("True", "Bool")
+                , ("False", "Bool")
+                , ("id", T.Forall "'a" $ "'a" --> "'a")
+                , ("cons", T.Forall "'a" $ "'a" --> list "'a" --> list "'a")
+                , ("reverse", T.Forall "'a" $ list "'a" --> list "'a")
+                ]
+            )
   where
-    list var = T.Name (Name "List" 0) `T.Application` var
+    list var = "List" $: var
+    sig (D.Signature name ty) = Just (name, ty)
+    sig _ = Nothing
 
 inferIO :: Expression Name -> IO ()
-inferIO = inferIO' defaultEnv
+inferIO = inferIO' do
+    (scope, builtins) <- mkDefaultScope
+    env <- mkDefaultEnv scope
+    pure (env, builtins)
 
-inferIO' :: HashMap Name (Type' Name) -> Expression Name -> IO ()
-inferIO' env expr = case run env $ fmap pretty . normalise =<< infer expr of
+inferIO' :: Eff '[NameGen] (HashMap Name (Type' Name), Builtins Name) -> Expression Name -> IO ()
+inferIO' mkEnv expr = case typeOrError of
     Left (TypeError err) -> putDoc $ err <> line
-    Right txt -> putDoc $ txt <> line
+    Right ty -> putDoc $ pretty ty <> line
+  where
+    typeOrError = runPureEff $ runNameGen do
+        (env, builtins) <- mkEnv
+        run env builtins $ normalise =<< infer expr
 
 parseInfer :: Text -> IO ()
-parseInfer input = do
-    case input & parse (usingReaderT pos1 expression) "cli" of
+parseInfer input = runEff $ runNameGen
+    case input & parse (usingReaderT pos1 code) "cli" of
         Left err -> putStrLn $ errorBundlePretty err
-        Right expr -> inferIO $ (`Name` 0) <$> expr
+        Right decls -> do
+            (scope, builtins) <- mkDefaultScope
+            defaultEnv <- mkDefaultEnv scope
+            resolvedDecls <- fst <$> resolveNames scope decls
+            typesOrErrors <- typecheck defaultEnv builtins resolvedDecls
+            case typesOrErrors of
+                Left (TypeError err) -> liftIO $ putDoc $ err <> line
+                Right types -> liftIO $ for_ types \ty -> putDoc $ pretty ty <> line
 
 parseInferIO :: IO ()
 parseInferIO = getLine >>= parseInfer
@@ -101,20 +169,5 @@ instance IsString (Pattern Text) where
     fromString = matchCase (`P.Constructor` []) P.Var
 
 instance IsString (Type' Text) where
-    fromString ('\'' : str) = T.Var $ fromString str -- I'm not sure whether the quote should be a part of a type var
+    fromString ('\'' : str) = T.Var $ ("'" <>) $ fromString str
     fromString str = str & matchCase T.Name (error $ "type name " <> fromString str <> " shouldn't start with a lowercase letter")
-
-instance IsString Name where
-    fromString ('\'' : rest) = flip Name 0 $ fromString rest
-    fromString str = Name (fromString str) 0
-
-instance IsString (Expression Name) where
-    fromString ('\'' : rest) = rest & matchCase (E.Variant . ("'" <>)) (error $ "type variable " <> fromString rest <> " at value level")
-    fromString str = str & matchCase (E.Constructor . flip Name 0) (E.Name . flip Name 0)
-
-instance IsString (Pattern Name) where
-    fromString = matchCase (flip P.Constructor [] . flip Name 0) (P.Var . flip Name 0)
-
-instance IsString (Type' Name) where
-    fromString ('\'' : str) = T.Var . flip Name 0 $ fromString str
-    fromString str = str & matchCase (T.Name . flip Name 0) (error $ "type name " <> fromString str <> " shouldn't start with a lowercase letter")

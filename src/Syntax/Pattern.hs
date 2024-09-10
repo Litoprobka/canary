@@ -3,7 +3,7 @@ module Syntax.Pattern (Pattern (..)) where
 
 import Relude
 import Syntax.Row
-import Prettyprinter (Pretty, pretty, Doc, braces, parens, sep, (<+>), punctuate, comma, dquotes)
+import Prettyprinter (Pretty, pretty, Doc, braces, parens, sep, (<+>), punctuate, comma, dquotes, brackets)
 import Syntax.Type (Type')
 
 data Pattern n
@@ -30,7 +30,7 @@ instance Pretty n => Pretty (Pattern n) where
             Constructor name args -> parensWhen 1 $ pretty name <+> sep (map (go 1) args)
             Variant name body -> parensWhen 1 $ pretty name <+> go 1 body -- todo: special case for unit?
             Record row -> braces . sep . punctuate comma . map recordField $ sortedRow row
-            List items -> braces . sep $ map pretty items
+            List items -> brackets . sep $ map pretty items
             IntLiteral num -> pretty num
             TextLiteral txt -> dquotes $ pretty txt
             CharLiteral c -> "'" <> pretty c <> "'"

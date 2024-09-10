@@ -1,109 +1,100 @@
 {-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE OverloadedRecordDot #-}
+{-# LANGUAGE TemplateHaskell #-}
+{-# LANGUAGE TypeFamilies #-}
+{-# LANGUAGE DataKinds #-}
+{-# LANGUAGE AllowAmbiguousTypes #-}
 
-module NameResolution (resolveNames, UnboundVar (..), Warning (..), ScopeErrors (..), Id (..)) where
+module NameResolution (resolveNames, UnboundVar (..), Warning (..), ScopeErrors (..)) where
 
-import Relude hiding (error)
+import Relude hiding (State, runState, evalState, error, get, put, modify)
 
-import Control.Monad (ap)
+import CheckerTypes hiding (Scope)
 import Data.HashMap.Strict qualified as Map
-import Data.These
-import Prelude qualified (show)
-
+import Data.Traversable (for)
 import Syntax
 import Syntax.Declaration qualified as D
 import Syntax.Expression qualified as E
 import Syntax.Pattern qualified as P
 import Syntax.Type qualified as T
-import Data.Traversable (for)
+import NameGen
+import Effectful (Effect, Eff, (:>))
+import Effectful.TH (makeEffect)
+import Effectful.State.Static.Local (State, runState, evalState, get, put, modify)
+import Effectful.Dispatch.Dynamic (reinterpret)
+import qualified Data.Sequence as Seq
 
--- | a writer-like monad for scope warnings and errors
-data ScopeErrors e w a
-    = Clean a
-    | Errors (These (Seq e) (Seq w)) a
-    deriving (Show, Functor)
 
-warn :: w -> ScopeErrors e w ()
-warn w = Errors (That $ one w) ()
+data ScopeErrors = ScopeErrors {errors :: Seq UnboundVar, warnings :: Seq Warning}
 
-error :: e -> ScopeErrors e w ()
-error e = Errors (This $ one e) ()
-
--- a derived instance wouldn't do
-instance Applicative (ScopeErrors e w) where
-    pure = Clean
-    (<*>) = ap
-
-instance Monad (ScopeErrors e w) where
-    wrappedX >>= f = case wrappedX of
-        Clean x -> f x
-        Errors errs x -> case f x of
-            Clean y -> Errors errs y
-            Errors errs2 y -> Errors (errs <> errs2) y
+-- | a writer-like effect for scope warnings and errors
+data ScopeErrorE :: Effect where
+    Warn :: Warning -> ScopeErrorE m ()
+    Error :: UnboundVar -> ScopeErrorE m ()
 
 -- * other types
 
-newtype Id = Id Int deriving (Eq)
-instance Show Id where
-    show (Id n) = "#" <> show n
-
-inc :: Id -> Id
-inc (Id n) = Id $ n + 1
-
-newtype Scope = Scope {table :: HashMap Text Id}
+newtype Scope = Scope {table :: HashMap Text Name}
 
 newtype UnboundVar = UnboundVar Text deriving (Show)
 data Warning = Shadowing Text | UnusedVar Text deriving (Show)
 
-type EnvMonad = StateT (Id, Scope) (ScopeErrors UnboundVar Warning)
+makeEffect ''ScopeErrorE
+
+runScopeErrors :: Eff (ScopeErrorE : es) a -> Eff es (a, ScopeErrors)
+runScopeErrors = reinterpret (runState $ ScopeErrors Seq.empty Seq.empty) \_ -> \case
+    Warn warning -> modify @ScopeErrors \se -> se{warnings = se.warnings Seq.|> warning}
+    Error error' -> modify @ScopeErrors \se -> se{errors = se.errors Seq.|> error'}
+
+
+type EnvEffs es = (State Scope :> es, NameGen :> es, ScopeErrorE :> es)
 
 -- | run a state action without changing the `Scope` part of the state
-scoped :: EnvMonad a -> EnvMonad a
+scoped :: (EnvEffs es) => Eff es a -> Eff es a
 scoped action = do
-    prevScope <- gets snd
+    prevScope <- get @Scope
     output <- action
-    modify $ second (const prevScope)
+    put prevScope
     pure output
 
 -- todo: handle duplicate names (those that aren't just shadowing)
-declare :: Text -> EnvMonad Id
+declare :: EnvEffs es => Text -> Eff es Name
 -- each wildcard gets a unique id
-declare "_" = gets fst <* modify (first inc)
+declare "_" = freshName "_"
 declare name = do
-    (id', scope) <- get
+    scope <- get @Scope
+    disambiguatedName <- freshName name
     case Map.lookup name scope.table of
-        Just _ -> lift $ warn (Shadowing name)
+        Just _ -> warn (Shadowing name)
         Nothing -> pass
-    put (inc id', Scope $ Map.insert name id' scope.table)
-    pure id'
+    put $ Scope $ Map.insert name disambiguatedName scope.table
+    pure disambiguatedName
 
 -- | looks up a name in the current scope
-resolve :: Text -> EnvMonad Id
+resolve :: EnvEffs es => Text -> Eff es Name
 resolve name = do
-    scope <- gets snd
+    scope <- get @Scope
     case scope.table & Map.lookup name of
         Just id' -> pure id'
         Nothing -> do
-            lift $ error (UnboundVar name)
+            error (UnboundVar name)
             -- this gives a unique id to every occurance of the same unbound name
             scoped $ declare name
 
-resolveNames :: [Declaration Text] -> ScopeErrors UnboundVar Warning [Declaration Id]
-resolveNames decls = evaluatingStateT emptyScope do
+resolveNames :: (NameGen :> es) => HashMap Text Name -> [Declaration Text] -> Eff es ([Declaration Name], ScopeErrors)
+resolveNames env decls = runScopeErrors $ evalState (Scope env) do
     mkGlobalScope
     traverse resolveDec decls
   where
-    emptyScope = (Id 0, Scope Map.empty)
-
     -- this is going to handle imports at some point
-    mkGlobalScope :: EnvMonad ()
+    mkGlobalScope :: EnvEffs es => Eff es ()
     mkGlobalScope = collectNames decls
 
 {- | adds declarations to the current scope
 this function should be used very carefully, since it will
 generate different IDs when called twice on the same data
 -}
-collectNames :: [Declaration Text] -> EnvMonad ()
+collectNames :: EnvEffs es => [Declaration Text] -> Eff es ()
 collectNames decls = for_ decls \case
     D.Value (E.FunctionBinding name _ _) _ -> void $ declare name
     D.Value (E.ValueBinding pat _) _ -> void $ declarePat pat
@@ -112,7 +103,7 @@ collectNames decls = for_ decls \case
     D.Signature _ _ -> pass
 
 -- | resolves names in a declaration. Doesn't change the current scope
-resolveDec :: Declaration Text -> EnvMonad (Declaration Id)
+resolveDec :: EnvEffs es => Declaration Text -> Eff es (Declaration Name)
 resolveDec decl = scoped case decl of
     D.Value binding locals -> do
         binding' <- resolveBinding locals binding
@@ -133,7 +124,7 @@ resolveDec decl = scoped case decl of
 {- | resolves names in a binding. Unlike the rest of the functions, it also
 takes local definitions as an argument, and uses them after resolving the name / pattern
 -}
-resolveBinding :: [Declaration Text] -> Binding Text -> EnvMonad (Binding Id)
+resolveBinding :: EnvEffs es => [Declaration Text] -> Binding Text -> Eff es (Binding Name)
 resolveBinding locals = \case
     E.FunctionBinding name args body -> do
         name' <- resolve name
@@ -152,7 +143,7 @@ resolveBinding locals = \case
 this is *almost* the definition of `traverse` for Pattern, except for `Constructor`
 should I use a separate var and make it a Bitraversable instead?
 -}
-declarePat :: Pattern Text -> EnvMonad (Pattern Id)
+declarePat :: EnvEffs es => Pattern Text -> Eff es (Pattern Name)
 declarePat = \case
     P.Constructor con pats -> P.Constructor <$> resolve con <*> traverse declarePat pats
     nothingToResolve -> traverse declare nothingToResolve
@@ -161,7 +152,7 @@ declarePat = \case
 
 same story here. Most of the expressions use names, but a couple define them
 -}
-resolveExpr :: Expression Text -> EnvMonad (Expression Id)
+resolveExpr :: EnvEffs es => Expression Text -> Eff es (Expression Name)
 resolveExpr e = scoped case e of
     E.Lambda arg body -> do
         arg' <- declarePat arg
@@ -169,6 +160,11 @@ resolveExpr e = scoped case e of
         pure $ E.Lambda arg' body'
     E.Application f arg -> E.Application <$> resolveExpr f <*> resolveExpr arg
     E.Let binding expr -> do
+        -- resolveBinding is intended for top-level bindings and where clauses,
+        -- so we have to declare the new vars with `collectNames`
+        --
+        -- yes, this is hacky
+        collectNames [D.Value binding []]
         binding' <- resolveBinding [] binding
         expr' <- resolveExpr expr
         pure $ E.Let binding' expr'
@@ -186,7 +182,7 @@ resolveExpr e = scoped case e of
     nothingToDeclare -> traverse resolve nothingToDeclare
 
 -- | resolves names in a type. Doesn't change the current scope
-resolveType :: Type' Text -> EnvMonad (Type' Id)
+resolveType :: EnvEffs es => Type' Text -> Eff es (Type' Name)
 resolveType ty = scoped case ty of
     T.Forall var body -> do
         var' <- declare var

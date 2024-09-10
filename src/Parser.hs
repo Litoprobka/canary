@@ -16,10 +16,10 @@ import Data.IntMap.Strict qualified as IntMap
 import Text.Megaparsec
 import Syntax.Row
 
-code :: Parser [Declaration Name]
+code :: Parser [Declaration Text]
 code = topLevelBlock declaration
 
-declaration :: Parser (Declaration Name)
+declaration :: Parser (Declaration Text)
 declaration = choice [typeDec, valueDec, signature]
   where
     valueDec = try $ D.Value <$> binding <*> whereBlock
@@ -37,19 +37,19 @@ declaration = choice [typeDec, valueDec, signature]
         vars <- many typeVariable -- placeholder
         D.Type name vars <$> (typePattern `sepBy` specialSymbol "|")
 
-    typePattern :: Parser (Name, [Type' Name])
+    typePattern :: Parser (Text, [Type' Text])
     typePattern = do
         name <- typeName
         args <- many type'
         pure (name, args)
 
-    signature :: Parser (Declaration Name)
+    signature :: Parser (Declaration Text)
     signature = do
         name <- termName
         specialSymbol ":"
         D.Signature name <$> type'
 
-type' :: Parser (Type' Name)
+type' :: Parser (Type' Text)
 type' = makeExprParser noPrec [[typeApp], [function], [forall', exists]]
   where
     noPrec =
@@ -87,7 +87,7 @@ lambdaLike con kw arg endSym = do
     specialSymbol endSym
     pure \body -> foldr con body args
 
-pattern' :: Parser (Pattern Name)
+pattern' :: Parser (Pattern Text)
 pattern' =
     choice
         [ P.Constructor <$> typeName <*> many patternParens
@@ -99,7 +99,7 @@ pattern' =
 should be used in cases where multiple patterns in a row are accepted, i.e.
 function definitions and match expressions
 -}
-patternParens :: Parser (Pattern Name)
+patternParens :: Parser (Pattern Text)
 patternParens =
     choice
         [ P.Var <$> termName
@@ -114,15 +114,17 @@ patternParens =
         ]
     where unit = P.Constructor "Unit" []
 
-binding :: Parser (Binding Name)
+binding :: Parser (Binding Text)
 binding = do
     f <-
+        -- it should probably be `try (E.FunctionBinding <$> termName) <*> NE.some patternParens
+        -- for cleaner parse errors
         try (E.FunctionBinding <$> termName <*> NE.some patternParens)
             <|> (E.ValueBinding <$> pattern')
     specialSymbol "="
     f <$> expression
 
-expression :: Parser (Expression Name)
+expression :: Parser (Expression Text)
 expression = makeExprParser noPrec (snd <$> IntMap.toDescList precMap)
   where
     precMap =
