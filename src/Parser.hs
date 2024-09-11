@@ -49,7 +49,7 @@ declaration = choice [typeDec, valueDec, signature]
         specialSymbol ":"
         D.Signature name <$> type'
 
-type' :: Parser (Type' Text)
+type' :: ParserM m => m (Type' Text)
 type' = makeExprParser noPrec [[typeApp], [function], [forall', exists]]
   where
     noPrec =
@@ -69,7 +69,7 @@ type' = makeExprParser noPrec [[typeApp], [function], [forall', exists]]
     typeApp = InfixL $ pure T.Application
     function = InfixR $ T.Function <$ specialSymbol "->"
 
-someRecord :: Text -> Parser value -> Maybe (Text -> value) -> Parser (Row value)
+someRecord :: ParserM m => Text -> m value -> Maybe (Text -> value) -> m (Row value)
 someRecord delim valueP missingValue = braces (fromList <$> commaSep recordItem)
   where
     onMissing txt = case missingValue of
@@ -80,14 +80,14 @@ someRecord delim valueP missingValue = braces (fromList <$> commaSep recordItem)
         valuePattern <- onMissing recordLabel $ specialSymbol delim *> valueP
         pure (recordLabel, valuePattern)
 
-lambdaLike :: (a -> b -> b) -> Parser () -> Parser a -> Text -> Parser (b -> b)
+lambdaLike :: ParserM m => (a -> b -> b) -> m () -> m a -> Text -> m (b -> b)
 lambdaLike con kw arg endSym = do
     kw
     args <- NE.some arg
     specialSymbol endSym
     pure \body -> foldr con body args
 
-pattern' :: Parser (Pattern Text)
+pattern' :: ParserM m => m (Pattern Text)
 pattern' =
     choice
         [ P.Constructor <$> typeName <*> many patternParens
@@ -99,7 +99,7 @@ pattern' =
 should be used in cases where multiple patterns in a row are accepted, i.e.
 function definitions and match expressions
 -}
-patternParens :: Parser (Pattern Text)
+patternParens :: ParserM m => m (Pattern Text)
 patternParens =
     choice
         [ P.Var <$> termName
@@ -114,7 +114,7 @@ patternParens =
         ]
     where unit = P.Constructor "Unit" []
 
-binding :: Parser (Binding Text)
+binding :: ParserM m => m (Binding Text)
 binding = do
     f <-
         -- it should probably be `try (E.FunctionBinding <$> termName) <*> NE.some patternParens
@@ -124,9 +124,15 @@ binding = do
     specialSymbol "="
     f <$> expression
 
-expression :: Parser (Expression Text)
-expression = makeExprParser noPrec (snd <$> IntMap.toDescList precMap)
+expression :: ParserM m => m (Expression Text)
+expression = expression' False
+
+expression' :: ParserM m => Bool -> m (Expression Text)
+expression' newScope
+    | newScope = withWildcards $ makeExprParser (noPrec wildcardOrVar) (snd <$> IntMap.toDescList precMap)
+    | otherwise = makeExprParser (noPrec $ E.Name <$> termName) (snd <$> IntMap.toDescList precMap)
   where
+    precMap :: ParserM m => IntMap [Operator m (Expression Text)]
     precMap =
         IntMap.fromList
             [ (120, [infixR "."]) -- lens composition
@@ -154,8 +160,9 @@ expression = makeExprParser noPrec (snd <$> IntMap.toDescList precMap)
         infixN = infix' InfixN
         infix' fixity sym = fixity $ operator sym $> \lhs rhs -> E.Name sym `E.Application` lhs `E.Application` rhs
 
-    noPrec = choice $ keywordBased <> terminals
+    noPrec varParser = choice $ keywordBased <> terminals varParser
 
+    keywordBased :: ParserM m => [m (Expression Text)]
     keywordBased =
         [ lambdaLike E.Lambda lambda pattern' "->" <*> expression
         , let'
@@ -175,9 +182,16 @@ expression = makeExprParser noPrec (snd <$> IntMap.toDescList precMap)
             pure $ E.Case arg matches
         match' = E.Match <$> block "match" ((,) <$> some patternParens <* specialSymbol "->" <*> expression)
 
-    terminals =
-        [ parens expression
-        , E.Name <$> termName
+    -- todo: better error messages for out-of-scope wildcards
+    wildcardOrVar = do
+        name <- termName
+        if name == "_"
+            then nextVar
+            else pure $ E.Name name
+
+    terminals varParser =
+        [ parens $ expression' True
+        , varParser
         , E.RecordLens <$> recordLens
         , E.Constructor <$> typeName
         , E.Variant <$> variantConstructor
@@ -185,10 +199,18 @@ expression = makeExprParser noPrec (snd <$> IntMap.toDescList precMap)
         , E.CharLiteral <$> charLiteral
         , E.TextLiteral <$> textLiteral
         ]
-{-
+
 -- todo: handle complicated scoping
-withWildcards :: WriterT Int Parser (Expression Name) -> Parser (Expression Name)
+-- f x _ >> g  <=>  (\$1 -> f x $1) >> g
+-- f _ x >> g  <=>  (\$1 -> f $1 x) >> g
+-- x + _ >> f  <=>  (\$1 -> x + $1) >> f
+withWildcards :: Monad m => StateT Int m (Expression Text) -> m (Expression Text)
 withWildcards p = do
-    (expr, varCount) <- runWriterT p
-    pure $ foldr (\i -> E.Lambda ("$" <> show i)) expr [1..varCount]
--}
+    (expr, varCount) <- runStateT p 0
+    pure $ foldr (\i -> E.Lambda (P.Var $ "$" <> show i)) expr [1..varCount]
+
+nextVar :: MonadParsec Void Text m => StateT Int m (Expression Text)
+nextVar = do
+    modify succ
+    i <- get
+    pure $ E.Name $ "$" <> show i

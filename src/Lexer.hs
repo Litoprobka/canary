@@ -1,5 +1,6 @@
 module Lexer (
     Parser,
+    ParserM,
     keywords,
     specialSymbols,
     block,
@@ -36,23 +37,28 @@ import Text.Megaparsec.Char qualified as C (newline, space1)
 import Text.Megaparsec.Char.Lexer qualified as L
 
 type Parser = ReaderT Pos (Parsec Void Text)
+type ParserM m = (MonadParsec Void Text m, MonadReader Pos m, MonadFail m)
 
 -- |  the usual space parser. Doesn't consume newlines
-space :: Parser ()
+space :: ParserM m => m ()
+space = L.space nonNewlineSpace lineComment blockComment
 
 {- | any non-zero amount of newlines and any amount of whitespace
   i.e. it skips lines of whitespace entirely
   should never be used outside of the block-parsing functions
 -}
-newlines :: Parser ()
-(space, newlines) = (L.space nonNewlineSpace lineComment blockComment, C.newline *> L.space C.space1 lineComment blockComment)
-  where
-    nonNewlineSpace = void $ takeWhile1P (Just "space") \c -> isSpace c && c /= '\n' -- we can ignore \r here
-    lineComment = L.skipLineComment "//"
-    blockComment = L.skipBlockCommentNested "/*" "*/"
+newlines :: ParserM m => m ()
+newlines = C.newline *> L.space C.space1 lineComment blockComment
+
+-- helper functions for @space@ and @newlines@
+-- they're not in a where block, because monomorphism restriction
+nonNewlineSpace, lineComment, blockComment :: ParserM m => m ()
+nonNewlineSpace = void $ takeWhile1P (Just "space") \c -> isSpace c && c /= '\n' -- we can ignore \r here
+lineComment = L.skipLineComment "//"
+blockComment = L.skipBlockCommentNested "/*" "*/"
 
 -- | space or a newline with increased indentation
-spaceOrLineWrap :: Parser ()
+spaceOrLineWrap :: ParserM m => m ()
 spaceOrLineWrap = void $ space `sepBy` newlineWithIndent
   where
     newlineWithIndent = try do
@@ -62,18 +68,17 @@ spaceOrLineWrap = void $ space `sepBy` newlineWithIndent
 {- | parses a statement separator
 a \n should have the same indent as previous blocks. A semicolon always works
 -}
-newline :: Parser ()
+newline :: ParserM m => m ()
 newline = label "separator" $ void (symbol ";") <|> eqIndent
   where
-    eqIndent :: Parser ()
     eqIndent = try do
         indent <- ask
         void $ L.indentGuard newlines EQ indent
 
-lexeme :: Parser a -> Parser a
+lexeme :: ParserM m => m a -> m a
 lexeme = L.lexeme spaceOrLineWrap
 
-symbol :: Text -> Parser Text
+symbol :: ParserM m => Text -> m Text
 symbol = L.symbol spaceOrLineWrap
 
 keywords :: HashSet Text
@@ -82,17 +87,18 @@ keywords = Set.fromList ["if", "then", "else", "type", "alias", "case", "where",
 specialSymbols :: [Text]
 specialSymbols = ["=", "|", ":", ".", ",", "->", "=>", "<-", "(", ")", "{", "}"]
 
-lambda :: Parser ()
+lambda :: ParserM m => m ()
 lambda = void $ lexeme $ satisfy \c -> c == '\\' || c == 'λ'
 
 -- | a helper for `block` and `block1`.
 block'
-    :: (forall b. Parser a -> Parser b -> Parser out)
+    :: ParserM m
+    => (forall b. m a -> m b -> m out)
     -> Text
     -- ^ keyword
-    -> Parser a
+    -> m a
     -- ^ `sep` parser. Intended uses are `sepEndBy` and `sepEndBy1`
-    -> Parser out
+    -> m out
     -- ^ statement parser
 block' sep kw p = do
     keyword kw
@@ -107,17 +113,17 @@ block' sep kw p = do
     blockIndent <- L.indentLevel
     local (const blockIndent) (p `sep` newline)
 
-block :: Text -> Parser a -> Parser [a]
+block :: ParserM m => Text -> m a -> m [a]
 block = block' sepEndBy
 
-block1 :: Text -> Parser a -> Parser (NonEmpty a)
+block1 :: ParserM m => Text -> m a -> m (NonEmpty a)
 block1 = block' NE.sepEndBy1
 
 {- | a newline-delimited expression
 > let x = y
 > z
 -}
-letBlock :: Text -> (a -> b -> c) -> Parser a -> Parser b -> Parser c
+letBlock :: ParserM m => Text -> (a -> b -> c) -> m a -> m b -> m c
 letBlock kw f declaration expression = do
     blockIndent <- L.indentLevel
     keyword kw
@@ -130,37 +136,37 @@ topLevelBlock :: Parser a -> Parser [a]
 topLevelBlock p = L.nonIndented spaceOrLineWrap $ p `sepEndBy` newline <* eof
 
 -- | intended to be called with one of `specialSymbols`
-specialSymbol :: Text -> Parser ()
+specialSymbol :: ParserM m => Text -> m ()
 specialSymbol sym = try $ lexeme $ string sym *> notFollowedBy (satisfy isOperatorChar) -- note that `symbol` isn't used here, since the whitespace matters in this case
 
 -- | parses a keyword, i.e. a symbol not followed by an alphanum character
-keyword :: Text -> Parser ()
+keyword :: ParserM m => Text -> m ()
 keyword kw = try $ lexeme $ string kw *> notFollowedBy (satisfy isIdentifierChar)
 
 -- | an identifier that doesn't start with an uppercase letter
-termName :: Parser Text
+termName :: ParserM m => m Text
 termName = try do
     ident <- identifier
     guard (not $ isUpperCase $ Text.head ident)
     pure ident
 
 -- | an identifier that starts with an uppercase letter
-typeName :: Parser Text
+typeName :: ParserM m => m Text
 typeName = try do
     ident <- identifier
     guard (isUpperCase $ Text.head ident)
     pure ident
 
 -- | an identifier that starts with a ' and a lowercase letter, i.e. 'acc
-typeVariable :: Parser Text
+typeVariable :: ParserM m => m Text
 typeVariable = try $ liftA2 Text.cons (single '\'') termName
 
 -- an identifier that starts with a ' and an uppercase letter, i.e. 'Some
-variantConstructor :: Parser Text
+variantConstructor :: ParserM m => m Text
 variantConstructor = try $ liftA2 Text.cons (single '\'') typeName
 
 -- a helper for other identifier parsers
-identifier :: Parser Text
+identifier :: ParserM m => m Text
 identifier = try do
     ident <- lexeme $ Text.cons <$> (letterChar <|> char '_') <*> takeWhileP (Just "identifier") isIdentifierChar
     when (ident `Set.member` keywords) (fail "expected an identifier, got a keyword")
@@ -169,20 +175,20 @@ identifier = try do
 {- | a record lens, i.e. .field.otherField.thirdField
 Chances are, this parser will only ever be used with T.RecordLens (I should rename Term to Expression)
 -}
-recordLens :: Parser (NonEmpty Text)
+recordLens :: ParserM m => m (NonEmpty Text)
 recordLens = lexeme $ single '.' *> identifier `NE.sepBy1` single '.'
 
-intLiteral :: Parser Int
+intLiteral :: ParserM m => m Int
 intLiteral = try $ lexeme $ L.signed empty L.decimal
 
 -- todo: handle escape sequences and interpolation
-textLiteral :: Parser Text
+textLiteral :: ParserM m => m Text
 textLiteral = between (symbol "\"") (symbol "\"") $ takeWhileP (Just "text literal body") (/= '"')
 
-charLiteral :: Parser Text
+charLiteral :: ParserM m => m Text
 charLiteral = try $ one <$> between (single '\'') (symbol "'") anySingle
 
-operator :: Text -> Parser ()
+operator :: ParserM m => Text -> m ()
 operator sym = lexeme $ string sym *> notFollowedBy (satisfy isOperatorChar)
 
 someOperator :: Parser Text
@@ -194,10 +200,10 @@ isOperatorChar = (`elem` ("+-*/%^=><&.~!?|" :: String))
 isIdentifierChar :: Char -> Bool
 isIdentifierChar c = isAlphaNum c || c == '_' || c == '\''
 
-parens, brackets, braces :: Parser a -> Parser a
+parens, brackets, braces :: ParserM m => m a -> m a
 parens = between (specialSymbol "(") (specialSymbol ")")
 brackets = between (specialSymbol "[") (specialSymbol "]")
 braces = between (specialSymbol "{") (specialSymbol "}")
 
-commaSep :: Parser a -> Parser [a]
+commaSep :: ParserM m => m a -> m [a]
 commaSep = (`sepEndBy` specialSymbol ",")
