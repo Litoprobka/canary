@@ -125,13 +125,18 @@ binding = do
     f <$> expression
 
 expression :: ParserM m => m (Expression Text)
-expression = expression' False
+expression = expression' OuterScope
 
-expression' :: ParserM m => Bool -> m (Expression Text)
-expression' newScope
-    | newScope = withWildcards $ makeExprParser (noPrec wildcardOrVar) (snd <$> IntMap.toDescList precMap)
-    | otherwise = makeExprParser (noPrec $ E.Name <$> termName) (snd <$> IntMap.toDescList precMap)
+data LambdaScope = OuterScope | NewScope
+
+expression' :: ParserM m => LambdaScope -> m (Expression Text)
+expression' scope = case scope of
+    NewScope -> withWildcards scopedExpr
+    OuterScope -> makeExprParser (noPrec $ E.Name <$> termName) (snd <$> IntMap.toDescList precMap)
   where
+    scopedExpr :: ParserM m => StateT Int m (Expression Text)
+    scopedExpr = makeExprParser (noPrec wildcardOrVar) (snd <$> IntMap.toDescList precMap)
+
     precMap :: ParserM m => IntMap [Operator m (Expression Text)]
     precMap =
         IntMap.fromList
@@ -169,8 +174,8 @@ expression' newScope
         , case'
         , match'
         , E.If <$ keyword "if" <*> expression <* keyword "then" <*> expression <* keyword "else" <*> expression
-        , E.Record <$> someRecord "=" expression (Just E.Name)
-        , E.List <$> brackets (commaSep expression)
+        , withWildcards $ E.Record <$> someRecord "=" scopedExpr (Just E.Name)
+        , withWildcards $ E.List <$> brackets (commaSep scopedExpr)
         ]
       where
         let' = do
@@ -183,6 +188,7 @@ expression' newScope
         match' = E.Match <$> block "match" ((,) <$> some patternParens <* specialSymbol "->" <*> expression)
 
     -- todo: better error messages for out-of-scope wildcards
+    wildcardOrVar :: ParserM m => StateT Int m (Expression Text)
     wildcardOrVar = do
         name <- termName
         if name == "_"
@@ -190,7 +196,7 @@ expression' newScope
             else pure $ E.Name name
 
     terminals varParser =
-        [ parens $ expression' True
+        [ parens $ expression' NewScope
         , varParser
         , E.RecordLens <$> recordLens
         , E.Constructor <$> typeName
@@ -200,10 +206,18 @@ expression' newScope
         , E.TextLiteral <$> textLiteral
         ]
 
--- todo: handle complicated scoping
--- f x _ >> g  <=>  (\$1 -> f x $1) >> g
--- f _ x >> g  <=>  (\$1 -> f $1 x) >> g
--- x + _ >> f  <=>  (\$1 -> x + $1) >> f
+-- turns out that respecting operator precedence makes for confusing code
+-- i.e. consider, say, `3 + _ * 4`
+-- with precendence, it should be parsed as `3 + (\x -> x * 4)`
+-- but what you probably mean is `\x -> 3 + x * 4`
+--
+-- in the end, I decided to go with the simples rules possible - that is, parens determine
+-- the scope of the implicit lambda
+--
+-- it's not clear whether I want to require parens around list and record literals
+-- on one hand, `({x = 3, y = 3})` looks a bit janky
+-- on the other hand, without that you wouldn't be able to write `f {x = 3, y = _}`
+-- if you want it to mean `\y -> f {x = 3, y}`
 withWildcards :: Monad m => StateT Int m (Expression Text) -> m (Expression Text)
 withWildcards p = do
     (expr, varCount) <- runStateT p 0

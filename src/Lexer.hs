@@ -94,12 +94,12 @@ lambda = void $ lexeme $ satisfy \c -> c == '\\' || c == 'λ'
 block'
     :: ParserM m
     => (forall b. m a -> m b -> m out)
+    -- ^ `sep` parser. Intended uses are `sepEndBy` and `sepEndBy1`
     -> Text
     -- ^ keyword
     -> m a
-    -- ^ `sep` parser. Intended uses are `sepEndBy` and `sepEndBy1`
-    -> m out
     -- ^ statement parser
+    -> m out
 block' sep kw p = do
     keyword kw
 
@@ -141,7 +141,7 @@ specialSymbol sym = try $ lexeme $ string sym *> notFollowedBy (satisfy isOperat
 
 -- | parses a keyword, i.e. a symbol not followed by an alphanum character
 keyword :: ParserM m => Text -> m ()
-keyword kw = try $ lexeme $ string kw *> notFollowedBy (satisfy isIdentifierChar)
+keyword kw = label (toString kw) $ try $ lexeme $ string kw *> notFollowedBy (satisfy isIdentifierChar)
 
 -- | an identifier that doesn't start with an uppercase letter
 termName :: ParserM m => m Text
