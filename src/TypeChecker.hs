@@ -12,7 +12,7 @@ module TypeChecker (
     inferBinding,
     check,
     checkPattern,
-    unify,
+    subtype,
     inferTypeVars,
     normalise,
     Builtins (..),
@@ -50,7 +50,6 @@ type Pattern' = Pattern Name
 
 type Type = Type' Name
 
--- а type whose outer constructor is monomorphic
 data Monotype
     = MName Name
     | MSkolem Skolem
@@ -60,6 +59,18 @@ data Monotype
     | MFn Monotype Monotype
     | MVariant (ExtRow Monotype)
     | MRecord (ExtRow Monotype)
+    deriving (Show, Eq)
+
+-- а type whose outer constructor is monomorphic
+data MonoLayer
+    = MLName Name
+    | MLSkolem Skolem
+    | MLUniVar UniVar
+    | MLVar Name
+    | MLApp Type Type
+    | MLFn Type Type
+    | MLVariant (ExtRow Type)
+    | MLRecord (ExtRow Type)
     deriving (Show, Eq)
 
 newtype TypeError = TypeError (Doc ()) deriving (Show)
@@ -89,6 +100,9 @@ type InfEffs es = (NameGen :> es, State InfState :> es, Error TypeError :> es, R
 
 instance Pretty Monotype where
     pretty = pretty . unMono
+
+instance Pretty MonoLayer where
+    pretty = pretty . unMonoLayer
 
 -- helpers
 
@@ -280,7 +294,7 @@ data Variance = In | Out | Inv
 -}
 mono :: InfEffs es => Variance -> Type -> Eff es Monotype
 mono variance = \case
-    v@T.Var{} -> typeError $ "unbound type variable " <> pretty v
+    v@T.Var{} -> typeError $ "unbound type variable" <+> pretty v
     T.Name name -> pure $ MName name
     T.Skolem skolem -> pure $ MSkolem skolem
     T.UniVar uni -> pure $ MUniVar uni
@@ -292,10 +306,12 @@ mono variance = \case
     T.Exists var body -> go =<< substitute (flipVariance variance) var body
   where
     go = mono variance
-    flipVariance = \case
-        In -> Out
-        Out -> In
-        Inv -> Inv
+
+flipVariance :: Variance -> Variance
+flipVariance = \case
+    In -> Out
+    Out -> In
+    Inv -> Inv
 
 unMono :: Monotype -> Type
 unMono = \case
@@ -307,6 +323,41 @@ unMono = \case
     MFn from to -> T.Function (unMono from) (unMono to)
     MVariant row -> T.Variant $ fmap unMono row
     MRecord row -> T.Record $ fmap unMono row
+
+{- unwraps forall/exists clauses in a type until a monomorphic constructor is encountered
+
+> monoLayer Out (forall a. a -> a)
+> -- ?a -> ?a
+> monoLayer In (forall a. a -> a)
+> -- #a -> #a
+> monoLayer Out (forall a. forall b. a -> b -> a)
+> -- forall b. ?a -> b -> ?a
+> monoLayer Out (forall a. (forall b. b -> a) -> a)
+> -- (forall b. b -> ?a) -> ?a
+-}
+monoLayer :: InfEffs es => Variance -> Type -> Eff es MonoLayer
+monoLayer variance = \case
+    v@T.Var{} -> typeError $ "unbound type variable" <+> pretty v
+    T.Name name -> pure $ MLName name
+    T.Skolem skolem -> pure $ MLSkolem skolem
+    T.UniVar uni -> pure $ MLUniVar uni
+    T.Application lhs rhs -> pure $ MLApp lhs rhs
+    T.Function from to -> pure $ MLFn from to
+    T.Variant row -> pure $ MLVariant row
+    T.Record row -> pure $ MLRecord row
+    T.Forall var body -> monoLayer variance =<< substitute variance var body
+    T.Exists var body -> monoLayer variance =<< substitute (flipVariance variance) var body
+
+unMonoLayer :: MonoLayer -> Type
+unMonoLayer = \case
+    MLName name -> T.Name name
+    MLSkolem skolem -> T.Skolem skolem
+    MLUniVar uni -> T.UniVar uni
+    MLVar name -> T.Var name
+    MLApp lhs rhs -> T.Application lhs rhs
+    MLFn lhs rhs -> T.Function lhs rhs
+    MLVariant row -> T.Variant row
+    MLRecord row -> T.Record row
 
 substitute :: InfEffs es => Variance -> Name -> Type -> Eff es Type
 substitute variance var ty = do
@@ -449,9 +500,9 @@ replaceSkolems con ty = uncurry (foldr con) <$> runState HashMap.empty (go ty)
 
 -- what to match
 data RecordOrVariant = Record | Variant deriving (Eq)
-conOf :: RecordOrVariant -> ExtRow Monotype -> Monotype
-conOf Record = MRecord
-conOf Variant = MVariant
+conOf :: RecordOrVariant -> ExtRow Type -> Type
+conOf Record = T.Record
+conOf Variant = T.Variant
 
 -- lookup a field in a type, assuming that the type is a row type
 -- if a univar is encountered, it's solved to a row type
@@ -530,9 +581,9 @@ compress whatToMatch r@(ExtRow row ext) = go ext
             MVar{} -> pure r
 
 -- first record minus fields that match with the second one
-diff :: InfEffs es => RecordOrVariant -> ExtRow Monotype -> Row Monotype -> Eff es (ExtRow Monotype)
+diff :: InfEffs es => RecordOrVariant -> ExtRow Type -> Row Type -> Eff es (ExtRow Type)
 diff whatToMatch lhsUncompressed rhs = do
-    lhs <- traverse (mono In) =<< compress whatToMatch (unMono <$> lhsUncompressed)
+    lhs <- compress whatToMatch lhsUncompressed
     pure $ lhs{row = Row.diff lhs.row rhs}
 
 -- finds all type parameters used in a type and creates corresponding forall clauses
@@ -576,47 +627,51 @@ inferDecls decls = do
         second (\conParams -> foldr T.Forall (foldr T.Function (T.Name name) conParams) vars)
             <$> constrs
 
--- | @subtype a b@ checks whether @a@ is a subtype of @b@
+-- | unifies two monotypes by instantiating free vars
 unify :: InfEffs es => Monotype -> Monotype -> Eff es ()
-unify = \cases
-    lhs rhs | lhs == rhs -> pass -- simple cases, i.e. two type constructors, two univars or two exvars
-    -- we *might* have to check for univars once again after applying `mono`
-    lhs (MUniVar uni) -> solveOr lhs (unify lhs) uni
-    (MUniVar uni) rhs -> solveOr rhs (`unify` rhs) uni
-    (MName lhs) (MName rhs) ->
-        unlessM (elem (lhs, rhs) <$> builtin (.subtypeRelations)) $
-            typeError ("cannot unify" <+> pretty lhs <+> "with" <+> pretty rhs)
-    (MFn inl outl) (MFn inr outr) -> do
-        unify inr inl
-        unify outl outr
-    (MApp lhs rhs) (MApp lhs' rhs') -> do
-        -- note that we assume the same variance for all type parameters
-        -- some kind of kind system is needed to track variance and prevent stuff like `Maybe a b`
-        -- higher-kinded types are also problematic when it comes to variance, i.e.
-        -- is `f a` a subtype of `f b` when a is `a` subtype of `b` or the other way around?
-        --
-        -- QuickLook just assumes that all constructors are invariant and -> is a special case
-        unify lhs lhs'
-        unify rhs rhs'
-    (MVariant lhs) (MVariant rhs) -> rowCase Variant lhs rhs
-    (MRecord lhs) (MRecord rhs) -> rowCase Record lhs rhs
-    lhs rhs -> typeError $ pretty lhs <+> "is not a subtype of" <+> pretty rhs
+unify lhs rhs = subtype (unMono lhs) (unMono rhs)
+
+subtype :: InfEffs es => Type -> Type -> Eff es ()
+subtype lhs_ rhs_ = join $ match <$> monoLayer In lhs_ <*> monoLayer Out rhs_ 
   where
+    match = \cases
+        lhs rhs | lhs == rhs -> pass -- simple cases, i.e. two type constructors, two univars or two exvars
+        lhs (MLUniVar uni) -> solveOr (mono In $ unMonoLayer lhs) (subtype (unMonoLayer lhs) . unMono) uni
+        (MLUniVar uni) rhs -> solveOr (mono Out $ unMonoLayer rhs) ((`subtype` unMonoLayer rhs) . unMono) uni
+        (MLName lhs) (MLName rhs) ->
+            unlessM (elem (lhs, rhs) <$> builtin (.subtypeRelations)) $
+                typeError ("cannot unify" <+> pretty lhs <+> "with" <+> pretty rhs)
+        (MLFn inl outl) (MLFn inr outr) -> do
+            subtype inr inl
+            subtype outl outr
+        (MLApp lhs rhs) (MLApp lhs' rhs') -> do
+            -- note that we assume the same variance for all type parameters
+            -- some kind of kind system is needed to track variance and prevent stuff like `Maybe a b`
+            -- higher-kinded types are also problematic when it comes to variance, i.e.
+            -- is `f a` a subtype of `f b` when a is `a` subtype of `b` or the other way around?
+            --
+            -- QuickLook just assumes that all constructors are invariant and -> is a special case
+            subtype lhs lhs'
+            subtype rhs rhs'
+        (MLVariant lhs) (MLVariant rhs) -> rowCase Variant lhs rhs
+        (MLRecord lhs) (MLRecord rhs) -> rowCase Record lhs rhs
+        lhs rhs -> typeError $ pretty lhs <+> "is not a subtype of" <+> pretty rhs
+
     rowCase whatToMatch lhsRow rhsRow = do
         let con = conOf whatToMatch
         for_ (IsList.toList lhsRow.row) \(name, lhsTy) ->
-            deepLookup whatToMatch name (unMono $ con rhsRow) >>= \case
+            deepLookup whatToMatch name (con rhsRow) >>= \case
                 Nothing ->
                     typeError $
                         pretty (con lhsRow) <+> "is not a subtype of" <+> pretty (con rhsRow)
                             <> ": right hand side does not contain" <+> pretty name
-                Just rhsTy -> unify lhsTy =<< mono In rhsTy
+                Just rhsTy -> subtype lhsTy rhsTy
         -- if the lhs has an extension, it should be compatible with rhs without the already matched fields
-        for_ (Row.extension lhsRow) \ext -> unify ext . con =<< diff whatToMatch rhsRow lhsRow.row
+        for_ (Row.extension lhsRow) \ext -> subtype ext . con =<< diff whatToMatch rhsRow lhsRow.row
 
     -- turns out it's different enough from `withUniVar`
-    solveOr :: InfEffs es => Monotype -> (Monotype -> Eff es ()) -> UniVar -> Eff es ()
-    solveOr solveWith whenSolved uni = lookupUniVar uni >>= either (const $ solveUniVar uni solveWith) whenSolved
+    solveOr :: InfEffs es => Eff es Monotype -> (Monotype -> Eff es ()) -> UniVar -> Eff es ()
+    solveOr solveWith whenSolved uni = lookupUniVar uni >>= either (const $ solveUniVar uni =<< solveWith) whenSolved
 
 check :: InfEffs es => Expr -> Type -> Eff es ()
 check e type_ = do
@@ -632,9 +687,7 @@ check e type_ = do
             check body to
         (E.Annotation expr annTy) ty -> do
             check expr annTy
-            monoTy <- mono Out ty
-            monoAnnTy <- mono In annTy
-            unify monoTy monoAnnTy
+            subtype annTy ty
         (E.If cond true false) ty -> do
             bool <- builtin (.bool)
             check cond $ T.Name bool
@@ -663,9 +716,8 @@ check e type_ = do
         expr (T.Forall var body) -> check expr =<< substitute Out var body
         expr (T.Exists var body) -> check expr =<< substitute In var body
         expr ty -> do
-            inferredTy <- mono In =<< infer expr
-            monoTy <- mono Out ty
-            unify inferredTy monoTy
+            inferredTy <- infer expr
+            subtype inferredTy ty
 
 checkPattern :: InfEffs es => Pattern' -> Type -> Eff es ()
 checkPattern = \cases
@@ -677,8 +729,8 @@ checkPattern = \cases
                 Nothing -> typeError $ pretty ty <+> "does not contain field" <+> pretty name
                 Just fieldTy -> checkPattern pat fieldTy
     pat ty -> do
-        ty' <- mono In =<< inferPattern pat
-        unify ty' =<< mono Out ty
+        inferredTy <- inferPattern pat
+        subtype inferredTy ty
 
 infer :: InfEffs es => Expr -> Eff es Type
 infer = scoped . \case
@@ -795,25 +847,25 @@ inferPattern = \case
     -- conArgTypes and the zipM may be unified into a single function
     conArgTypes = lookupSig >=> go
     go =
-        mono In >=> \case
-            MFn arg rest -> second (unMono arg :) <$> go (unMono rest)
+        monoLayer In >=> \case
+            MLFn arg rest -> second (arg :) <$> go rest
             -- univars should never appear as the rightmost argument of a value constructor type
             -- i.e. types of value constructors have the shape `a -> b -> c -> d -> ConcreteType a b c d`
             --
             -- solved univars cannot appear here either, since `lookupSig` on a pattern returns a type with no univars
-            MUniVar uni -> typeError $ "unexpected univar" <+> pretty uni <+> "in a constructor type"
+            MLUniVar uni -> typeError $ "unexpected univar" <+> pretty uni <+> "in a constructor type"
             -- this kind of repetition is necessary to retain missing pattern warnings
-            MName name -> pure (T.Name name, [])
-            MApp lhs rhs -> pure (T.Application (unMono lhs) (unMono rhs), [])
-            MVariant row -> pure (T.Variant $ unMono <$> row, [])
-            MRecord row -> pure (T.Record $ unMono <$> row, [])
-            MSkolem skolem -> pure (T.Skolem skolem, [])
-            MVar var -> pure (T.Var var, [])
+            MLName name -> pure (T.Name name, [])
+            MLApp lhs rhs -> pure (T.Application lhs rhs, [])
+            MLVariant row -> pure (T.Variant row, [])
+            MLRecord row -> pure (T.Record row, [])
+            MLSkolem skolem -> pure (T.Skolem skolem, [])
+            MLVar var -> pure (T.Var var, [])
 
 inferApp :: InfEffs es => Type -> Expr -> Eff es Type
 inferApp fTy arg =
-    mono In fTy >>= \case
-        MUniVar v -> do
+    monoLayer In fTy >>= \case
+        MLUniVar v -> do
             from <- mono In =<< infer arg
             lookupUniVar v >>= \case
                 Left _ -> do
@@ -824,5 +876,5 @@ inferApp fTy arg =
                     to <- mono Inv =<< freshUniVar
                     unify newTy (MFn from to)
                     pure $ unMono to
-        MFn from to -> unMono to <$ check arg (unMono from)
+        MLFn from to -> to <$ check arg from
         _ -> typeError $ pretty fTy <+> "is not a function type"

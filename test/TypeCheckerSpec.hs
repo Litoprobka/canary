@@ -56,7 +56,7 @@ exprs =
         )
     , ("\\cond -> if cond then id else reverse", λ "cond" $ E.If "cond" "id" "reverse")
     , ("\\x y -> [x, y]", λ "x" $ λ "y" $ E.List ["x", "y"])
-    , ("\\x y -> [x : ∀'a. 'a -> 'a, y]", λ "x" $ λ "y" $ E.List [E.Annotation "x" (T.Forall "'a" $ "'a" --> "'a"), "y"])
+    , ("\\(x : ∀'a. 'a -> 'a) y -> [x, y]", λ (P.Annotation "x" $ T.Forall "'a" $ "'a" --> "'a") $ λ "y" $ E.List ["x", "y"])
     , ("[id, \\{} -> {}]", E.List ["id", λ (P.Record []) unitE])
     ]
 
@@ -95,6 +95,7 @@ quickLookExamples =
     , ("single id : List (∀a. a -> a)", E.Annotation ("single" # "id") $ list $ T.Forall "'a" $ "'a" --> "'a")
     , ("(\\x -> x) ids)", λ "x" "x" # "ids")
     , ("wikiF (Just reverse)", "wikiF" # ("Just" # "reverse"))
+    , ("\\x y -> [x : ∀'a. 'a -> 'a, y]", λ "x" $ λ "y" $ E.List [E.Annotation "x" (T.Forall "'a" $ "'a" --> "'a"), "y"])
     ]
 
 quickLookDefs :: [(Text, Type' Text)]
