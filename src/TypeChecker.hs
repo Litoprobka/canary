@@ -677,7 +677,7 @@ subtype = \cases
 check :: InfEffs es => Expr -> Type -> Eff es ()
 check e type_ = do
     builtins <- ask @(Builtins Name)
-    mono Out type_ >>= match builtins e
+    scoped $ mono Out type_ >>= match builtins e
   where
     -- most of the cases don't need monomorphisation here
     -- it doesn't make a difference most of the time, since `subtype` monomorphises
@@ -740,7 +740,7 @@ checkPattern = \cases
         subtype ty' ty
 
 infer :: InfEffs es => Expr -> Eff es Type
-infer = \case
+infer = scoped . \case
     E.Name name -> lookupSig name
     E.Constructor name -> lookupSig name
     E.Variant name -> {-forallScope-} do
