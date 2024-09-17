@@ -65,15 +65,8 @@ data MonoLayer
 
 newtype TypeError = TypeError (Doc ()) deriving (Show)
 
-data Builtins a = Builtins
-    { bool :: a
-    , list :: a
-    , int :: a
-    , nat :: a
-    , text :: a
-    , char :: a
-    , lens :: a
-    , subtypeRelations :: [(a, a)]
+newtype Builtins a = Builtins
+    { subtypeRelations :: [(a, a)]
     }
     deriving (Show, Functor, Foldable, Traversable)
 
@@ -138,6 +131,7 @@ freshUniVar = do
 
 freshSkolem :: InfEffs es => Name -> Eff es Type
 freshSkolem (Name name _) = T.Skolem . Skolem <$> freshName name
+freshSkolem _ = T.Skolem . Skolem <$> freshName "what" -- why? 
 
 freshTypeVar :: InfEffs es => Eff es Name
 freshTypeVar = do
@@ -221,9 +215,6 @@ lookupSig name =
 
 updateSig :: InfEffs es => Name -> Type -> Eff es ()
 updateSig name ty = modify \s -> s{sigs = HashMap.insert name ty s.sigs}
-
-builtin :: Reader (Builtins Name) :> es => (Builtins Name -> a) -> Eff es a
-builtin = asks @(Builtins Name)
 
 -- | run the given action and discard signature updates
 scoped :: InfEffs es => Eff es a -> Eff es a
@@ -590,7 +581,7 @@ supertype = \cases
     -- and here comes the interesting part: we get back polymorphism by applying forallScope
     -- a similar function for existentials and skolems is TBD
     lhs rhs -> do
-        rels <- builtin (.subtypeRelations)
+        rels <- asks @(Builtins Name) (.subtypeRelations)
         forallScope $ join $ match rels <$> mono In lhs <*> mono In rhs
   where
     match rels = \cases
@@ -640,7 +631,7 @@ subtype = \cases
         lhs (MUniVar uni) -> solveOr (unMono lhs) (subtype $ unMono lhs) uni
         (MUniVar uni) rhs -> solveOr (unMono rhs) (`subtype` unMono rhs) uni
         (MName lhs) (MName rhs) ->
-            unlessM (elem (lhs, rhs) <$> builtin (.subtypeRelations)) $
+            unlessM (elem (lhs, rhs) <$> asks @(Builtins Name) (.subtypeRelations)) $
                 typeError (pretty lhs <+> "is not a subtype of" <+> pretty rhs)
         (MFn inl outl) (MFn inr outr) -> do
             subtype inr inl
@@ -675,9 +666,7 @@ subtype = \cases
     solveOr solveWith whenSolved uni = lookupUniVar uni >>= either (const $ solveUniVar uni solveWith) whenSolved
 
 check :: InfEffs es => Expr -> Type -> Eff es ()
-check e type_ = do
-    builtins <- ask @(Builtins Name)
-    scoped $ mono Out type_ >>= match builtins e
+check e type_ = scoped $ mono Out type_ >>= match e
   where
     -- most of the cases don't need monomorphisation here
     -- it doesn't make a difference most of the time, since `subtype` monomorphises
@@ -687,10 +676,10 @@ check e type_ = do
     -- with a monomorphised type rather than a polytype
     --
     -- one option is to make `unMono` behave like univarsToForall / univarsToExists
-    match builtins = \cases
+    match = \cases
         -- the cases for E.Name and E.Constructor are redundant, since
         -- `infer` just looks up their types anyway
-        (E.Lambda arg body) (MFn from to) -> scoped do
+        (E.Lambda arg body) (MFn from to) -> do
             -- `checkPattern` updates signatures of all mentioned variables
             checkPattern arg from
             check body to
@@ -698,8 +687,7 @@ check e type_ = do
             subtype ty' $ unMono ty
             check expr ty'
         (E.If cond true false) ty -> do
-            bool <- builtin (.bool)
-            check cond $ T.Name bool
+            check cond $ T.Name BoolName
             check true $ unMono ty
             check false $ unMono ty
         (E.Case arg matches) ty -> do
@@ -707,8 +695,7 @@ check e type_ = do
             for_ matches \(pat, body) -> do
                 checkPattern pat argTy
                 check body $ unMono ty
-        (E.List items) (MApp (T.Name name) itemTy)
-            | name == builtins.list -> for_ items (`check` itemTy)
+        (E.List items) (MApp (T.Name ListName) itemTy) -> for_ items (`check` itemTy)
         (E.Record row) ty -> do
             for_ (IsList.toList row) \(name, expr) ->
                 deepLookup Record name (unMono ty) >>= \case
@@ -759,8 +746,7 @@ infer = scoped . \case
         infer body
     E.Annotation expr ty -> ty <$ check expr ty
     E.If cond true false -> do
-        bool <- builtin (.bool)
-        check cond $ T.Name bool
+        check cond $ T.Name BoolName
         trueTy <- infer true
         falseTy <- infer false
         supertype trueTy falseTy
@@ -788,8 +774,7 @@ infer = scoped . \case
         pure $ foldr T.Function resultType finalPatTypes
     E.List items -> do
         itemTy <- freshUniVar
-        list <- builtin (.list)
-        T.Application (T.Name list) <$> (foldM supertype itemTy =<< traverse infer items)
+        T.Application (T.Name ListName) <$> (foldM supertype itemTy =<< traverse infer items)
     E.Record row -> T.Record . NoExtRow <$> traverse infer row
     E.RecordLens fields -> do
         recordParts <- for fields \field -> do
@@ -798,18 +783,17 @@ infer = scoped . \case
         let mkNestedRecord = foldr1 (.) recordParts
         a <- freshUniVar
         b <- freshUniVar
-        lens <- builtin (.lens)
         pure $
-            T.Name lens
+            T.Name LensName
                 `T.Application` mkNestedRecord a
                 `T.Application` mkNestedRecord b
                 `T.Application` a
                 `T.Application` b
     E.IntLiteral num
-        | num >= 0 -> T.Name <$> builtin (.nat)
-        | otherwise -> T.Name <$> builtin (.int)
-    E.TextLiteral _ -> T.Name <$> builtin (.text)
-    E.CharLiteral _ -> T.Name <$> builtin (.char)
+        | num >= 0 -> pure $ T.Name NatName
+        | otherwise -> pure $ T.Name IntName
+    E.TextLiteral _ -> pure $ T.Name TextName
+    E.CharLiteral _ -> pure $ T.Name TextName
 
 -- infers the type of a binding and declares it
 -- returns the type if it's a function or a single variable binding
@@ -842,17 +826,18 @@ inferPattern = \case
         pure resultType
     P.List pats -> do
         result <- freshUniVar
-        list <- builtin (.list)
-        T.Application (T.Name list) <$> (foldM supertype result =<< traverse inferPattern pats)
+        T.Application (T.Name ListName) <$> (foldM supertype result =<< traverse inferPattern pats)
     P.Variant name arg -> {-forallScope-} do
         argTy <- inferPattern arg
         T.Variant . ExtRow (fromList [(name, argTy)]) <$> freshUniVar
     P.Record row -> do
         typeRow <- traverse inferPattern row
         T.Record . ExtRow typeRow <$> freshUniVar
-    P.IntLiteral _ -> T.Name <$> builtin (.int)
-    P.TextLiteral _ -> T.Name <$> builtin (.text)
-    P.CharLiteral _ -> T.Name <$> builtin (.char)
+    P.IntLiteral num
+        | num >= 0 -> pure $ T.Name NatName
+        | otherwise -> pure $ T.Name IntName
+    P.TextLiteral _ -> pure $ T.Name TextName
+    P.CharLiteral _ -> pure $ T.Name TextName
   where
     -- conArgTypes and the zipM may be unified into a single function
     conArgTypes = lookupSig >=> go

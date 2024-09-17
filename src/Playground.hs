@@ -70,20 +70,7 @@ runDefault action = runPureEff $ runNameGen do
 
 mkDefaults :: NameGen :> es => Eff es (HashMap Text Name, Builtins Name, HashMap Name (Type' Name))
 mkDefaults = do
-    builtinsWithoutSubtypes <-
-        traverse
-            freshName
-            Builtins
-                { bool = "Bool"
-                , list = "List"
-                , int = "Int"
-                , nat = "Nat"
-                , text = "Text"
-                , char = "Char"
-                , lens = "Lens"
-                , subtypeRelations = [] -- [("Nat", "Int")]
-                }
-    let builtins = builtinsWithoutSubtypes { subtypeRelations = [(builtins.nat, builtins.int)]}
+    let builtins = Builtins { subtypeRelations = [(NatName, IntName)]}
     types <-
         traverse freshName $
             HashMap.fromList $
@@ -91,7 +78,15 @@ mkDefaults = do
                     <$> [ "Unit"
                         , "Maybe"
                         ]
-    let initScope = HashMap.insert "List" builtins.list $ HashMap.insert "Bool" builtins.bool types
+    let initScope = types <> HashMap.fromList
+            [ ("Bool", BoolName)
+            , ("List", ListName)
+            , ("Int", IntName)
+            , ("Nat", NatName)
+            , ("Text", TextName)
+            , ("Char", CharName)
+            , ("Lens", LensName)
+            ]
     (env, Scope scope) <-
         (runState (Scope initScope) . fmap (HashMap.fromList . fst) . runScopeErrors)
             ( traverse
