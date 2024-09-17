@@ -5,7 +5,7 @@
 {-# LANGUAGE DataKinds #-}
 {-# LANGUAGE AllowAmbiguousTypes #-}
 
-module NameResolution (resolveNames, UnboundVar (..), Warning (..), ScopeErrors (..)) where
+module NameResolution (runNameResolution, runScopeErrors, resolveNames, resolveExpr, resolveType, declare, Scope(..), UnboundVar (..), Warning (..), ScopeErrors (..)) where
 
 import Relude hiding (State, runState, evalState, error, get, put, modify)
 
@@ -81,8 +81,11 @@ resolve name = do
             -- this gives a unique id to every occurance of the same unbound name
             scoped $ declare name
 
+runNameResolution :: HashMap Text Name -> Eff (State Scope : ScopeErrorE : es) a -> Eff es (a, ScopeErrors)
+runNameResolution env = runScopeErrors . evalState (Scope env) 
+
 resolveNames :: (NameGen :> es) => HashMap Text Name -> [Declaration Text] -> Eff es ([Declaration Name], ScopeErrors)
-resolveNames env decls = runScopeErrors $ evalState (Scope env) do
+resolveNames env decls = runNameResolution env do
     mkGlobalScope
     traverse resolveDec decls
   where
@@ -191,5 +194,5 @@ resolveType ty = scoped case ty of
     T.Exists var body -> do
         var' <- declare var
         body' <- resolveType body
-        pure $ T.Forall var' body'
+        pure $ T.Exists var' body'
     nothingToDeclare -> traverse resolve nothingToDeclare

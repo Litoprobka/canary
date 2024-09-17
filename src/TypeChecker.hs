@@ -2,14 +2,18 @@
 {-# LANGUAGE DerivingStrategies #-}
 {-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE OverloadedRecordDot #-}
+{-# LANGUAGE NoFieldSelectors #-}
 
 module TypeChecker (
     run,
     runWithFinalEnv,
     infer,
     inferPattern,
+    inferBinding,
     check,
     checkPattern,
+    subtype,
+    supertype,
     inferTypeVars,
     normalise,
     Builtins (..),
@@ -572,6 +576,8 @@ inferDecls decls = do
 -- finds a "least common denominator" of two types, i.e.
 -- @subtype a (supertype a b)@ and @subtype b (supertype a b)@
 --
+-- for the most part, taking a supertype is a matter of recursively calling `mono In` on both inputs
+--
 -- this is what you get when you try to preserve polytypes in univars
 supertype :: InfEffs es => Type -> Type -> Eff es Type
 supertype = \cases
@@ -596,6 +602,9 @@ supertype = \cases
             -- would be as easy as taking all supertypes of lhs and rhs,
             -- taking the intersection and throwing an error if more than
             -- one type matches
+            --
+            -- on second thought, it might be possible that lhs and rhs are both subtypes of A,
+            -- and A is a subtype of B. In that case, supertype should yield A, rather than an error
             | (lhs, rhs) `elem` rels -> pure $ T.Name rhs
             | (rhs, lhs) `elem` rels -> pure $ T.Name lhs
         (MFn from to) (MFn from' to') -> T.Function <$> supertype from from' <*> supertype to to'
@@ -607,14 +616,15 @@ supertype = \cases
         -- (i.e. instead of "Int is not a subtype of Char" we would suddenly get existentials everywhere)
         lhs rhs -> typeError $ "cannot unify" <+> pretty lhs <+> "and" <+> pretty rhs
 
+    -- the unique thing about records is that they handle subtyping via row extensions
+    -- anyway, so `lhs` and `rhs` have a common supertype iff `lhs` unifies with `rhs`
     rowCase whatToMatch lhsUncompressed rhsUncompressed = do
         let con = conOf whatToMatch
         lhs <- compress whatToMatch lhsUncompressed
         rhs <- compress whatToMatch rhsUncompressed
-        baseRow <- Row.unionWithM supertype lhs.row rhs.row
-        con <$> case (Row.extension lhs, Row.extension rhs) of
-            (Just lhsExt, Just rhsExt) -> ExtRow baseRow <$> supertype lhsExt rhsExt
-            _ -> pure $ NoExtRow baseRow
+
+        subtype (con lhs) (con rhs)
+        con <$> compress whatToMatch lhs
 
 -- | @subtype a b@ checks whether @a@ is a subtype of @b@
 subtype :: InfEffs es => Type -> Type -> Eff es ()
@@ -627,8 +637,8 @@ subtype = \cases
     match = \cases
         lhs rhs | lhs == rhs -> pass -- simple cases, i.e. two type constructors, two univars or two exvars
         -- we *might* have to check for univars once again after applying `mono`
-        -- lhs (MUniVar uni) -> solveOr (unMono lhs) (subtype $ unMono lhs) uni
-        -- (MUniVar uni) rhs -> solveOr (unMono rhs) (`subtype` unMono rhs) uni
+        lhs (MUniVar uni) -> solveOr (unMono lhs) (subtype $ unMono lhs) uni
+        (MUniVar uni) rhs -> solveOr (unMono rhs) (`subtype` unMono rhs) uni
         (MName lhs) (MName rhs) ->
             unlessM (elem (lhs, rhs) <$> builtin (.subtypeRelations)) $
                 typeError (pretty lhs <+> "is not a subtype of" <+> pretty rhs)
@@ -706,7 +716,11 @@ check e type_ = do
                     Just fieldTy -> check expr fieldTy
         expr (MUniVar uni) -> lookupUniVar uni >>= \case
             Right ty -> check expr ty
-            Left _ -> solveUniVar uni =<< infer expr
+            Left _ -> do
+                newTy <- infer expr
+                lookupUniVar uni >>= \case
+                    Left _ -> solveUniVar uni newTy
+                    Right _ -> pass
 
         expr ty -> do
             ty' <- infer expr
@@ -862,11 +876,14 @@ inferApp fTy arg =
     mono In fTy >>= \case
         MUniVar v -> do
             from <- infer arg
-            to <- freshUniVar
             lookupUniVar v >>= \case
                 Left _ -> do
+                    to <- freshUniVar
                     solveUniVar v $ T.Function from to
                     pure to
-                Right newTy -> inferApp newTy arg
+                Right newTy -> do
+                    to <- freshUniVar
+                    subtype newTy (T.Function from to)
+                    pure to
         MFn from to -> to <$ check arg from
         _ -> typeError $ pretty fTy <+> "is not a function type"

@@ -13,7 +13,7 @@ import Data.Sequence qualified as Seq
 import Prettyprinter.Render.Text (putDoc)
 import Prettyprinter
 import TypeChecker (typecheck, TypeError (..))
-import Playground (mkDefaultEnv, mkDefaultScope)
+import Playground (mkDefaults)
 import qualified Syntax.Declaration as D
 import qualified Data.HashMap.Strict as HashMap
 
@@ -27,7 +27,7 @@ main = do
         Left err -> putStrLn $ errorBundlePretty err
         Right decls -> runEff $ runNameGen do
             traverse_ (liftIO . putDoc . pretty) decls
-            (scope, builtins) <- mkDefaultScope
+            (scope, builtins, env) <- mkDefaults
             (bindings, ScopeErrors errors warnings) <- resolveNames scope decls
             unless (Seq.null errors) $ putTextLn $ "errors: " <> foldMap show errors
             unless (Seq.null warnings) $ putTextLn $ "warnings: " <> foldMap show warnings
@@ -36,7 +36,6 @@ main = do
             traverse_ (liftIO . putDoc . pretty) bindings
 
             putTextLn "typechecking:"
-            env <- mkDefaultEnv scope
             typecheck env builtins bindings >>= \case
                 Left (TypeError err) -> liftIO . putDoc $ err <> line
                 Right checkedBindings -> liftIO . putDoc $ sep $ pretty . uncurry D.Signature <$> HashMap.toList checkedBindings
