@@ -90,6 +90,7 @@ mkDefaults = do
                 (\x -> (x, x))
                     <$> [ "Unit"
                         , "Maybe"
+                        , "Tuple"
                         ]
     let initScope = HashMap.insert "List" builtins.list $ HashMap.insert "Bool" builtins.bool types
     (env, Scope scope) <-

@@ -106,6 +106,20 @@ quickLookDefs =
             , ("wikiF", "Maybe" $: T.Forall "'a" (list "'a" --> list "'a") --> "Maybe" $: ("Tuple" $: ("List" $: "Int") $: ("List" $: "Char")))
             ]
 
+deepSkolemisation :: [(Text, Expression Text)]
+deepSkolemisation =
+    [ ("f g", "f" # "g")
+    , ("f2 g2", "f2" # "g2")
+    ]
+
+dsDefs :: [(Text, Type' Text)]
+dsDefs =
+    [ ("f", T.Forall "'a" $ T.Forall "'b" $ "'a" --> "'b" --> "'b")
+    , ("g", T.Forall "'p" ("'p" --> T.Forall "'q" ("'q" --> "'q")) --> "Int")
+    , ("g2", (T.Forall "'a" ("'a" --> "'a") --> "Bool") --> "Text")
+    , ("f2", "Int" --> "Int" --> "Bool")
+    ]
+
 list :: Type' Text -> Type' Text
 list ty = "List" $: ty
 
@@ -140,4 +154,13 @@ spec = do
                     quickLookDefs' <- fromList <$> traverse (\(name, ty) -> liftA2 (,) (declare name) (resolveType ty)) quickLookDefs
                     pure (expr', quickLookDefs')
                 run (quickLookDefs' <> env) builtins $ check expr' =<< normalise =<< infer expr'
+        in tcResult `shouldSatisfy` isRight
+    describe "deep subsumption examples" $ for_ deepSkolemisation \(txt, expr) -> it (Text.unpack txt)
+        let tcResult = runPureEff $ runNameGen do
+                (scope, builtins, env) <- mkDefaults
+                (expr', dsDefs') <- resolveSilent scope do
+                    expr' <- resolveExpr expr
+                    dsDefs' <- fromList <$> traverse (\(name, ty) -> liftA2 (,) (declare name) (resolveType ty)) dsDefs
+                    pure (expr', dsDefs')
+                run (dsDefs' <> env) builtins $ check expr' =<< normalise =<< infer expr'
         in tcResult `shouldSatisfy` isRight
