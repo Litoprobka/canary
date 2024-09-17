@@ -107,6 +107,9 @@ spec = do
         it "many patterns" do
             parsePretty (some pattern') "(Cons x xs) y ('Hmmm z)"
                 `shouldBe` Right [P.Constructor "Cons" ["x", "xs"], "y", P.Variant "'Hmmm" "z"]
+        it "annotation pattern" do
+            parsePretty pattern' "(Cons x xs : List Int)"
+                `shouldBe` Right (P.Annotation (P.Constructor "Cons" ["x", "xs"]) (T.Application (T.Name "List") (T.Name "Int")))
         it "record" do
             parsePretty pattern' "{ x = x, y = y, z = z }" `shouldBe` Right (P.Record [("x", "x"), ("y", "y"), ("z", "z")])
         it "record with implicit names" do
@@ -195,7 +198,7 @@ spec = do
                         ('Some x) -> Just x
                     |]
             parsePretty expression expr
-                `shouldBe` Right (E.Match [([P.Variant "'None" (P.Constructor "Unit" [])], "Nothing"), ([P.Variant "'Some" "x"], "Just" # "x")])
+                `shouldBe` Right (E.Match [([P.Variant "'None" (P.Record [])], "Nothing"), ([P.Variant "'Some" "x"], "Just" # "x")])
         it "guard clauses (todo)" do
             let expr =
                     [text|

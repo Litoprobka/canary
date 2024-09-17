@@ -1,3 +1,4 @@
+{-# LANGUAGE LambdaCase #-}
 module Parser (code, declaration, type', pattern', expression) where
 
 import Relude hiding (many, some)
@@ -15,6 +16,7 @@ import Control.Monad.Combinators.NonEmpty qualified as NE
 import Data.IntMap.Strict qualified as IntMap
 import Text.Megaparsec
 import Syntax.Row
+import qualified Syntax.Row as Row
 
 code :: Parser [Declaration Text]
 code = topLevelBlock declaration
@@ -88,12 +90,17 @@ lambdaLike con kw arg endSym = do
     pure \body -> foldr con body args
 
 pattern' :: ParserM m => m (Pattern Text)
-pattern' =
-    choice
+pattern' = do
+    pat <-
+      choice
         [ P.Constructor <$> typeName <*> many patternParens
         , P.Variant <$> variantConstructor <*> patternParens
         , patternParens
         ]
+    option pat do
+        specialSymbol ":" 
+        P.Annotation pat <$> type'
+
 
 {- | parses a pattern with constructors enclosed in parens
 should be used in cases where multiple patterns in a row are accepted, i.e.
@@ -112,7 +119,7 @@ patternParens =
         , P.Variant <$> variantConstructor <*> pure unit -- some sugar for variants with a unit payload
         , parens pattern'
         ]
-    where unit = P.Constructor "Unit" []
+    where unit = P.Record Row.empty
 
 binding :: ParserM m => m (Binding Text)
 binding = do
