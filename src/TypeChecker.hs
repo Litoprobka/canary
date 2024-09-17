@@ -12,8 +12,7 @@ module TypeChecker (
     inferBinding,
     check,
     checkPattern,
-    subtype,
-    supertype,
+    unify,
     inferTypeVars,
     normalise,
     Builtins (..),
@@ -577,55 +576,19 @@ inferDecls decls = do
         second (\conParams -> foldr T.Forall (foldr T.Function (T.Name name) conParams) vars)
             <$> constrs
 
---
-
--- finds a "least common denominator" of two types, i.e.
--- @subtype a (supertype a b)@ and @subtype b (supertype a b)@
---
--- for the most part, taking a supertype is a matter of recursively calling `mono In` on both inputs
---
--- this is what you get when you try to preserve polytypes in univars
-supertype :: InfEffs es => Monotype -> Monotype -> Eff es Monotype
-supertype lhsTy rhsTy = do
-    rels <- builtin (.subtypeRelations)
-    match rels lhsTy rhsTy
-  where
-    match rels = \cases
-        lhs rhs | lhs == rhs -> pure lhs
-        (MName lhs) (MName rhs)
-            -- for now, it only handles direct subtype/supertype relations
-            -- instead, this case should search for a common supertype
-            -- if we require subtypeRelations to be transitive, searching
-            -- would be as easy as taking all supertypes of lhs and rhs,
-            -- taking the intersection and throwing an error if more than
-            -- one type matches
-            --
-            -- on second thought, it might be possible that lhs and rhs are both subtypes of A,
-            -- and A is a subtype of B. In that case, supertype should yield A, rather than an error
-            | (lhs, rhs) `elem` rels -> pure $ MName rhs
-            | (rhs, lhs) `elem` rels -> pure $ MName lhs
-        (MFn from to) (MFn from' to') -> MFn <$> supertype from from' <*> supertype to to'
-        (MApp lhs rhs) (MApp lhs' rhs') -> MApp <$> supertype lhs lhs' <*> supertype rhs rhs'
-        lhs@MVariant{} rhs@MVariant{} -> lhs <$ subtype lhs rhs
-        lhs@MRecord{} rhs@MRecord{} -> lhs <$ subtype lhs rhs
-        -- note that a fresh existential (i.e `exists a. a`) *is* a common supertype of any two types
-        -- but using that would make type errors more confusing
-        -- (i.e. instead of "Int is not a subtype of Char" we would suddenly get existentials everywhere)
-        lhs rhs -> typeError $ "cannot unify" <+> pretty lhs <+> "and" <+> pretty rhs
-
 -- | @subtype a b@ checks whether @a@ is a subtype of @b@
-subtype :: InfEffs es => Monotype -> Monotype -> Eff es ()
-subtype = \cases
+unify :: InfEffs es => Monotype -> Monotype -> Eff es ()
+unify = \cases
     lhs rhs | lhs == rhs -> pass -- simple cases, i.e. two type constructors, two univars or two exvars
     -- we *might* have to check for univars once again after applying `mono`
-    lhs (MUniVar uni) -> solveOr lhs (subtype lhs) uni
-    (MUniVar uni) rhs -> solveOr rhs (`subtype` rhs) uni
+    lhs (MUniVar uni) -> solveOr lhs (unify lhs) uni
+    (MUniVar uni) rhs -> solveOr rhs (`unify` rhs) uni
     (MName lhs) (MName rhs) ->
         unlessM (elem (lhs, rhs) <$> builtin (.subtypeRelations)) $
-            typeError (pretty lhs <+> "is not a subtype of" <+> pretty rhs)
+            typeError ("cannot unify" <+> pretty lhs <+> "with" <+> pretty rhs)
     (MFn inl outl) (MFn inr outr) -> do
-        subtype inr inl
-        subtype outl outr
+        unify inr inl
+        unify outl outr
     (MApp lhs rhs) (MApp lhs' rhs') -> do
         -- note that we assume the same variance for all type parameters
         -- some kind of kind system is needed to track variance and prevent stuff like `Maybe a b`
@@ -633,8 +596,8 @@ subtype = \cases
         -- is `f a` a subtype of `f b` when a is `a` subtype of `b` or the other way around?
         --
         -- QuickLook just assumes that all constructors are invariant and -> is a special case
-        subtype lhs lhs'
-        subtype rhs rhs'
+        unify lhs lhs'
+        unify rhs rhs'
     (MVariant lhs) (MVariant rhs) -> rowCase Variant lhs rhs
     (MRecord lhs) (MRecord rhs) -> rowCase Record lhs rhs
     lhs rhs -> typeError $ pretty lhs <+> "is not a subtype of" <+> pretty rhs
@@ -647,9 +610,9 @@ subtype = \cases
                     typeError $
                         pretty (con lhsRow) <+> "is not a subtype of" <+> pretty (con rhsRow)
                             <> ": right hand side does not contain" <+> pretty name
-                Just rhsTy -> subtype lhsTy =<< mono In rhsTy
+                Just rhsTy -> unify lhsTy =<< mono In rhsTy
         -- if the lhs has an extension, it should be compatible with rhs without the already matched fields
-        for_ (Row.extension lhsRow) \ext -> subtype ext . con =<< diff whatToMatch rhsRow lhsRow.row
+        for_ (Row.extension lhsRow) \ext -> unify ext . con =<< diff whatToMatch rhsRow lhsRow.row
 
     -- turns out it's different enough from `withUniVar`
     solveOr :: InfEffs es => Monotype -> (Monotype -> Eff es ()) -> UniVar -> Eff es ()
@@ -658,44 +621,38 @@ subtype = \cases
 check :: InfEffs es => Expr -> Type -> Eff es ()
 check e type_ = do
     builtins <- ask @(Builtins Name)
-    mono Out type_ >>= match builtins e
+    scoped $ match builtins e type_
   where
-    -- most of the cases don't need monomorphisation here
-    -- it doesn't make a difference most of the time, since `subtype` monomorphises
-    -- its arguments anyway
-    --
-    -- however, if, say, a lambda argument gets inferred to a univar, that univar would unify
-    -- with a monomorphised type rather than a polytype
-    --
-    -- one option is to make `unMono` behave like univarsToForall / univarsToExists
     match builtins = \cases
         -- the cases for E.Name and E.Constructor are redundant, since
         -- `infer` just looks up their types anyway
-        (E.Lambda arg body) (MFn from to) -> scoped do
+        (E.Lambda arg body) (T.Function from to) -> scoped do
             -- `checkPattern` updates signatures of all mentioned variables
-            checkPattern arg $ unMono from
-            check body $ unMono to
-        (E.Annotation expr ty') ty -> do
-            check expr ty'
-            (`subtype` ty) =<< mono In ty'
+            checkPattern arg from
+            check body to
+        (E.Annotation expr annTy) ty -> do
+            check expr annTy
+            monoTy <- mono Out ty
+            monoAnnTy <- mono In annTy
+            unify monoTy monoAnnTy
         (E.If cond true false) ty -> do
             bool <- builtin (.bool)
             check cond $ T.Name bool
-            check true $ unMono ty
-            check false $ unMono ty
+            check true ty
+            check false ty
         (E.Case arg matches) ty -> do
             argTy <- infer arg
             for_ matches \(pat, body) -> do
                 checkPattern pat argTy
-                check body $ unMono ty
-        (E.List items) (MApp (MName name) itemTy)
-            | name == builtins.list -> for_ items (`check` unMono itemTy)
+                check body ty
+        (E.List items) (T.Application (T.Name name) itemTy)
+            | name == builtins.list -> for_ items (`check` itemTy)
         (E.Record row) ty -> do
             for_ (IsList.toList row) \(name, expr) ->
-                deepLookup Record name (unMono ty) >>= \case
+                deepLookup Record name ty >>= \case
                     Nothing -> typeError $ pretty ty <+> "does not contain field" <+> pretty name
                     Just fieldTy -> check expr fieldTy
-        expr (MUniVar uni) ->
+        expr (T.UniVar uni) ->
             lookupUniVar uni >>= \case
                 Right ty -> check expr $ unMono ty
                 Left _ -> do
@@ -703,9 +660,12 @@ check e type_ = do
                     lookupUniVar uni >>= \case
                         Left _ -> solveUniVar uni newTy
                         Right _ -> pass
+        expr (T.Forall var body) -> check expr =<< substitute Out var body
+        expr (T.Exists var body) -> check expr =<< substitute In var body
         expr ty -> do
-            ty' <- mono In =<< infer expr
-            subtype ty' ty
+            inferredTy <- mono In =<< infer expr
+            monoTy <- mono Out ty
+            unify inferredTy monoTy
 
 checkPattern :: InfEffs es => Pattern' -> Type -> Eff es ()
 checkPattern = \cases
@@ -718,10 +678,10 @@ checkPattern = \cases
                 Just fieldTy -> checkPattern pat fieldTy
     pat ty -> do
         ty' <- mono In =<< inferPattern pat
-        subtype ty' =<< mono Out ty
+        unify ty' =<< mono Out ty
 
 infer :: InfEffs es => Expr -> Eff es Type
-infer = \case
+infer = scoped . \case
     E.Name name -> lookupSig name
     E.Constructor name -> lookupSig name
     E.Variant name -> {-forallScope-} do
@@ -738,9 +698,7 @@ infer = \case
     E.Let binding body -> do
         void $ inferBinding binding
         infer body
-    E.Annotation expr ty -> do
-        check expr ty
-        unMono <$> mono In ty
+    E.Annotation expr ty -> ty <$ check expr ty
     E.If cond true false -> do
         bool <- builtin (.bool)
         check cond $ T.Name bool
@@ -864,7 +822,7 @@ inferApp fTy arg =
                     pure $ unMono to
                 Right newTy -> do
                     to <- mono Inv =<< freshUniVar
-                    subtype newTy (MFn from to)
+                    unify newTy (MFn from to)
                     pure $ unMono to
         MFn from to -> unMono to <$ check arg (unMono from)
         _ -> typeError $ pretty fTy <+> "is not a function type"
