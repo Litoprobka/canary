@@ -149,7 +149,14 @@ should I use a separate var and make it a Bitraversable instead?
 declarePat :: EnvEffs es => Pattern Text -> Eff es (Pattern Name)
 declarePat = \case
     P.Constructor con pats -> P.Constructor <$> resolve con <*> traverse declarePat pats
-    nothingToResolve -> traverse declare nothingToResolve
+    P.Annotation pat ty -> P.Annotation <$> declarePat pat <*> resolveType ty
+    P.Record row -> P.Record <$> traverse declarePat row
+    P.Variant openName arg -> P.Variant openName <$> declarePat arg
+    P.Var name -> P.Var <$> declare name
+    P.List pats -> P.List <$> traverse declarePat pats
+    P.IntLiteral n -> pure $ P.IntLiteral n
+    P.TextLiteral txt -> pure $ P.TextLiteral txt
+    P.CharLiteral c -> pure $ P.CharLiteral c
 
 {- | resolves names in an expression. Doesn't change the current scope
 
@@ -182,7 +189,16 @@ resolveExpr e = scoped case e of
             expr' <- resolveExpr expr
             pure (pats', expr')
     E.Annotation body ty -> E.Annotation <$> resolveExpr body <*> resolveType ty
-    nothingToDeclare -> traverse resolve nothingToDeclare
+    E.If cond true false -> E.If <$> resolveExpr cond <*> resolveExpr true <*> resolveExpr false
+    E.Record row -> E.Record <$> traverse resolveExpr row
+    E.List items -> E.List <$> traverse resolveExpr items
+    E.Name name -> E.Name <$> resolve name
+    E.Constructor name -> E.Constructor <$> resolve name
+    E.RecordLens lens -> pure $ E.RecordLens lens
+    E.Variant openName -> pure $ E.Variant openName
+    E.IntLiteral n -> pure $ E.IntLiteral n
+    E.TextLiteral txt -> pure $ E.TextLiteral txt
+    E.CharLiteral c -> pure $ E.CharLiteral c
 
 -- | resolves names in a type. Doesn't change the current scope
 resolveType :: EnvEffs es => Type' Text -> Eff es (Type' Name)
@@ -195,4 +211,11 @@ resolveType ty = scoped case ty of
         var' <- declare var
         body' <- resolveType body
         pure $ T.Exists var' body'
-    nothingToDeclare -> traverse resolve nothingToDeclare
+    T.Application lhs rhs -> T.Application <$> resolveType lhs <*> resolveType rhs
+    T.Function from to -> T.Function <$> resolveType from <*> resolveType to
+    T.Name name -> T.Name <$> resolve name
+    T.Var var -> T.Var <$> resolve var
+    T.UniVar uni -> pure $ T.UniVar uni
+    T.Skolem skolem -> pure $ T.Skolem skolem
+    T.Variant row -> T.Variant <$> traverse resolveType row
+    T.Record row -> T.Record <$> traverse resolveType row
