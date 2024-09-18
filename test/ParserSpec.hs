@@ -13,11 +13,11 @@ import Syntax.Expression qualified as E
 import Syntax.Pattern qualified as P
 import Syntax.Type qualified as T
 import Test.Hspec
-import Text.Megaparsec (errorBundlePretty, parse, pos1)
+import Text.Megaparsec (errorBundlePretty, parse, pos1, eof)
 import Syntax.Row (ExtRow(..))
 
 parsePretty :: Parser a -> Text -> Either String a
-parsePretty parser input = input & parse (usingReaderT pos1 parser) "test" & first errorBundlePretty
+parsePretty parser input = input & parse (usingReaderT pos1 parser <* eof) "test" & first errorBundlePretty
 
 spec :: Spec
 spec = do
@@ -209,6 +209,20 @@ spec = do
                         Just x = Just x
                     |]
             parsePretty expression expr `shouldSatisfy` isRight
+
+    describe "implicit lambdas with wildcards" do
+        it "(f _ x)" do
+            parsePretty expression "(f _ x)" `shouldBe` Right (E.Lambda "$1" $ "f" # "$1" # "x")
+        it "should work with operators" do
+            parsePretty expression "(_ + x * _ |> f)" `shouldBe` Right (E.Lambda "$1" $ E.Lambda "$2" $ "|>" # ("+" # "$1" # ("*" # "x" # "$2")) # "f")
+        it "should scope to the innermost parenthesis" do
+            parsePretty expression "(f (_ + _) _ x)" `shouldBe` Right (E.Lambda "$1" $ "f" # E.Lambda "$1" (E.Lambda "$2" $ "+" # "$1" # "$2") # "$1" # "x")
+        it "records and lists introduce a scope" do
+            parsePretty expression "{x = _, y = 0} z" `shouldBe` Right (E.Lambda "$1" (E.Record [("x", "$1"), ("y", E.IntLiteral 0)]) # "z")
+            parsePretty expression "[a, b, c, _, d, _]" `shouldBe` Right (E.Lambda "$1" $ E.Lambda "$2" $ E.List ["a", "b", "c", "$1", "d", "$2"])
+        it "should require outer parenthesis" do
+            parsePretty expression "f _" `shouldSatisfy` isLeft
+            parsePretty expression "f _ x" `shouldSatisfy` isLeft
 
     describe "misc. builtins" do
         it "list" do

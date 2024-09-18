@@ -24,6 +24,8 @@ module Lexer (
     braces,
     commaSep,
     someOperator,
+    nonWildcardTerm,
+    wildcard,
 ) where
 
 import Control.Monad.Combinators.NonEmpty qualified as NE
@@ -145,10 +147,21 @@ keyword kw = label (toString kw) $ try $ lexeme $ string kw *> notFollowedBy (sa
 
 -- | an identifier that doesn't start with an uppercase letter
 termName :: ParserM m => m Text
-termName = try do
-    ident <- identifier
-    guard (not $ isUpperCase $ Text.head ident)
-    pure ident
+termName = do
+    nextChar <- lookAhead anySingle
+    guard (not $ isUpperCase nextChar)
+    identifier
+
+-- | a term name that doesn't start with an underscore
+nonWildcardTerm :: ParserM m => m Text
+nonWildcardTerm = do
+    nextChar <- lookAhead anySingle
+    guard (nextChar /= '_')
+    termName
+
+-- | a termName that starts with an underscore
+wildcard :: ParserM m => m Text
+wildcard = lexeme $ Text.cons <$> single '_' <*> option "" identifier
 
 -- | an identifier that starts with an uppercase letter
 typeName :: ParserM m => m Text

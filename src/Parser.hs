@@ -132,17 +132,16 @@ binding = do
     f <$> expression
 
 expression :: ParserM m => m (Expression Text)
-expression = expression' OuterScope
+expression = expression' (E.Name <$> nonWildcardTerm)
 
-data LambdaScope = OuterScope | NewScope
-
-expression' :: ParserM m => LambdaScope -> m (Expression Text)
-expression' scope = case scope of
-    NewScope -> withWildcards scopedExpr
-    OuterScope -> makeExprParser (noPrec $ E.Name <$> termName) (snd <$> IntMap.toDescList precMap)
+expression' :: ParserM m => m (Expression Text) -> m (Expression Text)
+expression' termParser = makeExprParser (noPrec termParser) (snd <$> IntMap.toDescList precMap)
   where
-    scopedExpr :: ParserM m => StateT Int m (Expression Text)
-    scopedExpr = makeExprParser (noPrec wildcardOrVar) (snd <$> IntMap.toDescList precMap)
+    sameScopeExpr = expression' termParser
+
+    newScopeExpr :: ParserM m => StateT Int m (Expression Text)
+    newScopeExpr = expression' $
+        nextVar <* wildcard <|> E.Name <$> termName
 
     precMap :: ParserM m => IntMap [Operator m (Expression Text)]
     precMap =
@@ -174,36 +173,28 @@ expression' scope = case scope of
 
     noPrec varParser = choice $ keywordBased <> terminals varParser
 
-    keywordBased :: ParserM m => [m (Expression Text)]
     keywordBased =
-        [ lambdaLike E.Lambda lambda pattern' "->" <*> expression
+        [ lambdaLike E.Lambda lambda pattern' "->" <*> sameScopeExpr
         , let'
         , case'
         , match'
-        , E.If <$ keyword "if" <*> expression <* keyword "then" <*> expression <* keyword "else" <*> expression
-        , withWildcards $ E.Record <$> someRecord "=" scopedExpr (Just E.Name)
-        , withWildcards $ E.List <$> brackets (commaSep scopedExpr)
+        , E.If <$ keyword "if" <*> sameScopeExpr <* keyword "then" <*> sameScopeExpr <* keyword "else" <*> sameScopeExpr
+        , withWildcards $ E.Record <$> someRecord "=" newScopeExpr (Just E.Name)
+        , withWildcards $ E.List <$> brackets (commaSep newScopeExpr)
         ]
       where
         let' = do
-            letBlock "let" E.Let binding expression
+            letBlock "let" E.Let binding sameScopeExpr
         case' = do
             keyword "case"
-            arg <- expression
-            matches <- block "of" $ (,) <$> pattern' <* specialSymbol "->" <*> expression
+            arg <- sameScopeExpr
+            matches <- block "of" $ (,) <$> pattern' <* specialSymbol "->" <*> sameScopeExpr
             pure $ E.Case arg matches
-        match' = E.Match <$> block "match" ((,) <$> some patternParens <* specialSymbol "->" <*> expression)
+        match' = E.Match <$> block "match" ((,) <$> some patternParens <* specialSymbol "->" <*> sameScopeExpr)
 
-    -- todo: better error messages for out-of-scope wildcards
-    wildcardOrVar :: ParserM m => StateT Int m (Expression Text)
-    wildcardOrVar = do
-        name <- termName
-        if name == "_"
-            then nextVar
-            else pure $ E.Name name
-
+    terminals :: ParserM m => m (Expression Text) -> [m (Expression Text)]
     terminals varParser =
-        [ parens $ expression' NewScope
+        [ parens $ withWildcards newScopeExpr
         , varParser
         , E.RecordLens <$> recordLens
         , E.Constructor <$> typeName
