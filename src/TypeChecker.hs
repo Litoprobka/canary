@@ -513,7 +513,7 @@ conOf Variant = T.Variant
 -- Note: repetitive calls of deepLookup on an open row turn it into a chain of singular extensions
 -- you should probably call `compress` after that
 deepLookup :: InfEffs es => RecordOrVariant -> Row.OpenName -> Type -> Eff es (Maybe Type)
-deepLookup whatToMatch k = mono In >=> go >=> pure . fmap unMono
+deepLookup whatToMatch k = mono In >=> go >=> pure . fmap unMono -- todo: monoLayer instead of mono
   where
     go :: InfEffs es => Monotype -> Eff es (Maybe Monotype)
     go = \case
@@ -721,8 +721,12 @@ check e type_ = do
 
 checkPattern :: InfEffs es => Pattern' -> Type -> Eff es ()
 checkPattern = \cases
+    -- we need this case, since inferPattern only infers monotypes for var patterns
     (P.Var name) ty -> updateSig name ty
-    -- it's not clear whether value constructors need a separate rule
+    -- we probably do need a case for P.Constructor for the same reason
+    (P.Variant name arg) ty -> deepLookup Variant name ty >>= \case
+        Nothing -> typeError $ pretty ty <+> "does not contain variant" <+> pretty name
+        Just argTy -> checkPattern arg argTy
     (P.Record patRow) ty -> do
         for_ (IsList.toList patRow) \(name, pat) ->
             deepLookup Record name ty >>= \case

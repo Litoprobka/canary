@@ -112,6 +112,13 @@ deepSkolemisation =
     , ("f2 g2", "f2" # "g2")
     ]
 
+patterns :: [(Text, Pattern Text)]
+patterns =
+    [ ("Nothing : Maybe (∀ 'a. 'a)", P.Annotation (con "Nothing" []) (T.Name "Maybe" $: T.Forall "'a" "'a"))
+    , ("Just x  : Maybe (∀ 'a. 'a)", P.Annotation (con "Just" ["x"]) (T.Name "Maybe" $: T.Forall "'a" "'a"))
+    , ("Just (x : ∀ 'a. 'a -> 'a)", con "Just" [P.Annotation "x" (T.Name "Maybe" $: T.Forall "'a" ("'a" --> "'a"))])
+    ]
+
 dsDefs :: [(Text, Type' Text)]
 dsDefs =
     [ ("f", T.Forall "'a" $ T.Forall "'b" $ "'a" --> "'b" --> "'b")
@@ -163,4 +170,10 @@ spec = do
                     dsDefs' <- fromList <$> traverse (\(name, ty) -> liftA2 (,) (declare name) (resolveType ty)) dsDefs
                     pure (expr', dsDefs')
                 run (dsDefs' <> env) builtins $ check expr' =<< normalise =<< infer expr'
+        in tcResult `shouldSatisfy` isRight
+    describe "impredicative patterns" $ for_ patterns \(txt, pat) -> it (Text.unpack txt)
+        let tcResult = runPureEff $ runNameGen do
+                (scope, builtins, env) <- mkDefaults
+                pat' <- resolveSilent scope $ declarePat pat
+                run env builtins $ inferPattern pat'
         in tcResult `shouldSatisfy` isRight

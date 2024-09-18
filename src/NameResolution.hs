@@ -5,7 +5,7 @@
 {-# LANGUAGE DataKinds #-}
 {-# LANGUAGE AllowAmbiguousTypes #-}
 
-module NameResolution (runNameResolution, runScopeErrors, resolveNames, resolveExpr, resolveType, declare, Scope(..), UnboundVar (..), Warning (..), ScopeErrors (..)) where
+module NameResolution (runNameResolution, runScopeErrors, resolveNames, resolveExpr, resolveType, declare, declarePat, Scope(..), UnboundVar (..), Warning (..), ScopeErrors (..)) where
 
 import Relude hiding (State, runState, evalState, error, get, put, modify)
 
