@@ -26,6 +26,8 @@ module Lexer (
     someOperator,
     nonWildcardTerm,
     wildcard,
+    forallKeyword,
+    existsKeyword,
 ) where
 
 import Control.Monad.Combinators.NonEmpty qualified as NE
@@ -84,13 +86,20 @@ symbol :: ParserM m => Text -> m Text
 symbol = L.symbol spaceOrLineWrap
 
 keywords :: HashSet Text
-keywords = Set.fromList ["if", "then", "else", "type", "alias", "case", "where", "let", "match", "of"]
+keywords = Set.fromList ["if", "then", "else", "type", "alias", "case", "where", "let", "match", "of", "forall", "∀", "exists", "∃"]
 
 specialSymbols :: [Text]
 specialSymbols = ["=", "|", ":", ".", ",", "->", "=>", "<-", "(", ")", "{", "}"]
 
 lambda :: ParserM m => m ()
-lambda = void $ lexeme $ satisfy \c -> c == '\\' || c == 'λ'
+lambda = void $ symbol "\\" <|> symbol "λ" -- should we allow `λx -> expr` without a space after λ?
+
+
+forallKeyword :: ParserM m => m ()
+forallKeyword = keyword "forall" <|> void (symbol "∀")
+
+existsKeyword :: ParserM m => m ()
+existsKeyword = keyword "exists" <|> void (symbol "∃")
 
 -- | a helper for `block` and `block1`.
 block'

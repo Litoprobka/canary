@@ -262,6 +262,10 @@ spec = do
             parsePretty type' "'var" `shouldBe` Right (T.Var "'var")
         it "forall" do
             parsePretty type' "forall 'a. Maybe 'a" `shouldBe` Right (T.Forall "'a" $ T.Application "Maybe" $ T.Var "'a")
+            parsePretty type' "∀ 'a. 'a -> 'a" `shouldBe` Right (T.Forall "'a" $ T.Function (T.Var "'a") (T.Var "'a"))
+        it "exists" do
+            parsePretty type' "List (exists 'a. 'a)" `shouldBe` Right ("List" $: T.Exists "'a" "'a")
+            parsePretty type' "∃'a 'b. 'a -> 'b" `shouldBe` Right (T.Exists "'a" $ T.Exists "'b" $ "'a" --> "'b")
 
     describe "full programs" do
         it "parses the old lambdaTest (with tabs)" do
