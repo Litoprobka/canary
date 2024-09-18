@@ -135,7 +135,7 @@ expression :: ParserM m => m (Expression Text)
 expression = expression' (E.Name <$> nonWildcardTerm)
 
 expression' :: ParserM m => m (Expression Text) -> m (Expression Text)
-expression' termParser = makeExprParser (noPrec termParser) (snd <$> IntMap.toDescList precMap)
+expression' termParser = label "expression" $ makeExprParser (noPrec termParser) (snd <$> IntMap.toDescList precMap)
   where
     sameScopeExpr = expression' termParser
 
@@ -195,13 +195,13 @@ expression' termParser = makeExprParser (noPrec termParser) (snd <$> IntMap.toDe
     terminals :: ParserM m => m (Expression Text) -> [m (Expression Text)]
     terminals varParser =
         [ parens $ withWildcards newScopeExpr
-        , varParser
         , E.RecordLens <$> recordLens
         , E.Constructor <$> typeName
         , E.Variant <$> variantConstructor
         , E.IntLiteral <$> intLiteral
         , E.CharLiteral <$> charLiteral
         , E.TextLiteral <$> textLiteral
+        , varParser
         ]
 
 -- turns out that respecting operator precedence makes for confusing code
