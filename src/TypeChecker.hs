@@ -76,15 +76,8 @@ data MonoLayer
 
 newtype TypeError = TypeError (Doc ()) deriving (Show)
 
-data Builtins a = Builtins
-    { bool :: a
-    , list :: a
-    , int :: a
-    , nat :: a
-    , text :: a
-    , char :: a
-    , lens :: a
-    , subtypeRelations :: [(a, a)]
+newtype Builtins a = Builtins
+    { subtypeRelations :: [(a, a)]
     }
     deriving (Show, Functor, Foldable, Traversable)
 
@@ -165,6 +158,7 @@ freshUniVar = do
 
 freshSkolem :: InfEffs es => Name -> Eff es Type
 freshSkolem (Name name _) = T.Skolem . Skolem <$> freshName name
+freshSkolem _ = T.Skolem . Skolem <$> freshName "what" -- why? 
 
 freshTypeVar :: InfEffs es => Eff es Name
 freshTypeVar = do
@@ -697,7 +691,7 @@ subtype lhs_ rhs_ = join $ match <$> monoLayer In lhs_ <*> monoLayer Out rhs_
         lhs (MLUniVar uni) -> solveOr (mono In $ unMonoLayer lhs) (subtype (unMonoLayer lhs) . unMono) uni
         (MLUniVar uni) rhs -> solveOr (mono Out $ unMonoLayer rhs) ((`subtype` unMonoLayer rhs) . unMono) uni
         (MLName lhs) (MLName rhs) ->
-            unlessM (elem (lhs, rhs) <$> builtin (.subtypeRelations)) $
+            unlessM (elem (lhs, rhs) <$> asks @(Builtins Name) (.subtypeRelations)) $
                 typeError ("cannot unify" <+> pretty lhs <+> "with" <+> pretty rhs)
         (MLFn inl outl) (MLFn inr outr) -> do
             subtype inr inl
@@ -735,11 +729,9 @@ subtype lhs_ rhs_ = join $ match <$> monoLayer In lhs_ <*> monoLayer Out rhs_
     solveOr solveWith whenSolved uni = lookupUniVar uni >>= either (const $ solveUniVar uni =<< solveWith) whenSolved
 
 check :: InfEffs es => Expr -> Type -> Eff es ()
-check e type_ = do
-    builtins <- ask @(Builtins Name)
-    scoped $ match builtins e type_
+check e type_ = scoped $ match e type_
   where
-    match builtins = \cases
+    match = \cases
         -- the cases for E.Name and E.Constructor are redundant, since
         -- `infer` just looks up their types anyway
         (E.Lambda arg body) (T.Function from to) -> scoped do
@@ -750,8 +742,7 @@ check e type_ = do
             check expr annTy
             subtype annTy ty
         (E.If cond true false) ty -> do
-            bool <- builtin (.bool)
-            check cond $ T.Name bool
+            check cond $ T.Name BoolName
             check true ty
             check false ty
         (E.Case arg matches) ty -> do
@@ -759,8 +750,7 @@ check e type_ = do
             for_ matches \(pat, body) -> do
                 checkPattern pat argTy
                 check body ty
-        (E.List items) (T.Application (T.Name name) itemTy)
-            | name == builtins.list -> for_ items (`check` itemTy)
+        (E.List items) (T.Application (T.Name ListName) itemTy) -> for_ items (`check` itemTy)
         (E.Record row) ty -> do
             for_ (IsList.toList row) \(name, expr) ->
                 deepLookup Record name ty >>= \case
@@ -824,8 +814,7 @@ infer =
             infer body
         E.Annotation expr ty -> ty <$ check expr ty
         E.If cond true false -> do
-            bool <- builtin (.bool)
-            check cond $ T.Name bool
+            check cond $ T.Name BoolName
             result <- unMono <$> (mono In =<< infer true)
             check false result
             pure result
@@ -848,9 +837,8 @@ infer =
             pure $ foldr T.Function bodyType patTypes
         E.List items -> do
             itemTy <- freshUniVar
-            list <- builtin (.list)
             traverse_ (`check` itemTy) items
-            pure $ T.Application (T.Name list) itemTy
+            pure $ T.Application (T.Name ListName) itemTy
         E.Record row -> T.Record . NoExtRow <$> traverse infer row
         E.RecordLens fields -> do
             recordParts <- for fields \field -> do
@@ -859,18 +847,17 @@ infer =
             let mkNestedRecord = foldr1 (.) recordParts
             a <- freshUniVar
             b <- freshUniVar
-            lens <- builtin (.lens)
             pure $
-                T.Name lens
+                T.Name LensName
                     `T.Application` mkNestedRecord a
                     `T.Application` mkNestedRecord b
                     `T.Application` a
                     `T.Application` b
         E.IntLiteral num
-            | num >= 0 -> T.Name <$> builtin (.nat)
-            | otherwise -> T.Name <$> builtin (.int)
-        E.TextLiteral _ -> T.Name <$> builtin (.text)
-        E.CharLiteral _ -> T.Name <$> builtin (.char)
+            | num >= 0 -> pure $ T.Name NatName
+            | otherwise -> pure $ T.Name IntName
+        E.TextLiteral _ -> pure $ T.Name TextName
+        E.CharLiteral _ -> pure $ T.Name TextName
 
 -- infers the type of a function / variables in a pattern
 -- does not implicitly declare anything
@@ -919,18 +906,19 @@ inferPattern = \case
         pure resultType
     P.List pats -> do
         result <- freshUniVar
-        list <- builtin (.list)
         traverse_ (`checkPattern` result) pats
-        pure $ T.Application (T.Name list) result
+        pure $ T.Application (T.Name ListName) result
     P.Variant name arg -> {-forallScope-} do
         argTy <- inferPattern arg
         T.Variant . ExtRow (fromList [(name, argTy)]) <$> freshUniVar
     P.Record row -> do
         typeRow <- traverse inferPattern row
         T.Record . ExtRow typeRow <$> freshUniVar
-    P.IntLiteral _ -> T.Name <$> builtin (.int)
-    P.TextLiteral _ -> T.Name <$> builtin (.text)
-    P.CharLiteral _ -> T.Name <$> builtin (.char)
+    P.IntLiteral num
+        | num >= 0 -> pure $ T.Name NatName
+        | otherwise -> pure $ T.Name IntName
+    P.TextLiteral _ -> pure $ T.Name TextName
+    P.CharLiteral _ -> pure $ T.Name TextName
   where
     -- conArgTypes and the zipM may be unified into a single function
     conArgTypes = lookupSig >=> go
