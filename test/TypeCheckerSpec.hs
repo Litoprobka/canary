@@ -2,20 +2,23 @@
 
 module TypeCheckerSpec (spec) where
 
+import Data.HashMap.Strict qualified as HashMap
 import Data.Text qualified as Text
-import Relude
-import TypeChecker
-import Playground
-import Test.Hspec
-import Syntax hiding (Name)
-import Syntax.Expression qualified as E
-import Syntax.Type qualified as T
-import CheckerTypes
-import NameResolution
 import Effectful (runPureEff)
 import NameGen (runNameGen)
-import Syntax.Row (ExtRow(..))
-import qualified Syntax.Pattern as P
+import NameResolution
+import Playground
+import Prettyprinter hiding (list)
+import Prettyprinter.Render.Text (putDoc)
+import Relude
+import Syntax
+import Syntax.Declaration qualified as D
+import Syntax.Expression qualified as E
+import Syntax.Pattern qualified as P
+import Syntax.Row (ExtRow (..))
+import Syntax.Type qualified as T
+import Test.Hspec
+import TypeChecker
 
 -- resolve names, silently discarding the scope errors
 resolveSilent env = fmap fst . runNameResolution env
@@ -100,23 +103,19 @@ quickLookExamples =
 
 quickLookDefs :: [(Text, Type' Text)]
 quickLookDefs =
-            [ ("head", T.Forall "'a" $ list "'a" --> "Maybe" $: "'a")
-            , ("single", T.Forall "'a" $ "'a" --> list "'a")
-            , ("ids", list $ T.Forall "'a" $ "'a" --> "'a")
-            , ("wikiF", "Maybe" $: T.Forall "'a" (list "'a" --> list "'a") --> "Maybe" $: ("Tuple" $: ("List" $: "Int") $: ("List" $: "Char")))
-            ]
+    [ ("head", T.Forall "'a" $ list "'a" --> "Maybe" $: "'a")
+    , ("single", T.Forall "'a" $ "'a" --> list "'a")
+    , ("ids", list $ T.Forall "'a" $ "'a" --> "'a")
+    ,
+        ( "wikiF"
+        , "Maybe" $: T.Forall "'a" (list "'a" --> list "'a") --> "Maybe" $: ("Tuple" $: ("List" $: "Int") $: ("List" $: "Char"))
+        )
+    ]
 
 deepSkolemisation :: [(Text, Expression Text)]
 deepSkolemisation =
     [ ("f g", "f" # "g")
     , ("f2 g2", "f2" # "g2")
-    ]
-
-patterns :: [(Text, Pattern Text)]
-patterns =
-    [ ("Nothing : Maybe (∀ 'a. 'a)", P.Annotation (con "Nothing" []) (T.Name "Maybe" $: T.Forall "'a" "'a"))
-    , ("Just x  : Maybe (∀ 'a. 'a)", P.Annotation (con "Just" ["x"]) (T.Name "Maybe" $: T.Forall "'a" "'a"))
-    , ("Just (x : ∀ 'a. 'a -> 'a)", con "Just" [P.Annotation "x" (T.Name "Maybe" $: T.Forall "'a" ("'a" --> "'a"))])
     ]
 
 dsDefs :: [(Text, Type' Text)]
@@ -127,53 +126,92 @@ dsDefs =
     , ("f2", "Int" --> "Int" --> "Bool")
     ]
 
+patterns :: [(Text, Pattern Text)]
+patterns =
+    [ ("Nothing : Maybe (∀ 'a. 'a)", P.Annotation (con "Nothing" []) (T.Name "Maybe" $: T.Forall "'a" "'a"))
+    , ("Just x  : Maybe (∀ 'a. 'a)", P.Annotation (con "Just" ["x"]) (T.Name "Maybe" $: T.Forall "'a" "'a"))
+    , ("Just (x : ∀ 'a. 'a -> 'a)", con "Just" [P.Annotation "x" (T.Name "Maybe" $: T.Forall "'a" ("'a" --> "'a"))])
+    ]
+
+mutualRecursion :: [[Declaration Text]]
+mutualRecursion =
+    [
+        [ D.Value (E.FunctionBinding "f" ["x", "y"] $ E.Record [("x", "myId" # "x"), ("y", "myId" # "y")]) []
+        , D.Value (E.FunctionBinding "myId" ["x"] "x") []
+        ]
+    ]
+
 list :: Type' Text -> Type' Text
 list ty = "List" $: ty
 
 spec :: Spec
 spec = do
-    describe "sanity check" $ for_ exprs \(txt, expr) -> it (Text.unpack txt)
-        let tcResult = runPureEff $ runNameGen do
-                (scope, builtins, env) <- mkDefaults
-                expr' <- resolveSilent scope $ resolveExpr expr
-                run env builtins $ check expr' =<< normalise =<< infer expr'
-        in tcResult `shouldSatisfy` isRight
-    describe "errors" $ for_ errorExprs \(txt, expr) -> it (Text.unpack txt)
-        let tcResult = runPureEff $ runNameGen do
-                (scope, builtins, env) <- mkDefaults
-                expr' <- resolveSilent scope $ resolveExpr expr
-                run env builtins $ check expr' =<< normalise =<< infer expr'
-        in tcResult `shouldSatisfy` isLeft
-    describe "testing check" $ for_ exprsToCheck \(txt, expr, ty) -> it (Text.unpack txt)
-        let tcResult = runPureEff $ runNameGen do
-                (scope, builtins, env) <- mkDefaults
-                (expr', ty') <- resolveSilent scope do
-                    expr' <- resolveExpr expr
-                    ty' <- resolveType ty
-                    pure (expr', ty')
-                run env builtins $ check expr' ty'
-        in tcResult `shouldSatisfy` isRight
-    describe "quick look-esque impredicativity" $ for_ quickLookExamples \(txt, expr) -> it (Text.unpack txt)
-        let tcResult = runPureEff $ runNameGen do
-                (scope, builtins, env) <- mkDefaults
-                (expr', quickLookDefs') <- resolveSilent scope do
-                    expr' <- resolveExpr expr
-                    quickLookDefs' <- fromList <$> traverse (\(name, ty) -> liftA2 (,) (declare name) (resolveType ty)) quickLookDefs
-                    pure (expr', quickLookDefs')
-                run (quickLookDefs' <> env) builtins $ check expr' =<< normalise =<< infer expr'
-        in tcResult `shouldSatisfy` isRight
-    describe "deep subsumption examples" $ for_ deepSkolemisation \(txt, expr) -> it (Text.unpack txt)
-        let tcResult = runPureEff $ runNameGen do
-                (scope, builtins, env) <- mkDefaults
-                (expr', dsDefs') <- resolveSilent scope do
-                    expr' <- resolveExpr expr
-                    dsDefs' <- fromList <$> traverse (\(name, ty) -> liftA2 (,) (declare name) (resolveType ty)) dsDefs
-                    pure (expr', dsDefs')
-                run (dsDefs' <> env) builtins $ check expr' =<< normalise =<< infer expr'
-        in tcResult `shouldSatisfy` isRight
-    describe "impredicative patterns" $ for_ patterns \(txt, pat) -> it (Text.unpack txt)
-        let tcResult = runPureEff $ runNameGen do
-                (scope, builtins, env) <- mkDefaults
-                pat' <- resolveSilent scope $ declarePat pat
-                run env builtins $ inferPattern pat'
-        in tcResult `shouldSatisfy` isRight
+    describe "sanity check" $ for_ exprs \(txt, expr) ->
+        it
+            (Text.unpack txt)
+            let tcResult = runPureEff $ runNameGen do
+                    (scope, builtins, env) <- mkDefaults
+                    expr' <- resolveSilent scope $ resolveExpr expr
+                    run (Right <$> env) builtins $ check expr' =<< normalise =<< infer expr'
+             in tcResult `shouldSatisfy` isRight
+    describe "errors" $ for_ errorExprs \(txt, expr) ->
+        it
+            (Text.unpack txt)
+            let tcResult = runPureEff $ runNameGen do
+                    (scope, builtins, env) <- mkDefaults
+                    expr' <- resolveSilent scope $ resolveExpr expr
+                    run (Right <$> env) builtins $ check expr' =<< normalise =<< infer expr'
+             in tcResult `shouldSatisfy` isLeft
+    describe "testing check" $ for_ exprsToCheck \(txt, expr, ty) ->
+        it
+            (Text.unpack txt)
+            let tcResult = runPureEff $ runNameGen do
+                    (scope, builtins, env) <- mkDefaults
+                    (expr', ty') <- resolveSilent scope do
+                        expr' <- resolveExpr expr
+                        ty' <- resolveType ty
+                        pure (expr', ty')
+                    run (Right <$> env) builtins $ check expr' ty'
+             in tcResult `shouldSatisfy` isRight
+    describe "quick look-esque impredicativity" $ for_ quickLookExamples \(txt, expr) ->
+        it
+            (Text.unpack txt)
+            let tcResult = runPureEff $ runNameGen do
+                    (scope, builtins, env) <- mkDefaults
+                    (expr', quickLookDefs') <- resolveSilent scope do
+                        expr' <- resolveExpr expr
+                        quickLookDefs' <- fromList <$> traverse (\(name, ty) -> liftA2 (,) (declare name) (resolveType ty)) quickLookDefs
+                        pure (expr', quickLookDefs')
+                    run (fmap Right $ quickLookDefs' <> env) builtins $ check expr' =<< normalise =<< infer expr'
+             in tcResult `shouldSatisfy` isRight
+    describe "deep subsumption examples" $ for_ deepSkolemisation \(txt, expr) ->
+        it
+            (Text.unpack txt)
+            let tcResult = runPureEff $ runNameGen do
+                    (scope, builtins, env) <- mkDefaults
+                    (expr', dsDefs') <- resolveSilent scope do
+                        expr' <- resolveExpr expr
+                        dsDefs' <- fromList <$> traverse (\(name, ty) -> liftA2 (,) (declare name) (resolveType ty)) dsDefs
+                        pure (expr', dsDefs')
+                    run (fmap Right $ dsDefs' <> env) builtins $ check expr' =<< normalise =<< infer expr'
+             in tcResult `shouldSatisfy` isRight
+    describe "impredicative patterns" $ for_ patterns \(txt, pat) ->
+        it
+            (Text.unpack txt)
+            let tcResult = runPureEff $ runNameGen do
+                    (scope, builtins, env) <- mkDefaults
+                    pat' <- resolveSilent scope $ declarePat pat
+                    run (Right <$> env) builtins $ inferPattern pat'
+             in tcResult `shouldSatisfy` isRight
+    describe "mutual recursion" $ for_ mutualRecursion \decls ->
+        it
+            "decls"
+            let tcResult = runPureEff $ runNameGen do
+                    (scope, builtins, env) <- mkDefaults
+                    resolvedDecls <- fst <$> resolveNames scope decls
+                    typecheck env builtins resolvedDecls
+             in do
+                    case tcResult of
+                        Left _ -> pass
+                        Right checkedBindings -> putDoc $ sep $ pretty . uncurry D.Signature <$> HashMap.toList checkedBindings
+                    tcResult `shouldSatisfy` isRight

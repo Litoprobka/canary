@@ -1,11 +1,11 @@
 {-# LANGUAGE DataKinds #-}
+{-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE OverloadedRecordDot #-}
 {-# OPTIONS_GHC -Wno-incomplete-patterns #-}
 {-# OPTIONS_GHC -Wno-missing-export-lists #-}
 {-# OPTIONS_GHC -Wno-missing-methods #-}
 {-# OPTIONS_GHC -Wno-orphans #-}
 {-# OPTIONS_GHC -Wno-unused-imports #-}
-{-# LANGUAGE LambdaCase #-}
 
 module Playground where
 
@@ -21,7 +21,7 @@ import Effectful.Error.Static (Error)
 import Effectful.Reader.Static (Reader)
 import Effectful.State.Static.Local (State, runState)
 import NameGen (NameGen, freshName, runNameGen)
-import NameResolution (declare, resolveNames, resolveType, runNameResolution, Scope (..), runScopeErrors)
+import NameResolution (Scope (..), declare, resolveNames, resolveType, runNameResolution, runScopeErrors)
 import Parser
 import Prettyprinter hiding (list)
 import Prettyprinter.Render.Text (putDoc)
@@ -66,7 +66,7 @@ con = P.Constructor
 runDefault :: Eff '[Error TypeError, Reader (Builtins Name), State InfState, NameGen] a -> Either TypeError a
 runDefault action = runPureEff $ runNameGen do
     (_, builtins, defaultEnv) <- mkDefaults
-    run defaultEnv builtins action
+    run (Right <$> defaultEnv) builtins action
 
 mkDefaults :: NameGen :> es => Eff es (HashMap Text Name, Builtins Name, HashMap Name (Type' Name))
 mkDefaults = do
@@ -83,7 +83,7 @@ mkDefaults = do
                 , lens = "Lens"
                 , subtypeRelations = [] -- [("Nat", "Int")]
                 }
-    let builtins = builtinsWithoutSubtypes { subtypeRelations = [(builtins.nat, builtins.int)]}
+    let builtins = builtinsWithoutSubtypes{subtypeRelations = [(builtins.nat, builtins.int)]}
     types <-
         traverse freshName $
             HashMap.fromList $
@@ -127,7 +127,7 @@ inferIO' mkEnv expr = do
   where
     (typeOrError, finalEnv) = runPureEff $ runNameGen do
         (env, builtins) <- mkEnv
-        runWithFinalEnv env builtins $ normalise =<< infer expr
+        runWithFinalEnv (Right <$> env) builtins $ normalise =<< infer expr
 
 parseInfer :: Text -> IO ()
 parseInfer input = runEff $ runNameGen
@@ -175,4 +175,5 @@ instance IsString (Pattern Name) where
 
 instance IsString (Type' Name) where
     fromString str@('\'' : _) = T.Var $ nameFromText $ fromString str
-    fromString str = str & matchCase (T.Name . nameFromText) (error $ "type name " <> fromString str <> " shouldn't start with a lowercase letter")
+    fromString str =
+        str & matchCase (T.Name . nameFromText) (error $ "type name " <> fromString str <> " shouldn't start with a lowercase letter")

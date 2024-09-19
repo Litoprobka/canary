@@ -44,6 +44,7 @@ import Syntax.Pattern qualified as P
 import Syntax.Row (ExtRow (..))
 import Syntax.Row qualified as Row
 import Syntax.Type qualified as T
+import Prelude (show)
 
 type Expr = Expression Name
 type Pattern' = Pattern Name
@@ -87,11 +88,23 @@ data Builtins a = Builtins
     }
     deriving (Show, Functor, Foldable, Traversable)
 
+-- calling an uninferred type closure should introduce all of the inferred bindings
+-- into the global scope
+newtype UninferredType = UninferredType (forall es. InfEffs es => Eff es Type)
+instance Show UninferredType where
+    show _ = "<closure>"
+
+type TopLevelBindings = HashMap Name (Either UninferredType Type)
+
 data InfState = InfState
     { nextUniVarId :: Int
     , nextTypeVar :: Char
     , currentScope :: Scope
-    , sigs :: HashMap Name Type -- known bindings and type constructors
+    , topLevel :: TopLevelBindings
+    -- ^ top level bindings that may or may not have a type signature.
+    --       only solved types may appear here, but it's not clear whether
+    --       it's worth it to make that distinction at type level
+    , locals :: HashMap Name Type -- local variables
     , vars :: HashMap UniVar (Either Scope Monotype) -- contains either the scope of an unsolved var or a type
     }
     deriving (Show)
@@ -112,17 +125,17 @@ typecheck
     -> Builtins Name
     -> [Declaration Name]
     -> Eff es (Either TypeError (HashMap Name Type))
-typecheck env builtins decls = run env builtins $ traverse normalise =<< inferDecls decls
+typecheck env builtins decls = run (Right <$> env) builtins $ traverse normalise =<< inferDecls decls
 
 run
-    :: HashMap Name Type
+    :: TopLevelBindings
     -> Builtins Name
     -> Eff (Error TypeError : Reader (Builtins Name) : State InfState : es) a
     -> Eff es (Either TypeError a)
 run env builtins = fmap fst . runWithFinalEnv env builtins
 
 runWithFinalEnv
-    :: HashMap Name Type
+    :: TopLevelBindings
     -> Builtins Name
     -> Eff (Error TypeError : Reader (Builtins Name) : State InfState : es) a
     -> Eff es (Either TypeError a, InfState)
@@ -132,7 +145,8 @@ runWithFinalEnv env builtins = do
             { nextUniVarId = 0
             , nextTypeVar = 'a'
             , currentScope = Scope 0
-            , sigs = env
+            , topLevel = env
+            , locals = HashMap.empty
             , vars = HashMap.empty
             }
         . runReader builtins
@@ -204,9 +218,10 @@ alterUniVar override uni ty = do
         MUniVar uni2 | HashSet.member uni2 acc -> case selfRefType of
             Direct -> pure False
             Indirect -> typeError "self-referential type"
-        MUniVar uni2 -> lookupUniVar uni2 >>= \case
-            Left _ -> pure True
-            Right ty' -> cycleCheck (selfRefType, HashSet.insert uni2 acc) ty'
+        MUniVar uni2 ->
+            lookupUniVar uni2 >>= \case
+                Left _ -> pure True
+                Right ty' -> cycleCheck (selfRefType, HashSet.insert uni2 acc) ty'
         MFn from to -> cycleCheck (Indirect, acc) from >> cycleCheck (Indirect, acc) to
         MApp lhs rhs -> cycleCheck (Indirect, acc) lhs >> cycleCheck (Indirect, acc) rhs
         MVariant row -> True <$ traverse_ (cycleCheck (Indirect, acc)) row
@@ -218,18 +233,29 @@ alterUniVar override uni ty = do
     rescope scope = foldUniVars \v -> lookupUniVar v >>= either (rescopeVar v scope) (const pass)
     rescopeVar v scope oldScope = modify \s -> s{vars = HashMap.insert v (Left $ min oldScope scope) s.vars}
 
+-- looks up a type of a binding. If it's an uninferred global binding, it infers it first
 lookupSig :: InfEffs es => Name -> Eff es Type
-lookupSig name =
-    gets @InfState (HashMap.lookup name . (.sigs)) >>= \case
-        Just ty -> pure ty
-        Nothing -> do
-            -- assuming that type checking is performed after name resolution,
-            -- all encountered names have to be in scope
-            uni <- freshUniVar
-            uni <$ updateSig name uni
+lookupSig name = do
+    InfState{topLevel, locals} <- get @InfState
+    case HashMap.lookup name topLevel of
+        Just (Left (UninferredType closure)) -> closure
+        Just (Right ty) -> pure ty
+        Nothing -> case HashMap.lookup name locals of
+            Just ty -> pure ty
+            Nothing -> do
+                -- assuming that type checking is performed after name resolution,
+                -- all encountered names have to be in scope
+                uni <- freshUniVar
+                uni <$ updateSig name uni
 
 updateSig :: InfEffs es => Name -> Type -> Eff es ()
-updateSig name ty = modify \s -> s{sigs = HashMap.insert name ty s.sigs}
+updateSig name ty = modify \s -> s{locals = HashMap.insert name ty s.locals}
+
+declareAll :: InfEffs es => HashMap Name Type -> Eff es ()
+declareAll types = modify \s -> s{locals = types <> s.locals}
+
+declareTopLevel :: InfEffs es => HashMap Name Type -> Eff es ()
+declareTopLevel types = modify \s -> s{topLevel = Right <$> types <> s.locals}
 
 builtin :: Reader (Builtins Name) :> es => (Builtins Name -> a) -> Eff es a
 builtin = asks @(Builtins Name)
@@ -237,8 +263,8 @@ builtin = asks @(Builtins Name)
 -- | run the given action and discard signature updates
 scoped :: InfEffs es => Eff es a -> Eff es a
 scoped action = do
-    sigs <- gets @InfState (.sigs)
-    action <* modify \s -> s{sigs}
+    locals <- gets @InfState (.locals)
+    action <* modify \s -> s{locals}
 
 -- turns out it's tricky to get this function right.
 -- just taking all of the new univars and turning them into type vars is not enough,
@@ -610,12 +636,44 @@ inferTypeVars = uncurry (foldr T.Forall) . second snd . runPureEff . runState (H
 -- | check / infer types of a list of declarations that may reference each other
 inferDecls :: InfEffs es => [Declaration Name] -> Eff es (HashMap Name Type)
 inferDecls decls = do
-    let (values, sigs) = foldr getValueDecls ([], []) decls
-    traverse_ (uncurry updateSig) sigs
-    HashMap.fromList . catMaybes <$> for values \(binding, locals) -> do
-        void $ inferDecls locals
-        inferBinding binding
+    traverse_ updateTopLevel decls
+    let (values, sigs) = second HashMap.fromList $ foldr getValueDecls ([], []) decls
+    foldr (<>) HashMap.empty <$> for values \(binding, locals) ->
+        (=<<) (`HashMap.lookup` sigs) (listToMaybe $ collectNamesInBinding binding) & \case
+            Just ty -> do
+                checkBinding binding ty
+                pure $
+                    HashMap.mapMaybe (`HashMap.lookup` sigs) $
+                        HashMap.fromList $
+                            (\x -> (x, x)) <$> collectNamesInBinding binding
+            Nothing -> scoped do
+                declareAll =<< inferDecls locals
+                typeMap <- inferBinding binding
+                typeMap <$ declareTopLevel typeMap
   where
+    updateTopLevel = \case
+        D.Signature name sig ->
+            modify \s -> s{topLevel = HashMap.insert name (Right $ inferTypeVars sig) s.topLevel}
+        D.Value binding@(E.FunctionBinding name _ _) locals -> insertBinding name binding locals
+        D.Value binding@(E.ValueBinding (P.Var name) _) locals -> insertBinding name binding locals
+        D.Value E.ValueBinding{} _ -> pass -- todo
+        D.Type name vars constrs ->
+            for_ (mkConstrSigs name vars constrs) \(con, sig) ->
+                modify \s -> s{topLevel = HashMap.insert con (Right sig) s.topLevel}
+        D.Alias{} -> pass
+
+    insertBinding name binding locals =
+        let closure = UninferredType $ forallScope $ scoped do
+                declareAll =<< inferDecls locals
+                nameTypePairs <- inferBinding binding
+                declareTopLevel nameTypePairs
+                case HashMap.lookup name nameTypePairs of
+                    -- this can only happen if `inferBinding` returns an incorrect map of types
+                    Nothing -> typeError $ "Internal error: type closure for" <+> pretty name <+> "didn't infer its type"
+                    Just ty -> pure ty
+         in modify \s ->
+                s{topLevel = HashMap.insertWith (\_ x -> x) name (Left closure) s.topLevel}
+
     getValueDecls decl (values, sigs) = case decl of
         D.Value binding locals -> ((binding, locals) : values, sigs)
         D.Signature name sig -> (values, (name, sig) : sigs)
@@ -632,7 +690,7 @@ unify :: InfEffs es => Monotype -> Monotype -> Eff es ()
 unify lhs rhs = subtype (unMono lhs) (unMono rhs)
 
 subtype :: InfEffs es => Type -> Type -> Eff es ()
-subtype lhs_ rhs_ = join $ match <$> monoLayer In lhs_ <*> monoLayer Out rhs_ 
+subtype lhs_ rhs_ = join $ match <$> monoLayer In lhs_ <*> monoLayer Out rhs_
   where
     match = \cases
         lhs rhs | lhs == rhs -> pass -- simple cases, i.e. two type constructors, two univars or two exvars
@@ -663,8 +721,11 @@ subtype lhs_ rhs_ = join $ match <$> monoLayer In lhs_ <*> monoLayer Out rhs_
             deepLookup whatToMatch name (con rhsRow) >>= \case
                 Nothing ->
                     typeError $
-                        pretty (con lhsRow) <+> "is not a subtype of" <+> pretty (con rhsRow)
-                            <> ": right hand side does not contain" <+> pretty name
+                        pretty (con lhsRow)
+                            <+> "is not a subtype of"
+                            <+> pretty (con rhsRow)
+                            <> ": right hand side does not contain"
+                            <+> pretty name
                 Just rhsTy -> subtype lhsTy rhsTy
         -- if the lhs has an extension, it should be compatible with rhs without the already matched fields
         for_ (Row.extension lhsRow) \ext -> subtype ext . con =<< diff whatToMatch rhsRow lhsRow.row
@@ -719,14 +780,20 @@ check e type_ = do
             inferredTy <- infer expr
             subtype inferredTy ty
 
+checkBinding :: InfEffs es => Binding Name -> Type -> Eff es ()
+checkBinding binding ty = case binding of
+    E.FunctionBinding _ args body -> check (foldr E.Lambda body args) ty
+    E.ValueBinding pat body -> checkPattern pat ty >> check body ty
+
 checkPattern :: InfEffs es => Pattern' -> Type -> Eff es ()
 checkPattern = \cases
     -- we need this case, since inferPattern only infers monotypes for var patterns
     (P.Var name) ty -> updateSig name ty
     -- we probably do need a case for P.Constructor for the same reason
-    (P.Variant name arg) ty -> deepLookup Variant name ty >>= \case
-        Nothing -> typeError $ pretty ty <+> "does not contain variant" <+> pretty name
-        Just argTy -> checkPattern arg argTy
+    (P.Variant name arg) ty ->
+        deepLookup Variant name ty >>= \case
+            Nothing -> typeError $ pretty ty <+> "does not contain variant" <+> pretty name
+            Just argTy -> checkPattern arg argTy
     (P.Record patRow) ty -> do
         for_ (IsList.toList patRow) \(name, pat) ->
             deepLookup Record name ty >>= \case
@@ -737,89 +804,106 @@ checkPattern = \cases
         subtype inferredTy ty
 
 infer :: InfEffs es => Expr -> Eff es Type
-infer = scoped . \case
-    E.Name name -> lookupSig name
-    E.Constructor name -> lookupSig name
-    E.Variant name -> {-forallScope-} do
-        var <- freshUniVar
-        rowVar <- freshUniVar
-        -- #a -> [Name #a | #r]
-        pure $ T.Function var (T.Variant $ ExtRow (fromList [(name, var)]) rowVar)
-    E.Application f x -> do
-        fTy <- infer f
-        inferApp fTy x
-    E.Lambda arg body -> {-forallScope-} do
-        argTy <- inferPattern arg
-        T.Function argTy <$> infer body
-    E.Let binding body -> do
-        void $ inferBinding binding
-        infer body
-    E.Annotation expr ty -> ty <$ check expr ty
-    E.If cond true false -> do
-        bool <- builtin (.bool)
-        check cond $ T.Name bool
-        result <- unMono <$> (mono In =<< infer true)
-        check false result
-        pure result
-    E.Case arg matches -> do
-        argTy <- infer arg
-        result <- freshUniVar
-        for_ matches \(pat, body) -> do
-            checkPattern pat argTy
-            check body result
-        pure result
-    E.Match [] -> typeError "empty match expression"
-    E.Match ((firstPats, firstBody) : ms) -> {-forallScope-} do
-        bodyType <- infer firstBody
-        patTypes <- traverse inferPattern firstPats
-        for_ ms \(pats, body) -> do
+infer =
+    scoped . \case
+        E.Name name -> lookupSig name
+        E.Constructor name -> lookupSig name
+        E.Variant name -> {-forallScope-} do
+            var <- freshUniVar
+            rowVar <- freshUniVar
+            -- #a -> [Name #a | #r]
+            pure $ T.Function var (T.Variant $ ExtRow (fromList [(name, var)]) rowVar)
+        E.Application f x -> do
+            fTy <- infer f
+            inferApp fTy x
+        E.Lambda arg body -> {-forallScope-} do
+            argTy <- inferPattern arg
+            T.Function argTy <$> infer body
+        E.Let binding body -> do
+            declareAll =<< inferBinding binding
+            infer body
+        E.Annotation expr ty -> ty <$ check expr ty
+        E.If cond true false -> do
+            bool <- builtin (.bool)
+            check cond $ T.Name bool
+            result <- unMono <$> (mono In =<< infer true)
+            check false result
+            pure result
+        E.Case arg matches -> do
+            argTy <- infer arg
+            result <- freshUniVar
+            for_ matches \(pat, body) -> do
+                checkPattern pat argTy
+                check body result
+            pure result
+        E.Match [] -> typeError "empty match expression"
+        E.Match ((firstPats, firstBody) : ms) -> {-forallScope-} do
+            bodyType <- infer firstBody
+            patTypes <- traverse inferPattern firstPats
+            for_ ms \(pats, body) -> do
                 traverse_ (`checkPattern` bodyType) pats
                 check body bodyType
-        unless (all ((== length patTypes) . length . fst) ms) $
-            typeError "different amount of arguments in a match statement"
-        pure $ foldr T.Function bodyType patTypes
-    E.List items -> do
-        itemTy <- freshUniVar
-        list <- builtin (.list)
-        traverse_ (`check` itemTy) items
-        pure $ T.Application (T.Name list) itemTy
-    E.Record row -> T.Record . NoExtRow <$> traverse infer row
-    E.RecordLens fields -> do
-        recordParts <- for fields \field -> do
-            rowVar <- freshUniVar
-            pure \nested -> T.Record $ ExtRow (one (field, nested)) rowVar
-        let mkNestedRecord = foldr1 (.) recordParts
-        a <- freshUniVar
-        b <- freshUniVar
-        lens <- builtin (.lens)
-        pure $
-            T.Name lens
-                `T.Application` mkNestedRecord a
-                `T.Application` mkNestedRecord b
-                `T.Application` a
-                `T.Application` b
-    E.IntLiteral num
-        | num >= 0 -> T.Name <$> builtin (.nat)
-        | otherwise -> T.Name <$> builtin (.int)
-    E.TextLiteral _ -> T.Name <$> builtin (.text)
-    E.CharLiteral _ -> T.Name <$> builtin (.char)
+            unless (all ((== length patTypes) . length . fst) ms) $
+                typeError "different amount of arguments in a match statement"
+            pure $ foldr T.Function bodyType patTypes
+        E.List items -> do
+            itemTy <- freshUniVar
+            list <- builtin (.list)
+            traverse_ (`check` itemTy) items
+            pure $ T.Application (T.Name list) itemTy
+        E.Record row -> T.Record . NoExtRow <$> traverse infer row
+        E.RecordLens fields -> do
+            recordParts <- for fields \field -> do
+                rowVar <- freshUniVar
+                pure \nested -> T.Record $ ExtRow (one (field, nested)) rowVar
+            let mkNestedRecord = foldr1 (.) recordParts
+            a <- freshUniVar
+            b <- freshUniVar
+            lens <- builtin (.lens)
+            pure $
+                T.Name lens
+                    `T.Application` mkNestedRecord a
+                    `T.Application` mkNestedRecord b
+                    `T.Application` a
+                    `T.Application` b
+        E.IntLiteral num
+            | num >= 0 -> T.Name <$> builtin (.nat)
+            | otherwise -> T.Name <$> builtin (.int)
+        E.TextLiteral _ -> T.Name <$> builtin (.text)
+        E.CharLiteral _ -> T.Name <$> builtin (.char)
 
--- infers the type of a binding and declares it
--- returns the type if it's a function or a single variable binding
-inferBinding :: InfEffs es => Binding Name -> Eff es (Maybe (Name, Type))
+-- infers the type of a function / variables in a pattern
+-- does not implicitly declare anything
+inferBinding :: InfEffs es => Binding Name -> Eff es (HashMap Name Type)
 inferBinding = \case
-    E.ValueBinding pat body -> do
+    E.ValueBinding pat body -> scoped do
         bodyTy <- infer body
         checkPattern pat bodyTy
-        case pat of
-            P.Var name -> Just . (name,) <$> lookupSig name
-            _ -> pure Nothing
+        traverse lookupSig (HashMap.fromList $ (\x -> (x, x)) <$> collectNames pat)
     E.FunctionBinding name args body -> do
         argTypes <- traverse inferPattern args
         bodyTy <- infer body
         let ty = foldr T.Function bodyTy argTypes
-        updateSig name ty
-        pure $ Just (name, ty)
+        pure $ HashMap.singleton name ty
+
+-- \| collects all to-be-declared names in a pattern
+collectNames :: Pattern a -> [a]
+collectNames = \case
+    P.Var name -> [name]
+    P.Annotation pat _ -> collectNames pat
+    P.Variant _ pat -> collectNames pat
+    P.Constructor _ pats -> foldMap collectNames pats
+    P.List pats -> foldMap collectNames pats
+    P.Record row -> foldMap collectNames $ toList row
+    -- once again, exhaustiveness checking is worth writing some boilerplate
+    P.IntLiteral{} -> []
+    P.TextLiteral{} -> []
+    P.CharLiteral{} -> []
+
+collectNamesInBinding :: Binding a -> [a]
+collectNamesInBinding = \case
+    E.FunctionBinding name _ _ -> [name]
+    E.ValueBinding pat _ -> collectNames pat
 
 inferPattern :: InfEffs es => Pattern' -> Eff es Type
 inferPattern = \case
