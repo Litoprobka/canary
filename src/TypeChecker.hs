@@ -158,7 +158,7 @@ freshUniVar = do
 
 freshSkolem :: InfEffs es => Name -> Eff es Type
 freshSkolem (Name name _) = T.Skolem . Skolem <$> freshName name
-freshSkolem _ = T.Skolem . Skolem <$> freshName "what" -- why? 
+freshSkolem _ = T.Skolem . Skolem <$> freshName "what" -- why?
 
 freshTypeVar :: InfEffs es => Eff es Name
 freshTypeVar = do
@@ -941,16 +941,9 @@ inferPattern = \case
 inferApp :: InfEffs es => Type -> Expr -> Eff es Type
 inferApp fTy arg =
     monoLayer In fTy >>= \case
-        MLUniVar v -> do
-            from <- mono In =<< infer arg
-            lookupUniVar v >>= \case
-                Left _ -> do
-                    to <- mono Inv =<< freshUniVar
-                    solveUniVar v $ MFn from to
-                    pure $ unMono to
-                Right newTy -> do
-                    to <- mono Inv =<< freshUniVar
-                    unify newTy (MFn from to)
-                    pure $ unMono to
+        MLUniVar uni -> do
+            from <- infer arg
+            to <- freshUniVar
+            to <$ subtype (T.UniVar uni) (T.Function from to)
         MLFn from to -> to <$ check arg from
         _ -> typeError $ pretty fTy <+> "is not a function type"
