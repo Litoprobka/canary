@@ -26,16 +26,16 @@ main = do
     input & parse (usingReaderT pos1 code) fileName & \case
         Left err -> putStrLn $ errorBundlePretty err
         Right decls -> runEff $ runNameGen do
-            traverse_ (liftIO . putDoc . pretty) decls
+            traverse_ (liftIO . putDoc . (<> line) . pretty) decls
             (scope, builtins, env) <- mkDefaults
             (bindings, ScopeErrors errors warnings) <- resolveNames scope decls
             unless (Seq.null errors) $ putTextLn $ "errors: " <> foldMap show errors
             unless (Seq.null warnings) $ putTextLn $ "warnings: " <> foldMap show warnings
 
             putTextLn "resolved names:"
-            traverse_ (liftIO . putDoc . pretty) bindings
+            traverse_ (liftIO . putDoc . (<> line) . pretty) bindings
 
             putTextLn "typechecking:"
             typecheck env builtins bindings >>= \case
                 Left (TypeError err) -> liftIO . putDoc $ err <> line
-                Right checkedBindings -> liftIO . putDoc $ sep $ pretty . uncurry D.Signature <$> HashMap.toList checkedBindings
+                Right checkedBindings -> liftIO . putDoc $ vsep $ pretty . uncurry D.Signature <$> HashMap.toList checkedBindings

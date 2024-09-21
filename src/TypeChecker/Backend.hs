@@ -198,16 +198,15 @@ alterUniVar override uni ty = do
 lookupSig :: InfEffs es => Name -> Eff es Type
 lookupSig name = do
     InfState{topLevel, locals} <- get @InfState
-    case HashMap.lookup name topLevel of
-        Just (Left (UninferredType closure)) -> closure
-        Just (Right ty) -> pure ty
-        Nothing -> case HashMap.lookup name locals of
-            Just ty -> pure ty
-            Nothing -> do
-                -- assuming that type checking is performed after name resolution,
-                -- all encountered names have to be in scope
-                uni <- freshUniVar
-                uni <$ updateSig name uni
+    case (HashMap.lookup name topLevel, HashMap.lookup name locals) of
+        (Just (Right ty), _) -> pure ty
+        (_, Just ty) -> pure ty
+        (Just (Left (UninferredType closure)), _) -> closure
+        (Nothing, Nothing) -> do
+            -- assuming that type checking is performed after name resolution,
+            -- all encountered names have to be in scope
+            uni <- freshUniVar
+            uni <$ updateSig name uni
 
 updateSig :: InfEffs es => Name -> Type -> Eff es ()
 updateSig name ty = modify \s -> s{locals = HashMap.insert name ty s.locals}

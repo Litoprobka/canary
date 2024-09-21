@@ -38,6 +38,7 @@ library
       Syntax.Row
       Syntax.Type
       TypeChecker
+      TypeChecker.Backend
   other-modules:
       Paths_lang
   hs-source-dirs:

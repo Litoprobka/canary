@@ -101,7 +101,7 @@ inferDecls decls = do
         D.Alias{} -> pass
 
     insertBinding name binding locals =
-        let closure = UninferredType $ forallScope $ scoped do
+        let closure = UninferredType $ scoped do
                 declareAll =<< inferDecls locals
                 nameTypePairs <- inferBinding binding
                 declareTopLevel nameTypePairs
@@ -302,16 +302,18 @@ infer =
 -- infers the type of a function / variables in a pattern
 -- does not implicitly declare anything
 inferBinding :: InfEffs es => Binding Name -> Eff es (HashMap Name Type)
-inferBinding = \case
-    E.ValueBinding pat body -> scoped do
+inferBinding = scoped . \case
+    E.ValueBinding pat body -> do
         bodyTy <- infer body
         checkPattern pat bodyTy
         traverse lookupSig (HashMap.fromList $ (\x -> (x, x)) <$> collectNames pat)
-    E.FunctionBinding name args body -> do
+    E.FunctionBinding name args body -> HashMap.singleton name <$> forallScope do
+        updateSig name =<< freshUniVar
         argTypes <- traverse inferPattern args
         bodyTy <- infer body
         let ty = foldr T.Function bodyTy argTypes
-        pure $ HashMap.singleton name ty
+        (`subtype` ty) =<< lookupSig name
+        pure ty
 
 -- \| collects all to-be-declared names in a pattern
 collectNames :: Pattern a -> [a]
@@ -341,7 +343,9 @@ inferPattern = \case
     P.Annotation pat ty -> ty <$ checkPattern pat ty
     p@(P.Constructor name args) -> do
         (resultType, argTypes) <- conArgTypes name
-        unless (length argTypes == length args) $ typeError $ "incorrect arg count in pattern" <+> pretty p
+        traceShowM argTypes
+        unless (length argTypes == length args) $
+            typeError $ "incorrect arg count (" <> pretty (length args) <> ") in pattern" <+> pretty p <+> "(expected" <+> pretty (length argTypes) <> ")"
         zipWithM_ checkPattern args argTypes
         pure resultType
     P.List pats -> do

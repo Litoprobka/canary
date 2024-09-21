@@ -23,6 +23,7 @@ import Effectful.TH (makeEffect)
 import Effectful.State.Static.Local (State, runState, evalState, get, put, modify)
 import Effectful.Dispatch.Dynamic (reinterpret)
 import qualified Data.Sequence as Seq
+import Data.List (partition)
 
 
 data ScopeErrors = ScopeErrors {errors :: Seq UnboundVar, warnings :: Seq Warning}
@@ -87,11 +88,17 @@ runNameResolution env = runScopeErrors . evalState (Scope env)
 resolveNames :: (NameGen :> es) => HashMap Text Name -> [Declaration Text] -> Eff es ([Declaration Name], ScopeErrors)
 resolveNames env decls = runNameResolution env do
     mkGlobalScope
-    traverse resolveDec decls
+    let (valueDecls, rest) = partition isValueDecl decls
+    valueDecls' <- traverse resolveDec rest
+    otherDecls <- traverse resolveDec valueDecls
+    pure $ valueDecls' <> otherDecls
   where
     -- this is going to handle imports at some point
     mkGlobalScope :: EnvEffs es => Eff es ()
     mkGlobalScope = collectNames decls
+
+    isValueDecl D.Value{} = True
+    isValueDecl _ = False
 
 {- | adds declarations to the current scope
 this function should be used very carefully, since it will
@@ -105,18 +112,20 @@ collectNames decls = for_ decls \case
     D.Alias name _ -> void $ declare name
     D.Signature _ _ -> pass
 
--- | resolves names in a declaration. Doesn't change the current scope
+-- | resolves names in a declaration. Adds type constructors to the current scope
 resolveDec :: EnvEffs es => Declaration Text -> Eff es (Declaration Name)
-resolveDec decl = scoped case decl of
-    D.Value binding locals -> do
+resolveDec decl = case decl of
+    D.Value binding locals -> scoped do
         binding' <- resolveBinding locals binding
         locals' <- traverse resolveDec locals
         pure $ D.Value binding' locals'
     D.Type name vars constrs -> do
-        name' <- resolve name
-        vars' <- traverse resolve vars
+        (name', vars') <- scoped do
+            name' <- resolve name
+            vars' <- traverse declare vars
+            pure (name', vars')
         constrs' <-
-            constrs & traverse \(con, args) -> do
+              constrs & traverse \(con, args) -> do
                 con' <- declare con
                 args' <- traverse resolveType args
                 pure (con', args')
@@ -142,9 +151,6 @@ resolveBinding locals = \case
         pure $ E.ValueBinding pat' body'
 
 {- | resolves names in a pattern. Adds all new names to the current scope
-
-this is *almost* the definition of `traverse` for Pattern, except for `Constructor`
-should I use a separate var and make it a Bitraversable instead?
 -}
 declarePat :: EnvEffs es => Pattern Text -> Eff es (Pattern Name)
 declarePat = \case
