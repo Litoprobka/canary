@@ -92,11 +92,13 @@ spec = do
         it "nested" do
             parsePretty expression "if if True then False else True then 1 else 0"
                 `shouldBe` Right (E.If (E.If "True" "False" "True") (E.IntLiteral 1) (E.IntLiteral 0))
-        it "partially applied (todo)" do
+        it "partially applied" do
             parsePretty expression "(if _ then A else B)" `shouldBe` Right (E.Lambda "$1" $ E.If "$1" "A" "B")
         it "with operators" do
             parsePretty expression "x + if y || z then 4 else 5 * 2"
                 `shouldBe` Right (binApp "+" "x" $ E.If (binApp "||" "y" "z") (E.IntLiteral 4) (binApp "*" (E.IntLiteral 5) (E.IntLiteral 2)))
+        it "fixity shenanigans" do
+            parsePretty expression "if cond then 1 else 2 == 3 == 4" `shouldSatisfy` isLeft
 
     describe "pattern matching" do
         it "pattern" do
@@ -223,6 +225,15 @@ spec = do
         it "should require outer parenthesis" do
             parsePretty expression "f _" `shouldSatisfy` isLeft
             parsePretty expression "f _ x" `shouldSatisfy` isLeft
+
+    describe "precedence shenanigans" do
+        it "let" do
+            parsePretty expression "let x = y; z == w == v" `shouldSatisfy` isLeft
+        it "let-let" do
+            parsePretty expression "let x = y; let z = w; v" 
+                `shouldBe` Right (E.Let (E.ValueBinding "x" "y") (E.Let (E.ValueBinding "z" "w") "v"))
+        it "case" do
+            parsePretty expression "case x of y -> y == 1 == 2" `shouldSatisfy` isLeft
 
     describe "misc. builtins" do
         it "list" do

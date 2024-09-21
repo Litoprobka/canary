@@ -211,8 +211,8 @@ charLiteral = label "char literal" $ try $ one <$> between (single '\'') (symbol
 operator :: ParserM m => Text -> m ()
 operator sym = label "operator" $ lexeme $ string sym *> notFollowedBy (satisfy isOperatorChar)
 
-someOperator :: Parser Text
-someOperator = label "operator" $ lexeme $ takeWhile1P (Just "operator") isOperatorChar
+someOperator :: ParserM m => m Text
+someOperator = lexeme $ takeWhile1P (Just "operator") isOperatorChar
 
 isOperatorChar :: Char -> Bool
 isOperatorChar = (`elem` ("+-*/%^=><&.~!?|" :: String))

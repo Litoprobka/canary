@@ -37,6 +37,7 @@ declaration = choice [typeDec, valueDec, signature]
     typeDec' = do
         name <- typeName
         vars <- many typeVariable -- placeholder
+        specialSymbol "="
         D.Type name vars <$> (typePattern `sepBy` specialSymbol "|")
 
     typePattern :: Parser (Text, [Type' Text])
@@ -143,7 +144,6 @@ expression' termParser = label "expression" $ makeExprParser (noPrec termParser)
     newScopeExpr = expression' $
         nextVar <* wildcard <|> E.Name <$> termName
 
-    precMap :: ParserM m => IntMap [Operator m (Expression Text)]
     precMap =
         IntMap.fromList
             [ (120, [infixR "."]) -- lens composition
@@ -173,7 +173,9 @@ expression' termParser = label "expression" $ makeExprParser (noPrec termParser)
 
     noPrec varParser = choice $ keywordBased <> terminals varParser
 
-    keywordBased =
+    -- anyOperator = choice $ operator <$> [".", "^.", "^..", "^?", ">>", "<<", "^", "*", "/", "+", "-", "<>", ".~", "%~", "?~", "==", "!=", ">", ">=", "<", "<=", "&&", "||", "|>", "<|"]
+    -- this is a bit of an ad-hoc solution for the case where `let x = y; x == z == w` gets parsed as `(let x = y; x == z) == w`
+    keywordBased = (<* notFollowedBy someOperator) <$>
         [ lambdaLike E.Lambda lambda pattern' "->" <*> sameScopeExpr
         , let'
         , case'
