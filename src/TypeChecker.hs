@@ -120,8 +120,10 @@ inferDecls decls = do
 
     mkConstrSigs :: Name -> [Name] -> [(Name, [Type])] -> [(Name, Type)]
     mkConstrSigs name vars constrs =
-        second (\conParams -> foldr T.Forall (foldr T.Function (foldl' T.Application (T.Name name) (T.Var <$> vars)) conParams) vars)
-            <$> constrs
+        constrs
+            <&> second \conParams -> foldr T.Forall (foldr T.Function fullType conParams) vars
+      where
+        fullType = foldl' T.Application (T.Name name) (T.Var <$> vars)
 
 subtype :: InfEffs es => Type -> Type -> Eff es ()
 subtype lhs_ rhs_ = join $ match <$> monoLayer In lhs_ <*> monoLayer Out rhs_
