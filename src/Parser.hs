@@ -43,7 +43,7 @@ declaration = choice [typeDec, valueDec, signature]
     typePattern :: Parser (Text, [Type' Text])
     typePattern = do
         name <- typeName
-        args <- many type'
+        args <- many typeParens
         pure (name, args)
 
     signature :: Parser (Declaration Text)
@@ -53,10 +53,19 @@ declaration = choice [typeDec, valueDec, signature]
         D.Signature name <$> type'
 
 type' :: ParserM m => m (Type' Text)
-type' = makeExprParser noPrec [[typeApp], [function], [forall', exists]]
+type' = makeExprParser typeParens [[typeApp], [function], [forall', exists]]
   where
-    noPrec =
-        choice
+    forall' = Prefix $ lambdaLike T.Forall forallKeyword typeVariable "."
+    exists = Prefix $ lambdaLike T.Exists existsKeyword typeVariable "."
+
+    typeApp = InfixL $ pure T.Application
+    function = InfixR $ T.Function <$ specialSymbol "->"
+
+-- a type expression with higher precedence than application
+-- used when parsing constructor arguement types and the like
+typeParens :: ParserM m => m (Type' Text)
+typeParens =
+    choice
             [ T.Name <$> typeName
             , T.Var <$> typeVariable
             , parens type'
@@ -64,13 +73,7 @@ type' = makeExprParser noPrec [[typeApp], [function], [forall', exists]]
             , T.Variant . NoExtRow <$> brackets (fromList <$> commaSep variantItem)
             ]
       where
-        variantItem = (,) <$> variantConstructor <*> option (T.Name "Unit") noPrec
-
-    forall' = Prefix $ lambdaLike T.Forall forallKeyword typeVariable "."
-    exists = Prefix $ lambdaLike T.Exists existsKeyword typeVariable "."
-
-    typeApp = InfixL $ pure T.Application
-    function = InfixR $ T.Function <$ specialSymbol "->"
+        variantItem = (,) <$> variantConstructor <*> option (T.Name "Unit") typeParens
 
 someRecord :: ParserM m => Text -> m value -> Maybe (Text -> value) -> m (Row value)
 someRecord delim valueP missingValue = braces (fromList <$> commaSep recordItem)

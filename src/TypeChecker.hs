@@ -76,8 +76,8 @@ inferDecls :: InfEffs es => [Declaration Name] -> Eff es (HashMap Name Type)
 inferDecls decls = do
     traverse_ updateTopLevel decls
     let (values, sigs) = second HashMap.fromList $ foldr getValueDecls ([], []) decls
-    foldr (<>) HashMap.empty <$> for values \(binding, locals) ->
-        (=<<) (`HashMap.lookup` sigs) (listToMaybe $ collectNamesInBinding binding) & \case
+    fold <$> for values \(binding, locals) ->
+        binding & collectNamesInBinding & listToMaybe >>= (`HashMap.lookup` sigs) & \case
             Just ty -> do
                 checkBinding binding ty
                 pure $
@@ -120,7 +120,7 @@ inferDecls decls = do
 
     mkConstrSigs :: Name -> [Name] -> [(Name, [Type])] -> [(Name, Type)]
     mkConstrSigs name vars constrs =
-        second (\conParams -> foldr T.Forall (foldr T.Function (T.Name name) conParams) vars)
+        second (\conParams -> foldr T.Forall (foldr T.Function (foldl' T.Application (T.Name name) (T.Var <$> vars)) conParams) vars)
             <$> constrs
 
 subtype :: InfEffs es => Type -> Type -> Eff es ()
@@ -302,18 +302,28 @@ infer =
 -- infers the type of a function / variables in a pattern
 -- does not implicitly declare anything
 inferBinding :: InfEffs es => Binding Name -> Eff es (HashMap Name Type)
-inferBinding = scoped . \case
-    E.ValueBinding pat body -> do
-        bodyTy <- infer body
-        checkPattern pat bodyTy
-        traverse lookupSig (HashMap.fromList $ (\x -> (x, x)) <$> collectNames pat)
-    E.FunctionBinding name args body -> HashMap.singleton name <$> forallScope do
-        updateSig name =<< freshUniVar
-        argTypes <- traverse inferPattern args
-        bodyTy <- infer body
-        let ty = foldr T.Function bodyTy argTypes
-        (`subtype` ty) =<< lookupSig name
-        pure ty
+inferBinding =
+    scoped . \case
+        -- todo: use forallScope for value bindings. This requires changing the definition of forallScope
+        E.ValueBinding pat body -> do
+            bodyTy <- infer body
+            checkPattern pat bodyTy
+            traverse lookupSig (HashMap.fromList $ (\x -> (x, x)) <$> collectNames pat)
+        E.FunctionBinding name args body ->
+            HashMap.singleton name <$> forallScope do
+                -- note: we can only infer monotypes for recursive functions
+                -- while checking the body, the function itself is assigned a univar
+                -- in the end, we check that the inferred type is compatible with the one in the univar (inferred from recursive calls)
+                uni <- freshUniVar'
+                updateSig name $ T.UniVar uni
+                argTypes <- traverse inferPattern args
+                bodyTy <- infer body
+                let ty = foldr T.Function bodyTy argTypes
+                -- since we can still infer higher-rank types for non-recursive functions,
+                -- we only need the subtype check when the univar is solved, i.e. when the
+                -- functions contains any recursive calls at all
+                withUniVar uni (subtype ty . unMono)
+                pure ty
 
 -- \| collects all to-be-declared names in a pattern
 collectNames :: Pattern a -> [a]
@@ -343,9 +353,12 @@ inferPattern = \case
     P.Annotation pat ty -> ty <$ checkPattern pat ty
     p@(P.Constructor name args) -> do
         (resultType, argTypes) <- conArgTypes name
-        traceShowM argTypes
         unless (length argTypes == length args) $
-            typeError $ "incorrect arg count (" <> pretty (length args) <> ") in pattern" <+> pretty p <+> "(expected" <+> pretty (length argTypes) <> ")"
+            typeError $
+                "incorrect arg count ("
+                    <> pretty (length args)
+                    <> ") in pattern" <+> pretty p <+> "(expected" <+> pretty (length argTypes)
+                    <> ")"
         zipWithM_ checkPattern args argTypes
         pure resultType
     P.List pats -> do
@@ -374,7 +387,7 @@ inferPattern = \case
             --
             -- solved univars cannot appear here either, since `lookupSig` on a pattern returns a type with no univars
             MLUniVar uni -> typeError $ "unexpected univar" <+> pretty uni <+> "in a constructor type"
-            -- this kind of repetition is necessary to retain missing pattern warnings
+            -- this kind of repetition is necwithUniVaressary to retain missing pattern warnings
             MLName name -> pure (T.Name name, [])
             MLApp lhs rhs -> pure (T.Application lhs rhs, [])
             MLVariant row -> pure (T.Variant row, [])

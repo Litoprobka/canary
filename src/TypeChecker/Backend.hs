@@ -116,12 +116,15 @@ typeError :: InfEffs es => Doc () -> Eff es a
 typeError err = throwError $ TypeError err
 
 freshUniVar :: InfEffs es => Eff es (Type' n)
-freshUniVar = do
+freshUniVar = T.UniVar <$> freshUniVar'
+
+freshUniVar' :: InfEffs es => Eff es UniVar
+freshUniVar' = do
     -- and this is where I wish I had lens
     var <- UniVar <$> gets @InfState (.nextUniVarId) <* modify @InfState \s -> s{nextUniVarId = succ s.nextUniVarId}
     scope <- gets @InfState (.currentScope)
     modify \s -> s{vars = HashMap.insert var (Left scope) s.vars}
-    pure $ T.UniVar var
+    pure var
 
 freshSkolem :: InfEffs es => Name -> Eff es Type
 freshSkolem (Name name _) = T.Skolem . Skolem <$> freshName name
@@ -194,7 +197,7 @@ alterUniVar override uni ty = do
     rescope scope = foldUniVars \v -> lookupUniVar v >>= either (rescopeVar v scope) (const pass)
     rescopeVar v scope oldScope = modify \s -> s{vars = HashMap.insert v (Left $ min oldScope scope) s.vars}
 
--- looks up a type of a binding. If it's an uninferred global binding, it infers it first
+-- looks up a type of a binding. Local binding take precedence over uninferred globals, but not over inferred ones
 lookupSig :: InfEffs es => Name -> Eff es Type
 lookupSig name = do
     InfState{topLevel, locals} <- get @InfState
@@ -280,7 +283,7 @@ data Variance = In | Out | Inv
 -}
 mono :: InfEffs es => Variance -> Type -> Eff es Monotype
 mono variance = \case
-    v@T.Var{} -> typeError $ "unbound type variable" <+> pretty v
+    T.Var var -> pure $ MVar var
     T.Name name -> pure $ MName name
     T.Skolem skolem -> pure $ MSkolem skolem
     T.UniVar uni -> pure $ MUniVar uni
@@ -323,7 +326,7 @@ unMono = \case
 -}
 monoLayer :: InfEffs es => Variance -> Type -> Eff es MonoLayer
 monoLayer variance = \case
-    v@T.Var{} -> typeError $ "unbound type variable" <+> pretty v
+    T.Var var -> pure $ MLVar var
     T.Name name -> pure $ MLName name
     T.Skolem skolem -> pure $ MLSkolem skolem
     T.UniVar uni -> pure $ MLUniVar uni

@@ -120,15 +120,17 @@ resolveDec decl = case decl of
         locals' <- traverse resolveDec locals
         pure $ D.Value binding' locals'
     D.Type name vars constrs -> do
-        (name', vars') <- scoped do
+        (name', vars', constrsToDeclare) <- scoped do
             name' <- resolve name
             vars' <- traverse declare vars
-            pure (name', vars')
-        constrs' <-
+            constrsToDeclare <-
               constrs & traverse \(con, args) -> do
                 con' <- declare con
                 args' <- traverse resolveType args
-                pure (con', args')
+                pure (con, con', args')
+            pure (name', vars', constrsToDeclare)
+        for_ constrsToDeclare \(textName, conName, _) -> modify \(Scope table) -> Scope (Map.insert textName conName table)
+        let constrs' = constrsToDeclare <&> \(_, con', args') -> (con', args')
         pure $ D.Type name' vars' constrs'
     D.Alias alias body -> D.Alias <$> resolve alias <*> resolveType body
     D.Signature name ty -> D.Signature <$> resolve name <*> resolveType ty

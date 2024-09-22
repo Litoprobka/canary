@@ -139,12 +139,26 @@ mutualRecursion =
         [ D.Value (E.FunctionBinding "f" ["x", "y"] $ E.Record [("x", "myId" # "x"), ("y", "myId" # "y")]) []
         , D.Value (E.FunctionBinding "myId" ["x"] "x") []
         ]
-    , [D.Value (E.FunctionBinding "f" ["double", "cond", "n"] $ E.If ("cond" # "n") "n" ("f" # "double" # "cond" # ("double" # "n"))) []]
-    ,   [ D.Type "Stack" ["'a"] [("Cons", ["'a", "Stack" $: "'a"]), ("Nil", [])]
+    ,
+        [ D.Value
+            (E.FunctionBinding "f" ["double", "cond", "n"] $ E.If ("cond" # "n") "n" ("f" # "double" # "cond" # ("double" # "n")))
+            []
+        ]
+    ,
+        [ D.Type "Stack" ["'a"] [("Cons", ["'a", "Stack" $: "'a"]), ("Nil", [])]
         , D.Type "Peano" [] [("S", ["Peano"]), ("Z", [])]
-        , D.Value (E.FunctionBinding "length" ["xs"] (E.Case "xs" 
-            [ (con "Cons" ["head", "tail"], "S" # ("length" # "tail"))
-            , (con "Nil" [], "Z")])) []
+        , D.Value
+            ( E.FunctionBinding
+                "length"
+                ["xs"]
+                ( E.Case
+                    "xs"
+                    [ (con "Cons" ["head", "tail"], "S" # ("length" # "tail"))
+                    , (con "Nil" [], "Z")
+                    ]
+                )
+            )
+            []
         ]
     ]
 
@@ -218,7 +232,8 @@ spec = do
                     resolvedDecls <- fst <$> resolveNames scope decls
                     typecheck env builtins resolvedDecls
              in do
-                    case tcResult of
+                    {- case tcResult of
                         Left _ -> pass
                         Right checkedBindings -> putDoc $ sep $ pretty . uncurry D.Signature <$> HashMap.toList checkedBindings
+                    -}
                     tcResult `shouldSatisfy` isRight

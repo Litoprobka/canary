@@ -38,4 +38,4 @@ main = do
             putTextLn "typechecking:"
             typecheck env builtins bindings >>= \case
                 Left (TypeError err) -> liftIO . putDoc $ err <> line
-                Right checkedBindings -> liftIO . putDoc $ vsep $ pretty . uncurry D.Signature <$> HashMap.toList checkedBindings
+                Right checkedBindings -> liftIO . putDoc $ (<> line) $ vsep $ pretty . uncurry D.Signature <$> HashMap.toList checkedBindings
