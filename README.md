@@ -19,6 +19,7 @@ There's no concrete plan for the language. For the most part, I'm just figuring 
 ## Overview
 
 The syntax is heavily inspired by the ML-family, notably Haskell.
+Whether the language is going to be strict or lazy is to be decided
 
 ```haskell
 type List 'a = Cons 'a (List 'a) | Nil
@@ -60,12 +61,12 @@ Instead, we could write
 ```haskell
 runST : exists s. ST s a -> a
 ```
-This way, there are impredicative instantiations going on when we write
+This way, there are no impredicative instantiations going on when we write
 ```haskell
 computation = runST <| do
     ...
 ```
-and there's not need to special case `<|` [like GHC used to have](https://gitlab.haskell.org/ghc/ghc/blob/795986aaf33e2ffc233836b86a92a77366c91db2/compiler/typecheck/TcExpr.hs#L323-L334) with `$`
+and there's no need to special case `<|` [like GHC used to have](https://gitlab.haskell.org/ghc/ghc/blob/795986aaf33e2ffc233836b86a92a77366c91db2/compiler/typecheck/TcExpr.hs#L323-L334) with `$`
 
 In general, wherever Haskell type checking failed with the funky message about a skolem escaping its scope, <language> infers an existential instead.
 
