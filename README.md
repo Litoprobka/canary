@@ -68,7 +68,7 @@ computation = runST <| do
 ```
 and there's no need to special case `<|` [like GHC used to have](https://gitlab.haskell.org/ghc/ghc/blob/795986aaf33e2ffc233836b86a92a77366c91db2/compiler/typecheck/TcExpr.hs#L323-L334) with `$`
 
-In general, wherever Haskell type checking failed with the funky message about a skolem escaping its scope, <language> infers an existential instead.
+In general, wherever Haskell type checking failed with the funky message about a skolem escaping its scope, *language name* infers an existential instead.
 
 Some other use cases:
 
@@ -83,11 +83,11 @@ readSymlink : exists 'rel. Path 'any -> IO (Path 'rel)
 
 #### Row polymorphism
 
-*TODO*. You may read *Extensible record with scoped labels* in the meantime.
+*TODO*. You may read *Extensible records with scoped labels* in the meantime.
 
 ### Wildcard lambdas
 
-<name of the language> doesn't have operator sections (`(+3) :: Int -> Int`). Instead, there's a more general feature called wildcard lambdas (or something else if I come up with a better name).
+*name of the language* doesn't have operator sections (`(+3) :: Int -> Int`). Instead, there's a more general feature called wildcard lambdas (or something else if I come up with a better name).
 
 ```haskell
 plus3 = (_ + 3)
