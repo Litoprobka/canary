@@ -21,7 +21,7 @@ import Effectful.Error.Static (Error)
 import Effectful.Reader.Static (Reader)
 import Effectful.State.Static.Local (State, runState)
 import NameGen (NameGen, freshName, runNameGen)
-import NameResolution (Scope (..), declare, resolveNames, resolveType, runNameResolution, runScopeErrors)
+import NameResolution (Scope (..), declare, resolveNames, resolveType, runNameResolution, runScopeErrors, runDeclare)
 import Parser
 import Prettyprinter hiding (list)
 import Prettyprinter.Render.Text (putDoc)
@@ -63,7 +63,7 @@ lam = E.Lambda
 con :: n -> [Pattern n] -> Pattern n
 con = P.Constructor
 
-runDefault :: Eff '[Error TypeError, Reader (Builtins Name), State InfState, NameGen] a -> Either TypeError a
+runDefault :: Eff '[Declare, Error TypeError, Reader (Builtins Name), State InfState, NameGen] a -> Either TypeError a
 runDefault action = runPureEff $ runNameGen do
     (_, builtins, defaultEnv) <- mkDefaults
     run (Right <$> defaultEnv) builtins action
@@ -89,7 +89,7 @@ mkDefaults = do
             , ("Lens", LensName)
             ]
     (env, Scope scope) <-
-        (runState (Scope initScope) . fmap (HashMap.fromList . fst) . runScopeErrors)
+        (runState (Scope initScope) . fmap (HashMap.fromList . fst) . runScopeErrors . NameResolution.runDeclare)
             ( traverse
                 (\(name, ty) -> liftA2 (,) (declare name) (resolveType ty))
                 [ ("()", "Unit")

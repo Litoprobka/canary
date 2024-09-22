@@ -19,6 +19,7 @@ module TypeChecker (
     InfState (..),
     TypeError (..),
     InfEffs,
+    Declare,
     typecheck,
 ) where
 
@@ -215,9 +216,9 @@ check e type_ = scoped $ match e type_
 checkBinding :: InfEffs es => Binding Name -> Type -> Eff es ()
 checkBinding binding ty = case binding of
     E.FunctionBinding _ args body -> check (foldr E.Lambda body args) ty
-    E.ValueBinding pat body -> checkPattern pat ty >> check body ty
+    E.ValueBinding pat body -> scoped $ checkPattern pat ty >> check body ty
 
-checkPattern :: InfEffs es => Pattern' -> Type -> Eff es ()
+checkPattern :: (InfEffs es, Declare :> es) => Pattern' -> Type -> Eff es ()
 checkPattern = \cases
     -- we need this case, since inferPattern only infers monotypes for var patterns
     (P.Var name) ty -> updateSig name ty
@@ -359,7 +360,7 @@ collectNamesInBinding = \case
     E.FunctionBinding name _ _ -> [name]
     E.ValueBinding pat _ -> collectNames pat
 
-inferPattern :: InfEffs es => Pattern' -> Eff es Type
+inferPattern :: (InfEffs es, Declare :> es) => Pattern' -> Eff es Type
 inferPattern = \case
     P.Var name -> do
         uni <- freshUniVar

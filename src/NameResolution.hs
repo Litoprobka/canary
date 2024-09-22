@@ -5,7 +5,7 @@
 {-# LANGUAGE DataKinds #-}
 {-# LANGUAGE AllowAmbiguousTypes #-}
 
-module NameResolution (runNameResolution, runScopeErrors, resolveNames, resolveExpr, resolveType, declare, declarePat, Scope(..), UnboundVar (..), Warning (..), ScopeErrors (..)) where
+module NameResolution (runNameResolution, runScopeErrors, runDeclare, resolveNames, resolveExpr, resolveType, declare, declarePat, Scope(..), UnboundVar (..), Warning (..), ScopeErrors (..)) where
 
 import Relude hiding (State, runState, evalState, error, get, put, modify)
 
@@ -21,7 +21,7 @@ import NameGen
 import Effectful (Effect, Eff, (:>))
 import Effectful.TH (makeEffect)
 import Effectful.State.Static.Local (State, runState, evalState, get, put, modify)
-import Effectful.Dispatch.Dynamic (reinterpret)
+import Effectful.Dispatch.Dynamic (reinterpret, interpret)
 import qualified Data.Sequence as Seq
 import Data.List (partition)
 
@@ -33,6 +33,11 @@ data ScopeErrorE :: Effect where
     Warn :: Warning -> ScopeErrorE m ()
     Error :: UnboundVar -> ScopeErrorE m ()
 
+-- | a one-off effect to differentiate functions that do and don't declare stuff
+-- | on type level
+data Declare :: Effect where
+    Declare :: Text -> Declare m Name
+
 -- * other types
 
 newtype Scope = Scope {table :: HashMap Text Name}
@@ -41,35 +46,36 @@ newtype UnboundVar = UnboundVar Text deriving (Show)
 data Warning = Shadowing Text | UnusedVar Text deriving (Show)
 
 makeEffect ''ScopeErrorE
+makeEffect ''Declare
 
 runScopeErrors :: Eff (ScopeErrorE : es) a -> Eff es (a, ScopeErrors)
 runScopeErrors = reinterpret (runState $ ScopeErrors Seq.empty Seq.empty) \_ -> \case
     Warn warning -> modify @ScopeErrors \se -> se{warnings = se.warnings Seq.|> warning}
     Error error' -> modify @ScopeErrors \se -> se{errors = se.errors Seq.|> error'}
 
-
-type EnvEffs es = (State Scope :> es, NameGen :> es, ScopeErrorE :> es)
-
 -- | run a state action without changing the `Scope` part of the state
-scoped :: (EnvEffs es) => Eff es a -> Eff es a
-scoped action = do
+scoped :: EnvEffs es => Eff (Declare : es) a -> Eff es a
+scoped action' = runDeclare action' & \action -> do
     prevScope <- get @Scope
     output <- action
     put prevScope
     pure output
 
 -- todo: handle duplicate names (those that aren't just shadowing)
-declare :: EnvEffs es => Text -> Eff es Name
--- each wildcard gets a unique id
-declare "_" = freshName "_"
-declare name = do
-    scope <- get @Scope
-    disambiguatedName <- freshName name
-    case Map.lookup name scope.table of
-        Just _ -> warn (Shadowing name)
-        Nothing -> pass
-    put $ Scope $ Map.insert name disambiguatedName scope.table
-    pure disambiguatedName
+runDeclare :: EnvEffs es => Eff (Declare : es) a -> Eff es a
+runDeclare = interpret \_ -> \case
+    -- each wildcard gets a unique id
+    Declare "_" -> freshName "_"
+    Declare name -> do
+        scope <- get @Scope
+        disambiguatedName <- freshName name
+        case Map.lookup name scope.table of
+            Just _ -> warn (Shadowing name)
+            Nothing -> pass
+        put $ Scope $ Map.insert name disambiguatedName scope.table
+        pure disambiguatedName
+
+type EnvEffs es = (State Scope :> es, NameGen :> es, ScopeErrorE :> es)   
 
 -- | looks up a name in the current scope
 resolve :: EnvEffs es => Text -> Eff es Name
@@ -82,11 +88,11 @@ resolve name = do
             -- this gives a unique id to every occurance of the same unbound name
             scoped $ declare name
 
-runNameResolution :: HashMap Text Name -> Eff (State Scope : ScopeErrorE : es) a -> Eff es (a, ScopeErrors)
-runNameResolution env = runScopeErrors . evalState (Scope env) 
+runNameResolution :: (NameGen :> es) => HashMap Text Name -> Eff (Declare : State Scope : ScopeErrorE : es) a -> Eff es (a, ScopeErrors)
+runNameResolution env = runScopeErrors . evalState (Scope env) . runDeclare
 
 resolveNames :: (NameGen :> es) => HashMap Text Name -> [Declaration Text] -> Eff es ([Declaration Name], ScopeErrors)
-resolveNames env decls = runNameResolution env do
+resolveNames env decls = runNameResolution env $ runDeclare do
     mkGlobalScope
     let (valueDecls, rest) = partition isValueDecl decls
     valueDecls' <- traverse resolveDec rest
@@ -94,7 +100,7 @@ resolveNames env decls = runNameResolution env do
     pure $ valueDecls' <> otherDecls
   where
     -- this is going to handle imports at some point
-    mkGlobalScope :: EnvEffs es => Eff es ()
+    mkGlobalScope :: (EnvEffs es, Declare :> es) => Eff es ()
     mkGlobalScope = collectNames decls
 
     isValueDecl D.Value{} = True
@@ -104,7 +110,7 @@ resolveNames env decls = runNameResolution env do
 this function should be used very carefully, since it will
 generate different IDs when called twice on the same data
 -}
-collectNames :: EnvEffs es => [Declaration Text] -> Eff es ()
+collectNames :: (EnvEffs es, Declare :> es) => [Declaration Text] -> Eff es ()
 collectNames decls = for_ decls \case
     D.Value (E.FunctionBinding name _ _) _ -> void $ declare name
     D.Value (E.ValueBinding pat _) _ -> void $ declarePat pat
@@ -139,7 +145,7 @@ resolveDec decl = case decl of
 takes local definitions as an argument, and uses them after resolving the name / pattern
 -}
 resolveBinding :: EnvEffs es => [Declaration Text] -> Binding Text -> Eff es (Binding Name)
-resolveBinding locals = \case
+resolveBinding locals = scoped . \case
     E.FunctionBinding name args body -> do
         name' <- resolve name
         args' <- traverse declarePat args
@@ -154,7 +160,7 @@ resolveBinding locals = \case
 
 {- | resolves names in a pattern. Adds all new names to the current scope
 -}
-declarePat :: EnvEffs es => Pattern Text -> Eff es (Pattern Name)
+declarePat :: (EnvEffs es, Declare :> es) => Pattern Text -> Eff es (Pattern Name)
 declarePat = \case
     P.Constructor con pats -> P.Constructor <$> resolve con <*> traverse declarePat pats
     P.Annotation pat ty -> P.Annotation <$> declarePat pat <*> resolveType ty

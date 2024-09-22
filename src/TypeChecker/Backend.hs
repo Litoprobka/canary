@@ -3,6 +3,9 @@
 {-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE OverloadedRecordDot #-}
 {-# LANGUAGE NoFieldSelectors #-}
+{-# LANGUAGE TemplateHaskell #-}
+{-# LANGUAGE GADTs #-}
+{-# LANGUAGE TypeFamilies #-}
 
 module TypeChecker.Backend where
 
@@ -23,6 +26,8 @@ import Syntax.Row qualified as Row
 import Syntax.Type qualified as T
 import Prelude (show)
 import Data.Traversable (for)
+import Effectful.Dispatch.Dynamic (interpret)
+import Effectful.TH
 
 type Expr = Expression Name
 type Pattern' = Pattern Name
@@ -59,12 +64,6 @@ newtype Builtins a = Builtins
     }
     deriving (Show, Functor, Foldable, Traversable)
 
-instance Pretty Monotype where
-    pretty = pretty . unMono
-
-instance Pretty MonoLayer where
-    pretty = pretty . unMonoLayer
-
 -- calling an uninferred type closure should introduce all of the inferred bindings
 -- into the global scope
 newtype UninferredType = UninferredType (forall es. InfEffs es => Eff es Type)
@@ -88,17 +87,38 @@ data InfState = InfState
 
 type InfEffs es = (NameGen :> es, State InfState :> es, Error TypeError :> es, Reader (Builtins Name) :> es)
 
+data Declare :: Effect where
+    UpdateSig :: Name -> Type -> Declare m ()
+
+makeEffect ''Declare
+
+-- | run the given action and discard signature updates
+scoped :: InfEffs es => Eff (Declare : es) a -> Eff es a
+scoped action = runDeclare action & \action' -> do
+    locals <- gets @InfState (.locals)
+    action' <* modify \s -> s{locals}
+
+-- | interpret `updateSig` as an update of InfState
+runDeclare :: (State InfState :> es) => Eff (Declare : es) a -> Eff es a
+runDeclare = interpret \_ (UpdateSig name ty) -> modify \s -> s{locals = HashMap.insert name ty s.locals}
+
+instance Pretty Monotype where
+    pretty = pretty . unMono
+
+instance Pretty MonoLayer where
+    pretty = pretty . unMonoLayer
+
 run
     :: TopLevelBindings
     -> Builtins Name
-    -> Eff (Error TypeError : Reader (Builtins Name) : State InfState : es) a
+    -> Eff (Declare : Error TypeError : Reader (Builtins Name) : State InfState : es) a
     -> Eff es (Either TypeError a)
 run env builtins = fmap fst . runWithFinalEnv env builtins
 
 runWithFinalEnv
     :: TopLevelBindings
     -> Builtins Name
-    -> Eff (Error TypeError : Reader (Builtins Name) : State InfState : es) a
+    -> Eff (Declare : Error TypeError : Reader (Builtins Name) : State InfState : es) a
     -> Eff es (Either TypeError a, InfState)
 runWithFinalEnv env builtins = do
     runState
@@ -112,6 +132,7 @@ runWithFinalEnv env builtins = do
             }
         . runReader builtins
         . runErrorNoCallStack
+        . runDeclare
 
 typeError :: InfEffs es => Doc () -> Eff es a
 typeError err = throwError $ TypeError err
@@ -199,7 +220,7 @@ alterUniVar override uni ty = do
     rescopeVar v scope oldScope = modify \s -> s{vars = HashMap.insert v (Left $ min oldScope scope) s.vars}
 
 -- looks up a type of a binding. Local binding take precedence over uninferred globals, but not over inferred ones
-lookupSig :: InfEffs es => Name -> Eff es Type
+lookupSig :: (InfEffs es, Declare :> es) => Name -> Eff es Type
 lookupSig name = do
     InfState{topLevel, locals} <- get @InfState
     case (HashMap.lookup name topLevel, HashMap.lookup name locals) of
@@ -212,23 +233,14 @@ lookupSig name = do
             uni <- freshUniVar
             uni <$ updateSig name uni
 
-updateSig :: InfEffs es => Name -> Type -> Eff es ()
-updateSig name ty = modify \s -> s{locals = HashMap.insert name ty s.locals}
-
-declareAll :: InfEffs es => HashMap Name Type -> Eff es ()
-declareAll types = modify \s -> s{locals = types <> s.locals}
+declareAll :: (Declare :> es) => HashMap Name Type -> Eff es ()
+declareAll = traverse_ (uncurry updateSig) . HashMap.toList
 
 declareTopLevel :: InfEffs es => HashMap Name Type -> Eff es ()
 declareTopLevel types = modify \s -> s{topLevel = Right <$> types <> s.locals}
 
 builtin :: Reader (Builtins Name) :> es => (Builtins Name -> a) -> Eff es a
 builtin = asks @(Builtins Name)
-
--- | run the given action and discard signature updates
-scoped :: InfEffs es => Eff es a -> Eff es a
-scoped action = do
-    locals <- gets @InfState (.locals)
-    action <* modify \s -> s{locals}
 
 forallScope :: InfEffs es => Eff es (HashMap n Type) -> Eff es (HashMap n Type)
 forallScope  = forallScope' >=> uncurry for

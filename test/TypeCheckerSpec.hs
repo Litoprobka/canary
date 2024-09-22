@@ -4,13 +4,13 @@ module TypeCheckerSpec (spec) where
 
 import Data.HashMap.Strict qualified as HashMap
 import Data.Text qualified as Text
-import Effectful (runPureEff)
-import NameGen (runNameGen)
+import Effectful (Eff, runPureEff, (:>))
+import NameGen
 import NameResolution
 import Playground
 import Prettyprinter hiding (list)
 import Prettyprinter.Render.Text (putDoc)
-import Relude
+import Relude hiding (State)
 import Syntax
 import Syntax.Declaration qualified as D
 import Syntax.Expression qualified as E
