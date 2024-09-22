@@ -51,7 +51,7 @@ typecheck
 typecheck env builtins decls = run (Right <$> env) builtins $ traverse normalise =<< inferDecls decls
 
 -- finds all type parameters used in a type and creates corresponding forall clauses
--- doesn't work with type vars (univars?), because the intended use case is pre-processing user-supplied types
+-- ignores univars, because the intended use case is pre-processing user-supplied types
 inferTypeVars :: Type -> Type
 inferTypeVars = uncurry (foldr T.Forall) . second snd . runPureEff . runState (HashSet.empty, HashSet.empty) . go
   where
@@ -301,18 +301,31 @@ infer =
         E.TextLiteral _ -> pure $ T.Name TextName
         E.CharLiteral _ -> pure $ T.Name TextName
 
+inferApp :: InfEffs es => Type -> Expr -> Eff es Type
+inferApp fTy arg =
+    monoLayer In fTy >>= \case
+        MLUniVar uni -> do
+            from <- infer arg
+            to <- freshUniVar
+            to <$ subtype (T.UniVar uni) (T.Function from to)
+        MLFn from to -> to <$ check arg from
+        _ -> typeError $ pretty fTy <+> "is not a function type"
+
 -- infers the type of a function / variables in a pattern
 -- does not implicitly declare anything
 inferBinding :: InfEffs es => Binding Name -> Eff es (HashMap Name Type)
 inferBinding =
-    scoped . \case
-        -- todo: use forallScope for value bindings. This requires changing the definition of forallScope
+    scoped . forallScope . \case
         E.ValueBinding pat body -> do
-            bodyTy <- infer body
+            (patTy, bodyTy) <- do
+                patTy <- inferPattern pat
+                bodyTy <- infer body
+                pure (patTy, bodyTy)
+            subtype patTy bodyTy
             checkPattern pat bodyTy
             traverse lookupSig (HashMap.fromList $ (\x -> (x, x)) <$> collectNames pat)
-        E.FunctionBinding name args body ->
-            HashMap.singleton name <$> forallScope do
+
+        E.FunctionBinding name args body -> do
                 -- note: we can only infer monotypes for recursive functions
                 -- while checking the body, the function itself is assigned a univar
                 -- in the end, we check that the inferred type is compatible with the one in the univar (inferred from recursive calls)
@@ -325,7 +338,7 @@ inferBinding =
                 -- we only need the subtype check when the univar is solved, i.e. when the
                 -- functions contains any recursive calls at all
                 withUniVar uni (subtype ty . unMono)
-                pure ty
+                pure $ HashMap.singleton name ty
 
 -- \| collects all to-be-declared names in a pattern
 collectNames :: Pattern a -> [a]
@@ -396,16 +409,6 @@ inferPattern = \case
             MLRecord row -> pure (T.Record row, [])
             MLSkolem skolem -> pure (T.Skolem skolem, [])
             MLVar var -> pure (T.Var var, [])
-
-inferApp :: InfEffs es => Type -> Expr -> Eff es Type
-inferApp fTy arg =
-    monoLayer In fTy >>= \case
-        MLUniVar uni -> do
-            from <- infer arg
-            to <- freshUniVar
-            to <$ subtype (T.UniVar uni) (T.Function from to)
-        MLFn from to -> to <$ check arg from
-        _ -> typeError $ pretty fTy <+> "is not a function type"
 
 -- gets rid of all univars
 normalise :: InfEffs es => Type -> Eff es Type

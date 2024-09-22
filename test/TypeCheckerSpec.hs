@@ -133,19 +133,19 @@ patterns =
     , ("Just (x : ∀ 'a. 'a -> 'a)", con "Just" [P.Annotation "x" (T.Name "Maybe" $: T.Forall "'a" ("'a" --> "'a"))])
     ]
 
-mutualRecursion :: [[Declaration Text]]
+mutualRecursion :: [(Text, [Declaration Text])]
 mutualRecursion =
     [
-        [ D.Value (E.FunctionBinding "f" ["x", "y"] $ E.Record [("x", "myId" # "x"), ("y", "myId" # "y")]) []
+        ("f and myId", [ D.Value (E.FunctionBinding "f" ["x", "y"] $ E.Record [("x", "myId" # "x"), ("y", "myId" # "y")]) []
         , D.Value (E.FunctionBinding "myId" ["x"] "x") []
-        ]
+        ])
     ,
-        [ D.Value
+        ("f double cond n", [ D.Value
             (E.FunctionBinding "f" ["double", "cond", "n"] $ E.If ("cond" # "n") "n" ("f" # "double" # "cond" # ("double" # "n")))
             []
-        ]
+        ])
     ,
-        [ D.Type "Stack" ["'a"] [("Cons", ["'a", "Stack" $: "'a"]), ("Nil", [])]
+        ("length", [ D.Type "Stack" ["'a"] [("Cons", ["'a", "Stack" $: "'a"]), ("Nil", [])]
         , D.Type "Peano" [] [("S", ["Peano"]), ("Z", [])]
         , D.Value
             ( E.FunctionBinding
@@ -159,7 +159,11 @@ mutualRecursion =
                 )
             )
             []
-        ]
+        ])
+    ,   ("xs and os (mutual recursion)", [ D.Value (E.ValueBinding "xs" $ "Cons" # E.IntLiteral 0 # "os") []
+        , D.Value (E.ValueBinding "os" $ "Cons" # E.IntLiteral 1 # "xs") []
+        , D.Type "Stack" ["'a"] [("Cons", ["'a", "Stack" $: "'a"]), ("Nil", [])]
+        ])
     ]
 
 list :: Type' Text -> Type' Text
@@ -224,9 +228,9 @@ spec = do
                     pat' <- resolveSilent scope $ declarePat pat
                     run (Right <$> env) builtins $ inferPattern pat'
              in tcResult `shouldSatisfy` isRight
-    describe "mutual recursion" $ for_ mutualRecursion \decls ->
+    describe "mutual recursion" $ for_ mutualRecursion \(name, decls) ->
         it
-            "decls"
+            (toString name)
             let tcResult = runPureEff $ runNameGen do
                     (scope, builtins, env) <- mkDefaults
                     resolvedDecls <- fst <$> resolveNames scope decls

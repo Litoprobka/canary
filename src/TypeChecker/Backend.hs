@@ -15,13 +15,14 @@ import Effectful.Error.Static (Error, runErrorNoCallStack, throwError)
 import Effectful.Reader.Static (Reader, asks, runReader)
 import Effectful.State.Static.Local (State, get, gets, modify, runState)
 import NameGen
-import Prettyprinter (Doc, Pretty, pretty, (<+>))
+import Prettyprinter (Doc, Pretty, pretty)
 import Relude hiding (Reader, State, Type, ask, asks, bool, get, gets, modify, put, runReader, runState)
 import Syntax
 import Syntax.Row
 import Syntax.Row qualified as Row
 import Syntax.Type qualified as T
 import Prelude (show)
+import Data.Traversable (for)
 
 type Expr = Expression Name
 type Pattern' = Pattern Name
@@ -229,11 +230,14 @@ scoped action = do
     locals <- gets @InfState (.locals)
     action <* modify \s -> s{locals}
 
+forallScope :: InfEffs es => Eff es (HashMap n Type) -> Eff es (HashMap n Type)
+forallScope  = forallScope' >=> uncurry for
+
 -- turns out it's tricky to get this function right.
 -- just taking all of the new univars and turning them into type vars is not enough,
 -- since a univar may be produced when specifying a univar from parent scope (i.e. `#a` to `#b -> #c`)
-forallScope :: InfEffs es => Eff es Type -> Eff es Type
-forallScope action = do
+forallScope' :: InfEffs es => Eff es a -> Eff es (a, Type -> Eff es Type)
+forallScope' action = do
     start <- gets @InfState (.nextUniVarId)
     modify \s@InfState{currentScope = Scope n} -> s{currentScope = Scope $ succ n}
     out <- action
@@ -243,7 +247,7 @@ forallScope action = do
     -- I'm not sure whether it's sound to convert all skolems in scope
     -- skolems may need a scope approach similar to univars
     -- skolemsToExists =<<
-    foldM (applyVar outerScope) out (UniVar <$> [start .. end])
+    pure (out, \ty -> foldM (applyVar outerScope) ty (UniVar <$> [start .. end]))
   where
     applyVar outerScope bodyTy uni =
         lookupUniVar uni >>= \case
