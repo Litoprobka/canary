@@ -89,6 +89,7 @@ exprsToCheck =
         , λ "f" $ λ "g" $ "g" # ("f" # unitE) # ("f" # "Nothing")
         , T.Forall "'a" $ T.Forall "'b" $ T.Forall "'c" ("'c" --> "'a") --> ("'a" --> "'a" --> "'b") --> "'b"
         )
+    , ("[1, []] : List (∃a. a)", E.List [E.IntLiteral 1, E.List []], "List" $: T.Exists "'a" "'a")
     ]
 
 quickLookExamples :: [(Text, Expression Text)]
