@@ -1,4 +1,3 @@
-{-# LANGUAGE LambdaCase #-}
 module Parser (code, declaration, type', pattern', expression) where
 
 import Relude hiding (many, some)
@@ -102,7 +101,7 @@ pattern' = do
         , patternParens
         ]
     option pat do
-        specialSymbol ":" 
+        specialSymbol ":"
         P.Annotation pat <$> type'
 
 

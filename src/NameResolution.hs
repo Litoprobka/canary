@@ -5,7 +5,7 @@
 {-# LANGUAGE DataKinds #-}
 {-# LANGUAGE AllowAmbiguousTypes #-}
 
-module NameResolution (runNameResolution, runScopeErrors, runDeclare, resolveNames, resolveExpr, resolveType, declare, declarePat, Scope(..), UnboundVar (..), Warning (..), ScopeErrors (..)) where
+module NameResolution (runNameResolution, runScopeErrors, runDeclare, resolveNames, resolveExpr, resolveType, resolve, declare, declarePat, Scope(..), UnboundVar (..), Warning (..), ScopeErrors (..)) where
 
 import Relude hiding (State, runState, evalState, error, get, put, modify)
 
@@ -91,8 +91,8 @@ resolve name = do
 runNameResolution :: (NameGen :> es) => HashMap Text Name -> Eff (Declare : State Scope : ScopeErrorE : es) a -> Eff es (a, ScopeErrors)
 runNameResolution env = runScopeErrors . evalState (Scope env) . runDeclare
 
-resolveNames :: (NameGen :> es) => HashMap Text Name -> [Declaration Text] -> Eff es ([Declaration Name], ScopeErrors)
-resolveNames env decls = runNameResolution env $ runDeclare do
+resolveNames :: (EnvEffs es,  Declare :> es) => [Declaration Text] -> Eff es [Declaration Name]
+resolveNames decls = do
     mkGlobalScope
     let (valueDecls, rest) = partition isValueDecl decls
     valueDecls' <- traverse resolveDec rest

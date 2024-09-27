@@ -130,7 +130,7 @@ parseInfer input = runEff $ runNameGen
         Left err -> putStrLn $ errorBundlePretty err
         Right decls -> do
             (scope, builtins, defaultEnv) <- mkDefaults
-            resolvedDecls <- fst <$> resolveNames scope decls
+            resolvedDecls <- fst <$> runNameResolution scope (resolveNames decls)
             typesOrErrors <- typecheck defaultEnv builtins resolvedDecls
             case typesOrErrors of
                 Left (TypeError err) -> liftIO $ putDoc $ err <> line

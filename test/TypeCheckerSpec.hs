@@ -234,7 +234,7 @@ spec = do
             (toString name)
             let tcResult = runPureEff $ runNameGen do
                     (scope, builtins, env) <- mkDefaults
-                    resolvedDecls <- fst <$> resolveNames scope decls
+                    resolvedDecls <- fst <$> runNameResolution scope (resolveNames decls)
                     typecheck env builtins resolvedDecls
              in do
                     {- case tcResult of
