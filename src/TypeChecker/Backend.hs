@@ -18,7 +18,7 @@ import Effectful.Error.Static (Error, runErrorNoCallStack, throwError)
 import Effectful.Reader.Static (Reader, asks, runReader)
 import Effectful.State.Static.Local (State, get, gets, modify, runState)
 import NameGen
-import Prettyprinter (Doc, Pretty, pretty)
+import Prettyprinter (Doc, Pretty, pretty, (<+>))
 import Relude hiding (Reader, State, Type, ask, asks, bool, get, gets, modify, put, runReader, runState)
 import Syntax
 import Syntax.Row
@@ -96,7 +96,7 @@ makeEffect ''Declare
 scoped :: InfEffs es => Eff (Declare : es) a -> Eff es a
 scoped action = runDeclare action & \action' -> do
     locals <- gets @InfState (.locals)
-    action' <* modify \s -> s{locals}
+    action' <* modify (\s -> s{locals})
 
 -- | interpret `updateSig` as an update of InfState
 runDeclare :: (State InfState :> es) => Eff (Declare : es) a -> Eff es a
@@ -237,7 +237,7 @@ declareAll :: (Declare :> es) => HashMap Name Type -> Eff es ()
 declareAll = traverse_ (uncurry updateSig) . HashMap.toList
 
 declareTopLevel :: InfEffs es => HashMap Name Type -> Eff es ()
-declareTopLevel types = modify \s -> s{topLevel = Right <$> types <> s.locals}
+declareTopLevel types = modify \s -> s{topLevel = fmap Right types <> s.topLevel}
 
 builtin :: Reader (Builtins Name) :> es => (Builtins Name -> a) -> Eff es a
 builtin = asks @(Builtins Name)
