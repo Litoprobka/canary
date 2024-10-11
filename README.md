@@ -76,10 +76,38 @@ Some other use cases:
 type Relativity = Abs | Rel
 type Path ('a : Relativity) = ...
 
-readSymlink : exists 'rel. Path 'any -> IO (Path 'rel)
+readSymlink : Path 'any -> IO (exists 'rel. Path 'rel)
 
 -- todo: a concatenative DSL example
 ```
+
+Existentials are good at types-that-cannot-be-named. Here's how the Haskell library justified-containers would look like
+```haskell
+type JMap 'ph 'k 'v
+type Key 'ph 'k
+
+justify : Map 'k 'v -> exists 'ph. JMap 'ph 'k 'v
+fromJustified : JMap 'ph 'k 'v -> Map 'k 'v
+
+member : 'k -> JMap 'ph 'k 'v -> Maybe (Key 'ph 'k)
+lookup : Key 'ph 'k -> JMap 'ph 'k 'v -> 'v
+update : ('v -> 'v) -> Key 'ph 'k -> JMap 'ph 'k 'v -> JMap 'ph 'k 'v
+
+insert : 'k -> 'v -> JMap 'ph 'k 'v -> exists 'ph2. JMap 'ph2 'k 'v
+delete : Key 'ph 'k -> JMap 'ph 'k 'v -> exists 'ph2. JMap 'ph2 'k 'v
+```
+
+The API is almost exactly the same, except that we don't need an ad-hoc continuation to introduce a scope, we can use the justified map directly
+
+```haskell
+example : List ('k, 'v) -> Map 'k 'v -> Map 'k 'v
+example kvPairs map' = fromJustified <| foldr (uncurry insert) jmap matchingKeys where
+    jmap = justify map
+    matchingKeys = keys |> mapMaybe \(k, v) -> map (_, v) (lookup _ jmap)
+```
+
+*(currently unimplemented)*
+There's a subtle quirk that makes this style possible - whenever a local binding with an outer `exists` quantifier is introduced, the existential is implicitly instantiated to a skolem. That way, multiple uses of that binding share the same type.
 
 #### Row polymorphism
 

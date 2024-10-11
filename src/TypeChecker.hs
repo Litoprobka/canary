@@ -150,6 +150,8 @@ subtype lhs_ rhs_ = join $ match <$> monoLayer In lhs_ <*> monoLayer Out rhs_
             subtype rhs rhs'
         (MLVariant lhs) (MLVariant rhs) -> rowCase Variant lhs rhs
         (MLRecord lhs) (MLRecord rhs) -> rowCase Record lhs rhs
+        (MLVar var) _ -> typeError $ "dangling type variable" <+> pretty var
+        _ (MLVar var) -> typeError $ "dangling type variable" <+> pretty var
         lhs rhs -> typeError $ pretty lhs <+> "is not a subtype of" <+> pretty rhs
 
     rowCase whatToMatch lhsRow rhsRow = do
@@ -303,13 +305,14 @@ infer =
         E.CharLiteral _ -> pure $ T.Name TextName
 
 inferApp :: InfEffs es => Type -> Expr -> Eff es Type
-inferApp fTy arg =
+inferApp fTy arg = do
     monoLayer In fTy >>= \case
         MLUniVar uni -> do
             from <- infer arg
             to <- freshUniVar
             to <$ subtype (T.UniVar uni) (T.Function from to)
-        MLFn from to -> to <$ check arg from
+        MLFn from to -> do
+            to <$ check arg from
         _ -> typeError $ pretty fTy <+> "is not a function type"
 
 -- infers the type of a function / variables in a pattern

@@ -1,11 +1,12 @@
+{-# LANGUAGE AllowAmbiguousTypes #-}
 {-# LANGUAGE DataKinds #-}
 {-# LANGUAGE DerivingStrategies #-}
+{-# LANGUAGE GADTs #-}
 {-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE OverloadedRecordDot #-}
-{-# LANGUAGE NoFieldSelectors #-}
 {-# LANGUAGE TemplateHaskell #-}
-{-# LANGUAGE GADTs #-}
 {-# LANGUAGE TypeFamilies #-}
+{-# LANGUAGE NoFieldSelectors #-}
 
 module TypeChecker.Backend where
 
@@ -13,21 +14,21 @@ import CheckerTypes
 import Control.Monad (foldM)
 import Data.HashMap.Strict qualified as HashMap
 import Data.HashSet qualified as HashSet
+import Data.Traversable (for)
 import Effectful
+import Effectful.Dispatch.Dynamic (interpret, reinterpret)
 import Effectful.Error.Static (Error, runErrorNoCallStack, throwError)
 import Effectful.Reader.Static (Reader, asks, runReader)
 import Effectful.State.Static.Local (State, get, gets, modify, runState)
+import Effectful.TH
 import NameGen
 import Prettyprinter (Doc, Pretty, pretty, (<+>))
-import Relude hiding (Reader, State, Type, ask, asks, bool, get, gets, modify, put, runReader, runState)
+import Relude hiding (Reader, State, Type, ask, asks, bool, break, evalState, get, gets, modify, put, runReader, runState)
 import Syntax
 import Syntax.Row
 import Syntax.Row qualified as Row
 import Syntax.Type qualified as T
 import Prelude (show)
-import Data.Traversable (for)
-import Effectful.Dispatch.Dynamic (interpret)
-import Effectful.TH
 
 type Expr = Expression Name
 type Pattern' = Pattern Name
@@ -94,13 +95,22 @@ makeEffect ''Declare
 
 -- | run the given action and discard signature updates
 scoped :: InfEffs es => Eff (Declare : es) a -> Eff es a
-scoped action = runDeclare action & \action' -> do
-    locals <- gets @InfState (.locals)
-    action' <* modify (\s -> s{locals})
+scoped action =
+    runDeclare action & \action' -> do
+        locals <- gets @InfState (.locals)
+        action' <* modify (\s -> s{locals})
 
 -- | interpret `updateSig` as an update of InfState
-runDeclare :: (State InfState :> es) => Eff (Declare : es) a -> Eff es a
+runDeclare :: State InfState :> es => Eff (Declare : es) a -> Eff es a
 runDeclare = interpret \_ (UpdateSig name ty) -> modify \s -> s{locals = HashMap.insert name ty s.locals}
+
+data Break err :: Effect where
+    Break :: err -> Break err m a
+
+makeEffect ''Break
+
+runBreak :: forall err a es. Eff (Break err : es) a -> Eff es (Either err a)
+runBreak = reinterpret (runErrorNoCallStack @err) \_ (Break val) -> throwError @err val
 
 instance Pretty Monotype where
     pretty = pretty . unMono
@@ -186,17 +196,6 @@ alterUniVar override uni ty = do
     noCycle <- cycleCheck (Direct, HashSet.singleton uni) ty
     when noCycle $ modify \s -> s{vars = HashMap.insert uni (Right ty) s.vars}
   where
-    foldUniVars :: InfEffs es => (UniVar -> Eff es ()) -> Monotype -> Eff es ()
-    foldUniVars action = \case
-        MUniVar v -> action v >> lookupUniVar v >>= either (const pass) (foldUniVars action)
-        MApp lhs rhs -> foldUniVars action lhs >> foldUniVars action rhs
-        MFn from to -> foldUniVars action from >> foldUniVars action to
-        MVariant row -> traverse_ (foldUniVars action) row
-        MRecord row -> traverse_ (foldUniVars action) row
-        MName _ -> pass
-        MSkolem _ -> pass
-        MVar _ -> pass
-
     -- errors out on indirect cycles (i.e. a ~ Maybe a)
     -- returns False on direct univar cycles (i.e. a ~ b, b ~ c, c ~ a)
     -- returns True when there are no cycles
@@ -219,6 +218,17 @@ alterUniVar override uni ty = do
     rescope scope = foldUniVars \v -> lookupUniVar v >>= either (rescopeVar v scope) (const pass)
     rescopeVar v scope oldScope = modify \s -> s{vars = HashMap.insert v (Left $ min oldScope scope) s.vars}
 
+foldUniVars :: InfEffs es => (UniVar -> Eff es ()) -> Monotype -> Eff es ()
+foldUniVars action = \case
+    MUniVar v -> action v >> lookupUniVar v >>= either (const pass) (foldUniVars action)
+    MApp lhs rhs -> foldUniVars action lhs >> foldUniVars action rhs
+    MFn from to -> foldUniVars action from >> foldUniVars action to
+    MVariant row -> traverse_ (foldUniVars action) row
+    MRecord row -> traverse_ (foldUniVars action) row
+    MName _ -> pass
+    MSkolem _ -> pass
+    MVar _ -> pass
+
 -- looks up a type of a binding. Local binding take precedence over uninferred globals, but not over inferred ones
 lookupSig :: (InfEffs es, Declare :> es) => Name -> Eff es Type
 lookupSig name = do
@@ -233,7 +243,7 @@ lookupSig name = do
             uni <- freshUniVar
             uni <$ updateSig name uni
 
-declareAll :: (Declare :> es) => HashMap Name Type -> Eff es ()
+declareAll :: Declare :> es => HashMap Name Type -> Eff es ()
 declareAll = traverse_ (uncurry updateSig) . HashMap.toList
 
 declareTopLevel :: InfEffs es => HashMap Name Type -> Eff es ()
@@ -243,7 +253,7 @@ builtin :: Reader (Builtins Name) :> es => (Builtins Name -> a) -> Eff es a
 builtin = asks @(Builtins Name)
 
 forallScope :: InfEffs es => Eff es (HashMap n Type) -> Eff es (HashMap n Type)
-forallScope  = forallScope' >=> uncurry for
+forallScope = forallScope' >=> uncurry for
 
 -- turns out it's tricky to get this function right.
 -- just taking all of the new univars and turning them into type vars is not enough,
@@ -261,26 +271,27 @@ forallScope' action = do
     -- skolemsToExists =<<
     pure (out, \ty -> foldM (applyVar outerScope) ty (UniVar <$> [start .. end]))
   where
+    -- note: chances are, substituteTy and isRelevant cause this function to be /O(n * m)/,
+    -- where n is the size of the type and m is uni var count
     applyVar outerScope bodyTy uni =
         lookupUniVar uni >>= \case
-            Right ty -> do
+            Right ty ->
+                -- univars don't work well with instantiation of polymorphic types (aka `mono`),
+                -- so we actively have to get rid of them
                 substituteTy (T.UniVar uni) ty bodyTy
-            Left scope | scope > outerScope && isRelevant uni bodyTy -> do
-                tyVar <- freshTypeVar
-                solveUniVar uni (MVar tyVar)
-                pure $ T.Forall tyVar bodyTy
+            Left scope | scope > outerScope -> do
+                relevant <- isRelevant uni bodyTy
+                if not relevant
+                    then pure bodyTy
+                    else do
+                        tyVar <- freshTypeVar
+                        solveUniVar uni (MVar tyVar)
+                        pure $ T.Forall tyVar bodyTy
             Left _ -> pure bodyTy
-    isRelevant uni = \case
-        T.UniVar v -> v == uni
-        T.Forall _ body' -> isRelevant uni body'
-        T.Exists _ body' -> isRelevant uni body'
-        T.Function from to -> isRelevant uni from || isRelevant uni to
-        T.Application lhs rhs -> isRelevant uni lhs || isRelevant uni rhs
-        T.Variant row -> any (isRelevant uni) row
-        T.Record row -> any (isRelevant uni) row
-        T.Name _ -> False
-        T.Var _ -> False
-        T.Skolem _ -> False
+    isRelevant uni ty = do
+        monoTy <- mono Inv ty
+        output <- runBreak @() $ monoTy & foldUniVars \v -> when (v == uni) (break ())
+        pure $ isLeft output
 
 --
 
@@ -299,7 +310,7 @@ data Variance = In | Out | Inv
 -}
 mono :: InfEffs es => Variance -> Type -> Eff es Monotype
 mono variance = \case
-    T.Var var -> pure $ MVar var
+    T.Var var -> typeError $ "mono: dangling var" <+> pretty var -- pure $ MVar var
     T.Name name -> pure $ MName name
     T.Skolem skolem -> pure $ MSkolem skolem
     T.UniVar uni -> pure $ MUniVar uni
@@ -342,7 +353,7 @@ unMono = \case
 -}
 monoLayer :: InfEffs es => Variance -> Type -> Eff es MonoLayer
 monoLayer variance = \case
-    T.Var var -> pure $ MLVar var
+    T.Var var -> typeError $ "monoLayer: dangling var" <+> pretty var -- pure $ MLVar var
     T.Name name -> pure $ MLName name
     T.Skolem skolem -> pure $ MLSkolem skolem
     T.UniVar uni -> pure $ MLUniVar uni
@@ -372,7 +383,9 @@ substitute variance var ty = do
     go replacement = \case
         T.Var v | v == var -> pure replacement
         T.Var name -> pure $ T.Var name
-        T.UniVar uni -> pure $ T.UniVar uni
+        T.UniVar uni ->
+            T.UniVar uni
+                <$ withUniVar uni \body -> overrideUniVar uni =<< mono In =<< go replacement (unMono body)
         T.Forall v body
             | v /= var -> T.Forall v <$> go replacement body
             | otherwise -> pure $ T.Forall v body
