@@ -17,7 +17,7 @@ instance Pretty n => Pretty (Declaration n) where
     pretty = \case
        Value binding locals -> pretty binding <> line <> whereIfNonEmpty locals <> line <> nest 4 (vsep (pretty <$> locals))
        Signature name ty -> pretty name <+> ":" <+> pretty ty
-       Type name vars cons -> "type" <+> pretty name <+> sep (pretty <$> vars) <+> encloseSep "= " "" (space <> "|" <> space)  (cons <&> \(con, args) -> sep (pretty con : map pretty args))
+       Type name vars cons -> sep ("type" : pretty name : map pretty vars) <+> encloseSep "= " "" (space <> "|" <> space)  (cons <&> \(con, args) -> sep (pretty con : map pretty args))
        Alias name ty -> "type alias" <+> pretty name <+> "=" <+> pretty ty
       where
         whereIfNonEmpty locals

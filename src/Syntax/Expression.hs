@@ -49,8 +49,8 @@ instance Pretty n => Pretty (Expression n) where
             Lambda arg body -> parensWhen 1 $ "λ" <> pretty arg <+> "->" <+> pretty body
             Application lhs rhs -> parensWhen 3 $ go 2 lhs <+> go 3 rhs
             Let binding body -> "let" <+> pretty binding <> ";" <+> pretty body
-            Case arg matches -> "case" <+> pretty arg <+> "of" <> line <> nest 4 (vsep $ matches <&> \(pat, body) -> pretty pat <+> "->" <+> pretty body)
-            Match matches -> "match" <> line <> nest 4 (vsep $ matches <&> \(pats, body) -> sep (parens . pretty <$> pats) <+> "->" <+> pretty body)
+            Case arg matches -> nest 4 (vsep $ ("case" <+> pretty arg <+> "of" :) $ matches <&> \(pat, body) -> pretty pat <+> "->" <+> pretty body)
+            Match matches -> nest 4 (vsep $ ("match" :) $ matches <&> \(pats, body) -> sep (parens . pretty <$> pats) <+> "->" <+> pretty body)
             If cond true false -> "if" <+> pretty cond <+> "then" <+> pretty true <+> "else" <+> pretty false
             Annotation expr ty -> parensWhen 1 $ pretty expr <+> ":" <+> pretty ty
             Name name -> pretty name

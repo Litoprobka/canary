@@ -27,7 +27,7 @@ instance Pretty n => Pretty (Pattern n) where
         go n = \case
             Var name -> pretty name
             Annotation pat ty -> parens $ pretty pat <+> ":" <+> pretty ty
-            Constructor name args -> parensWhen 1 $ pretty name <+> sep (map (go 1) args)
+            Constructor name args -> parensWhen 1 $ sep (pretty name : map (go 1) args)
             Variant name body -> parensWhen 1 $ pretty name <+> go 1 body -- todo: special case for unit?
             Record row -> braces . sep . punctuate comma . map recordField $ sortedRow row
             List items -> brackets . sep $ map pretty items
