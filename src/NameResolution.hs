@@ -36,14 +36,14 @@ data ScopeErrorE :: Effect where
 -- | a one-off effect to differentiate functions that do and don't declare stuff
 -- | on type level
 data Declare :: Effect where
-    Declare :: Text -> Declare m Name
+    Declare :: SimpleName -> Declare m Name
 
 -- * other types
 
 newtype Scope = Scope {table :: HashMap Text Name}
 
-newtype UnboundVar = UnboundVar Text deriving (Show)
-data Warning = Shadowing Text | UnusedVar Text deriving (Show)
+newtype UnboundVar = UnboundVar SimpleName deriving (Show)
+data Warning = Shadowing SimpleName | UnusedVar SimpleName deriving (Show)
 
 makeEffect ''ScopeErrorE
 makeEffect ''Declare
@@ -65,23 +65,23 @@ scoped action' = runDeclare action' & \action -> do
 runDeclare :: EnvEffs es => Eff (Declare : es) a -> Eff es a
 runDeclare = interpret \_ -> \case
     -- each wildcard gets a unique id
-    Declare "_" -> freshName "_"
+    Declare (SimpleName loc "_") -> freshName loc "_"
     Declare name -> do
         scope <- get @Scope
-        disambiguatedName <- freshName name
-        case Map.lookup name scope.table of
+        disambiguatedName <- freshName name.loc name.name
+        case Map.lookup name.name scope.table of
             Just _ -> warn (Shadowing name)
             Nothing -> pass
-        put $ Scope $ Map.insert name disambiguatedName scope.table
+        put $ Scope $ Map.insert name.name disambiguatedName scope.table
         pure disambiguatedName
 
 type EnvEffs es = (State Scope :> es, NameGen :> es, ScopeErrorE :> es)   
 
 -- | looks up a name in the current scope
-resolve :: EnvEffs es => Text -> Eff es Name
+resolve :: EnvEffs es => SimpleName -> Eff es Name
 resolve name = do
     scope <- get @Scope
-    case scope.table & Map.lookup name of
+    case scope.table & Map.lookup name.name of
         Just id' -> pure id'
         Nothing -> do
             error (UnboundVar name)
@@ -91,7 +91,7 @@ resolve name = do
 runNameResolution :: (NameGen :> es) => HashMap Text Name -> Eff (Declare : State Scope : ScopeErrorE : es) a -> Eff es (a, ScopeErrors)
 runNameResolution env = runScopeErrors . evalState (Scope env) . runDeclare
 
-resolveNames :: (EnvEffs es,  Declare :> es) => [Declaration Text] -> Eff es [Declaration Name]
+resolveNames :: (EnvEffs es,  Declare :> es) => [Declaration SimpleName] -> Eff es [Declaration Name]
 resolveNames decls = do
     mkGlobalScope
     let (valueDecls, rest) = partition isValueDecl decls
@@ -110,7 +110,7 @@ resolveNames decls = do
 this function should be used very carefully, since it will
 generate different IDs when called twice on the same data
 -}
-collectNames :: (EnvEffs es, Declare :> es) => [Declaration Text] -> Eff es ()
+collectNames :: (EnvEffs es, Declare :> es) => [Declaration SimpleName] -> Eff es ()
 collectNames decls = for_ decls \case
     D.Value _ (E.FunctionBinding _ name _ _) _ -> void $ declare name
     D.Value _ (E.ValueBinding _ pat _) _ -> void $ declarePat pat
@@ -119,7 +119,7 @@ collectNames decls = for_ decls \case
     D.Signature{} -> pass
 
 -- | resolves names in a declaration. Adds type constructors to the current scope
-resolveDec :: EnvEffs es => Declaration Text -> Eff es (Declaration Name)
+resolveDec :: EnvEffs es => Declaration SimpleName -> Eff es (Declaration Name)
 resolveDec decl = case decl of
     D.Value loc binding locals -> scoped do
         binding' <- resolveBinding locals binding
@@ -135,7 +135,7 @@ resolveDec decl = case decl of
                 args' <- traverse resolveType args
                 pure (con, D.Constructor conLoc con' args')
             pure (name', vars', constrsToDeclare)
-        for_ constrsToDeclare \(textName, D.Constructor _ conName _) -> modify \(Scope table) -> Scope (Map.insert textName conName table)
+        for_ constrsToDeclare \(textName, D.Constructor _ conName _) -> modify \(Scope table) -> Scope (Map.insert textName.name conName table)
         pure $ D.Type loc name' vars' (snd <$> constrsToDeclare)
     D.Alias loc alias body -> D.Alias loc <$> resolve alias <*> resolveType body
     D.Signature loc name ty -> D.Signature loc <$> resolve name <*> resolveType ty
@@ -143,7 +143,7 @@ resolveDec decl = case decl of
 {- | resolves names in a binding. Unlike the rest of the functions, it also
 takes local definitions as an argument, and uses them after resolving the name / pattern
 -}
-resolveBinding :: EnvEffs es => [Declaration Text] -> Binding Text -> Eff es (Binding Name)
+resolveBinding :: EnvEffs es => [Declaration SimpleName] -> Binding SimpleName -> Eff es (Binding Name)
 resolveBinding locals = scoped . \case
     E.FunctionBinding loc name args body -> do
         name' <- resolve name
@@ -159,13 +159,13 @@ resolveBinding locals = scoped . \case
 
 {- | resolves names in a pattern. Adds all new names to the current scope
 -}
-declarePat :: (EnvEffs es, Declare :> es) => Pattern Text -> Eff es (Pattern Name)
+declarePat :: (EnvEffs es, Declare :> es) => Pattern SimpleName -> Eff es (Pattern Name)
 declarePat = \case
     P.Constructor loc con pats -> P.Constructor loc <$> resolve con <*> traverse declarePat pats
     P.Annotation loc pat ty -> P.Annotation loc <$> declarePat pat <*> resolveType ty
     P.Record loc row -> P.Record loc <$> traverse declarePat row
     P.Variant loc openName arg -> P.Variant loc openName <$> declarePat arg
-    P.Var loc name -> P.Var loc <$> declare name
+    P.Var name -> P.Var <$> declare name
     P.List loc pats -> P.List loc <$> traverse declarePat pats
     P.IntLiteral loc n -> pure $ P.IntLiteral loc n
     P.TextLiteral loc txt -> pure $ P.TextLiteral loc txt
@@ -175,7 +175,7 @@ declarePat = \case
 
 same story here. Most of the expressions use names, but a couple define them
 -}
-resolveExpr :: EnvEffs es => Expression Text -> Eff es (Expression Name)
+resolveExpr :: EnvEffs es => Expression SimpleName -> Eff es (Expression Name)
 resolveExpr e = scoped case e of
     E.Lambda loc arg body -> do
         arg' <- declarePat arg
@@ -205,16 +205,16 @@ resolveExpr e = scoped case e of
     E.If loc cond true false -> E.If loc <$> resolveExpr cond <*> resolveExpr true <*> resolveExpr false
     E.Record loc row -> E.Record loc <$> traverse resolveExpr row
     E.List loc items -> E.List loc <$> traverse resolveExpr items
-    E.Name loc name -> E.Name loc <$> resolve name
-    E.Constructor loc name -> E.Constructor loc <$> resolve name
+    E.Name name -> E.Name <$> resolve name
+    E.Constructor name -> E.Constructor <$> resolve name
     E.RecordLens loc lens -> pure $ E.RecordLens loc lens
-    E.Variant loc openName -> pure $ E.Variant loc openName
+    E.Variant openName -> pure $ E.Variant openName
     E.IntLiteral loc n -> pure $ E.IntLiteral loc n
     E.TextLiteral loc txt -> pure $ E.TextLiteral loc txt
     E.CharLiteral loc c -> pure $ E.CharLiteral loc c
 
 -- | resolves names in a type. Doesn't change the current scope
-resolveType :: EnvEffs es => Type' Text -> Eff es (Type' Name)
+resolveType :: EnvEffs es => Type' SimpleName -> Eff es (Type' Name)
 resolveType ty = scoped case ty of
     T.Forall loc var body -> do
         var' <- declare var
@@ -226,8 +226,8 @@ resolveType ty = scoped case ty of
         pure $ T.Exists loc var' body'
     T.Application loc lhs rhs -> T.Application loc <$> resolveType lhs <*> resolveType rhs
     T.Function loc from to -> T.Function loc <$> resolveType from <*> resolveType to
-    T.Name loc name -> T.Name loc <$> resolve name
-    T.Var loc var -> T.Var loc <$> resolve var
+    T.Name name -> T.Name <$> resolve name
+    T.Var var -> T.Var <$> resolve var
     T.UniVar loc uni -> pure $ T.UniVar loc uni
     T.Skolem loc skolem -> pure $ T.Skolem loc skolem
     T.Variant loc row -> T.Variant loc <$> traverse resolveType row

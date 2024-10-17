@@ -4,10 +4,11 @@ module Syntax.Pattern (Pattern (..)) where
 import Relude
 import Syntax.Row
 import Prettyprinter (Pretty, pretty, Doc, braces, parens, sep, (<+>), punctuate, comma, dquotes, brackets)
-import Syntax.Type (Type', Loc)
+import Syntax.Type (Type')
+import CheckerTypes (Loc)
 
 data Pattern n
-    = Var Loc n
+    = Var n
     | Annotation Loc (Pattern n) (Type' n)
     | Constructor Loc n [Pattern n]
     | Variant Loc OpenName (Pattern n)
@@ -25,7 +26,7 @@ instance Pretty n => Pretty (Pattern n) where
     pretty = go 0 where
         go :: Int -> Pattern n -> Doc ann
         go n = \case
-            Var _ name -> pretty name
+            Var name -> pretty name
             Annotation _ pat ty -> parens $ pretty pat <+> ":" <+> pretty ty
             Constructor _ name args -> parensWhen 1 $ sep (pretty name : map (go 1) args)
             Variant _ name body -> parensWhen 1 $ pretty name <+> go 1 body -- todo: special case for unit?

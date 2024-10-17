@@ -3,8 +3,9 @@ module Syntax.Declaration (Declaration (..), Constructor (..)) where
 
 import Relude
 import Syntax.Expression (Binding)
-import Syntax.Type (Type', Loc)
+import Syntax.Type (Type')
 import Prettyprinter (Pretty (pretty), nest, vsep, line, (<+>), sep, space, encloseSep)
+import CheckerTypes (Loc)
 
 data Declaration n
     = Value Loc (Binding n) [Declaration n] -- todo: forbid local type declarations?

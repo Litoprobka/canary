@@ -1,27 +1,18 @@
 {-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE OverloadedRecordDot #-}
-{-# LANGUAGE NoFieldSelectors #-}
-{-# OPTIONS_GHC -Wno-partial-fields #-}
 
-module Syntax.Type (Type' (..), Loc (..), getLoc) where
+module Syntax.Type (Type' (..)) where
 
 import Prettyprinter (Doc, Pretty, braces, comma, pretty, punctuate, sep, (<+>), parens, brackets)
 import Relude
 import Syntax.Row
 import CheckerTypes qualified as CT
-import Text.Megaparsec (SourcePos)
-
-data Loc 
-  = Loc { start :: SourcePos, end :: SourcePos } 
-  | Blank
-  deriving (Show)
-instance Eq Loc where
-  _ == _ = True -- a crutch for the inferred Eq instance of Type'
+import CheckerTypes (Loc, HasLoc)
 
 --  Note: Functor-Foldable-Traversable instances don't do the right thing with `Forall` and `Exists`
 data Type' n
-    = Name Loc n
-    | Var Loc n
+    = Name n
+    | Var n
     | UniVar Loc CT.UniVar
     | Skolem Loc CT.Skolem
     | Application Loc (Type' n) (Type' n)
@@ -49,8 +40,8 @@ instance Pretty n => Pretty (Type' n) where
       where
         prettyPrec :: Int -> Type' n -> Doc ann
         prettyPrec prec = \case
-            Name _ name -> pretty name
-            Var _ name -> pretty name
+            Name name -> pretty name
+            Var name -> pretty name
             Skolem _ skolem -> pretty skolem
             UniVar _ uni -> pretty uni
             Application _ lhs rhs -> parensWhen 3 $ prettyPrec 2 lhs <+> prettyPrec 3 rhs
@@ -70,16 +61,15 @@ instance Pretty n => Pretty (Type' n) where
         variantItem (name, ty) = pretty name <+> pretty ty
         recordField (name, ty) = pretty name <+> ":" <+> pretty ty
 
--- perhaps it's time to depend on optics
-getLoc :: Type' n -> Loc
-getLoc = \case
-  Name loc _ -> loc
-  Var loc _ -> loc
-  Skolem loc _ -> loc
-  UniVar loc _  -> loc
-  Application loc _ _ -> loc
-  Function loc _ _ -> loc
-  Forall loc _ _ -> loc
-  Exists loc _ _ -> loc
-  Variant loc _ -> loc
-  Record loc _ -> loc
+instance HasLoc n => HasLoc (Type' n) where
+  getLoc = \case
+    Name name -> CT.getLoc name
+    Var name -> CT.getLoc name
+    Skolem loc _ -> loc
+    UniVar loc _  -> loc
+    Application loc _ _ -> loc
+    Function loc _ _ -> loc
+    Forall loc _ _ -> loc
+    Exists loc _ _ -> loc
+    Variant loc _ -> loc
+    Record loc _ -> loc

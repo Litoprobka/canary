@@ -36,26 +36,26 @@ type Pattern' = Pattern Name
 type Type = Type' Name
 
 data Monotype
-    = MName T.Loc Name
-    | MSkolem T.Loc Skolem
-    | MUniVar T.Loc UniVar
-    | MVar T.Loc Name -- a (probably out of scope) type var
-    | MApp T.Loc Monotype Monotype
-    | MFn T.Loc Monotype Monotype
-    | MVariant T.Loc (ExtRow Monotype)
-    | MRecord T.Loc (ExtRow Monotype)
+    = MName Name
+    | MSkolem Loc Skolem
+    | MUniVar Loc UniVar
+    | MVar Name -- a (probably out of scope) type var
+    | MApp Loc Monotype Monotype
+    | MFn Loc Monotype Monotype
+    | MVariant Loc (ExtRow Monotype)
+    | MRecord Loc (ExtRow Monotype)
     deriving (Show, Eq)
 
 -- а type whose outer constructor is monomorphic
 data MonoLayer
-    = MLName T.Loc Name
-    | MLSkolem T.Loc Skolem
-    | MLUniVar T.Loc UniVar
-    | MLVar T.Loc Name
-    | MLApp T.Loc Type Type
-    | MLFn T.Loc Type Type
-    | MLVariant T.Loc (ExtRow Type)
-    | MLRecord T.Loc (ExtRow Type)
+    = MLName Name
+    | MLSkolem Loc Skolem
+    | MLUniVar Loc UniVar
+    | MLVar Name
+    | MLApp Loc Type Type
+    | MLFn Loc Type Type
+    | MLVariant Loc (ExtRow Type)
+    | MLRecord Loc (ExtRow Type)
     deriving (Show, Eq)
 
 newtype TypeError = TypeError (Doc ()) deriving (Show)
@@ -147,7 +147,7 @@ runWithFinalEnv env builtins = do
 typeError :: InfEffs es => Doc () -> Eff es a
 typeError err = throwError $ TypeError err
 
-freshUniVar :: InfEffs es => T.Loc -> Eff es (Type' n)
+freshUniVar :: InfEffs es => Loc -> Eff es (Type' n)
 freshUniVar loc = T.UniVar loc <$> freshUniVar'
 
 freshUniVar' :: InfEffs es => Eff es UniVar
@@ -158,15 +158,15 @@ freshUniVar' = do
     modify \s -> s{vars = HashMap.insert var (Left scope) s.vars}
     pure var
 
-freshSkolem :: InfEffs es => T.Loc -> Name -> Eff es Type
-freshSkolem loc (Name name _) = T.Skolem loc . Skolem <$> freshName name
-freshSkolem loc _ = T.Skolem loc . Skolem <$> freshName "what" -- why?
+freshSkolem :: InfEffs es => Name -> Eff es Type
+freshSkolem (Name loc name _) = T.Skolem loc . Skolem <$> freshName loc name
+freshSkolem _ = T.Skolem Blank . Skolem <$> freshName Blank "what" -- why?
 
-freshTypeVar :: InfEffs es => Eff es Name
-freshTypeVar = do
+freshTypeVar :: Loc -> InfEffs es => Eff es Name
+freshTypeVar loc = do
     id' <- freshId
     letter <- gets @InfState (.nextTypeVar) <* modify \s -> s{nextTypeVar = cycleChar s.nextTypeVar}
-    pure $ Name (one letter) id'
+    pure $ Name loc (one letter) id'
   where
     cycleChar 'z' = 'a'
     cycleChar c = succ c
@@ -230,8 +230,8 @@ foldUniVars action = \case
     MVar{} -> pass
 
 -- looks up a type of a binding. Local binding take precedence over uninferred globals, but not over inferred ones
-lookupSig :: (InfEffs es, Declare :> es) => T.Loc -> Name -> Eff es Type
-lookupSig loc name = do
+lookupSig :: (InfEffs es, Declare :> es) => Name -> Eff es Type
+lookupSig name = do
     InfState{topLevel, locals} <- get @InfState
     case (HashMap.lookup name topLevel, HashMap.lookup name locals) of
         (Just (Right ty), _) -> pure ty
@@ -240,7 +240,7 @@ lookupSig loc name = do
         (Nothing, Nothing) -> do
             -- assuming that type checking is performed after name resolution,
             -- all encountered names have to be in scope
-            uni <- freshUniVar loc
+            uni <- freshUniVar (getLoc name)
             uni <$ updateSig name uni
 
 declareAll :: Declare :> es => HashMap Name Type -> Eff es ()
@@ -278,15 +278,15 @@ forallScope' action = do
             Right ty ->
                 -- univars don't work well with instantiation of polymorphic types (aka `mono`),
                 -- so we actively have to get rid of them
-                substituteTy (T.UniVar T.Blank uni) ty bodyTy
+                substituteTy (T.UniVar Blank uni) ty bodyTy
             Left scope | scope > outerScope -> do
                 relevant <- isRelevant uni bodyTy
                 if not relevant
                     then pure bodyTy
                     else do
-                        tyVar <- freshTypeVar
-                        solveUniVar uni (MVar T.Blank tyVar)
-                        pure $ T.Forall (T.getLoc bodyTy) tyVar bodyTy
+                        tyVar <- freshTypeVar Blank
+                        solveUniVar uni (MVar tyVar)
+                        pure $ T.Forall (getLoc bodyTy) tyVar bodyTy
             Left _ -> pure bodyTy
     isRelevant uni ty = do
         monoTy <- mono Inv ty
@@ -310,8 +310,8 @@ data Variance = In | Out | Inv
 -}
 mono :: InfEffs es => Variance -> Type -> Eff es Monotype
 mono variance = \case
-    T.Var _ var -> typeError $ "mono: dangling var" <+> pretty var -- pure $ MVar var
-    T.Name loc name -> pure $ MName loc name
+    T.Var var -> typeError $ "mono: dangling var" <+> pretty var -- pure $ MVar var
+    T.Name name -> pure $ MName name
     T.Skolem loc skolem -> pure $ MSkolem loc skolem
     T.UniVar loc uni -> pure $ MUniVar loc uni
     T.Application loc lhs rhs -> MApp loc <$> go lhs <*> go rhs
@@ -331,10 +331,10 @@ flipVariance = \case
 
 unMono :: Monotype -> Type
 unMono = \case
-    MName loc name -> T.Name loc name
+    MName name -> T.Name name
     MSkolem loc skolem -> T.Skolem loc skolem
     MUniVar loc uniVar -> T.UniVar loc uniVar
-    MVar loc var -> T.Var loc var
+    MVar var -> T.Var var
     MApp loc lhs rhs -> T.Application loc (unMono lhs) (unMono rhs)
     MFn loc from to -> T.Function loc (unMono from) (unMono to)
     MVariant loc row -> T.Variant loc $ fmap unMono row
@@ -353,8 +353,8 @@ unMono = \case
 -}
 monoLayer :: InfEffs es => Variance -> Type -> Eff es MonoLayer
 monoLayer variance = \case
-    T.Var _ var -> typeError $ "monoLayer: dangling var" <+> pretty var -- pure $ MLVar var
-    T.Name loc name -> pure $ MLName loc name
+    T.Var var -> typeError $ "monoLayer: dangling var" <+> pretty var -- pure $ MLVar var
+    T.Name name -> pure $ MLName name
     T.Skolem loc skolem -> pure $ MLSkolem loc skolem
     T.UniVar loc uni -> pure $ MLUniVar loc uni
     T.Application loc lhs rhs -> pure $ MLApp loc lhs rhs
@@ -366,10 +366,10 @@ monoLayer variance = \case
 
 unMonoLayer :: MonoLayer -> Type
 unMonoLayer = \case
-    MLName loc name -> T.Name loc name
+    MLName name -> T.Name name
     MLSkolem loc skolem -> T.Skolem loc skolem
     MLUniVar loc uni -> T.UniVar loc uni
-    MLVar loc name -> T.Var loc name
+    MLVar name -> T.Var name
     MLApp loc lhs rhs -> T.Application loc lhs rhs
     MLFn loc lhs rhs -> T.Function loc lhs rhs
     MLVariant loc row -> T.Variant loc row
@@ -377,12 +377,12 @@ unMonoLayer = \case
 
 substitute :: InfEffs es => Variance -> Name -> Type -> Eff es Type
 substitute variance var ty = do
-    someVar <- freshSomething T.Blank var variance
+    someVar <- freshSomething Blank var variance
     go someVar ty
   where
     go replacement = \case
-        T.Var _ v | v == var -> pure replacement
-        T.Var loc name -> pure $ T.Var loc name
+        T.Var v | v == var -> pure replacement
+        T.Var name -> pure $ T.Var name
         T.UniVar loc uni ->
             T.UniVar loc uni
                 <$ withUniVar uni \body -> overrideUniVar uni =<< mono In =<< go replacement (unMono body)
@@ -406,8 +406,8 @@ substitute variance var ty = do
     -- in: forall a. a -> Int
     freshSomething loc name = \case
         In -> freshUniVar loc
-        Out -> freshSkolem loc name
-        Inv -> freshSkolem loc name
+        Out -> freshSkolem name
+        Inv -> freshSkolem name
 
 -- `substituteTy` shouldn't be used for type vars, because it fails in cases like `forall a. (forall a. body)`
 -- normally those are removed by name resolution, but they may still occur when checking, say `f (f x)`
@@ -429,7 +429,7 @@ substituteTy from to = go
 
 -- what to match
 data RecordOrVariant = Record | Variant deriving (Eq)
-conOf :: RecordOrVariant -> T.Loc -> ExtRow Type -> Type
+conOf :: RecordOrVariant -> Loc -> ExtRow Type -> Type
 conOf Record = T.Record
 conOf Variant = T.Variant
 

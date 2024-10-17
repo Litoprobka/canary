@@ -1,4 +1,5 @@
 {-# OPTIONS_GHC -Wno-unrecognised-pragmas #-}
+
 {-# HLINT ignore "Use <$>" #-}
 module Lexer (
     Parser,
@@ -31,8 +32,11 @@ module Lexer (
     forallKeyword,
     existsKeyword,
     withLoc,
+    withLoc',
+    mkName,
 ) where
 
+import CheckerTypes (Loc (..), SimpleName (..))
 import Control.Monad.Combinators.NonEmpty qualified as NE
 import Data.Char (isAlphaNum, isSpace, isUpperCase)
 import Data.HashSet qualified as Set
@@ -42,7 +46,6 @@ import Text.Megaparsec hiding (Token, token)
 import Text.Megaparsec.Char hiding (newline, space)
 import Text.Megaparsec.Char qualified as C (newline, space1)
 import Text.Megaparsec.Char.Lexer qualified as L
-import Syntax.Type (Loc (..))
 
 type Parser = ReaderT Pos (Parsec Void Text)
 type ParserM m = (MonadParsec Void Text m, MonadReader Pos m, MonadFail m)
@@ -97,7 +100,6 @@ specialSymbols = ["=", "|", ":", ".", ",", "->", "=>", "<-", "(", ")", "{", "}"]
 
 lambda :: ParserM m => m ()
 lambda = void $ symbol "\\" <|> symbol "λ" -- should we allow `λx -> expr` without a space after λ?
-
 
 forallKeyword :: ParserM m => m ()
 forallKeyword = keyword "forall" <|> void (symbol "∀")
@@ -159,39 +161,46 @@ keyword :: ParserM m => Text -> m ()
 keyword kw = label (toString kw) $ try $ lexeme $ string kw *> notFollowedBy (satisfy isIdentifierChar)
 
 -- | an identifier that doesn't start with an uppercase letter
-termName :: ParserM m => m Text
-termName = do
+termName' :: ParserM m => m Text
+termName' = do
     void $ lookAhead (satisfy $ not . isUpperCase)
     identifier
 
+termName :: ParserM m => m SimpleName
+termName = mkName termName'
+
 -- | a term name that doesn't start with an underscore
-nonWildcardTerm :: ParserM m => m Text
-nonWildcardTerm = choice 
-    [ lookAhead (anySingleBut '_') *> termName
-    , wildcard *> fail "unexpected wildcard"
-    ]
+nonWildcardTerm :: ParserM m => m SimpleName
+nonWildcardTerm =
+    choice
+        [ lookAhead (anySingleBut '_') *> termName
+        , wildcard *> fail "unexpected wildcard"
+        ]
 
 -- | a termName that starts with an underscore
-wildcard :: ParserM m => m Text
-wildcard = lexeme $ Text.cons <$> single '_' <*> option "" identifier
+wildcard :: ParserM m => m SimpleName
+wildcard = lexeme $ mkName $ Text.cons <$> single '_' <*> option "" identifier
 
 -- | an identifier that starts with an uppercase letter
-typeName :: ParserM m => m Text
-typeName = do
+typeName' :: ParserM m => m Text
+typeName' = do
     void $ lookAhead (satisfy isUpperCase)
     identifier
 
+typeName :: ParserM m => m SimpleName
+typeName = mkName typeName'
+
 -- | an identifier that starts with a ' and a lowercase letter, i.e. 'acc
-typeVariable :: ParserM m => m Text
-typeVariable = try $ liftA2 Text.cons (single '\'') termName
+typeVariable :: ParserM m => m SimpleName
+typeVariable = try $ mkName $ liftA2 Text.cons (single '\'') termName'
 
 -- an identifier that starts with a ' and an uppercase letter, i.e. 'Some
-variantConstructor :: ParserM m => m Text
-variantConstructor = try $ liftA2 Text.cons (single '\'') typeName
+variantConstructor :: ParserM m => m SimpleName
+variantConstructor = try $ mkName $ liftA2 Text.cons (single '\'') typeName'
 
 -- a helper for other identifier parsers
 identifier :: ParserM m => m Text
-identifier = try do
+identifier = try $ do
     ident <- lexeme $ Text.cons <$> (letterChar <|> char '_') <*> takeWhileP (Just "identifier") isIdentifierChar
     when (ident `Set.member` keywords) (fail $ "expected an identifier, got " <> toString ident)
     pure ident
@@ -199,8 +208,8 @@ identifier = try do
 {- | a record lens, i.e. .field.otherField.thirdField
 Chances are, this parser will only ever be used with E.RecordLens
 -}
-recordLens :: ParserM m => m (NonEmpty Text)
-recordLens = label "record lens" $ lexeme $ single '.' *> identifier `NE.sepBy1` single '.'
+recordLens :: ParserM m => m (NonEmpty SimpleName)
+recordLens = label "record lens" $ lexeme $ single '.' *> mkName identifier `NE.sepBy1` single '.'
 
 intLiteral :: ParserM m => m Int
 intLiteral = label "int literal" $ try $ lexeme $ L.signed empty L.decimal
@@ -212,11 +221,11 @@ textLiteral = label "text literal" $ between (symbol "\"") (symbol "\"") $ takeW
 charLiteral :: ParserM m => m Text
 charLiteral = label "char literal" $ try $ one <$> between (single '\'') (symbol "'") anySingle
 
-operator :: ParserM m => Text -> m ()
-operator sym = label "operator" $ lexeme $ string sym *> notFollowedBy (satisfy isOperatorChar)
+operator :: ParserM m => Text -> m Loc
+operator sym = label "operator" $ lexeme $ withLoc' const $ string sym *> notFollowedBy (satisfy isOperatorChar)
 
-someOperator :: ParserM m => m Text
-someOperator = lexeme $ takeWhile1P (Just "operator") isOperatorChar
+someOperator :: ParserM m => m SimpleName
+someOperator = lexeme $ mkName $ takeWhile1P (Just "operator") isOperatorChar
 
 isOperatorChar :: Char -> Bool
 isOperatorChar = (`elem` ("+-*/%^=><&.~!?|" :: String))
@@ -239,3 +248,9 @@ withLoc p = do
     end <- getSourcePos
     let loc = if start == end then Blank else Loc start end
     pure $ f loc
+
+withLoc' :: ParserM m => (Loc -> a -> b) -> m a -> m b
+withLoc' f p = withLoc $ flip f <$> p
+
+mkName :: ParserM m => m Text -> m SimpleName
+mkName = withLoc' SimpleName

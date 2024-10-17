@@ -5,7 +5,7 @@
 module NameGen (runNameGen, freshId, freshName, NameGen) where
 
 import Relude hiding (evalState, get, modify)
-import CheckerTypes (Id (..), inc, Name (..))
+import CheckerTypes (Id (..), inc, Name (..), Loc)
 import Effectful
 import Effectful.TH
 import Effectful.State.Static.Local (evalState, get, modify)
@@ -16,8 +16,8 @@ data NameGen :: Effect where
 
 makeEffect ''NameGen
 
-freshName :: (NameGen :> es) => Text -> Eff es Name
-freshName name = Name name <$> freshId
+freshName :: (NameGen :> es) => Loc -> Text -> Eff es Name
+freshName loc name = Name loc name <$> freshId
 
 runNameGen :: Eff (NameGen : es) a -> Eff es a
 runNameGen = reinterpret (evalState $ Id 0) \_ FreshId -> get <* modify inc

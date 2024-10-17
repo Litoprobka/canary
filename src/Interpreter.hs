@@ -69,10 +69,10 @@ eval builtins constrs = go where
     E.If _ cond true false -> case go env cond of
         Constructor name [] | name == builtins.true -> go env true
         _ -> go env false
-    E.Name _ name -> fromMaybe (error $ show name <> " not in scope") $ HashMap.lookup name env
-    E.Constructor _ name ->  fromMaybe (error $ "unknown constructor " <> show name) $ HashMap.lookup name constrs
+    E.Name name -> fromMaybe (error $ show name <> " not in scope") $ HashMap.lookup name env
+    E.Constructor name ->  fromMaybe (error $ "unknown constructor " <> show name) $ HashMap.lookup name constrs
     E.RecordLens _ path -> RecordLens path
-    E.Variant _ name -> Lambda $ Variant name
+    E.Variant name -> Lambda $ Variant name
     E.Record _ row -> Record $ fmap (go env) row
     E.List _ xs -> foldr (\h t -> Constructor builtins.cons [go env h, t]) (Constructor builtins.nil []) xs
     E.IntLiteral _ n -> Int n
@@ -84,7 +84,7 @@ eval builtins constrs = go where
 
   match :: HashMap Name Value -> Pattern Name -> Value -> Maybe (HashMap Name Value)
   match env = \cases
-    (P.Var _ var) val -> Just $ HashMap.insert var val env
+    (P.Var var) val -> Just $ HashMap.insert var val env
     (P.Annotation _ pat _) val -> match env pat val
     (P.Variant _ name argPat) (Variant name' arg)
         | name == name' -> match env argPat arg

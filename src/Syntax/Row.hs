@@ -10,8 +10,9 @@ import Data.Sequence.NonEmpty (NESeq)
 import Data.Sequence.NonEmpty qualified as NESeq
 import GHC.IsList qualified (Item, toList)
 import Relude hiding (empty)
+import CheckerTypes (SimpleName)
 
-type OpenName = Text
+type OpenName = SimpleName
 
 newtype Row a
   = Row (HashMap OpenName (NESeq a))

@@ -15,15 +15,16 @@ import Syntax.Type qualified as T
 import Control.Monad.Combinators.Expr
 import Control.Monad.Combinators.NonEmpty qualified as NE
 
+import CheckerTypes (Loc (..), SimpleName (..), getLoc)
 import Data.IntMap.Strict qualified as IntMap
 import Syntax.Row
 import Syntax.Row qualified as Row
 import Text.Megaparsec
 
-code :: Parser [Declaration Text]
+code :: Parser [Declaration SimpleName]
 code = topLevelBlock declaration
 
-declaration :: Parser (Declaration Text)
+declaration :: Parser (Declaration SimpleName)
 declaration = withLoc $ choice [typeDec, valueDec, signature]
   where
     valueDec = flip3 D.Value <$> binding <*> whereBlock
@@ -42,19 +43,19 @@ declaration = withLoc $ choice [typeDec, valueDec, signature]
         specialSymbol "="
         flip4 D.Type name vars <$> typePattern `sepBy` specialSymbol "|"
 
-    typePattern :: Parser (Constructor Text)
+    typePattern :: Parser (Constructor SimpleName)
     typePattern = withLoc do
         name <- typeName
         args <- many typeParens
         pure $ flip3 D.Constructor name args
 
-    signature :: Parser (T.Loc -> Declaration Text)
+    signature :: Parser (Loc -> Declaration SimpleName)
     signature = do
         name <- termName
         specialSymbol ":"
         flip3 D.Signature name <$> type'
 
-type' :: ParserM m => m (Type' Text)
+type' :: ParserM m => m (Type' SimpleName)
 type' = makeExprParser typeParens [[typeApp], [function], [forall', exists]]
   where
     forall' = Prefix $ lambdaLike T.Forall forallKeyword typeVariable "."
@@ -62,42 +63,42 @@ type' = makeExprParser typeParens [[typeApp], [function], [forall', exists]]
 
     typeApp = InfixL $ pure $ appLoc T.Application
     function = InfixR $ appLoc T.Function <$ specialSymbol "->"
-    appLoc con lhs rhs = con (zipLoc (T.getLoc lhs) (T.getLoc rhs)) lhs rhs
+    appLoc con lhs rhs = con (zipLoc (getLoc lhs) (getLoc rhs)) lhs rhs
 
 -- a type expression with higher precedence than application
 -- used when parsing constructor arguement types and the like
-typeParens :: ParserM m => m (Type' Text)
+typeParens :: ParserM m => m (Type' SimpleName)
 typeParens =
     choice
-        [ withLoc $ flip T.Name <$> typeName
-        , withLoc $ flip T.Var <$> typeVariable
+        [ T.Name <$> typeName
+        , T.Var <$> typeVariable
         , parens type'
-        , withLoc $ flip T.Record . NoExtRow <$> someRecord ":" type' Nothing
-        , withLoc $ flip T.Variant . NoExtRow <$> brackets (fromList <$> commaSep variantItem)
+        , withLoc' T.Record $ NoExtRow <$> someRecord ":" type' Nothing
+        , withLoc' T.Variant $ NoExtRow <$> brackets (fromList <$> commaSep variantItem)
         ]
   where
-    variantItem = (,) <$> variantConstructor <*> option (T.Name T.Blank "Unit") typeParens
+    variantItem = (,) <$> variantConstructor <*> option (T.Name $ SimpleName Blank "Unit") typeParens
 
-someRecord :: ParserM m => Text -> m value -> Maybe (T.Loc -> Text -> value) -> m (Row value)
+someRecord :: ParserM m => Text -> m value -> Maybe (SimpleName -> value) -> m (Row value)
 someRecord delim valueP missingValue = braces (fromList <$> commaSep recordItem)
   where
-    onMissing loc txt = case missingValue of
+    onMissing name = case missingValue of
         Nothing -> id
-        Just textToValue -> option (textToValue loc txt)
+        Just nameToValue -> option (nameToValue name)
     recordItem = do
-        (recordLabel, loc) <- withLoc $ (,) <$> termName
-        valuePattern <- onMissing loc recordLabel $ specialSymbol delim *> valueP
+        recordLabel <- termName
+        valuePattern <- onMissing recordLabel $ specialSymbol delim *> valueP
         pure (recordLabel, valuePattern)
 
-lambdaLike :: ParserM m => (T.Loc -> a -> b -> b) -> m () -> m a -> Text -> m (b -> b)
+lambdaLike :: ParserM m => (Loc -> a -> b -> b) -> m () -> m a -> Text -> m (b -> b)
 lambdaLike con kw argP endSym = do
     kw
     args <- NE.some $ (,) <$> getSourcePos <*> argP
     specialSymbol endSym
     end <- getSourcePos
-    pure \body -> foldr (\(start, arg) -> con (T.Loc start end) arg) body args
+    pure \body -> foldr (\(start, arg) -> con (Loc start end) arg) body args
 
-pattern' :: ParserM m => m (Pattern Text)
+pattern' :: ParserM m => m (Pattern SimpleName)
 pattern' = do
     pat <-
         choice
@@ -113,23 +114,23 @@ pattern' = do
 should be used in cases where multiple patterns in a row are accepted, i.e.
 function definitions and match expressions
 -}
-patternParens :: ParserM m => m (Pattern Text)
+patternParens :: ParserM m => m (Pattern SimpleName)
 patternParens =
     choice
-        [ withLoc $ flip P.Var <$> termName
-        , withLoc $ flip P.Record <$> someRecord "=" pattern' (Just P.Var)
-        , withLoc $ flip P.List <$> brackets (commaSep pattern')
-        , withLoc $ flip P.IntLiteral <$> intLiteral
-        , withLoc $ flip P.TextLiteral <$> textLiteral
-        , withLoc $ flip P.CharLiteral <$> charLiteral
+        [ P.Var <$> termName
+        , withLoc' P.Record $ someRecord "=" pattern' (Just P.Var)
+        , withLoc' P.List $ brackets (commaSep pattern')
+        , withLoc' P.IntLiteral intLiteral
+        , withLoc' P.TextLiteral textLiteral
+        , withLoc' P.CharLiteral charLiteral
         , withLoc $ flip3 P.Constructor <$> typeName <*> pure [] -- a constructor without arguments
         , withLoc $ flip3 P.Variant <$> variantConstructor <*> pure unit -- some sugar for variants with a unit payload
         , parens pattern'
         ]
   where
-    unit = P.Record T.Blank Row.empty
+    unit = P.Record Blank Row.empty
 
-binding :: ParserM m => m (Binding Text)
+binding :: ParserM m => m (Binding SimpleName)
 binding = withLoc do
     f <-
         -- it should probably be `try (E.FunctionBinding <$> termName) <*> NE.some patternParens
@@ -139,18 +140,19 @@ binding = withLoc do
     specialSymbol "="
     f <$> expression
 
-expression :: ParserM m => m (Expression Text)
-expression = expression' $ withLoc (flip E.Name <$> nonWildcardTerm)
+expression :: ParserM m => m (Expression SimpleName)
+expression = expression' $ E.Name <$> nonWildcardTerm
 
-expression' :: ParserM m => m (Expression Text) -> m (Expression Text)
+expression' :: ParserM m => m (Expression SimpleName) -> m (Expression SimpleName)
 expression' termParser = label "expression" $ makeExprParser (noPrec termParser) (snd <$> IntMap.toDescList precMap)
   where
     sameScopeExpr = expression' termParser
 
-    newScopeExpr :: ParserM m => StateT Int m (Expression Text)
+    newScopeExpr :: ParserM m => StateT Int m (Expression SimpleName)
     newScopeExpr =
-        expression' $ withLoc $
-            nextVar <* wildcard <|> (flip E.Name <$> termName)
+        expression' $
+            withLoc (nextVar <* wildcard)
+                <|> fmap E.Name termName
 
     precMap =
         IntMap.fromList
@@ -174,13 +176,13 @@ expression' termParser = label "expression" $ makeExprParser (noPrec termParser)
             ty <- type'
             pure \loc expr -> E.Annotation loc expr ty
 
-        appLoc lhs rhs = E.Application (zipLoc (E.getLoc lhs) (E.getLoc rhs)) lhs rhs
+        appLoc lhs rhs = E.Application (zipLoc (getLoc lhs) (getLoc rhs)) lhs rhs
         infixL = infix' InfixL
         infixR = infix' InfixR
         infixN = infix' InfixN
         infix' fixity sym = fixity do
-            opLoc <- withLoc $ (\ _ x -> x) <$> operator sym
-            pure \lhs rhs -> E.Name opLoc sym `appLoc` lhs `appLoc` rhs
+            opLoc <- operator sym
+            pure \lhs rhs -> E.Name (SimpleName opLoc sym) `appLoc` lhs `appLoc` rhs
 
     noPrec varParser = choice $ keywordBased <> terminals varParser
 
@@ -215,15 +217,15 @@ expression' termParser = label "expression" $ makeExprParser (noPrec termParser)
             false <- sameScopeExpr
             pure $ flip4 E.If cond true false
 
-    terminals :: ParserM m => m (Expression Text) -> [m (Expression Text)]
+    terminals :: ParserM m => m (Expression SimpleName) -> [m (Expression SimpleName)]
     terminals varParser =
         [ parens $ withWildcards newScopeExpr
-        , withLoc $ flip E.RecordLens <$> recordLens
-        , withLoc $ flip E.Constructor <$> typeName
-        , withLoc $ flip E.Variant <$> variantConstructor
-        , withLoc $ flip E.IntLiteral <$> intLiteral
-        , withLoc $ flip E.CharLiteral <$> charLiteral
-        , withLoc $ flip E.TextLiteral <$> textLiteral
+        , withLoc' E.RecordLens recordLens
+        , E.Constructor <$> typeName
+        , E.Variant <$> variantConstructor
+        , withLoc' E.IntLiteral intLiteral
+        , withLoc' E.CharLiteral charLiteral
+        , withLoc' E.TextLiteral textLiteral
         , varParser
         ]
 
@@ -239,21 +241,22 @@ expression' termParser = label "expression" $ makeExprParser (noPrec termParser)
 -- on one hand, `({x = 3, y = 3})` looks a bit janky
 -- on the other hand, without that you wouldn't be able to write `f {x = 3, y = _}`
 -- if you want it to mean `\y -> f {x = 3, y}`
-withWildcards :: ParserM m => StateT Int m (Expression Text) -> m (Expression Text)
+withWildcards :: ParserM m => StateT Int m (Expression SimpleName) -> m (Expression SimpleName)
 withWildcards p = do
+    -- todo: collect a list of var names along with the counter
     ((expr, varCount), loc) <- withLoc $ (,) <$> runStateT p 0
-    pure $ foldr (\i -> E.Lambda loc (P.Var T.Blank $ "$" <> show i)) expr [1 .. varCount]
+    pure $ foldr (\i -> E.Lambda loc (P.Var $ SimpleName Blank $ "$" <> show i)) expr [1 .. varCount]
 
-zipLoc :: T.Loc -> T.Loc -> T.Loc
-zipLoc loc T.Blank = loc
-zipLoc T.Blank loc = loc
-zipLoc (T.Loc start _) (T.Loc _ end) = T.Loc start end
+zipLoc :: Loc -> Loc -> Loc
+zipLoc loc Blank = loc
+zipLoc Blank loc = loc
+zipLoc (Loc start _) (Loc _ end) = Loc start end
 
-nextVar :: MonadParsec Void Text m => StateT Int m (T.Loc -> Expression Text)
+nextVar :: MonadParsec Void Text m => StateT Int m (Loc -> Expression SimpleName)
 nextVar = do
     modify succ
     i <- get
-    pure \loc -> E.Name loc $ "$" <> show i
+    pure \loc -> E.Name $ SimpleName loc $ "$" <> show i
 
 flip3 :: (a -> b -> c -> d) -> b -> c -> a -> d
 flip3 f y z x = f x y z

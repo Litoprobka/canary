@@ -1,12 +1,14 @@
 {-# LANGUAGE LambdaCase #-}
-module Syntax.Expression (Expression (..), Binding (..), getLoc) where
+module Syntax.Expression (Expression (..), Binding (..)) where
 
 import Relude
 
 import Syntax.Pattern (Pattern)
-import Syntax.Type (Type', Loc)
+import Syntax.Type (Type')
 import Syntax.Row
 import Prettyprinter (Pretty, pretty, (<+>), concatWith, parens, sep, nest, vsep, encloseSep, brackets, comma, punctuate, braces, dquotes)
+import CheckerTypes (Loc, Name, HasLoc (..))
+import qualified CheckerTypes as CT
 
 data Binding n
     = ValueBinding Loc (Pattern n) (Expression n)
@@ -23,14 +25,14 @@ data Expression n
     | If Loc (Expression n) (Expression n) (Expression n)
     | -- | value : Type
       Annotation Loc (Expression n) (Type' n)
-    | Name Loc n
+    | Name n
     | -- | .field.otherField.thirdField
       RecordLens Loc (NonEmpty OpenName)
-    | Constructor Loc n
+    | Constructor n
     | -- | 'Constructor
       -- unlike the rest of the cases, variant tags and record fields
       -- don't need any kind of name resolution
-      Variant Loc OpenName
+      Variant OpenName
     | Record Loc (Row (Expression n))
     | List Loc [Expression n]
     | IntLiteral Loc Int
@@ -53,10 +55,10 @@ instance Pretty n => Pretty (Expression n) where
             Match _ matches -> nest 4 (vsep $ ("match" :) $ matches <&> \(pats, body) -> sep (parens . pretty <$> pats) <+> "->" <+> pretty body)
             If _ cond true false -> "if" <+> pretty cond <+> "then" <+> pretty true <+> "else" <+> pretty false
             Annotation _ expr ty -> parensWhen 1 $ pretty expr <+> ":" <+> pretty ty
-            Name _ name -> pretty name
+            Name name -> pretty name
             RecordLens _ fields -> encloseSep "." "" "." $ toList $ pretty <$> fields
-            Constructor _ name -> pretty name
-            Variant _ name -> pretty name
+            Constructor name -> pretty name
+            Variant name -> pretty name
             Record _ row -> braces . sep . punctuate comma . map recordField $ sortedRow row
             List _ xs -> brackets . sep . punctuate comma $ pretty <$> xs
             IntLiteral _ num -> pretty num
@@ -68,21 +70,21 @@ instance Pretty n => Pretty (Expression n) where
                 | otherwise = id
             recordField (name, body) = pretty name <+> "=" <+> pretty body
 
-getLoc :: Expression n -> Loc
-getLoc = \case
-  Lambda loc _ _ -> loc
-  Application loc _ _ -> loc
-  Let loc _ _ -> loc
-  Case loc _ _ -> loc
-  Match loc _ -> loc
-  If loc _ _ _ -> loc
-  Annotation loc _ _ -> loc
-  Name loc _ -> loc
-  RecordLens loc _ -> loc
-  Constructor loc _ -> loc
-  Variant loc _ -> loc
-  Record loc _ -> loc
-  List loc _ -> loc
-  IntLiteral loc _ -> loc
-  TextLiteral loc _ -> loc
-  CharLiteral loc _ -> loc
+instance HasLoc n => HasLoc (Expression n) where
+  getLoc = \case
+    Lambda loc _ _ -> loc
+    Application loc _ _ -> loc
+    Let loc _ _ -> loc
+    Case loc _ _ -> loc
+    Match loc _ -> loc
+    If loc _ _ _ -> loc
+    Annotation loc _ _ -> loc
+    Name name -> getLoc name
+    RecordLens loc _ -> loc
+    Constructor name -> getLoc name
+    Variant name -> getLoc name
+    Record loc _ -> loc
+    List loc _ -> loc
+    IntLiteral loc _ -> loc
+    TextLiteral loc _ -> loc
+    CharLiteral loc _ -> loc
