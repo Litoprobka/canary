@@ -54,20 +54,20 @@ typecheck env builtins decls = run (Right <$> env) builtins $ traverse normalise
 -- finds all type parameters used in a type and creates corresponding forall clauses
 -- ignores univars, because the intended use case is pre-processing user-supplied types
 inferTypeVars :: Type -> Type
-inferTypeVars = uncurry (foldr T.Forall) . second snd . runPureEff . runState (HashSet.empty, HashSet.empty) . go
+inferTypeVars ty = uncurry (foldr (T.Forall $ T.getLoc ty)) . second snd . runPureEff . runState (HashSet.empty, HashSet.empty) . go $ ty
   where
     go :: Type -> Eff '[State (HashSet Name, HashSet Name)] Type
     go = \case
-        T.Var var -> do
+        v@(T.Var _ var) -> do
             isNew <- not . HashSet.member var <$> gets @(HashSet Name, HashSet Name) snd
             when isNew $ modify @(HashSet Name, HashSet Name) (second $ HashSet.insert var)
-            pure $ T.Var var
-        T.Forall var body -> modify @(HashSet Name, HashSet Name) (first $ HashSet.insert var) >> T.Forall var <$> go body
-        T.Exists var body -> modify @(HashSet Name, HashSet Name) (first $ HashSet.insert var) >> T.Exists var <$> go body
-        T.Function from to -> T.Function <$> go from <*> go to
-        T.Application lhs rhs -> T.Application <$> go lhs <*> go rhs
-        T.Variant row -> T.Variant <$> traverse go row
-        T.Record row -> T.Record <$> traverse go row
+            pure v
+        T.Forall loc var body -> modify @(HashSet Name, HashSet Name) (first $ HashSet.insert var) >> T.Forall loc var <$> go body
+        T.Exists loc var body -> modify @(HashSet Name, HashSet Name) (first $ HashSet.insert var) >> T.Exists loc var <$> go body
+        T.Function loc from to -> T.Function loc <$> go from <*> go to
+        T.Application loc lhs rhs -> T.Application loc <$> go lhs <*> go rhs
+        T.Variant loc row -> T.Variant loc <$> traverse go row
+        T.Record loc row -> T.Record loc <$> traverse go row
         uni@T.UniVar{} -> pure uni
         skolem@T.Skolem{} -> pure skolem
         name@T.Name{} -> pure name
@@ -91,13 +91,13 @@ inferDecls decls = do
                 typeMap <$ declareTopLevel typeMap
   where
     updateTopLevel = \case
-        D.Signature name sig ->
+        D.Signature _ name sig ->
             modify \s -> s{topLevel = HashMap.insert name (Right $ inferTypeVars sig) s.topLevel}
-        D.Value binding@(E.FunctionBinding name _ _) locals -> insertBinding name binding locals
-        D.Value binding@(E.ValueBinding (P.Var name) _) locals -> insertBinding name binding locals
-        D.Value E.ValueBinding{} _ -> pass -- todo
-        D.Type name vars constrs ->
-            for_ (mkConstrSigs name vars constrs) \(con, sig) ->
+        D.Value _ binding@(E.FunctionBinding _ name _ _) locals -> insertBinding name binding locals
+        D.Value _ binding@(E.ValueBinding _ (P.Var _ name) _) locals -> insertBinding name binding locals
+        D.Value _ E.ValueBinding{} _ -> pass -- todo
+        D.Type loc name vars constrs ->
+            for_ (mkConstrSigs loc name vars constrs) \(con, sig) ->
                 modify \s -> s{topLevel = HashMap.insert con (Right sig) s.topLevel}
         D.Alias{} -> pass
 
@@ -114,32 +114,34 @@ inferDecls decls = do
                 s{topLevel = HashMap.insertWith (\_ x -> x) name (Left closure) s.topLevel}
 
     getValueDecls decl (values, sigs) = case decl of
-        D.Value binding locals -> ((binding, locals) : values, sigs)
-        D.Signature name sig -> (values, (name, sig) : sigs)
-        D.Type name vars constrs -> (values, mkConstrSigs name vars constrs ++ sigs)
+        D.Value _ binding locals -> ((binding, locals) : values, sigs)
+        D.Signature _ name sig -> (values, (name, sig) : sigs)
+        D.Type loc name vars constrs -> (values, mkConstrSigs loc name vars constrs ++ sigs)
         D.Alias{} -> (values, sigs)
 
-    mkConstrSigs :: Name -> [Name] -> [(Name, [Type])] -> [(Name, Type)]
-    mkConstrSigs name vars constrs =
-        constrs
-            <&> second \conParams -> foldr T.Forall (foldr T.Function fullType conParams) vars
+    mkConstrSigs :: T.Loc -> Name -> [Name] -> [Constructor Name] -> [(Name, Type)]
+    mkConstrSigs tyLoc name vars constrs =
+        constrs <&> \(D.Constructor loc con params) ->
+            ( con
+            , foldr (T.Forall loc) (foldr (T.Function loc) fullType params) vars
+            )
       where
-        fullType = foldl' T.Application (T.Name name) (T.Var <$> vars)
+        fullType = foldl' (T.Application tyLoc) (T.Name tyLoc name) (T.Var tyLoc <$> vars)
 
 subtype :: InfEffs es => Type -> Type -> Eff es ()
 subtype lhs_ rhs_ = join $ match <$> monoLayer In lhs_ <*> monoLayer Out rhs_
   where
     match = \cases
         lhs rhs | lhs == rhs -> pass -- simple cases, i.e. two type constructors, two univars or two exvars
-        lhs (MLUniVar uni) -> solveOr (mono In $ unMonoLayer lhs) (subtype (unMonoLayer lhs) . unMono) uni
-        (MLUniVar uni) rhs -> solveOr (mono Out $ unMonoLayer rhs) ((`subtype` unMonoLayer rhs) . unMono) uni
-        (MLName lhs) (MLName rhs) ->
+        lhs (MLUniVar _ uni) -> solveOr (mono In $ unMonoLayer lhs) (subtype (unMonoLayer lhs) . unMono) uni
+        (MLUniVar _ uni) rhs -> solveOr (mono Out $ unMonoLayer rhs) ((`subtype` unMonoLayer rhs) . unMono) uni
+        (MLName _ lhs) (MLName _ rhs) ->
             unlessM (elem (lhs, rhs) <$> builtin (.subtypeRelations)) $
                 typeError ("cannot unify" <+> pretty lhs <+> "with" <+> pretty rhs)
-        (MLFn inl outl) (MLFn inr outr) -> do
+        (MLFn _ inl outl) (MLFn _ inr outr) -> do
             subtype inr inl
             subtype outl outr
-        (MLApp lhs rhs) (MLApp lhs' rhs') -> do
+        (MLApp _ lhs rhs) (MLApp _ lhs' rhs') -> do
             -- note that we assume the same variance for all type parameters
             -- some kind of kind system is needed to track variance and prevent stuff like `Maybe a b`
             -- higher-kinded types are also problematic when it comes to variance, i.e.
@@ -148,26 +150,27 @@ subtype lhs_ rhs_ = join $ match <$> monoLayer In lhs_ <*> monoLayer Out rhs_
             -- QuickLook just assumes that all constructors are invariant and -> is a special case
             subtype lhs lhs'
             subtype rhs rhs'
-        (MLVariant lhs) (MLVariant rhs) -> rowCase Variant lhs rhs
-        (MLRecord lhs) (MLRecord rhs) -> rowCase Record lhs rhs
-        (MLVar var) _ -> typeError $ "dangling type variable" <+> pretty var
-        _ (MLVar var) -> typeError $ "dangling type variable" <+> pretty var
+        (MLVariant locL lhs) (MLVariant locR rhs) -> rowCase Variant (locL, lhs) (locR, rhs)
+        (MLRecord locL lhs) (MLRecord locR rhs) -> rowCase Record (locL, lhs) (locR, rhs)
+        (MLVar _ var) _ -> typeError $ "dangling type variable" <+> pretty var
+        _ (MLVar _ var) -> typeError $ "dangling type variable" <+> pretty var
         lhs rhs -> typeError $ pretty lhs <+> "is not a subtype of" <+> pretty rhs
 
-    rowCase whatToMatch lhsRow rhsRow = do
+    rowCase :: InfEffs es => RecordOrVariant -> (T.Loc, ExtRow Type) -> (T.Loc, ExtRow Type) -> Eff es ()
+    rowCase whatToMatch (locL, lhsRow) (locR, rhsRow) = do
         let con = conOf whatToMatch
         for_ (IsList.toList lhsRow.row) \(name, lhsTy) ->
-            deepLookup whatToMatch name (con rhsRow) >>= \case
+            deepLookup whatToMatch name (con locR rhsRow) >>= \case
                 Nothing ->
                     typeError $
-                        pretty (con lhsRow)
+                        pretty (con locL lhsRow)
                             <+> "is not a subtype of"
-                            <+> pretty (con rhsRow)
+                            <+> pretty (con locR rhsRow)
                             <> ": right hand side does not contain"
                                 <+> pretty name
                 Just rhsTy -> subtype lhsTy rhsTy
         -- if the lhs has an extension, it should be compatible with rhs without the already matched fields
-        for_ (Row.extension lhsRow) \ext -> subtype ext . con =<< diff whatToMatch rhsRow lhsRow.row
+        for_ (Row.extension lhsRow) \ext -> subtype ext . con locL =<< diff whatToMatch rhsRow lhsRow.row
 
     -- turns out it's different enough from `withUniVar`
     solveOr :: InfEffs es => Eff es Monotype -> (Monotype -> Eff es ()) -> UniVar -> Eff es ()
@@ -179,29 +182,29 @@ check e type_ = scoped $ match e type_
     match = \cases
         -- the cases for E.Name and E.Constructor are redundant, since
         -- `infer` just looks up their types anyway
-        (E.Lambda arg body) (T.Function from to) -> scoped do
+        (E.Lambda _ arg body) (T.Function _ from to) -> scoped do
             -- `checkPattern` updates signatures of all mentioned variables
             checkPattern arg from
             check body to
-        (E.Annotation expr annTy) ty -> do
+        (E.Annotation _ expr annTy) ty -> do
             check expr annTy
             subtype annTy ty
-        (E.If cond true false) ty -> do
-            check cond $ T.Name BoolName
+        (E.If _ cond true false) ty -> do
+            check cond $ T.Name (E.getLoc cond) BoolName
             check true ty
             check false ty
-        (E.Case arg matches) ty -> do
+        (E.Case _ arg matches) ty -> do
             argTy <- infer arg
             for_ matches \(pat, body) -> do
                 checkPattern pat argTy
                 check body ty
-        (E.List items) (T.Application (T.Name ListName) itemTy) -> for_ items (`check` itemTy)
-        (E.Record row) ty -> do
+        (E.List _ items) (T.Application _ (T.Name _ ListName) itemTy) -> for_ items (`check` itemTy)
+        (E.Record _ row) ty -> do
             for_ (IsList.toList row) \(name, expr) ->
                 deepLookup Record name ty >>= \case
                     Nothing -> typeError $ pretty ty <+> "does not contain field" <+> pretty name
                     Just fieldTy -> check expr fieldTy
-        expr (T.UniVar uni) ->
+        expr (T.UniVar _ uni) ->
             lookupUniVar uni >>= \case
                 Right ty -> check expr $ unMono ty
                 Left _ -> do
@@ -209,27 +212,27 @@ check e type_ = scoped $ match e type_
                     lookupUniVar uni >>= \case
                         Left _ -> solveUniVar uni newTy
                         Right _ -> pass
-        expr (T.Forall var body) -> check expr =<< substitute Out var body
-        expr (T.Exists var body) -> check expr =<< substitute In var body
+        expr (T.Forall _ var body) -> check expr =<< substitute Out var body
+        expr (T.Exists _ var body) -> check expr =<< substitute In var body
         expr ty -> do
             inferredTy <- infer expr
             subtype inferredTy ty
 
 checkBinding :: InfEffs es => Binding Name -> Type -> Eff es ()
 checkBinding binding ty = case binding of
-    E.FunctionBinding _ args body -> check (foldr E.Lambda body args) ty
-    E.ValueBinding pat body -> scoped $ checkPattern pat ty >> check body ty
+    E.FunctionBinding loc _ args body -> check (foldr (E.Lambda loc) body args) ty
+    E.ValueBinding _ pat body -> scoped $ checkPattern pat ty >> check body ty
 
 checkPattern :: (InfEffs es, Declare :> es) => Pattern' -> Type -> Eff es ()
 checkPattern = \cases
     -- we need this case, since inferPattern only infers monotypes for var patterns
-    (P.Var name) ty -> updateSig name ty
+    (P.Var _ name) ty -> updateSig name ty
     -- we probably do need a case for P.Constructor for the same reason
-    (P.Variant name arg) ty ->
+    (P.Variant _ name arg) ty ->
         deepLookup Variant name ty >>= \case
             Nothing -> typeError $ pretty ty <+> "does not contain variant" <+> pretty name
             Just argTy -> checkPattern arg argTy
-    (P.Record patRow) ty -> do
+    (P.Record _ patRow) ty -> do
         for_ (IsList.toList patRow) \(name, pat) ->
             deepLookup Record name ty >>= \case
                 Nothing -> typeError $ pretty ty <+> "does not contain field" <+> pretty name
@@ -241,37 +244,37 @@ checkPattern = \cases
 infer :: InfEffs es => Expr -> Eff es Type
 infer =
     scoped . \case
-        E.Name name -> lookupSig name
-        E.Constructor name -> lookupSig name
-        E.Variant name -> {-forallScope-} do
-            var <- freshUniVar
-            rowVar <- freshUniVar
+        E.Name loc name -> lookupSig loc name
+        E.Constructor loc name -> lookupSig loc name
+        E.Variant loc name -> {-forallScope-} do
+            var <- freshUniVar loc
+            rowVar <- freshUniVar loc
             -- #a -> [Name #a | #r]
-            pure $ T.Function var (T.Variant $ ExtRow (fromList [(name, var)]) rowVar)
-        E.Application f x -> do
+            pure $ T.Function loc var (T.Variant loc $ ExtRow (fromList [(name, var)]) rowVar)
+        E.Application _ f x -> do
             fTy <- infer f
             inferApp fTy x
-        E.Lambda arg body -> {-forallScope-} do
+        E.Lambda loc arg body -> {-forallScope-} do
             argTy <- inferPattern arg
-            T.Function argTy <$> infer body
-        E.Let binding body -> do
+            T.Function loc argTy <$> infer body
+        E.Let _ binding body -> do
             declareAll =<< inferBinding binding
             infer body
-        E.Annotation expr ty -> ty <$ check expr ty
-        E.If cond true false -> do
-            check cond $ T.Name BoolName
+        E.Annotation _ expr ty -> ty <$ check expr ty
+        E.If loc cond true false -> do
+            check cond $ T.Name loc BoolName
             result <- unMono <$> (mono In =<< infer true)
             check false result
             pure result
-        E.Case arg matches -> do
+        E.Case loc arg matches -> do
             argTy <- infer arg
-            result <- freshUniVar
+            result <- freshUniVar loc
             for_ matches \(pat, body) -> do
                 checkPattern pat argTy
                 check body result
             pure result
-        E.Match [] -> typeError "empty match expression"
-        E.Match ((firstPats, firstBody) : ms) -> {-forallScope-} do
+        E.Match _ [] -> typeError "empty match expression"
+        E.Match loc ((firstPats, firstBody) : ms) -> {-forallScope-} do
             bodyType <- infer firstBody
             patTypes <- traverse inferPattern firstPats
             for_ ms \(pats, body) -> do
@@ -279,39 +282,40 @@ infer =
                 check body bodyType
             unless (all ((== length patTypes) . length . fst) ms) $
                 typeError "different amount of arguments in a match statement"
-            pure $ foldr T.Function bodyType patTypes
-        E.List items -> do
-            itemTy <- freshUniVar
+            pure $ foldr (T.Function loc) bodyType patTypes
+        E.List loc items -> do
+            itemTy <- freshUniVar loc
             traverse_ (`check` itemTy) items
-            pure $ T.Application (T.Name ListName) itemTy
-        E.Record row -> T.Record . NoExtRow <$> traverse infer row
-        E.RecordLens fields -> do
+            pure $ T.Application loc (T.Name loc ListName) itemTy
+        E.Record loc row -> T.Record loc . NoExtRow <$> traverse infer row
+        E.RecordLens loc fields -> do
             recordParts <- for fields \field -> do
-                rowVar <- freshUniVar
-                pure \nested -> T.Record $ ExtRow (one (field, nested)) rowVar
+                rowVar <- freshUniVar loc
+                pure \nested -> T.Record loc $ ExtRow (one (field, nested)) rowVar
             let mkNestedRecord = foldr1 (.) recordParts
-            a <- freshUniVar
-            b <- freshUniVar
+            let tAppLoc = T.Application loc
+            a <- freshUniVar loc
+            b <- freshUniVar loc
             pure $
-                T.Name LensName
-                    `T.Application` mkNestedRecord a
-                    `T.Application` mkNestedRecord b
-                    `T.Application` a
-                    `T.Application` b
-        E.IntLiteral num
-            | num >= 0 -> pure $ T.Name NatName
-            | otherwise -> pure $ T.Name IntName
-        E.TextLiteral _ -> pure $ T.Name TextName
-        E.CharLiteral _ -> pure $ T.Name TextName
+                T.Name loc LensName
+                    `tAppLoc` mkNestedRecord a
+                    `tAppLoc` mkNestedRecord b
+                    `tAppLoc` a
+                    `tAppLoc` b
+        E.IntLiteral loc num
+            | num >= 0 -> pure $ T.Name loc NatName
+            | otherwise -> pure $ T.Name loc IntName
+        E.TextLiteral loc _ -> pure $ T.Name loc TextName
+        E.CharLiteral loc _ -> pure $ T.Name loc TextName
 
 inferApp :: InfEffs es => Type -> Expr -> Eff es Type
 inferApp fTy arg = do
     monoLayer In fTy >>= \case
-        MLUniVar uni -> do
+        MLUniVar loc uni -> do
             from <- infer arg
-            to <- freshUniVar
-            to <$ subtype (T.UniVar uni) (T.Function from to)
-        MLFn from to -> do
+            to <- freshUniVar loc
+            to <$ subtype (T.UniVar loc uni) (T.Function loc from to)
+        MLFn _ from to -> do
             to <$ check arg from
         _ -> typeError $ pretty fTy <+> "is not a function type"
 
@@ -320,39 +324,38 @@ inferApp fTy arg = do
 inferBinding :: InfEffs es => Binding Name -> Eff es (HashMap Name Type)
 inferBinding =
     scoped . forallScope . \case
-        E.ValueBinding pat body -> do
+        E.ValueBinding loc pat body -> do
             (patTy, bodyTy) <- do
                 patTy <- inferPattern pat
                 bodyTy <- infer body
                 pure (patTy, bodyTy)
             subtype patTy bodyTy
             checkPattern pat bodyTy
-            traverse lookupSig (HashMap.fromList $ (\x -> (x, x)) <$> collectNames pat)
-
-        E.FunctionBinding name args body -> do
-                -- note: we can only infer monotypes for recursive functions
-                -- while checking the body, the function itself is assigned a univar
-                -- in the end, we check that the inferred type is compatible with the one in the univar (inferred from recursive calls)
-                uni <- freshUniVar'
-                updateSig name $ T.UniVar uni
-                argTypes <- traverse inferPattern args
-                bodyTy <- infer body
-                let ty = foldr T.Function bodyTy argTypes
-                -- since we can still infer higher-rank types for non-recursive functions,
-                -- we only need the subtype check when the univar is solved, i.e. when the
-                -- functions contains any recursive calls at all
-                withUniVar uni (subtype ty . unMono)
-                pure $ HashMap.singleton name ty
+            traverse (lookupSig loc) (HashMap.fromList $ (\x -> (x, x)) <$> collectNames pat)
+        E.FunctionBinding loc name args body -> do
+            -- note: we can only infer monotypes for recursive functions
+            -- while checking the body, the function itself is assigned a univar
+            -- in the end, we check that the inferred type is compatible with the one in the univar (inferred from recursive calls)
+            uni <- freshUniVar'
+            updateSig name $ T.UniVar loc uni
+            argTypes <- traverse inferPattern args
+            bodyTy <- infer body
+            let ty = foldr (T.Function loc) bodyTy argTypes
+            -- since we can still infer higher-rank types for non-recursive functions,
+            -- we only need the subtype check when the univar is solved, i.e. when the
+            -- functions contains any recursive calls at all
+            withUniVar uni (subtype ty . unMono)
+            pure $ HashMap.singleton name ty
 
 -- \| collects all to-be-declared names in a pattern
 collectNames :: Pattern a -> [a]
 collectNames = \case
-    P.Var name -> [name]
-    P.Annotation pat _ -> collectNames pat
-    P.Variant _ pat -> collectNames pat
-    P.Constructor _ pats -> foldMap collectNames pats
-    P.List pats -> foldMap collectNames pats
-    P.Record row -> foldMap collectNames $ toList row
+    P.Var _ name -> [name]
+    P.Annotation _ pat _ -> collectNames pat
+    P.Variant _ _ pat -> collectNames pat
+    P.Constructor _ _ pats -> foldMap collectNames pats
+    P.List _ pats -> foldMap collectNames pats
+    P.Record _ row -> foldMap collectNames $ toList row
     -- once again, exhaustiveness checking is worth writing some boilerplate
     P.IntLiteral{} -> []
     P.TextLiteral{} -> []
@@ -360,18 +363,18 @@ collectNames = \case
 
 collectNamesInBinding :: Binding a -> [a]
 collectNamesInBinding = \case
-    E.FunctionBinding name _ _ -> [name]
-    E.ValueBinding pat _ -> collectNames pat
+    E.FunctionBinding _ name _ _ -> [name]
+    E.ValueBinding _ pat _ -> collectNames pat
 
 inferPattern :: (InfEffs es, Declare :> es) => Pattern' -> Eff es Type
 inferPattern = \case
-    P.Var name -> do
-        uni <- freshUniVar
+    P.Var loc name -> do
+        uni <- freshUniVar loc
         updateSig name uni
         pure uni
-    P.Annotation pat ty -> ty <$ checkPattern pat ty
-    p@(P.Constructor name args) -> do
-        (resultType, argTypes) <- conArgTypes name
+    P.Annotation _ pat ty -> ty <$ checkPattern pat ty
+    p@(P.Constructor loc name args) -> do
+        (resultType, argTypes) <- conArgTypes loc name
         unless (length argTypes == length args) $
             typeError $
                 "incorrect arg count ("
@@ -380,55 +383,55 @@ inferPattern = \case
                     <> ")"
         zipWithM_ checkPattern args argTypes
         pure resultType
-    P.List pats -> do
-        result <- freshUniVar
+    P.List loc pats -> do
+        result <- freshUniVar loc
         traverse_ (`checkPattern` result) pats
-        pure $ T.Application (T.Name ListName) result
-    P.Variant name arg -> {-forallScope-} do
+        pure $ T.Application loc (T.Name loc ListName) result
+    P.Variant loc name arg -> {-forallScope-} do
         argTy <- inferPattern arg
-        T.Variant . ExtRow (fromList [(name, argTy)]) <$> freshUniVar
-    P.Record row -> do
+        T.Variant loc . ExtRow (fromList [(name, argTy)]) <$> freshUniVar loc
+    P.Record loc row -> do
         typeRow <- traverse inferPattern row
-        T.Record . ExtRow typeRow <$> freshUniVar
-    P.IntLiteral num
-        | num >= 0 -> pure $ T.Name NatName
-        | otherwise -> pure $ T.Name IntName
-    P.TextLiteral _ -> pure $ T.Name TextName
-    P.CharLiteral _ -> pure $ T.Name TextName
+        T.Record loc . ExtRow typeRow <$> freshUniVar loc
+    P.IntLiteral loc num
+        | num >= 0 -> pure $ T.Name loc NatName
+        | otherwise -> pure $ T.Name loc IntName
+    P.TextLiteral loc _ -> pure $ T.Name loc TextName
+    P.CharLiteral loc _ -> pure $ T.Name loc TextName
   where
     -- conArgTypes and the zipM may be unified into a single function
-    conArgTypes = lookupSig >=> go
+    conArgTypes loc name = lookupSig loc name >>= go
     go =
         monoLayer In >=> \case
-            MLFn arg rest -> second (arg :) <$> go rest
+            MLFn _ arg rest -> second (arg :) <$> go rest
             -- univars should never appear as the rightmost argument of a value constructor type
             -- i.e. types of value constructors have the shape `a -> b -> c -> d -> ConcreteType a b c d`
             --
             -- solved univars cannot appear here either, since `lookupSig` on a pattern returns a type with no univars
-            MLUniVar uni -> typeError $ "unexpected univar" <+> pretty uni <+> "in a constructor type"
+            MLUniVar _ uni -> typeError $ "unexpected univar" <+> pretty uni <+> "in a constructor type"
             -- this kind of repetition is necwithUniVaressary to retain missing pattern warnings
-            MLName name -> pure (T.Name name, [])
-            MLApp lhs rhs -> pure (T.Application lhs rhs, [])
-            MLVariant row -> pure (T.Variant row, [])
-            MLRecord row -> pure (T.Record row, [])
-            MLSkolem skolem -> pure (T.Skolem skolem, [])
-            MLVar var -> pure (T.Var var, [])
+            MLName loc name -> pure (T.Name loc name, [])
+            MLApp loc lhs rhs -> pure (T.Application loc lhs rhs, [])
+            MLVariant loc row -> pure (T.Variant loc row, [])
+            MLRecord loc row -> pure (T.Record loc row, [])
+            MLSkolem loc skolem -> pure (T.Skolem loc skolem, [])
+            MLVar loc var -> pure (T.Var loc var, [])
 
 -- gets rid of all univars
 normalise :: InfEffs es => Type -> Eff es Type
 normalise = uniVarsToForall {->=> skolemsToExists-} >=> go
   where
     go = \case
-        T.UniVar uni ->
+        T.UniVar _ uni ->
             lookupUniVar uni >>= \case
                 Left _ -> typeError $ "dangling univar " <> pretty uni
                 Right body -> go (unMono body)
-        T.Forall var body -> T.Forall var <$> go body
-        T.Exists var body -> T.Exists var <$> go body
-        T.Function from to -> T.Function <$> go from <*> go to
-        T.Application lhs rhs -> T.Application <$> go lhs <*> go rhs
-        T.Variant row -> T.Variant <$> traverse go row
-        T.Record row -> T.Record <$> traverse go row
+        T.Forall loc var body -> T.Forall loc var <$> go body
+        T.Exists loc var body -> T.Exists loc var <$> go body
+        T.Function loc from to -> T.Function loc <$> go from <*> go to
+        T.Application loc lhs rhs -> T.Application loc <$> go lhs <*> go rhs
+        T.Variant loc row -> T.Variant loc <$> traverse go row
+        T.Record loc row -> T.Record loc <$> traverse go row
         v@T.Var{} -> pure v
         name@T.Name{} -> pure name
         skolem@T.Skolem{} -> pure skolem -- typeError $ "skolem " <> pretty skolem <> " remains in code"
@@ -437,25 +440,25 @@ normalise = uniVarsToForall {->=> skolemsToExists-} >=> go
     -- it also compresses any records found along the way, because I don't feel like
     -- making that a different pass, and `compress` uses `mono` under the hood, which
     -- means that it has to be run early
-    uniVarsToForall ty = uncurry (foldr T.Forall) <$> runState HashMap.empty (uniGo ty)
+    uniVarsToForall ty = uncurry (foldr (T.Forall (T.getLoc ty))) <$> runState HashMap.empty (uniGo ty)
     uniGo :: InfEffs es => Type -> Eff (State (HashMap UniVar Name) : es) Type
     uniGo = \case
-        T.UniVar uni -> do
+        T.UniVar loc uni -> do
             gets @(HashMap UniVar Name) (HashMap.lookup uni) >>= \case
-                Just var -> pure $ T.Var var
+                Just var -> pure $ T.Var loc var -- I'm not sure where should typevars originate from
                 Nothing ->
                     lookupUniVar uni >>= \case
                         Left _ -> do
                             tyVar <- freshTypeVar
                             modify $ HashMap.insert uni tyVar
-                            pure $ T.Var tyVar
+                            pure $ T.Var loc tyVar
                         Right body -> uniGo $ unMono body
-        T.Forall var body -> T.Forall var <$> uniGo body
-        T.Exists var body -> T.Exists var <$> uniGo body
-        T.Function from to -> T.Function <$> uniGo from <*> uniGo to
-        T.Application lhs rhs -> T.Application <$> uniGo lhs <*> uniGo rhs
-        T.Variant row -> T.Variant <$> (traverse uniGo =<< compress Variant row)
-        T.Record row -> T.Record <$> (traverse uniGo =<< compress Record row)
+        T.Forall loc var body -> T.Forall loc var <$> uniGo body
+        T.Exists loc var body -> T.Exists loc var <$> uniGo body
+        T.Function loc from to -> T.Function loc <$> uniGo from <*> uniGo to
+        T.Application loc lhs rhs -> T.Application loc <$> uniGo lhs <*> uniGo rhs
+        T.Variant loc row -> T.Variant loc <$> (traverse uniGo =<< compress Variant row)
+        T.Record loc row -> T.Record loc <$> (traverse uniGo =<< compress Record row)
         v@T.Var{} -> pure v
         name@T.Name{} -> pure name
         skolem@T.Skolem{} -> pure skolem
@@ -475,30 +478,30 @@ skolemsToExists = replaceSkolems T.Exists
 -- b ~ ∀a. a -> a
 skolemsToForall = replaceSkolems T.Forall
 
-replaceSkolems :: InfEffs es => (Name -> Type -> Type) -> Type -> Eff es Type
-replaceSkolems con ty = uncurry (foldr con) <$> runState HashMap.empty (go ty)
+replaceSkolems :: InfEffs es => (T.Loc -> Name -> Type -> Type) -> Type -> Eff es Type
+replaceSkolems con ty = uncurry (foldr (con $ T.getLoc ty)) <$> runState HashMap.empty (go ty)
   where
     go :: InfEffs es => Type -> Eff (State (HashMap Skolem Name) : es) Type
     go = \case
-        T.Skolem skolem ->
+        T.Skolem loc skolem ->
             get @(HashMap Skolem Name) >>= \acc -> case HashMap.lookup skolem acc of
-                Just tyVar -> pure $ T.Var tyVar
+                Just tyVar -> pure $ T.Var loc tyVar
                 Nothing -> do
                     tyVar <- freshTypeVar
                     modify $ HashMap.insert skolem tyVar
-                    pure $ T.Var tyVar
-        T.UniVar uni ->
+                    pure $ T.Var loc tyVar
+        T.UniVar loc uni ->
             lookupUniVar uni >>= \case
-                Left _ -> pure $ T.UniVar uni
+                Left _ -> pure $ T.UniVar loc uni
                 Right body -> do
                     body' <- go $ undefined body
                     overrideUniVar uni $ undefined body'
                     pure body'
-        T.Forall var body -> T.Forall var <$> go body
-        T.Exists var body -> T.Exists var <$> go body
-        T.Function from to -> T.Function <$> go from <*> go to
-        T.Application lhs rhs -> T.Application <$> go lhs <*> go rhs
-        T.Record row -> T.Record <$> traverse go row
-        T.Variant row -> T.Variant <$> traverse go row
+        T.Forall loc var body -> T.Forall loc var <$> go body
+        T.Exists loc var body -> T.Exists loc var <$> go body
+        T.Function loc from to -> T.Function loc <$> go from <*> go to
+        T.Application loc lhs rhs -> T.Application loc <$> go lhs <*> go rhs
+        T.Record loc row -> T.Record loc <$> traverse go row
+        T.Variant loc row -> T.Variant loc <$> traverse go row
         v@T.Var{} -> pure v
         name@T.Name{} -> pure name

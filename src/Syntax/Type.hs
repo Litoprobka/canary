@@ -1,25 +1,35 @@
 {-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE OverloadedRecordDot #-}
+{-# LANGUAGE NoFieldSelectors #-}
+{-# OPTIONS_GHC -Wno-partial-fields #-}
 
-module Syntax.Type (Type' (..)) where
+module Syntax.Type (Type' (..), Loc (..), getLoc) where
 
 import Prettyprinter (Doc, Pretty, braces, comma, pretty, punctuate, sep, (<+>), parens, brackets)
 import Relude
 import Syntax.Row
 import CheckerTypes qualified as CT
+import Text.Megaparsec (SourcePos)
+
+data Loc 
+  = Loc { start :: SourcePos, end :: SourcePos } 
+  | Blank
+  deriving (Show)
+instance Eq Loc where
+  _ == _ = True -- a crutch for the inferred Eq instance of Type'
 
 --  Note: Functor-Foldable-Traversable instances don't do the right thing with `Forall` and `Exists`
 data Type' n
-    = Name n
-    | Var n
-    | UniVar CT.UniVar
-    | Skolem CT.Skolem
-    | Application (Type' n) (Type' n)
-    | Function (Type' n) (Type' n)
-    | Forall n (Type' n)
-    | Exists n (Type' n)
-    | Variant (ExtRow (Type' n))
-    | Record (ExtRow (Type' n))
+    = Name Loc n
+    | Var Loc n
+    | UniVar Loc CT.UniVar
+    | Skolem Loc CT.Skolem
+    | Application Loc (Type' n) (Type' n)
+    | Function Loc (Type' n) (Type' n)
+    | Forall Loc n (Type' n)
+    | Exists Loc n (Type' n)
+    | Variant Loc (ExtRow (Type' n))
+    | Record Loc (ExtRow (Type' n))
     deriving (Show, Eq, Functor, Foldable, Traversable)
 
 -- >>> pretty $ Function (Var "a") (Record (fromList [("x", Name "Int"), ("x", Name "a")]) Nothing)
@@ -39,16 +49,16 @@ instance Pretty n => Pretty (Type' n) where
       where
         prettyPrec :: Int -> Type' n -> Doc ann
         prettyPrec prec = \case
-            Name name -> pretty name
-            Var name -> pretty name
-            Skolem skolem -> pretty skolem
-            UniVar uni -> pretty uni
-            Application lhs rhs -> parensWhen 3 $ prettyPrec 2 lhs <+> prettyPrec 3 rhs
-            Function from to -> parensWhen 2 $ prettyPrec 2 from <+> "->" <+> pretty to
-            Forall var body -> parensWhen 1 $ "∀" <> pretty var <> "." <+> pretty body
-            Exists var body -> parensWhen 1 $ "∃" <> pretty var <> "." <+> pretty body
-            Variant row -> brackets . withExt row . sep . punctuate comma . map variantItem $ sortedRow row.row
-            Record row -> braces . withExt row . sep . punctuate comma . map recordField $ sortedRow row.row
+            Name _ name -> pretty name
+            Var _ name -> pretty name
+            Skolem _ skolem -> pretty skolem
+            UniVar _ uni -> pretty uni
+            Application _ lhs rhs -> parensWhen 3 $ prettyPrec 2 lhs <+> prettyPrec 3 rhs
+            Function _ from to -> parensWhen 2 $ prettyPrec 2 from <+> "->" <+> pretty to
+            Forall _ var body -> parensWhen 1 $ "∀" <> pretty var <> "." <+> pretty body
+            Exists _ var body -> parensWhen 1 $ "∃" <> pretty var <> "." <+> pretty body
+            Variant _ row -> brackets . withExt row . sep . punctuate comma . map variantItem $ sortedRow row.row
+            Record _ row -> braces . withExt row . sep . punctuate comma . map recordField $ sortedRow row.row
           where
             parensWhen minPrec
                 | prec >= minPrec = parens
@@ -59,3 +69,17 @@ instance Pretty n => Pretty (Type' n) where
         -- todo: a special case for unit
         variantItem (name, ty) = pretty name <+> pretty ty
         recordField (name, ty) = pretty name <+> ":" <+> pretty ty
+
+-- perhaps it's time to depend on optics
+getLoc :: Type' n -> Loc
+getLoc = \case
+  Name loc _ -> loc
+  Var loc _ -> loc
+  Skolem loc _ -> loc
+  UniVar loc _  -> loc
+  Application loc _ _ -> loc
+  Function loc _ _ -> loc
+  Forall loc _ _ -> loc
+  Exists loc _ _ -> loc
+  Variant loc _ -> loc
+  Record loc _ -> loc

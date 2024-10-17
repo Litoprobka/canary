@@ -112,65 +112,64 @@ generate different IDs when called twice on the same data
 -}
 collectNames :: (EnvEffs es, Declare :> es) => [Declaration Text] -> Eff es ()
 collectNames decls = for_ decls \case
-    D.Value (E.FunctionBinding name _ _) _ -> void $ declare name
-    D.Value (E.ValueBinding pat _) _ -> void $ declarePat pat
-    D.Type name _ _ -> void $ declare name
-    D.Alias name _ -> void $ declare name
-    D.Signature _ _ -> pass
+    D.Value _ (E.FunctionBinding _ name _ _) _ -> void $ declare name
+    D.Value _ (E.ValueBinding _ pat _) _ -> void $ declarePat pat
+    D.Type _ name _ _ -> void $ declare name
+    D.Alias _ name _ -> void $ declare name
+    D.Signature{} -> pass
 
 -- | resolves names in a declaration. Adds type constructors to the current scope
 resolveDec :: EnvEffs es => Declaration Text -> Eff es (Declaration Name)
 resolveDec decl = case decl of
-    D.Value binding locals -> scoped do
+    D.Value loc binding locals -> scoped do
         binding' <- resolveBinding locals binding
         locals' <- traverse resolveDec locals
-        pure $ D.Value binding' locals'
-    D.Type name vars constrs -> do
+        pure $ D.Value loc binding' locals'
+    D.Type loc name vars constrs -> do
         (name', vars', constrsToDeclare) <- scoped do
             name' <- resolve name
             vars' <- traverse declare vars
             constrsToDeclare <-
-              constrs & traverse \(con, args) -> do
+              constrs & traverse \(D.Constructor conLoc con args) -> do
                 con' <- declare con
                 args' <- traverse resolveType args
-                pure (con, con', args')
+                pure (con, D.Constructor conLoc con' args')
             pure (name', vars', constrsToDeclare)
-        for_ constrsToDeclare \(textName, conName, _) -> modify \(Scope table) -> Scope (Map.insert textName conName table)
-        let constrs' = constrsToDeclare <&> \(_, con', args') -> (con', args')
-        pure $ D.Type name' vars' constrs'
-    D.Alias alias body -> D.Alias <$> resolve alias <*> resolveType body
-    D.Signature name ty -> D.Signature <$> resolve name <*> resolveType ty
+        for_ constrsToDeclare \(textName, D.Constructor _ conName _) -> modify \(Scope table) -> Scope (Map.insert textName conName table)
+        pure $ D.Type loc name' vars' (snd <$> constrsToDeclare)
+    D.Alias loc alias body -> D.Alias loc <$> resolve alias <*> resolveType body
+    D.Signature loc name ty -> D.Signature loc <$> resolve name <*> resolveType ty
 
 {- | resolves names in a binding. Unlike the rest of the functions, it also
 takes local definitions as an argument, and uses them after resolving the name / pattern
 -}
 resolveBinding :: EnvEffs es => [Declaration Text] -> Binding Text -> Eff es (Binding Name)
 resolveBinding locals = scoped . \case
-    E.FunctionBinding name args body -> do
+    E.FunctionBinding loc name args body -> do
         name' <- resolve name
         args' <- traverse declarePat args
         collectNames locals
         body' <- resolveExpr body
-        pure $ E.FunctionBinding name' args' body'
-    E.ValueBinding pat body -> do
+        pure $ E.FunctionBinding loc name' args' body'
+    E.ValueBinding loc pat body -> do
         pat' <- traverse resolve pat -- `traverse` finally works
         collectNames locals
         body' <- resolveExpr body
-        pure $ E.ValueBinding pat' body'
+        pure $ E.ValueBinding loc pat' body'
 
 {- | resolves names in a pattern. Adds all new names to the current scope
 -}
 declarePat :: (EnvEffs es, Declare :> es) => Pattern Text -> Eff es (Pattern Name)
 declarePat = \case
-    P.Constructor con pats -> P.Constructor <$> resolve con <*> traverse declarePat pats
-    P.Annotation pat ty -> P.Annotation <$> declarePat pat <*> resolveType ty
-    P.Record row -> P.Record <$> traverse declarePat row
-    P.Variant openName arg -> P.Variant openName <$> declarePat arg
-    P.Var name -> P.Var <$> declare name
-    P.List pats -> P.List <$> traverse declarePat pats
-    P.IntLiteral n -> pure $ P.IntLiteral n
-    P.TextLiteral txt -> pure $ P.TextLiteral txt
-    P.CharLiteral c -> pure $ P.CharLiteral c
+    P.Constructor loc con pats -> P.Constructor loc <$> resolve con <*> traverse declarePat pats
+    P.Annotation loc pat ty -> P.Annotation loc <$> declarePat pat <*> resolveType ty
+    P.Record loc row -> P.Record loc <$> traverse declarePat row
+    P.Variant loc openName arg -> P.Variant loc openName <$> declarePat arg
+    P.Var loc name -> P.Var loc <$> declare name
+    P.List loc pats -> P.List loc <$> traverse declarePat pats
+    P.IntLiteral loc n -> pure $ P.IntLiteral loc n
+    P.TextLiteral loc txt -> pure $ P.TextLiteral loc txt
+    P.CharLiteral loc c -> pure $ P.CharLiteral loc c
 
 {- | resolves names in an expression. Doesn't change the current scope
 
@@ -178,58 +177,58 @@ same story here. Most of the expressions use names, but a couple define them
 -}
 resolveExpr :: EnvEffs es => Expression Text -> Eff es (Expression Name)
 resolveExpr e = scoped case e of
-    E.Lambda arg body -> do
+    E.Lambda loc arg body -> do
         arg' <- declarePat arg
         body' <- resolveExpr body
-        pure $ E.Lambda arg' body'
-    E.Application f arg -> E.Application <$> resolveExpr f <*> resolveExpr arg
-    E.Let binding expr -> do
+        pure $ E.Lambda loc arg' body'
+    E.Application loc f arg -> E.Application loc <$> resolveExpr f <*> resolveExpr arg
+    E.Let loc binding expr -> do
         -- resolveBinding is intended for top-level bindings and where clauses,
         -- so we have to declare the new vars with `collectNames`
         --
         -- yes, this is hacky
-        collectNames [D.Value binding []]
+        collectNames [D.Value loc binding []] -- should we use `loc` from `binding` here?
         binding' <- resolveBinding [] binding
         expr' <- resolveExpr expr
-        pure $ E.Let binding' expr'
-    E.Case arg matches ->
-        E.Case <$> resolveExpr arg <*> for matches \(pat, expr) -> scoped do
+        pure $ E.Let loc binding' expr'
+    E.Case loc arg matches ->
+        E.Case loc <$> resolveExpr arg <*> for matches \(pat, expr) -> scoped do
             pat' <- declarePat pat
             expr' <- resolveExpr expr
             pure (pat', expr')
-    E.Match matches ->
-        E.Match <$> for matches \(pats, expr) -> scoped do
+    E.Match loc matches ->
+        E.Match loc <$> for matches \(pats, expr) -> scoped do
             pats' <- traverse declarePat pats
             expr' <- resolveExpr expr
             pure (pats', expr')
-    E.Annotation body ty -> E.Annotation <$> resolveExpr body <*> resolveType ty
-    E.If cond true false -> E.If <$> resolveExpr cond <*> resolveExpr true <*> resolveExpr false
-    E.Record row -> E.Record <$> traverse resolveExpr row
-    E.List items -> E.List <$> traverse resolveExpr items
-    E.Name name -> E.Name <$> resolve name
-    E.Constructor name -> E.Constructor <$> resolve name
-    E.RecordLens lens -> pure $ E.RecordLens lens
-    E.Variant openName -> pure $ E.Variant openName
-    E.IntLiteral n -> pure $ E.IntLiteral n
-    E.TextLiteral txt -> pure $ E.TextLiteral txt
-    E.CharLiteral c -> pure $ E.CharLiteral c
+    E.Annotation loc body ty -> E.Annotation loc <$> resolveExpr body <*> resolveType ty
+    E.If loc cond true false -> E.If loc <$> resolveExpr cond <*> resolveExpr true <*> resolveExpr false
+    E.Record loc row -> E.Record loc <$> traverse resolveExpr row
+    E.List loc items -> E.List loc <$> traverse resolveExpr items
+    E.Name loc name -> E.Name loc <$> resolve name
+    E.Constructor loc name -> E.Constructor loc <$> resolve name
+    E.RecordLens loc lens -> pure $ E.RecordLens loc lens
+    E.Variant loc openName -> pure $ E.Variant loc openName
+    E.IntLiteral loc n -> pure $ E.IntLiteral loc n
+    E.TextLiteral loc txt -> pure $ E.TextLiteral loc txt
+    E.CharLiteral loc c -> pure $ E.CharLiteral loc c
 
 -- | resolves names in a type. Doesn't change the current scope
 resolveType :: EnvEffs es => Type' Text -> Eff es (Type' Name)
 resolveType ty = scoped case ty of
-    T.Forall var body -> do
+    T.Forall loc var body -> do
         var' <- declare var
         body' <- resolveType body
-        pure $ T.Forall var' body'
-    T.Exists var body -> do
+        pure $ T.Forall loc var' body'
+    T.Exists loc var body -> do
         var' <- declare var
         body' <- resolveType body
-        pure $ T.Exists var' body'
-    T.Application lhs rhs -> T.Application <$> resolveType lhs <*> resolveType rhs
-    T.Function from to -> T.Function <$> resolveType from <*> resolveType to
-    T.Name name -> T.Name <$> resolve name
-    T.Var var -> T.Var <$> resolve var
-    T.UniVar uni -> pure $ T.UniVar uni
-    T.Skolem skolem -> pure $ T.Skolem skolem
-    T.Variant row -> T.Variant <$> traverse resolveType row
-    T.Record row -> T.Record <$> traverse resolveType row
+        pure $ T.Exists loc var' body'
+    T.Application loc lhs rhs -> T.Application loc <$> resolveType lhs <*> resolveType rhs
+    T.Function loc from to -> T.Function loc <$> resolveType from <*> resolveType to
+    T.Name loc name -> T.Name loc <$> resolve name
+    T.Var loc var -> T.Var loc <$> resolve var
+    T.UniVar loc uni -> pure $ T.UniVar loc uni
+    T.Skolem loc skolem -> pure $ T.Skolem loc skolem
+    T.Variant loc row -> T.Variant loc <$> traverse resolveType row
+    T.Record loc row -> T.Record loc <$> traverse resolveType row

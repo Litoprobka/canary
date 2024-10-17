@@ -38,30 +38,30 @@ import TypeChecker
 
 infixr 2 -->
 (-->) :: Type' n -> Type' n -> Type' n
-(-->) = T.Function
+(-->) = T.Function T.Blank
 
 infixl 1 #
 (#) :: Expression n -> Expression n -> Expression n
-(#) = E.Application
+(#) = E.Application T.Blank
 
 binApp :: Expression Text -> Expression Text -> Expression Text -> Expression Text
 binApp f arg1 arg2 = f # arg1 # arg2
 
 infixl 3 $:
 ($:) :: Type' n -> Type' n -> Type' n
-($:) = T.Application
+($:) = T.Application T.Blank
 
 λ :: Pattern n -> Expression n -> Expression n
-λ = E.Lambda
+λ = E.Lambda T.Blank
 
 lam :: Pattern n -> Expression n -> Expression n
-lam = E.Lambda
+lam = E.Lambda T.Blank
 
 (∃) :: n -> Type' n -> Type' n
-(∃) = T.Exists
+(∃) = T.Exists T.Blank
 
 con :: n -> [Pattern n] -> Pattern n
-con = P.Constructor
+con = P.Constructor T.Blank
 
 runDefault :: Eff '[Declare, Error TypeError, Reader (Builtins Name), State InfState, NameGen] a -> Either TypeError a
 runDefault action = runPureEff $ runNameGen do
@@ -93,13 +93,13 @@ mkDefaults = do
             ( traverse
                 (\(name, ty) -> liftA2 (,) (declare name) (resolveType ty))
                 [ ("()", "Unit")
-                , ("Nothing", T.Forall "'a" $ "Maybe" $: "'a")
-                , ("Just", T.Forall "'a" $ "'a" --> "Maybe" $: "'a")
+                , ("Nothing", T.Forall T.Blank "'a" $ "Maybe" $: "'a")
+                , ("Just", T.Forall T.Blank "'a" $ "'a" --> "Maybe" $: "'a")
                 , ("True", "Bool")
                 , ("False", "Bool")
-                , ("id", T.Forall "'a" $ "'a" --> "'a")
-                , ("cons", T.Forall "'a" $ "'a" --> list "'a" --> list "'a")
-                , ("reverse", T.Forall "'a" $ list "'a" --> list "'a")
+                , ("id", T.Forall T.Blank "'a" $ "'a" --> "'a")
+                , ("cons", T.Forall T.Blank "'a" $ "'a" --> list "'a" --> list "'a")
+                , ("reverse", T.Forall T.Blank "'a" $ list "'a" --> list "'a")
                 ]
             )
     pure (scope, builtins, env)
@@ -145,15 +145,15 @@ matchCase whenUpper whenLower str@(h : _)
     | otherwise = whenLower $ fromString str
 
 instance IsString (Expression Text) where
-    fromString ('\'' : rest) = rest & matchCase (E.Variant . ("'" <>)) (error $ "type variable " <> fromString rest <> " at value level")
-    fromString str = str & matchCase E.Constructor E.Name
+    fromString ('\'' : rest) = rest & matchCase (E.Variant T.Blank . ("'" <>)) (error $ "type variable " <> fromString rest <> " at value level")
+    fromString str = str & matchCase (E.Constructor T.Blank) (E.Name T.Blank)
 
 instance IsString (Pattern Text) where
-    fromString = matchCase (`P.Constructor` []) P.Var
+    fromString = matchCase (\name -> P.Constructor T.Blank name []) (P.Var T.Blank)
 
 instance IsString (Type' Text) where
-    fromString str@('\'' : _) = T.Var $ fromString str
-    fromString str = str & matchCase T.Name (error $ "type name " <> fromString str <> " shouldn't start with a lowercase letter")
+    fromString str@('\'' : _) = T.Var T.Blank $ fromString str
+    fromString str = str & matchCase (T.Name T.Blank) (error $ "type name " <> fromString str <> " shouldn't start with a lowercase letter")
 
 instance IsString Name where
     fromString = nameFromText . fromString
@@ -162,13 +162,13 @@ nameFromText :: Text -> Name
 nameFromText txt = Name txt (Id $ hashWithSalt 0 txt)
 
 instance IsString (Expression Name) where
-    fromString ('\'' : rest) = rest & matchCase (E.Variant . ("'" <>)) (error $ "type variable " <> fromString rest <> " at value level")
-    fromString str = str & matchCase (E.Constructor . nameFromText) (E.Name . nameFromText)
+    fromString ('\'' : rest) = rest & matchCase (E.Variant T.Blank . ("'" <>)) (error $ "type variable " <> fromString rest <> " at value level")
+    fromString str = str & matchCase (E.Constructor T.Blank . nameFromText) (E.Name T.Blank . nameFromText)
 
 instance IsString (Pattern Name) where
-    fromString = matchCase (\txt -> nameFromText txt `P.Constructor` []) (P.Var . nameFromText)
+    fromString = matchCase (\txt -> P.Constructor T.Blank (nameFromText txt) []) (P.Var T.Blank . nameFromText)
 
 instance IsString (Type' Name) where
-    fromString str@('\'' : _) = T.Var $ nameFromText $ fromString str
+    fromString str@('\'' : _) = T.Var T.Blank $ nameFromText $ fromString str
     fromString str =
-        str & matchCase (T.Name . nameFromText) (error $ "type name " <> fromString str <> " shouldn't start with a lowercase letter")
+        str & matchCase (T.Name T.Blank . nameFromText) (error $ "type name " <> fromString str <> " shouldn't start with a lowercase letter")

@@ -17,6 +17,7 @@ import Playground (mkDefaults)
 import qualified Syntax.Declaration as D
 import qualified Data.HashMap.Strict as HashMap
 import qualified Syntax.Expression as E
+import Syntax.Type qualified as T
 import Interpreter (eval, InterpreterBuiltins (..))
 
 main :: IO ()
@@ -46,9 +47,9 @@ main = do
             typecheck env builtins bindings >>= \case
                 Left (TypeError err) -> liftIO . putDoc $ err <> line
                 Right checkedBindings -> do
-                    liftIO . putDoc $ (<> line) $ vsep $ pretty . uncurry D.Signature <$> HashMap.toList checkedBindings
+                    liftIO . putDoc $ (<> line) $ vsep $ pretty . uncurry (D.Signature T.Blank) <$> HashMap.toList checkedBindings
                     case bindings of
-                        (D.Value (E.ValueBinding _ body) _) : _ ->
+                        (D.Value _ (E.ValueBinding _ _ body) _) : _ ->
                             liftIO . putDoc $ (<> line) $ pretty $ eval evalBuiltins constrs HashMap.empty body
                         _ -> putTextLn "Not a value"
 

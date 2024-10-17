@@ -4,18 +4,18 @@ module Syntax.Pattern (Pattern (..)) where
 import Relude
 import Syntax.Row
 import Prettyprinter (Pretty, pretty, Doc, braces, parens, sep, (<+>), punctuate, comma, dquotes, brackets)
-import Syntax.Type (Type')
+import Syntax.Type (Type', Loc)
 
 data Pattern n
-    = Var n
-    | Annotation (Pattern n) (Type' n)
-    | Constructor n [Pattern n]
-    | Variant OpenName (Pattern n)
-    | Record (Row (Pattern n))
-    | List [Pattern n]
-    | IntLiteral Int
-    | TextLiteral Text
-    | CharLiteral Text
+    = Var Loc n
+    | Annotation Loc (Pattern n) (Type' n)
+    | Constructor Loc n [Pattern n]
+    | Variant Loc OpenName (Pattern n)
+    | Record Loc (Row (Pattern n))
+    | List Loc [Pattern n]
+    | IntLiteral Loc Int
+    | TextLiteral Loc Text
+    | CharLiteral Loc Text
     deriving (Show, Eq, Functor, Foldable, Traversable)
 
 -- note that the Traversable instance generally
@@ -25,15 +25,15 @@ instance Pretty n => Pretty (Pattern n) where
     pretty = go 0 where
         go :: Int -> Pattern n -> Doc ann
         go n = \case
-            Var name -> pretty name
-            Annotation pat ty -> parens $ pretty pat <+> ":" <+> pretty ty
-            Constructor name args -> parensWhen 1 $ sep (pretty name : map (go 1) args)
-            Variant name body -> parensWhen 1 $ pretty name <+> go 1 body -- todo: special case for unit?
-            Record row -> braces . sep . punctuate comma . map recordField $ sortedRow row
-            List items -> brackets . sep $ map pretty items
-            IntLiteral num -> pretty num
-            TextLiteral txt -> dquotes $ pretty txt
-            CharLiteral c -> "'" <> pretty c <> "'"
+            Var _ name -> pretty name
+            Annotation _ pat ty -> parens $ pretty pat <+> ":" <+> pretty ty
+            Constructor _ name args -> parensWhen 1 $ sep (pretty name : map (go 1) args)
+            Variant _ name body -> parensWhen 1 $ pretty name <+> go 1 body -- todo: special case for unit?
+            Record _ row -> braces . sep . punctuate comma . map recordField $ sortedRow row
+            List _ items -> brackets . sep $ map pretty items
+            IntLiteral _ num -> pretty num
+            TextLiteral _ txt -> dquotes $ pretty txt
+            CharLiteral _ c -> "'" <> pretty c <> "'"
           where
             parensWhen minPrec
                 | n >= minPrec = parens

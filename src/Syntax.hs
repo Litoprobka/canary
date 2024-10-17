@@ -4,7 +4,7 @@ module Syntax (module Export) where
 
 import Relude ()
 
-import Syntax.Declaration as Export (Declaration)
+import Syntax.Declaration as Export (Declaration, Constructor)
 import Syntax.Pattern as Export (Pattern)
 import Syntax.Expression as Export (Expression, Binding)
 import Syntax.Type as Export (Type')

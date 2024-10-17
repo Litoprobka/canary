@@ -1,3 +1,5 @@
+{-# OPTIONS_GHC -Wno-unrecognised-pragmas #-}
+{-# HLINT ignore "Use <$>" #-}
 module Lexer (
     Parser,
     ParserM,
@@ -28,6 +30,7 @@ module Lexer (
     wildcard,
     forallKeyword,
     existsKeyword,
+    withLoc,
 ) where
 
 import Control.Monad.Combinators.NonEmpty qualified as NE
@@ -39,6 +42,7 @@ import Text.Megaparsec hiding (Token, token)
 import Text.Megaparsec.Char hiding (newline, space)
 import Text.Megaparsec.Char qualified as C (newline, space1)
 import Text.Megaparsec.Char.Lexer qualified as L
+import Syntax.Type (Loc (..))
 
 type Parser = ReaderT Pos (Parsec Void Text)
 type ParserM m = (MonadParsec Void Text m, MonadReader Pos m, MonadFail m)
@@ -58,8 +62,8 @@ newlines = C.newline *> L.space C.space1 lineComment blockComment
 -- they're not in a where block, because monomorphism restriction
 nonNewlineSpace, lineComment, blockComment :: ParserM m => m ()
 nonNewlineSpace = void $ takeWhile1P (Just "space") \c -> isSpace c && c /= '\n' -- we can ignore \r here
-lineComment = L.skipLineComment "//"
-blockComment = L.skipBlockCommentNested "/*" "*/"
+lineComment = L.skipLineComment "--"
+blockComment = L.skipBlockCommentNested "---" "---"
 
 -- | space or a newline with increased indentation
 spaceOrLineWrap :: ParserM m => m ()
@@ -227,3 +231,11 @@ braces = between (specialSymbol "{") (specialSymbol "}")
 
 commaSep :: ParserM m => m a -> m [a]
 commaSep = (`sepEndBy` specialSymbol ",")
+
+withLoc :: ParserM m => m (Loc -> a) -> m a
+withLoc p = do
+    start <- getSourcePos
+    f <- p
+    end <- getSourcePos
+    let loc = if start == end then Blank else Loc start end
+    pure $ f loc
