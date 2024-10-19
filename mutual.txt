@@ -1,0 +1,9 @@
+type Peano = Z | S Peano
+
+odd = match
+    Z -> False
+    (S n) -> even n
+
+even = match
+    Z -> True
+    (S n) -> odd n
