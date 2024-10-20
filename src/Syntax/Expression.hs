@@ -64,7 +64,7 @@ data Expression (p :: Pass)
     | TextLiteral Loc Text
     | CharLiteral Loc Text
     | -- | an unresolved expression with infix / prefix operators
-      Infix (HasInfix p) [(Expression p, NameAt p)] (Expression p)
+      Infix (HasInfix p) [(Expression p, Maybe (NameAt p))] (Expression p)
 
 deriving instance Show (NameAt pass) => Show (Expression pass)
 deriving instance Eq (NameAt pass) => Eq (Expression pass)
@@ -105,7 +105,7 @@ instance Pretty (NameAt p) => Pretty (Expression p) where
             IntLiteral _ num -> pretty num
             TextLiteral _ txt -> dquotes $ pretty txt
             CharLiteral _ c -> "'" <> pretty c <> "'"
-            Infix _ pairs last' -> "?(" <> sep (map (\(lhs, op) -> pretty lhs <+> pretty op) pairs <> [pretty last']) <> ")"
+            Infix _ pairs last' -> "?(" <> sep (concatMap (\(lhs, op) -> pretty lhs : maybe [] (pure . pretty) op) pairs <> [pretty last']) <> ")"
           where
             parensWhen minPrec
                 | n >= minPrec = parens

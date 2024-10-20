@@ -1,7 +1,7 @@
-{-# OPTIONS_GHC -Wno-unrecognised-pragmas #-}
-
 {-# HLINT ignore "Use <$>" #-}
 {-# LANGUAGE DataKinds #-}
+{-# OPTIONS_GHC -Wno-unrecognised-pragmas #-}
+
 module Parser (code, declaration, type', pattern', expression) where
 
 import Relude hiding (many, some)
@@ -16,7 +16,7 @@ import Syntax.Type qualified as T
 import Control.Monad.Combinators.Expr
 import Control.Monad.Combinators.NonEmpty qualified as NE
 
-import Common (Loc (..), SimpleName (..), getLoc, zipLoc, Pass (..))
+import Common (Loc (..), Pass (..), SimpleName (..), getLoc, zipLoc)
 import Syntax.Row
 import Syntax.Row qualified as Row
 import Text.Megaparsec
@@ -144,42 +144,51 @@ expression :: ParserM m => m (Expression 'Parse)
 expression = expression' $ E.Name <$> nonWildcardTerm
 
 expression' :: ParserM m => m (Expression 'Parse) -> m (Expression 'Parse)
-expression' termParser = label "expression" $ makeExprParser (noPrec termParser) [[annotation]]
+expression' termParser = label "expression" $ infixExpr termParser
   where
     sameScopeExpr = expression' termParser
 
+    -- overrides the term parser of expression to collect wildcards
+    -- has to be called in the scope of `withWildcards`
     newScopeExpr :: ParserM m => StateT Int m (Expression 'Parse)
     newScopeExpr =
         expression' $
             withLoc (nextVar <* wildcard)
                 <|> fmap E.Name termName
 
-    annotation = Postfix $ withLoc do
-        specialSymbol ":"
-        ty <- type'
-        pure \loc expr -> E.Annotation loc expr ty
+    infixExpr varParser = do
+        firstExpr <- noPrec varParser
+        pairs <- many $ (,) <$> optional someOperator <*> noPrec varParser
+        pure $ uncurry (E.Infix E.Yes) $ shift firstExpr pairs
+      where
+        -- x [(+, y), (*, z), (+, w)] --> [(x, +), (y, *), (z, +)] w
+        shift expr [] = ([], expr)
+        shift lhs ((op, rhs) : rest) = first ((lhs, op) :) $ shift rhs rest
+    -- parse Annotation somewhere
+    noPrec varParser = choice $ keywordBased <> terminals <> [varParser]
 
-    noPrec varParser = choice $ keywordBased <> terminals varParser
-
+    -- expression forms that have a leading keyword/symbol
     keywordBased =
-        [ lambdaLike E.Lambda lambda pattern' "->" <*> sameScopeExpr
+        [ -- note that we don't use `sameScopeExpression` here, since interliving explicit and implicit lambdas, i.e. `(\f -> f _)`, is way too confusing
+          lambdaLike E.Lambda lambda pattern' "->" <*> expression
         , let'
         , case'
         , match'
         , if'
         , withWildcards $ withLoc $ flip E.Record <$> someRecord "=" newScopeExpr (Just E.Name)
         , withWildcards $ withLoc $ flip E.List <$> brackets (commaSep newScopeExpr)
+        , parens $ withWildcards newScopeExpr
         ]
       where
         let' =
             withLoc $
-                letBlock "let" (flip3 E.Let) binding sameScopeExpr
+                letBlock "let" (flip3 E.Let) binding expression -- wildcards do not propagate through let bindings. Use an explicit lambda instead!
         case' = withLoc do
             keyword "case"
-            arg <- sameScopeExpr
-            matches <- block "of" $ (,) <$> pattern' <* specialSymbol "->" <*> sameScopeExpr
+            arg <- expression -- `case _ of` is redundant, since it has the same meaning as one arg `match`
+            matches <- block "of" $ (,) <$> pattern' <* specialSymbol "->" <*> expression
             pure $ flip3 E.Case arg matches
-        match' = withLoc $ flip E.Match <$> block "match" ((,) <$> some patternParens <* specialSymbol "->" <*> sameScopeExpr)
+        match' = withLoc $ flip E.Match <$> block "match" ((,) <$> some patternParens <* specialSymbol "->" <*> expression)
         if' = withLoc do
             keyword "if"
             cond <- sameScopeExpr
@@ -189,29 +198,14 @@ expression' termParser = label "expression" $ makeExprParser (noPrec termParser)
             false <- sameScopeExpr
             pure $ flip4 E.If cond true false
 
-    terminals :: ParserM m => m (Expression 'Parse) -> [m (Expression 'Parse)]
-    terminals varParser =
-        [ parens $ withWildcards newScopeExpr
-        , withLoc' E.RecordLens recordLens
+    terminals =
+        [ withLoc' E.RecordLens recordLens
         , E.Constructor <$> typeName
         , E.Variant <$> variantConstructor
         , withLoc' E.IntLiteral intLiteral
         , withLoc' E.CharLiteral charLiteral
         , withLoc' E.TextLiteral textLiteral
-        , varParser
         ]
-
-    infixExpr varParser = do
-        firstExpr <- noPrec varParser
-        pairs <- many $ (,) <$> option (SimpleName Blank "app") someOperator <*> noPrec varParser
-        pure $ uncurry (E.Infix E.Yes) $ shift firstExpr pairs
-      where
-        -- x [(+, y), (*, z), (+, w)] --> [(x, +), (y, *), (z, +)] w
-        shift expr [] = ([], expr)
-        shift lhs ((op, rhs) : rest) = first ((lhs, op) :) $ shift rhs rest
-
-        
-            
 
 -- turns out that respecting operator precedence makes for confusing code
 -- i.e. consider, say, `3 + _ * 4`

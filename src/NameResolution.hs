@@ -240,7 +240,7 @@ resolveExpr e = scoped case e of
     E.List loc items -> E.List loc <$> traverse resolveExpr items
     E.Infix E.Yes pairs last' ->
         E.Infix E.Yup
-            <$> traverse (bitraverse resolveExpr resolve) pairs
+            <$> traverse (bitraverse resolveExpr (traverse resolve)) pairs
             <*> resolveExpr last'
     E.Name name -> E.Name <$> resolve name
     E.Constructor name -> E.Constructor <$> resolve name

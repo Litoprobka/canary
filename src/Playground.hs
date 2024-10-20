@@ -16,6 +16,7 @@ import Relude hiding (Reader, State, bool, runState)
 import Common hiding (Scope)
 import Data.Char (isUpperCase)
 import Data.HashMap.Strict qualified as HashMap
+import Data.HashSet qualified as HashSet
 import Effectful
 import Effectful.Error.Static (Error)
 import Effectful.Reader.Static (Reader)
@@ -104,7 +105,7 @@ mkDefaults = do
                 , ("reverse", T.Forall Blank "'a" $ list "'a" --> list "'a")
                 ]
             )
-    pure (scope, builtins, _fixityRes env)
+    pure (scope, builtins, undefined "fixity res" env)
   where
     list var = "List" $: var
 
@@ -133,7 +134,7 @@ parseInfer input = runEff $ runNameGen
         Right decls -> do
             (scope, builtins, defaultEnv) <- mkDefaults
             resolvedDecls <- fst <$> runNameResolution scope (resolveNames decls)
-            typesOrErrors <- typecheck defaultEnv builtins $ _fixityRes resolvedDecls
+            typesOrErrors <- typecheck defaultEnv builtins $ undefined "fixity res" resolvedDecls
             case typesOrErrors of
                 Left (TypeError err) -> liftIO $ putDoc $ err <> line
                 Right types -> liftIO $ for_ types \ty -> putDoc $ pretty ty <> line

@@ -116,8 +116,7 @@ zipLoc (Loc start _) (Loc _ end) = Loc start end
 -- * Some fancy boilerplate prevention stuff
 
 -- bifix f g = f $ g $ f $ g $ ...
+-- we don't need a special case to make bifix it monadic. We do need monadic baseCast-s though
 bifix :: ((a -> b) -> a -> b) -> ((a -> b) -> a -> b) -> a -> b
 bifix f g = let recur = f (g recur) in recur
 
--- we don't need a special case to make bifix it monadic. We do need monadic baseCast-s though
-    
