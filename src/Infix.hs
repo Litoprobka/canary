@@ -25,8 +25,6 @@ data Fixity = InfixL | InfixR | InfixChain | Infix deriving (Eq)
 
 data Priority = Left' | Right' deriving (Show)
 
-data TokenList = Op Name (Expression Name) TokenList | E (Expression Name)
-
 type Ctx es = (Reader OpMap :> es, Reader PriorityGraph :> es, Error Text :> es)
 
 lookup' :: (Error Text :> es, Hashable k) => k -> HashMap k v -> Eff es v
@@ -52,16 +50,16 @@ priority prev next = do
         | HashSet.member prevEq nextHigherThan -> pure Right'
         | otherwise -> throwError @Text $ "undefined ordering of " <> show prev <> " and " <> show next
 
-parse :: TokenList -> Either Text (Expression Name)
-parse = runPureEff . runErrorNoCallStack . runReader testOpMap . runReader testGraph . go []
+parse :: [(Expression Name, Name)] -> Expression Name -> Either Text (Expression Name)
+parse pairs last' = runPureEff . runErrorNoCallStack . runReader testOpMap . runReader testGraph $ go [] pairs
   where
-    go :: Ctx es => [(Expression Name, Name)] -> TokenList -> Eff es (Expression Name)
-    go [] (E y) = pure y
-    go ((x, op) : rest) (E y) = do
-        last' <- appOrMerge op x y
-        foldM (\acc (z, op') -> appOrMerge op' z acc) last' rest
-    go [] (Op op x rest) = go [(x, op)] rest
-    go ((x, prev) : stack) (Op next y rest) = do
+    go :: Ctx es => [(Expression Name, Name)] -> [(Expression Name, Name)] -> Eff es (Expression Name)
+    go [] [] = pure last'
+    go ((x, op) : rest) [] = do
+        last'' <- appOrMerge op x last'
+        foldM (\acc (z, op') -> appOrMerge op' z acc) last'' rest
+    go [] ((x, op) : rest) = go [(x, op)] rest
+    go ((x, prev) : stack) ((y, next) : rest) = do
         newStack <- pop (y, next) ((x, prev) :| stack)
         go newStack rest
 

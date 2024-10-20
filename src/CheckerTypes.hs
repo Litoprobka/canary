@@ -5,7 +5,7 @@
 {-# LANGUAGE OverloadedRecordDot #-}
 {-# OPTIONS_GHC -Wno-partial-fields #-}
 
-module CheckerTypes (Name (..), UniVar (..), Skolem (..), Scope (..), Id (..), inc, Loc (..), SimpleName (..), HasLoc(..)) where
+module CheckerTypes (Name (..), UniVar (..), Skolem (..), Scope (..), Id (..), inc, Loc (..), SimpleName (..), HasLoc(..), zipLoc) where
 
 import Prettyprinter
 import Relude
@@ -95,3 +95,8 @@ instance Hashable Loc where
 -- this should probably be replaced by a classy lens
 class HasLoc a where
     getLoc :: a -> Loc
+
+zipLoc :: Loc -> Loc -> Loc
+zipLoc loc Blank = loc
+zipLoc Blank loc = loc
+zipLoc (Loc start _) (Loc _ end) = Loc start end

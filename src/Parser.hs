@@ -15,11 +15,12 @@ import Syntax.Type qualified as T
 import Control.Monad.Combinators.Expr
 import Control.Monad.Combinators.NonEmpty qualified as NE
 
-import CheckerTypes (Loc (..), SimpleName (..), getLoc)
+import CheckerTypes (Loc (..), SimpleName (..), getLoc, zipLoc)
 import Data.IntMap.Strict qualified as IntMap
 import Syntax.Row
 import Syntax.Row qualified as Row
 import Text.Megaparsec
+import qualified Data.List.NonEmpty as NE
 
 code :: Parser [Declaration SimpleName]
 code = topLevelBlock declaration
@@ -144,7 +145,7 @@ expression :: ParserM m => m (Expression SimpleName)
 expression = expression' $ E.Name <$> nonWildcardTerm
 
 expression' :: ParserM m => m (Expression SimpleName) -> m (Expression SimpleName)
-expression' termParser = label "expression" $ makeExprParser (noPrec termParser) (snd <$> IntMap.toDescList precMap)
+expression' termParser = label "expression" $ makeExprParser (noPrec termParser) [[annotation]]
   where
     sameScopeExpr = expression' termParser
 
@@ -154,50 +155,22 @@ expression' termParser = label "expression" $ makeExprParser (noPrec termParser)
             withLoc (nextVar <* wildcard)
                 <|> fmap E.Name termName
 
-    precMap =
-        IntMap.fromList
-            [ (120, [infixR "."]) -- lens composition
-            , (110, infixL <$> ["^.", "^..", "^?"]) -- lens getters (subject to change)
-            , (100, [InfixL $ pure appLoc])
-            , (90, [infixL ">>", infixR "<<"]) -- function composition
-            , (80, [infixR "^"])
-            , (70, infixL <$> ["*", "/"])
-            , (60, map infixL ["+", "-"] <> [infixR "<>"])
-            , (50, infixR <$> [".~", "%~", "?~"]) -- lens setters (subject to change)
-            , (40, infixN <$> ["==", "!=", ">", ">=", "<", "<="])
-            , (30, [infixR "&&"])
-            , (20, [infixR "||"])
-            , (0, [infixL "|>", infixR "<|"]) -- pipes
-            , (-100, [annotation]) -- I can't think of anything that should have lower precedence than annotation
-            ]
-      where
-        annotation = Postfix $ withLoc do
-            specialSymbol ":"
-            ty <- type'
-            pure \loc expr -> E.Annotation loc expr ty
-
-        appLoc lhs rhs = E.Application (zipLoc (getLoc lhs) (getLoc rhs)) lhs rhs
-        infixL = infix' InfixL
-        infixR = infix' InfixR
-        infixN = infix' InfixN
-        infix' fixity sym = fixity do
-            opLoc <- operator sym
-            pure \lhs rhs -> E.Name (SimpleName opLoc sym) `appLoc` lhs `appLoc` rhs
+    annotation = Postfix $ withLoc do
+        specialSymbol ":"
+        ty <- type'
+        pure \loc expr -> E.Annotation loc expr ty
 
     noPrec varParser = choice $ keywordBased <> terminals varParser
 
-    -- anyOperator = choice $ operator <$> [".", "^.", "^..", "^?", ">>", "<<", "^", "*", "/", "+", "-", "<>", ".~", "%~", "?~", "==", "!=", ">", ">=", "<", "<=", "&&", "||", "|>", "<|"]
-    -- this is a bit of an ad-hoc solution for the case where `let x = y; x == z == w` gets parsed as `(let x = y; x == z) == w`
     keywordBased =
-        (<* notFollowedBy someOperator)
-            <$> [ lambdaLike E.Lambda lambda pattern' "->" <*> sameScopeExpr
-                , let'
-                , case'
-                , match'
-                , if'
-                , withWildcards $ withLoc $ flip E.Record <$> someRecord "=" newScopeExpr (Just E.Name)
-                , withWildcards $ withLoc $ flip E.List <$> brackets (commaSep newScopeExpr)
-                ]
+        [ lambdaLike E.Lambda lambda pattern' "->" <*> sameScopeExpr
+        , let'
+        , case'
+        , match'
+        , if'
+        , withWildcards $ withLoc $ flip E.Record <$> someRecord "=" newScopeExpr (Just E.Name)
+        , withWildcards $ withLoc $ flip E.List <$> brackets (commaSep newScopeExpr)
+        ]
       where
         let' =
             withLoc $
@@ -229,6 +202,18 @@ expression' termParser = label "expression" $ makeExprParser (noPrec termParser)
         , varParser
         ]
 
+    infixExpr varParser = do
+        firstExpr <- noPrec varParser
+        pairs <- many $ (,) <$> option (SimpleName Blank "app") someOperator <*> noPrec varParser
+        pure $ uncurry E.Infix $ shift firstExpr pairs
+      where
+        -- x [(+, y), (*, z), (+, w)] --> [(x, +), (y, *), (z, +)] w
+        shift expr [] = ([], expr)
+        shift lhs ((op, rhs) : rest) = first ((lhs, op) :) $ shift rhs rest
+
+        
+            
+
 -- turns out that respecting operator precedence makes for confusing code
 -- i.e. consider, say, `3 + _ * 4`
 -- with precendence, it should be parsed as `3 + (\x -> x * 4)`
@@ -246,11 +231,6 @@ withWildcards p = do
     -- todo: collect a list of var names along with the counter
     ((expr, varCount), loc) <- withLoc $ (,) <$> runStateT p 0
     pure $ foldr (\i -> E.Lambda loc (P.Var $ SimpleName Blank $ "$" <> show i)) expr [1 .. varCount]
-
-zipLoc :: Loc -> Loc -> Loc
-zipLoc loc Blank = loc
-zipLoc Blank loc = loc
-zipLoc (Loc start _) (Loc _ end) = Loc start end
 
 nextVar :: MonadParsec Void Text m => StateT Int m (Loc -> Expression SimpleName)
 nextVar = do

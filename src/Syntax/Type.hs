@@ -16,7 +16,7 @@ data Type' n
     | UniVar Loc CT.UniVar
     | Skolem Loc CT.Skolem
     | Application Loc (Type' n) (Type' n)
-    | Function Loc (Type' n) (Type' n)
+    | Function Loc (Type' n) (Type' n) -- probably doesn't need a Loc
     | Forall Loc n (Type' n)
     | Exists Loc n (Type' n)
     | Variant Loc (ExtRow (Type' n))

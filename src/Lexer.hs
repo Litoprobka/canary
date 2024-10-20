@@ -225,7 +225,10 @@ operator :: ParserM m => Text -> m Loc
 operator sym = label "operator" $ lexeme $ withLoc' const $ string sym *> notFollowedBy (satisfy isOperatorChar)
 
 someOperator :: ParserM m => m SimpleName
-someOperator = lexeme $ mkName $ takeWhile1P (Just "operator") isOperatorChar
+someOperator = lexeme $ mkName do
+    op <- takeWhile1P (Just "operator") isOperatorChar
+    guard (op `notElem` specialSymbols)
+    pure op
 
 isOperatorChar :: Char -> Bool
 isOperatorChar = (`elem` ("+-*/%^=><&.~!?|" :: String))

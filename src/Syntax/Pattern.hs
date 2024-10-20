@@ -11,7 +11,7 @@ data Pattern n
     = Var n
     | Annotation Loc (Pattern n) (Type' n)
     | Constructor Loc n [Pattern n]
-    | Variant Loc OpenName (Pattern n)
+    | Variant Loc OpenName (Pattern n) -- Loc is redundant
     | Record Loc (Row (Pattern n))
     | List Loc [Pattern n]
     | IntLiteral Loc Int

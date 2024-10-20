@@ -7,14 +7,18 @@ import Syntax.Pattern (Pattern)
 import Syntax.Type (Type')
 import Syntax.Row
 import Prettyprinter (Pretty, pretty, (<+>), concatWith, parens, sep, nest, vsep, encloseSep, brackets, comma, punctuate, braces, dquotes)
-import CheckerTypes (Loc, Name, HasLoc (..))
-import qualified CheckerTypes as CT
+import CheckerTypes (Loc, HasLoc (..), zipLoc)
 
 data Binding n
     = ValueBinding Loc (Pattern n) (Expression n)
     | FunctionBinding Loc n (NonEmpty (Pattern n)) (Expression n)
     deriving (Show, Eq, Functor, Foldable, Traversable)
 
+-- todo: some nodes don't need to store an explicit Loc. Instead, getLoc may zip the child node locs
+-- the only difference is whether outer parenthesis are inculded, but seems like that only makes a differenc
+-- for wildcard lambdas
+--
+-- Application, Annotation and some others
 data Expression n
     = Lambda Loc (Pattern n) (Expression n)
     | Application Loc (Expression n) (Expression n)
@@ -38,6 +42,8 @@ data Expression n
     | IntLiteral Loc Int
     | TextLiteral Loc Text
     | CharLiteral Loc Text
+    -- | an unresolved expression with infix / prefix operators
+    | Infix [(Expression n, n)] (Expression n)
     deriving (Show, Eq, Functor, Foldable, Traversable)
 
 instance Pretty n => Pretty (Binding n) where
@@ -64,6 +70,7 @@ instance Pretty n => Pretty (Expression n) where
             IntLiteral _ num -> pretty num
             TextLiteral _ txt -> dquotes $ pretty txt
             CharLiteral _ c -> "'" <> pretty c <> "'"
+            Infix pairs last' -> "?(" <> sep (map (\(lhs, op) -> pretty lhs <+> pretty op) pairs <> [pretty last']) <> ")"
           where
             parensWhen minPrec
                 | n >= minPrec = parens
@@ -88,3 +95,5 @@ instance HasLoc n => HasLoc (Expression n) where
     IntLiteral loc _ -> loc
     TextLiteral loc _ -> loc
     CharLiteral loc _ -> loc
+    Infix ((e, _): _) l -> zipLoc (getLoc e) (getLoc l)
+    Infix [] l -> getLoc l

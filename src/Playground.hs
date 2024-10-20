@@ -144,16 +144,22 @@ matchCase whenUpper whenLower str@(h : _)
     | isUpperCase h = whenUpper $ fromString str
     | otherwise = whenLower $ fromString str
 
-instance IsString (Expression Text) where
+mkName :: Text -> SimpleName
+mkName = SimpleName Blank
+
+instance IsString (Expression SimpleName) where
     fromString ('\'' : rest) = rest & matchCase (E.Variant . SimpleName Blank . ("'" <>)) (error $ "type variable " <> fromString rest <> " at value level")
-    fromString str = str & matchCase E.Constructor E.Name
+    fromString str = str & matchCase (E.Constructor . mkName) (E.Name . mkName)
 
-instance IsString (Pattern Text) where
-    fromString = matchCase (\name -> P.Constructor Blank name []) P.Var
+instance IsString (Pattern SimpleName) where
+    fromString = matchCase (\name -> P.Constructor Blank (mkName name) []) (P.Var . mkName)
 
-instance IsString (Type' Text) where
-    fromString str@('\'' : _) = T.Var $ fromString str
-    fromString str = str & matchCase T.Name (error $ "type name " <> fromString str <> " shouldn't start with a lowercase letter")
+instance IsString (Type' SimpleName) where
+    fromString str@('\'' : _) = T.Var . mkName $ fromString str
+    fromString str = str & matchCase (T.Name . mkName) (error $ "type name " <> fromString str <> " shouldn't start with a lowercase letter")
+
+instance IsString SimpleName where
+    fromString = mkName . fromString
 
 instance IsString Name where
     fromString = nameFromText . fromString
