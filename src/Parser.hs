@@ -1,6 +1,7 @@
 {-# OPTIONS_GHC -Wno-unrecognised-pragmas #-}
 
 {-# HLINT ignore "Use <$>" #-}
+{-# LANGUAGE DataKinds #-}
 module Parser (code, declaration, type', pattern', expression) where
 
 import Relude hiding (many, some)
@@ -15,17 +16,15 @@ import Syntax.Type qualified as T
 import Control.Monad.Combinators.Expr
 import Control.Monad.Combinators.NonEmpty qualified as NE
 
-import CheckerTypes (Loc (..), SimpleName (..), getLoc, zipLoc)
-import Data.IntMap.Strict qualified as IntMap
+import Common (Loc (..), SimpleName (..), getLoc, zipLoc, Pass (..))
 import Syntax.Row
 import Syntax.Row qualified as Row
 import Text.Megaparsec
-import qualified Data.List.NonEmpty as NE
 
-code :: Parser [Declaration SimpleName]
+code :: Parser [Declaration 'Parse]
 code = topLevelBlock declaration
 
-declaration :: Parser (Declaration SimpleName)
+declaration :: Parser (Declaration 'Parse)
 declaration = withLoc $ choice [typeDec, valueDec, signature]
   where
     valueDec = flip3 D.Value <$> binding <*> whereBlock
@@ -44,19 +43,19 @@ declaration = withLoc $ choice [typeDec, valueDec, signature]
         specialSymbol "="
         flip4 D.Type name vars <$> typePattern `sepBy` specialSymbol "|"
 
-    typePattern :: Parser (Constructor SimpleName)
+    typePattern :: Parser (Constructor 'Parse)
     typePattern = withLoc do
         name <- typeName
         args <- many typeParens
         pure $ flip3 D.Constructor name args
 
-    signature :: Parser (Loc -> Declaration SimpleName)
+    signature :: Parser (Loc -> Declaration 'Parse)
     signature = do
         name <- termName
         specialSymbol ":"
         flip3 D.Signature name <$> type'
 
-type' :: ParserM m => m (Type' SimpleName)
+type' :: ParserM m => m (Type' 'Parse)
 type' = makeExprParser typeParens [[typeApp], [function], [forall', exists]]
   where
     forall' = Prefix $ lambdaLike T.Forall forallKeyword typeVariable "."
@@ -68,7 +67,7 @@ type' = makeExprParser typeParens [[typeApp], [function], [forall', exists]]
 
 -- a type expression with higher precedence than application
 -- used when parsing constructor arguement types and the like
-typeParens :: ParserM m => m (Type' SimpleName)
+typeParens :: ParserM m => m (Type' 'Parse)
 typeParens =
     choice
         [ T.Name <$> typeName
@@ -99,7 +98,7 @@ lambdaLike con kw argP endSym = do
     end <- getSourcePos
     pure \body -> foldr (\(start, arg) -> con (Loc start end) arg) body args
 
-pattern' :: ParserM m => m (Pattern SimpleName)
+pattern' :: ParserM m => m (Pattern 'Parse)
 pattern' = do
     pat <-
         choice
@@ -115,7 +114,7 @@ pattern' = do
 should be used in cases where multiple patterns in a row are accepted, i.e.
 function definitions and match expressions
 -}
-patternParens :: ParserM m => m (Pattern SimpleName)
+patternParens :: ParserM m => m (Pattern 'Parse)
 patternParens =
     choice
         [ P.Var <$> termName
@@ -131,7 +130,7 @@ patternParens =
   where
     unit = P.Record Blank Row.empty
 
-binding :: ParserM m => m (Binding SimpleName)
+binding :: ParserM m => m (Binding 'Parse)
 binding = withLoc do
     f <-
         -- it should probably be `try (E.FunctionBinding <$> termName) <*> NE.some patternParens
@@ -141,15 +140,15 @@ binding = withLoc do
     specialSymbol "="
     f <$> expression
 
-expression :: ParserM m => m (Expression SimpleName)
+expression :: ParserM m => m (Expression 'Parse)
 expression = expression' $ E.Name <$> nonWildcardTerm
 
-expression' :: ParserM m => m (Expression SimpleName) -> m (Expression SimpleName)
+expression' :: ParserM m => m (Expression 'Parse) -> m (Expression 'Parse)
 expression' termParser = label "expression" $ makeExprParser (noPrec termParser) [[annotation]]
   where
     sameScopeExpr = expression' termParser
 
-    newScopeExpr :: ParserM m => StateT Int m (Expression SimpleName)
+    newScopeExpr :: ParserM m => StateT Int m (Expression 'Parse)
     newScopeExpr =
         expression' $
             withLoc (nextVar <* wildcard)
@@ -190,7 +189,7 @@ expression' termParser = label "expression" $ makeExprParser (noPrec termParser)
             false <- sameScopeExpr
             pure $ flip4 E.If cond true false
 
-    terminals :: ParserM m => m (Expression SimpleName) -> [m (Expression SimpleName)]
+    terminals :: ParserM m => m (Expression 'Parse) -> [m (Expression 'Parse)]
     terminals varParser =
         [ parens $ withWildcards newScopeExpr
         , withLoc' E.RecordLens recordLens
@@ -205,7 +204,7 @@ expression' termParser = label "expression" $ makeExprParser (noPrec termParser)
     infixExpr varParser = do
         firstExpr <- noPrec varParser
         pairs <- many $ (,) <$> option (SimpleName Blank "app") someOperator <*> noPrec varParser
-        pure $ uncurry E.Infix $ shift firstExpr pairs
+        pure $ uncurry (E.Infix E.Yes) $ shift firstExpr pairs
       where
         -- x [(+, y), (*, z), (+, w)] --> [(x, +), (y, *), (z, +)] w
         shift expr [] = ([], expr)
@@ -226,13 +225,13 @@ expression' termParser = label "expression" $ makeExprParser (noPrec termParser)
 -- on one hand, `({x = 3, y = 3})` looks a bit janky
 -- on the other hand, without that you wouldn't be able to write `f {x = 3, y = _}`
 -- if you want it to mean `\y -> f {x = 3, y}`
-withWildcards :: ParserM m => StateT Int m (Expression SimpleName) -> m (Expression SimpleName)
+withWildcards :: ParserM m => StateT Int m (Expression 'Parse) -> m (Expression 'Parse)
 withWildcards p = do
     -- todo: collect a list of var names along with the counter
     ((expr, varCount), loc) <- withLoc $ (,) <$> runStateT p 0
     pure $ foldr (\i -> E.Lambda loc (P.Var $ SimpleName Blank $ "$" <> show i)) expr [1 .. varCount]
 
-nextVar :: MonadParsec Void Text m => StateT Int m (Loc -> Expression SimpleName)
+nextVar :: MonadParsec Void Text m => StateT Int m (Loc -> Expression 'Parse)
 nextVar = do
     modify succ
     i <- get

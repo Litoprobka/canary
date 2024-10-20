@@ -36,7 +36,7 @@ module Lexer (
     mkName,
 ) where
 
-import CheckerTypes (Loc (..), SimpleName (..))
+import Common (Loc (..), SimpleName (..))
 import Control.Monad.Combinators.NonEmpty qualified as NE
 import Data.Char (isAlphaNum, isSpace, isUpperCase)
 import Data.HashSet qualified as Set

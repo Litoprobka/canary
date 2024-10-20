@@ -9,7 +9,7 @@ import Data.Sequence.NonEmpty (NESeq)
 import Data.Sequence.NonEmpty qualified as NESeq
 import GHC.IsList qualified (Item, toList)
 import Relude hiding (empty)
-import CheckerTypes (SimpleName)
+import Common (SimpleName)
 
 type OpenName = SimpleName
 

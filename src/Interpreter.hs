@@ -1,8 +1,9 @@
 {-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE OverloadedRecordDot #-}
+{-# LANGUAGE DataKinds #-}
 module Interpreter where
 
-import CheckerTypes (Name)
+import Common (Name, Pass (..))
 import Relude
 import Syntax.Row (OpenName)
 import Syntax
@@ -47,7 +48,7 @@ data InterpreterBuiltins a = InterpreterBuiltins
     , nil :: a
     } deriving (Functor, Foldable, Traversable)
 
-eval :: InterpreterBuiltins Name -> HashMap Name Value -> HashMap Name Value -> Expression Name -> Value
+eval :: InterpreterBuiltins Name -> HashMap Name Value -> HashMap Name Value -> Expression 'Fixity -> Value
 eval builtins constrs = go where
   go env = \case
     E.Lambda _ pat body -> Lambda \arg -> go (forceMatch env pat arg) body
@@ -78,11 +79,12 @@ eval builtins constrs = go where
     E.IntLiteral _ n -> Int n
     E.TextLiteral _ txt -> Text txt
     E.CharLiteral _ c -> Char c
+    E.Infix witness _ _ -> E.noInfix witness
 
-  forceMatch :: HashMap Name Value -> Pattern Name -> Value -> HashMap Name Value
+  forceMatch :: HashMap Name Value -> Pattern 'Fixity -> Value -> HashMap Name Value
   forceMatch env pat arg = fromMaybe (error "pattern mismatch") $ match env pat arg
 
-  match :: HashMap Name Value -> Pattern Name -> Value -> Maybe (HashMap Name Value)
+  match :: HashMap Name Value -> Pattern 'Fixity -> Value -> Maybe (HashMap Name Value)
   match env = \cases
     (P.Var var) val -> Just $ HashMap.insert var val env
     (P.Annotation _ pat _) val -> match env pat val
@@ -109,7 +111,7 @@ eval builtins constrs = go where
   mkLambda 0 f = f []
   mkLambda n f = mkLambda (pred n) \args -> Lambda \x -> f (x : args)
 
-  matchAllArgs :: HashMap Name Value -> [Value] -> [Pattern Name] -> Expression Name -> Maybe Value
+  matchAllArgs :: HashMap Name Value -> [Value] -> [Pattern 'Fixity] -> Expression 'Fixity -> Maybe Value
   matchAllArgs env args pats body = do
     env' <- fold <$> zipWithM (match env) pats args
     pure $ go env' body

@@ -4,8 +4,10 @@
 {-# LANGUAGE NoFieldSelectors #-}
 {-# LANGUAGE OverloadedRecordDot #-}
 {-# OPTIONS_GHC -Wno-partial-fields #-}
+{-# LANGUAGE TypeFamilies #-}
+{-# LANGUAGE DataKinds #-}
 
-module CheckerTypes (Name (..), UniVar (..), Skolem (..), Scope (..), Id (..), inc, Loc (..), SimpleName (..), HasLoc(..), zipLoc) where
+module Common (Name (..), UniVar (..), Skolem (..), Scope (..), Id (..), inc, Loc (..), SimpleName (..), HasLoc(..), zipLoc, NameAt, Pass(..), bifix) where
 
 import Prettyprinter
 import Relude
@@ -13,6 +15,16 @@ import Text.Megaparsec (SourcePos)
 
 -- this file is a bit of a crutch. Perhaps it's better to move the definitions to Type or TypeChecker
 -- however, they don't really belong to Type, and moving them to TypeChecker introduces a cyclic dependency (which may or may not be fine)
+
+data Pass
+    = Parse -- after parsing
+    | NameRes -- etc
+    | Fixity
+    | DuringTypecheck -- an intermediate state for univars and skolems
+
+type family NameAt (pass :: Pass) where
+    NameAt 'Parse = SimpleName
+    NameAt other = Name
 
 -- a disambiguated name
 -- I haven't decided whether ids should be global or per-name
@@ -100,3 +112,12 @@ zipLoc :: Loc -> Loc -> Loc
 zipLoc loc Blank = loc
 zipLoc Blank loc = loc
 zipLoc (Loc start _) (Loc _ end) = Loc start end
+
+-- * Some fancy boilerplate prevention stuff
+
+-- bifix f g = f $ g $ f $ g $ ...
+bifix :: ((a -> b) -> a -> b) -> ((a -> b) -> a -> b) -> a -> b
+bifix f g = let recur = f (g recur) in recur
+
+-- we don't need a special case to make bifix it monadic. We do need monadic baseCast-s though
+    

@@ -13,7 +13,7 @@ module Playground where
 
 import Relude hiding (Reader, State, bool, runState)
 
-import CheckerTypes hiding (Scope)
+import Common hiding (Scope)
 import Data.Char (isUpperCase)
 import Data.HashMap.Strict qualified as HashMap
 import Effectful
@@ -21,7 +21,7 @@ import Effectful.Error.Static (Error)
 import Effectful.Reader.Static (Reader)
 import Effectful.State.Static.Local (State, runState)
 import NameGen (NameGen, freshName, runNameGen)
-import NameResolution (Scope (..), declare, resolveNames, resolveType, runNameResolution, runScopeErrors, runDeclare)
+import NameResolution (Scope (..), declare, resolveNames, resolveType, runDeclare, runNameResolution, runScopeErrors)
 import Parser
 import Prettyprinter hiding (list)
 import Prettyprinter.Render.Text (putDoc)
@@ -37,30 +37,30 @@ import TypeChecker
 -- a lot of what is used here is only reasonable for interactive use
 
 infixr 2 -->
-(-->) :: Type' n -> Type' n -> Type' n
+(-->) :: Type' p -> Type' p -> Type' p
 (-->) = T.Function Blank
 
 infixl 1 #
-(#) :: Expression n -> Expression n -> Expression n
+(#) :: Expression p -> Expression p -> Expression p
 (#) = E.Application Blank
 
-binApp :: Expression Text -> Expression Text -> Expression Text -> Expression Text
+binApp :: Expression 'Parse -> Expression 'Parse -> Expression 'Parse -> Expression 'Parse
 binApp f arg1 arg2 = f # arg1 # arg2
 
 infixl 3 $:
-($:) :: Type' n -> Type' n -> Type' n
+($:) :: Type' p -> Type' p -> Type' p
 ($:) = T.Application Blank
 
-λ :: Pattern n -> Expression n -> Expression n
+λ :: Pattern p -> Expression p -> Expression p
 λ = E.Lambda Blank
 
-lam :: Pattern n -> Expression n -> Expression n
+lam :: Pattern p -> Expression p -> Expression p
 lam = E.Lambda Blank
 
-(∃) :: n -> Type' n -> Type' n
+(∃) :: NameAt p -> Type' p -> Type' p
 (∃) = T.Exists Blank
 
-con :: n -> [Pattern n] -> Pattern n
+con :: NameAt p -> [Pattern p] -> Pattern p
 con = P.Constructor Blank
 
 runDefault :: Eff '[Declare, Error TypeError, Reader (Builtins Name), State InfState, NameGen] a -> Either TypeError a
@@ -68,9 +68,9 @@ runDefault action = runPureEff $ runNameGen do
     (_, builtins, defaultEnv) <- mkDefaults
     run (Right <$> defaultEnv) builtins action
 
-mkDefaults :: NameGen :> es => Eff es (HashMap Text Name, Builtins Name, HashMap Name (Type' Name))
+mkDefaults :: NameGen :> es => Eff es (HashMap Text Name, Builtins Name, HashMap Name (Type' 'Fixity))
 mkDefaults = do
-    let builtins = Builtins { subtypeRelations = [(NatName Blank, IntName Blank)]}
+    let builtins = Builtins{subtypeRelations = [(NatName Blank, IntName Blank)]}
     types <-
         traverse (freshName Blank) $
             HashMap.fromList $
@@ -79,15 +79,17 @@ mkDefaults = do
                         , "Maybe"
                         , "Tuple"
                         ]
-    let initScope = types <> HashMap.fromList
-            [ ("Bool", BoolName Blank)
-            , ("List", ListName Blank)
-            , ("Int", IntName Blank)
-            , ("Nat", NatName Blank)
-            , ("Text", TextName Blank)
-            , ("Char", CharName Blank)
-            , ("Lens", LensName Blank)
-            ]
+    let initScope =
+            types
+                <> HashMap.fromList
+                    [ ("Bool", BoolName Blank)
+                    , ("List", ListName Blank)
+                    , ("Int", IntName Blank)
+                    , ("Nat", NatName Blank)
+                    , ("Text", TextName Blank)
+                    , ("Char", CharName Blank)
+                    , ("Lens", LensName Blank)
+                    ]
     (env, Scope scope) <-
         (runState (Scope initScope) . fmap (HashMap.fromList . fst) . runScopeErrors . NameResolution.runDeclare)
             ( traverse
@@ -102,16 +104,16 @@ mkDefaults = do
                 , ("reverse", T.Forall Blank "'a" $ list "'a" --> list "'a")
                 ]
             )
-    pure (scope, builtins, env)
+    pure (scope, builtins, _fixityRes env)
   where
     list var = "List" $: var
 
-inferIO :: Expression Name -> IO ()
+inferIO :: Expression 'Fixity -> IO ()
 inferIO = inferIO' do
     (_, builtins, env) <- mkDefaults
     pure (env, builtins)
 
-inferIO' :: Eff '[NameGen] (HashMap Name (Type' Name), Builtins Name) -> Expression Name -> IO ()
+inferIO' :: Eff '[NameGen] (HashMap Name (Type' 'Fixity), Builtins Name) -> Expression 'Fixity -> IO ()
 inferIO' mkEnv expr = do
     case typeOrError of
         Left (TypeError err) -> putDoc $ err <> line
@@ -131,7 +133,7 @@ parseInfer input = runEff $ runNameGen
         Right decls -> do
             (scope, builtins, defaultEnv) <- mkDefaults
             resolvedDecls <- fst <$> runNameResolution scope (resolveNames decls)
-            typesOrErrors <- typecheck defaultEnv builtins resolvedDecls
+            typesOrErrors <- typecheck defaultEnv builtins $ _fixityRes resolvedDecls
             case typesOrErrors of
                 Left (TypeError err) -> liftIO $ putDoc $ err <> line
                 Right types -> liftIO $ for_ types \ty -> putDoc $ pretty ty <> line
@@ -147,14 +149,14 @@ matchCase whenUpper whenLower str@(h : _)
 mkName :: Text -> SimpleName
 mkName = SimpleName Blank
 
-instance IsString (Expression SimpleName) where
+instance IsString (Expression 'Parse) where
     fromString ('\'' : rest) = rest & matchCase (E.Variant . SimpleName Blank . ("'" <>)) (error $ "type variable " <> fromString rest <> " at value level")
     fromString str = str & matchCase (E.Constructor . mkName) (E.Name . mkName)
 
-instance IsString (Pattern SimpleName) where
+instance IsString (Pattern 'Parse) where
     fromString = matchCase (\name -> P.Constructor Blank (mkName name) []) (P.Var . mkName)
 
-instance IsString (Type' SimpleName) where
+instance IsString (Type' 'Parse) where
     fromString str@('\'' : _) = T.Var . mkName $ fromString str
     fromString str = str & matchCase (T.Name . mkName) (error $ "type name " <> fromString str <> " shouldn't start with a lowercase letter")
 
@@ -167,14 +169,14 @@ instance IsString Name where
 nameFromText :: Text -> Name
 nameFromText txt = Name Blank txt (Id $ hashWithSalt 0 txt)
 
-instance IsString (Expression Name) where
+instance {-# OVERLAPPABLE #-} NameAt p ~ Name => IsString (Expression p) where
     fromString ('\'' : rest) = rest & matchCase (E.Variant . SimpleName Blank . ("'" <>)) (error $ "type variable " <> fromString rest <> " at value level")
     fromString str = str & matchCase (E.Constructor . nameFromText) (E.Name . nameFromText)
 
-instance IsString (Pattern Name) where
+instance {-# OVERLAPPABLE #-} NameAt p ~ Name => IsString (Pattern p) where
     fromString = matchCase (\txt -> P.Constructor Blank (nameFromText txt) []) (P.Var . nameFromText)
 
-instance IsString (Type' Name) where
+instance {-# OVERLAPPABLE #-} NameAt p ~ Name => IsString (Type' p) where
     fromString str@('\'' : _) = T.Var $ nameFromText $ fromString str
     fromString str =
         str & matchCase (T.Name . nameFromText) (error $ "type name " <> fromString str <> " shouldn't start with a lowercase letter")

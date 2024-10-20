@@ -5,7 +5,7 @@
 module NameGen (runNameGen, freshId, freshName, NameGen) where
 
 import Relude hiding (evalState, get, modify)
-import CheckerTypes (Id (..), inc, Name (..), Loc)
+import Common (Id (..), inc, Name (..), Loc)
 import Effectful
 import Effectful.TH
 import Effectful.State.Static.Local (evalState, get, modify)

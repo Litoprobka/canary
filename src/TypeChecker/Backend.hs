@@ -10,7 +10,7 @@
 
 module TypeChecker.Backend where
 
-import CheckerTypes
+import Common
 import Control.Monad (foldM)
 import Data.HashMap.Strict qualified as HashMap
 import Data.HashSet qualified as HashSet
@@ -30,10 +30,10 @@ import Syntax.Row qualified as Row
 import Syntax.Type qualified as T
 import Prelude (show)
 
-type Expr = Expression Name
-type Pattern' = Pattern Name
+type Expr = Expression 'Fixity
+type Pat = Pattern 'Fixity
 
-type Type = Type' Name
+type Type = Type' 'DuringTypecheck
 
 data Monotype
     = MName Name
@@ -67,11 +67,11 @@ newtype Builtins a = Builtins
 
 -- calling an uninferred type closure should introduce all of the inferred bindings
 -- into the global scope
-newtype UninferredType = UninferredType (forall es. InfEffs es => Eff es Type)
+newtype UninferredType = UninferredType (forall es. InfEffs es => Eff es (Type' 'Fixity))
 instance Show UninferredType where
     show _ = "<closure>"
 
-type TopLevelBindings = HashMap Name (Either UninferredType Type)
+type TopLevelBindings = HashMap Name (Either UninferredType (Type' 'Fixity))
 
 data InfState = InfState
     { nextUniVarId :: Int
@@ -147,7 +147,7 @@ runWithFinalEnv env builtins = do
 typeError :: InfEffs es => Doc () -> Eff es a
 typeError err = throwError $ TypeError err
 
-freshUniVar :: InfEffs es => Loc -> Eff es (Type' n)
+freshUniVar :: InfEffs es => Loc -> Eff es Type
 freshUniVar loc = T.UniVar loc <$> freshUniVar'
 
 freshUniVar' :: InfEffs es => Eff es UniVar
@@ -234,9 +234,9 @@ lookupSig :: (InfEffs es, Declare :> es) => Name -> Eff es Type
 lookupSig name = do
     InfState{topLevel, locals} <- get @InfState
     case (HashMap.lookup name topLevel, HashMap.lookup name locals) of
-        (Just (Right ty), _) -> pure ty
+        (Just (Right ty), _) -> pure $ T.cast id ty
         (_, Just ty) -> pure ty
-        (Just (Left (UninferredType closure)), _) -> closure
+        (Just (Left (UninferredType closure)), _) -> T.cast id <$> closure
         (Nothing, Nothing) -> do
             -- assuming that type checking is performed after name resolution,
             -- all encountered names have to be in scope
@@ -246,7 +246,7 @@ lookupSig name = do
 declareAll :: Declare :> es => HashMap Name Type -> Eff es ()
 declareAll = traverse_ (uncurry updateSig) . HashMap.toList
 
-declareTopLevel :: InfEffs es => HashMap Name Type -> Eff es ()
+declareTopLevel :: InfEffs es => HashMap Name (Type' 'Fixity) -> Eff es ()
 declareTopLevel types = modify \s -> s{topLevel = fmap Right types <> s.topLevel}
 
 builtin :: Reader (Builtins Name) :> es => (Builtins Name -> a) -> Eff es a

@@ -1,30 +1,31 @@
 {-# LANGUAGE LambdaCase #-}
-module Syntax.Pattern (Pattern (..)) where
+{-# LANGUAGE UndecidableInstances #-}
+{-# LANGUAGE RoleAnnotations #-}
+module Syntax.Pattern (Pattern (..), cast) where
 
 import Relude
 import Syntax.Row
 import Prettyprinter (Pretty, pretty, Doc, braces, parens, sep, (<+>), punctuate, comma, dquotes, brackets)
 import Syntax.Type (Type')
-import CheckerTypes (Loc)
+import Common (Loc, Pass, NameAt, bifix)
 
-data Pattern n
-    = Var n
-    | Annotation Loc (Pattern n) (Type' n)
-    | Constructor Loc n [Pattern n]
-    | Variant Loc OpenName (Pattern n) -- Loc is redundant
-    | Record Loc (Row (Pattern n))
-    | List Loc [Pattern n]
+data Pattern (p :: Pass)
+    = Var (NameAt p)
+    | Annotation Loc (Pattern p) (Type' p)
+    | Constructor Loc (NameAt p) [Pattern p]
+    | Variant Loc OpenName (Pattern p) -- Loc is redundant
+    | Record Loc (Row (Pattern p))
+    | List Loc [Pattern p]
     | IntLiteral Loc Int
     | TextLiteral Loc Text
     | CharLiteral Loc Text
-    deriving (Show, Eq, Functor, Foldable, Traversable)
 
--- note that the Traversable instance generally
--- doesn't do what you want
+deriving instance Show (NameAt pass) => Show (Pattern pass)
+deriving instance Eq (NameAt pass) => Eq (Pattern pass)
 
-instance Pretty n => Pretty (Pattern n) where
+instance Pretty (NameAt pass) => Pretty (Pattern pass) where
     pretty = go 0 where
-        go :: Int -> Pattern n -> Doc ann
+        go :: Int -> Pattern pass -> Doc ann
         go n = \case
             Var name -> pretty name
             Annotation _ pat ty -> parens $ pretty pat <+> ":" <+> pretty ty
@@ -41,3 +42,20 @@ instance Pretty n => Pretty (Pattern n) where
                 | otherwise = id
             
             recordField (name, pat) = pretty name <+> "=" <+> pretty pat
+
+
+-- | a cast template for bifix. Doesn't handle annotations
+baseCast :: NameAt p ~ NameAt q => (Pattern p -> Pattern q) -> Pattern p -> Pattern q
+baseCast recur = \case
+    Var name -> Var name
+    Constructor loc name pats -> Constructor loc name (map recur pats)
+    Variant loc name pat -> Variant loc name (recur pat)
+    Record loc pats -> Record loc (fmap recur pats)
+    List loc pats -> List loc (map recur pats)
+    IntLiteral loc n -> IntLiteral loc n
+    TextLiteral loc txt -> TextLiteral loc txt
+    CharLiteral loc c -> CharLiteral loc c
+    ann@Annotation{} -> recur ann
+
+cast :: (NameAt p ~ NameAt q) => ((Pattern p -> Pattern q) -> Pattern p -> Pattern q) -> Pattern p -> Pattern q
+cast terminals = bifix terminals baseCast

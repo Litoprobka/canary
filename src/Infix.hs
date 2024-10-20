@@ -1,9 +1,10 @@
 {-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE MultiWayIf #-}
+{-# LANGUAGE DataKinds #-}
 
 module Infix where
 
-import CheckerTypes (Name, getLoc, zipLoc)
+import Common (Name, getLoc, zipLoc, Pass (..))
 import Control.Monad (foldM)
 import Data.HashMap.Strict qualified as HashMap
 import Data.HashSet qualified as HashSet
@@ -13,8 +14,11 @@ import Effectful.Error.Static (Error, runErrorNoCallStack, throwError)
 import Effectful.Reader.Static (Reader, ask, runReader)
 import Playground ()
 import Relude hiding (Op, Reader, ask, runReader)
-import Syntax (Expression)
+import Syntax (Expression, Pattern)
 import Syntax.Expression qualified as E
+import qualified Syntax.Pattern as P
+import qualified Syntax.Type as T
+import Syntax.Expression (Binding)
 
 newtype EqClass = EqClass Int deriving (Show, Eq, Hashable)
 
@@ -50,20 +54,47 @@ priority prev next = do
         | HashSet.member prevEq nextHigherThan -> pure Right'
         | otherwise -> throwError @Text $ "undefined ordering of " <> show prev <> " and " <> show next
 
-parse :: [(Expression Name, Name)] -> Expression Name -> Either Text (Expression Name)
-parse pairs last' = runPureEff . runErrorNoCallStack . runReader testOpMap . runReader testGraph $ go [] pairs
-  where
-    go :: Ctx es => [(Expression Name, Name)] -> [(Expression Name, Name)] -> Eff es (Expression Name)
-    go [] [] = pure last'
-    go ((x, op) : rest) [] = do
-        last'' <- appOrMerge op x last'
-        foldM (\acc (z, op') -> appOrMerge op' z acc) last'' rest
-    go [] ((x, op) : rest) = go [(x, op)] rest
-    go ((x, prev) : stack) ((y, next) : rest) = do
-        newStack <- pop (y, next) ((x, prev) :| stack)
-        go newStack rest
+resolveFixity :: Expression 'NameRes -> Either Text (Expression 'Fixity)
+resolveFixity = runPureEff . runErrorNoCallStack . runReader testOpMap . runReader testGraph . parse
 
-    pop :: Ctx es => (Expression Name, Name) -> NonEmpty (Expression Name, Name) -> Eff es [(Expression Name, Name)]
+parse :: Ctx es => Expression 'NameRes -> Eff es (Expression 'Fixity)
+parse = \case
+    E.Lambda loc arg body -> E.Lambda loc (castP arg) <$> parse body
+    E.Application loc lhs rhs -> E.Application loc <$> parse lhs <*> parse rhs
+    E.Let loc bind expr -> E.Let loc <$> parseBinding bind <*> parse expr
+    E.Case loc arg cases -> E.Case loc <$> parse arg <*> traverse (bitraverse (pure . castP) parse) cases
+    -- | Haskell's \cases
+    E.Match loc cases -> E.Match loc <$> traverse (bitraverse (pure . map castP) parse) cases
+    E.If loc cond true false -> E.If loc <$> parse cond <*> parse true <*> parse false
+    -- | value : Type
+    E.Annotation loc e ty -> E.Annotation loc <$> parse e <*> pure (T.cast id ty)
+    E.Name name -> pure $ E.Name name
+    -- | .field.otherField.thirdField
+    E.RecordLens loc row -> pure $ E.RecordLens loc row
+    E.Constructor name -> pure $ E.Constructor name
+    E.Variant name -> pure $ E.Variant name
+    E.Record loc row -> E.Record loc <$> traverse parse row
+    E.List loc exprs -> E.List loc <$> traverse parse exprs
+    E.IntLiteral loc n -> pure $ E.IntLiteral loc n
+    E.TextLiteral loc txt -> pure $ E.TextLiteral loc txt
+    E.CharLiteral loc c -> pure $ E.CharLiteral loc c
+    -- | an unresolved expression with infix / prefix operators
+    E.Infix _ pairs last' -> join $ go' <$> traverse (bitraverse parse pure) pairs <*> parse last'
+  where
+    go' :: Ctx es => [(Expression 'Fixity, Name)] -> Expression 'Fixity -> Eff es (Expression 'Fixity)
+    go' pairs last' = go [] pairs
+      where
+        go :: Ctx es => [(Expression 'Fixity, Name)] -> [(Expression 'Fixity, Name)] -> Eff es (Expression 'Fixity)
+        go [] [] = pure last'
+        go ((x, op) : rest) [] = do
+            last'' <- appOrMerge op x last'
+            foldM (\acc (z, op') -> appOrMerge op' z acc) last'' rest
+        go [] ((x, op) : rest) = go [(x, op)] rest
+        go ((x, prev) : stack) ((y, next) : rest) = do
+            newStack <- pop (y, next) ((x, prev) :| stack)
+            go newStack rest
+
+    pop :: Ctx es => (Expression 'Fixity, Name) -> NonEmpty (Expression 'Fixity, Name) -> Eff es [(Expression 'Fixity, Name)]
     pop (y, next) ((x, prev) :| stack) =
         priority prev next >>= \case
             Right' -> pure ((y, next) : (x, prev) : stack)
@@ -73,7 +104,7 @@ parse pairs last' = runPureEff . runErrorNoCallStack . runReader testOpMap . run
                     Nothing -> pure [(newX, next)]
                     Just stack' -> pop (newX, next) stack'
 
-    appOrMerge :: Ctx es => Name -> Expression Name -> Expression Name -> Eff es (Expression Name)
+    appOrMerge :: Ctx es => Name -> Expression 'Fixity -> Expression 'Fixity -> Eff es (Expression 'Fixity)
     appOrMerge op lhs rhs = do
         opMap <- ask @OpMap
         (fixity, _) <- lookup' op opMap
@@ -104,3 +135,15 @@ testGraph =
         , (EqClass 0, HashSet.fromList [EqClass 4])
         , (EqClass 4, HashSet.fromList [])
         ]
+
+-- * Helpers
+
+parseBinding :: Ctx es => Binding 'NameRes -> Eff es (Binding 'Fixity)
+parseBinding = \case
+    E.ValueBinding loc pat expr -> E.ValueBinding loc (castP pat) <$> parse expr
+    E.FunctionBinding loc name pats body -> E.FunctionBinding loc name (fmap castP pats) <$> parse body
+
+castP :: Pattern 'NameRes -> Pattern 'Fixity
+castP = P.cast \recur -> \case
+    P.Annotation loc pat ty -> P.Annotation loc (recur pat) (T.cast id ty)
+    other -> recur other
