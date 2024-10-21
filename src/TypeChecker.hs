@@ -18,7 +18,6 @@ module TypeChecker (
     normalise,
     Builtins (..),
     InfState (..),
-    TypeError (..),
     InfEffs,
     Declare,
     typecheck,
@@ -43,13 +42,14 @@ import Syntax.Row (ExtRow (..))
 import Syntax.Row qualified as Row
 import Syntax.Type qualified as T
 import TypeChecker.Backend
+import Diagnostic (Diagnose)
 
 typecheck
-    :: NameGen :> es
+    :: (NameGen :> es, Diagnose :> es)
     => HashMap Name (Type' 'Fixity) -- imports; note that the types may not be incomplete
     -> Builtins Name
     -> [Declaration 'Fixity]
-    -> Eff es (Either TypeError (HashMap Name (Type' 'Fixity))) -- type checking doesn't add anything new to the AST, so we reuse 'Fixity for simplicity
+    -> Eff es (HashMap Name (Type' 'Fixity)) -- type checking doesn't add anything new to the AST, so we reuse 'Fixity for simplicity
 typecheck env builtins decls = run (Right <$> env) builtins $ traverse normalise =<< inferDecls decls
 
 -- finds all type parameters used in a type and creates corresponding forall clauses

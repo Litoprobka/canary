@@ -22,7 +22,7 @@ import Effectful.Error.Static (Error)
 import Effectful.Reader.Static (Reader)
 import Effectful.State.Static.Local (State, runState)
 import NameGen (NameGen, freshName, runNameGen)
-import NameResolution (Scope (..), declare, resolveNames, resolveType, runDeclare, runNameResolution, runScopeErrors)
+import NameResolution (Scope (..), declare, resolveNames, resolveType, runDeclare, runNameResolution)
 import Parser
 import Prettyprinter hiding (list)
 import Prettyprinter.Render.Text (putDoc)
@@ -34,6 +34,10 @@ import Syntax.Row
 import Syntax.Type qualified as T
 import Text.Megaparsec (errorBundlePretty, parse, pos1)
 import TypeChecker
+import Diagnostic (runDiagnose, Diagnose, runDiagnose')
+import Error.Diagnose (Diagnostic)
+import Prettyprinter.Render.Terminal (AnsiStyle)
+import Infix (resolveFixity, testGraph, testOpMap)
 
 -- a lot of what is used here is only reasonable for interactive use
 
@@ -64,12 +68,12 @@ lam = E.Lambda Blank
 con :: NameAt p -> [Pattern p] -> Pattern p
 con = P.Constructor Blank
 
-runDefault :: Eff '[Declare, Error TypeError, Reader (Builtins Name), State InfState, NameGen] a -> Either TypeError a
-runDefault action = runPureEff $ runNameGen do
+runDefault :: Eff '[Declare, Reader (Builtins Name), State InfState, NameGen, Diagnose] a -> (Maybe a, Diagnostic (Doc AnsiStyle))
+runDefault action = runPureEff . runDiagnose' ("<none>", "") $ runNameGen do
     (_, builtins, defaultEnv) <- mkDefaults
     run (Right <$> defaultEnv) builtins action
 
-mkDefaults :: NameGen :> es => Eff es (HashMap Text Name, Builtins Name, HashMap Name (Type' 'Fixity))
+mkDefaults :: (NameGen :> es, Diagnose :> es) => Eff es (HashMap Text Name, Builtins Name, HashMap Name (Type' 'Fixity))
 mkDefaults = do
     let builtins = Builtins{subtypeRelations = [(NatName Blank, IntName Blank)]}
     types <-
@@ -92,7 +96,7 @@ mkDefaults = do
                     , ("Lens", LensName Blank)
                     ]
     (env, Scope scope) <-
-        (runState (Scope initScope) . fmap (HashMap.fromList . fst) . runScopeErrors . NameResolution.runDeclare)
+        (runState (Scope initScope) . fmap HashMap.fromList . NameResolution.runDeclare)
             ( traverse
                 (\(name, ty) -> liftA2 (,) (declare $ SimpleName Blank name) (resolveType ty))
                 [ ("()", "Unit")
@@ -105,7 +109,7 @@ mkDefaults = do
                 , ("reverse", T.Forall Blank "'a" $ list "'a" --> list "'a")
                 ]
             )
-    pure (scope, builtins, undefined "fixity res" env)
+    pure (scope, builtins, T.cast id <$> env)
   where
     list var = "List" $: var
 
@@ -114,30 +118,29 @@ inferIO = inferIO' do
     (_, builtins, env) <- mkDefaults
     pure (env, builtins)
 
-inferIO' :: Eff '[NameGen] (HashMap Name (Type' 'Fixity), Builtins Name) -> Expression 'Fixity -> IO ()
+inferIO' :: Eff '[NameGen, Diagnose, IOE] (HashMap Name (Type' 'Fixity), Builtins Name) -> Expression 'Fixity -> IO ()
 inferIO' mkEnv expr = do
-    case typeOrError of
-        Left (TypeError err) -> putDoc $ err <> line
-        Right ty -> putDoc $ pretty ty <> line
-    for_ (HashMap.toList finalEnv.vars) \case
-        (name, Left _) -> putDoc $ pretty name <> line
-        (name, Right ty) -> putDoc $ pretty name <> ":" <+> pretty ty <> line
+    getTy >>= \case
+        Nothing -> pass
+        Just (ty, finalEnv) -> do
+            putDoc $ pretty ty <> line
+            for_ (HashMap.toList finalEnv.vars) \case
+                (name, Left _) -> putDoc $ pretty name <> line
+                (name, Right ty') -> putDoc $ pretty name <> ":" <+> pretty ty' <> line
   where
-    (typeOrError, finalEnv) = runPureEff $ runNameGen do
+    getTy = runEff $ runDiagnose ("<none>", "") $ runNameGen do
         (env, builtins) <- mkEnv
         runWithFinalEnv (Right <$> env) builtins $ normalise =<< infer expr
 
 parseInfer :: Text -> IO ()
-parseInfer input = runEff $ runNameGen
+parseInfer input = void . runEff . runDiagnose ("cli", input) $ runNameGen
     case input & parse (usingReaderT pos1 code) "cli" of
         Left err -> putStrLn $ errorBundlePretty err
         Right decls -> do
             (scope, builtins, defaultEnv) <- mkDefaults
-            resolvedDecls <- fst <$> runNameResolution scope (resolveNames decls)
-            typesOrErrors <- typecheck defaultEnv builtins $ undefined "fixity res" resolvedDecls
-            case typesOrErrors of
-                Left (TypeError err) -> liftIO $ putDoc $ err <> line
-                Right types -> liftIO $ for_ types \ty -> putDoc $ pretty ty <> line
+            resolvedDecls <- resolveFixity testOpMap testGraph =<< runNameResolution scope (resolveNames decls)
+            types <- typecheck defaultEnv builtins resolvedDecls
+            liftIO $ for_ types \ty -> putDoc $ pretty ty <> line
 
 parseInferIO :: IO ()
 parseInferIO = getLine >>= parseInfer

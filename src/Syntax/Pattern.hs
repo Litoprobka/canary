@@ -1,6 +1,6 @@
 {-# LANGUAGE LambdaCase #-}
-{-# LANGUAGE UndecidableInstances #-}
 {-# LANGUAGE RoleAnnotations #-}
+{-# LANGUAGE UndecidableInstances #-}
 module Syntax.Pattern (Pattern (..), cast) where
 
 import Relude
@@ -19,9 +19,6 @@ data Pattern (p :: Pass)
     | IntLiteral Loc Int
     | TextLiteral Loc Text
     | CharLiteral Loc Text
-
-deriving instance Show (NameAt pass) => Show (Pattern pass)
-deriving instance Eq (NameAt pass) => Eq (Pattern pass)
 
 instance Pretty (NameAt pass) => Pretty (Pattern pass) where
     pretty = go 0 where

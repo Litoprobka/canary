@@ -7,7 +7,6 @@
 
 module NameResolution (
     runNameResolution,
-    runScopeErrors,
     runDeclare,
     resolveNames,
     resolveExpr,
@@ -16,9 +15,6 @@ module NameResolution (
     declare,
     declarePat,
     Scope (..),
-    UnboundVar (..),
-    Warning (..),
-    ScopeErrors (..),
 ) where
 
 import Relude hiding (State, error, evalState, get, modify, put, runState)
@@ -26,13 +22,14 @@ import Relude hiding (State, error, evalState, get, modify, put, runState)
 import Common hiding (Scope)
 import Data.HashMap.Strict qualified as Map
 import Data.List (partition)
-import Data.Sequence qualified as Seq
 import Data.Traversable (for)
+import Diagnostic
 import Effectful (Eff, Effect, (:>))
-import Effectful.Dispatch.Dynamic (interpret, reinterpret)
-import Effectful.State.Static.Local (State, evalState, get, modify, put, runState)
+import Effectful.Dispatch.Dynamic (interpret)
+import Effectful.State.Static.Local (State, evalState, get, modify, put)
 import Effectful.TH (makeEffect)
 import NameGen
+import Prettyprinter (pretty, (<+>))
 import Syntax
 import Syntax.Declaration qualified as D
 import Syntax.Expression qualified as E
@@ -43,33 +40,29 @@ import Syntax.Type qualified as T
 The name resolution pass. Transforms 'Parse AST into 'NameRes AST. It doesn't short-circuit on errors
 -}
 
-data ScopeErrors = ScopeErrors {errors :: Seq UnboundVar, warnings :: Seq Warning}
-
--- | a writer-like effect for scope warnings and errors
-data ScopeErrorE :: Effect where
-    Warn :: Warning -> ScopeErrorE m ()
-    Error :: UnboundVar -> ScopeErrorE m ()
-
 {- | a one-off effect to differentiate functions that do and don't declare stuff
 | on type level
 -}
 data Declare :: Effect where
     Declare :: SimpleName -> Declare m Name
 
+makeEffect ''Declare
+
 -- * other types
 
 newtype Scope = Scope {table :: HashMap Text Name}
-
-newtype UnboundVar = UnboundVar SimpleName deriving (Show)
 data Warning = Shadowing SimpleName | UnusedVar SimpleName deriving (Show)
+newtype Error = UnboundVar SimpleName
 
-makeEffect ''ScopeErrorE
-makeEffect ''Declare
+warn :: Diagnose :> es => Warning -> Eff es ()
+warn =
+    nonFatal . dummy . \case
+        Shadowing name -> "The binding" <+> pretty name <+> "shadows an earlier binding"
+        UnusedVar name -> "The binding" <+> pretty name <+> "is unused"
 
-runScopeErrors :: Eff (ScopeErrorE : es) a -> Eff es (a, ScopeErrors)
-runScopeErrors = reinterpret (runState $ ScopeErrors Seq.empty Seq.empty) \_ -> \case
-    Warn warning -> modify @ScopeErrors \se -> se{warnings = se.warnings Seq.|> warning}
-    Error error' -> modify @ScopeErrors \se -> se{errors = se.errors Seq.|> error'}
+error :: Diagnose :> es => Error -> Eff es ()
+error = nonFatal . dummy . \case
+    UnboundVar name -> "The variable" <+> pretty name <+> "is unbound"
 
 -- | run a state action without changing the `Scope` part of the state
 scoped :: EnvEffs es => Eff (Declare : es) a -> Eff es a
@@ -94,7 +87,7 @@ runDeclare = interpret \_ -> \case
         put $ Scope $ Map.insert name.name disambiguatedName scope.table
         pure disambiguatedName
 
-type EnvEffs es = (State Scope :> es, NameGen :> es, ScopeErrorE :> es)
+type EnvEffs es = (State Scope :> es, NameGen :> es, Diagnose :> es)
 
 -- | looks up a name in the current scope
 resolve :: EnvEffs es => SimpleName -> Eff es Name
@@ -108,8 +101,8 @@ resolve name = do
             scoped $ declare name
 
 runNameResolution
-    :: NameGen :> es => HashMap Text Name -> Eff (Declare : State Scope : ScopeErrorE : es) a -> Eff es (a, ScopeErrors)
-runNameResolution env = runScopeErrors . evalState (Scope env) . runDeclare
+    :: (NameGen :> es, Diagnose :> es) => HashMap Text Name -> Eff (Declare : State Scope : es) a -> Eff es a
+runNameResolution env = evalState (Scope env) . runDeclare
 
 resolveNames :: (EnvEffs es, Declare :> es) => [Declaration 'Parse] -> Eff es [Declaration 'NameRes]
 resolveNames decls = do

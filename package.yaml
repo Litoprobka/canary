@@ -28,6 +28,7 @@ dependencies:
 - base >= 4.7 && < 5
 - effectful >= 2.3 && < 3
 - effectful-th
+- diagnose
 - relude >= 1.2.1.0 && < 2
 - megaparsec >= 9.5.0 && < 10
 - nonempty-containers
@@ -35,7 +36,6 @@ dependencies:
 - prettyprinter >=1.7 && <2
 - prettyprinter-ansi-terminal
 - template-haskell
-- these >= 1.2 && < 2
 
 ghc-options:
 - -Wall

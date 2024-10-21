@@ -25,6 +25,7 @@ source-repository head
 library
   exposed-modules:
       Common
+      Diagnostic
       IL
       Infix
       Interpreter
@@ -52,6 +53,7 @@ library
   ghc-options: -Wall -Wcompat -Widentities -Wincomplete-record-updates -Wincomplete-uni-patterns -Wmissing-export-lists -Wmissing-home-modules -Wpartial-fields -Wredundant-constraints
   build-depends:
       base >=4.7 && <5
+    , diagnose
     , effectful >=2.3 && <3
     , effectful-th
     , megaparsec >=9.5.0 && <10
@@ -61,7 +63,6 @@ library
     , prettyprinter-ansi-terminal
     , relude >=1.2.1.0 && <2
     , template-haskell
-    , these >=1.2 && <2
   default-language: GHC2021
 
 executable lang-exe
@@ -77,6 +78,7 @@ executable lang-exe
   ghc-options: -Wall -Wcompat -Widentities -Wincomplete-record-updates -Wincomplete-uni-patterns -Wmissing-export-lists -Wmissing-home-modules -Wpartial-fields -Wredundant-constraints -threaded -rtsopts -with-rtsopts=-N
   build-depends:
       base >=4.7 && <5
+    , diagnose
     , effectful >=2.3 && <3
     , effectful-th
     , lang
@@ -87,7 +89,6 @@ executable lang-exe
     , prettyprinter-ansi-terminal
     , relude >=1.2.1.0 && <2
     , template-haskell
-    , these >=1.2 && <2
   default-language: GHC2021
 
 test-suite lang-test
@@ -106,6 +107,7 @@ test-suite lang-test
   ghc-options: -Wall -Wcompat -Widentities -Wincomplete-record-updates -Wincomplete-uni-patterns -Wmissing-export-lists -Wmissing-home-modules -Wpartial-fields -Wredundant-constraints -threaded -rtsopts -with-rtsopts=-N
   build-depends:
       base >=4.7 && <5
+    , diagnose
     , effectful >=2.3 && <3
     , effectful-th
     , hspec ==2.*
@@ -118,6 +120,5 @@ test-suite lang-test
     , prettyprinter-ansi-terminal
     , relude >=1.2.1.0 && <2
     , template-haskell
-    , these >=1.2 && <2
   default-language: GHC2021
   build-tool-depends: hspec-discover:hspec-discover == 2.*

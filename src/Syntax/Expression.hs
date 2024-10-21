@@ -32,9 +32,6 @@ data Binding (p :: Pass)
     = ValueBinding Loc (Pattern p) (Expression p)
     | FunctionBinding Loc (NameAt p) (NonEmpty (Pattern p)) (Expression p)
 
-deriving instance (Show (NameAt pass), Show (HasInfix pass)) => Show (Binding pass)
-deriving instance (Eq (NameAt pass), Eq (HasInfix pass)) => Eq (Binding pass)
-
 -- todo: some nodes don't need to store an explicit Loc. Instead, getLoc may zip the child node locs
 -- the only difference is whether outer parenthesis are inculded, but seems like that only makes a differenc
 -- for wildcard lambdas
@@ -65,9 +62,6 @@ data Expression (p :: Pass)
     | CharLiteral Loc Text
     | -- | an unresolved expression with infix / prefix operators
       Infix (HasInfix p) [(Expression p, Maybe (NameAt p))] (Expression p)
-
-deriving instance Show (NameAt pass) => Show (Expression pass)
-deriving instance Eq (NameAt pass) => Eq (Expression pass)
 
 -- unresolved infix operators may only appear before the fixity resolution pass
 data HasInfix (pass :: Pass) where

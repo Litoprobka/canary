@@ -15,9 +15,10 @@ import Control.Monad (foldM)
 import Data.HashMap.Strict qualified as HashMap
 import Data.HashSet qualified as HashSet
 import Data.Traversable (for)
+import Diagnostic (Diagnose, fatal, dummy)
 import Effectful
 import Effectful.Dispatch.Dynamic (interpret, reinterpret)
-import Effectful.Error.Static (Error, runErrorNoCallStack, throwError)
+import Effectful.Error.Static (runErrorNoCallStack, throwError)
 import Effectful.Reader.Static (Reader, asks, runReader)
 import Effectful.State.Static.Local (State, get, gets, modify, runState)
 import Effectful.TH
@@ -29,6 +30,7 @@ import Syntax.Row
 import Syntax.Row qualified as Row
 import Syntax.Type qualified as T
 import Prelude (show)
+import Prettyprinter.Render.Terminal (AnsiStyle)
 
 type Expr = Expression 'Fixity
 type Pat = Pattern 'Fixity
@@ -58,8 +60,6 @@ data MonoLayer
     | MLRecord Loc (ExtRow Type)
     deriving (Show, Eq)
 
-newtype TypeError = TypeError (Doc ()) deriving (Show)
-
 newtype Builtins a = Builtins
     { subtypeRelations :: [(a, a)]
     }
@@ -86,7 +86,7 @@ data InfState = InfState
     }
     deriving (Show)
 
-type InfEffs es = (NameGen :> es, State InfState :> es, Error TypeError :> es, Reader (Builtins Name) :> es)
+type InfEffs es = (NameGen :> es, State InfState :> es, Diagnose :> es, Reader (Builtins Name) :> es)
 
 data Declare :: Effect where
     UpdateSig :: Name -> Type -> Declare m ()
@@ -121,15 +121,15 @@ instance Pretty MonoLayer where
 run
     :: TopLevelBindings
     -> Builtins Name
-    -> Eff (Declare : Error TypeError : Reader (Builtins Name) : State InfState : es) a
-    -> Eff es (Either TypeError a)
+    -> Eff (Declare : Reader (Builtins Name) : State InfState : es) a
+    -> Eff es a
 run env builtins = fmap fst . runWithFinalEnv env builtins
 
 runWithFinalEnv
     :: TopLevelBindings
     -> Builtins Name
-    -> Eff (Declare : Error TypeError : Reader (Builtins Name) : State InfState : es) a
-    -> Eff es (Either TypeError a, InfState)
+    -> Eff (Declare : Reader (Builtins Name) : State InfState : es) a
+    -> Eff es (a, InfState)
 runWithFinalEnv env builtins = do
     runState
         InfState
@@ -141,11 +141,10 @@ runWithFinalEnv env builtins = do
             , vars = HashMap.empty
             }
         . runReader builtins
-        . runErrorNoCallStack
         . runDeclare
 
-typeError :: InfEffs es => Doc () -> Eff es a
-typeError err = throwError $ TypeError err
+typeError :: InfEffs es => Doc AnsiStyle -> Eff es a
+typeError err = fatal $ dummy err
 
 freshUniVar :: InfEffs es => Loc -> Eff es Type
 freshUniVar loc = T.UniVar loc <$> freshUniVar'

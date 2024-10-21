@@ -15,12 +15,7 @@ data Declaration (p :: Pass)
     | Alias Loc (NameAt p) (Type' p)
     | Signature Loc (NameAt p) (Type' p)
 
-deriving instance Show (NameAt pass) => Show (Declaration pass)
-deriving instance Eq (NameAt pass) => Eq (Declaration pass)
-
 data Constructor p = Constructor Loc (NameAt p) [Type' p]
-deriving instance Show (NameAt pass) => Show (Constructor pass)
-deriving instance Eq (NameAt pass) => Eq (Constructor pass)
 
 instance Pretty (NameAt p) => Pretty (Declaration p) where
     pretty = \case

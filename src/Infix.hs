@@ -1,24 +1,24 @@
+{-# LANGUAGE DataKinds #-}
 {-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE MultiWayIf #-}
-{-# LANGUAGE DataKinds #-}
 
 module Infix where
 
-import Common (Name(..), getLoc, zipLoc, Pass (..))
+import Common (Name (..), Pass (..), getLoc, zipLoc)
 import Control.Monad (foldM)
 import Data.HashMap.Strict qualified as HashMap
 import Data.HashSet qualified as HashSet
 import Data.List.NonEmpty qualified as NE
-import Effectful (Eff, runPureEff, (:>))
-import Effectful.Error.Static (Error, runErrorNoCallStack, throwError)
+import Diagnostic (Diagnose, dummy, fatal)
+import Effectful (Eff, (:>))
 import Effectful.Reader.Static (Reader, ask, runReader)
+import Prettyprinter (Pretty, pretty, (<+>))
 import Relude hiding (Op, Reader, ask, runReader)
 import Syntax
+import Syntax.Declaration qualified as D
 import Syntax.Expression qualified as E
-import qualified Syntax.Pattern as P
-import qualified Syntax.Type as T
-import qualified Syntax.Declaration as D
-import Prettyprinter (Doc, (<+>), pretty, Pretty)
+import Syntax.Pattern qualified as P
+import Syntax.Type qualified as T
 
 newtype EqClass = EqClass Int deriving (Show, Eq, Hashable, Pretty)
 
@@ -30,11 +30,11 @@ data Fixity = InfixL | InfixR | InfixChain | Infix deriving (Eq)
 
 data Priority = Left' | Right' deriving (Show)
 
-type Ctx es = (Reader OpMap :> es, Reader PriorityGraph :> es, Error (Doc ()) :> es)
+type Ctx es = (Reader OpMap :> es, Reader PriorityGraph :> es, Diagnose :> es)
 
-lookup' :: (Error (Doc ()) :> es, Hashable k, Pretty k) => k -> HashMap k v -> Eff es v
+lookup' :: (Diagnose :> es, Hashable k, Pretty k) => k -> HashMap k v -> Eff es v
 lookup' key hmap = case HashMap.lookup key hmap of
-    Nothing -> throwError @(Doc ()) $ "missing operator" <+> pretty key
+    Nothing -> fatal $ dummy $ "missing operator" <+> pretty key
     Just v -> pure v
 
 priority :: Ctx es => Op -> Op -> Eff es Priority
@@ -50,18 +50,19 @@ priority prev next = do
         | prevEq == nextEq -> case (prevFixity, nextFixity) of
             (InfixL, InfixL) -> pure Left'
             (InfixR, InfixR) -> pure Right'
-            _ -> throwError @(Doc ()) $ "incompatible fixity of" <+> pretty prev <+> "and" <+> pretty next
+            _ -> fatal $ dummy $ "incompatible fixity of" <+> pretty prev <+> "and" <+> pretty next
         | HashSet.member nextEq prevHigherThan -> pure Left'
         | HashSet.member prevEq nextHigherThan -> pure Right'
-        | otherwise -> throwError @(Doc ()) $ "undefined ordering of" <+> pretty prev <+> "and" <+> pretty next
+        | otherwise -> fatal $ dummy $ "undefined ordering of" <+> pretty prev <+> "and" <+> pretty next
 
-resolveFixity :: OpMap -> PriorityGraph -> [Declaration 'NameRes] -> Either (Doc ()) [Declaration 'Fixity]
-resolveFixity opMap graph = runPureEff . runErrorNoCallStack . runReader opMap . runReader graph . traverse parseDeclaration
+resolveFixity :: Diagnose :> es => OpMap -> PriorityGraph -> [Declaration 'NameRes] -> Eff es [Declaration 'Fixity]
+resolveFixity opMap graph = runReader opMap . runReader graph . traverse parseDeclaration
 
 parseDeclaration :: Ctx es => Declaration 'NameRes -> Eff es (Declaration 'Fixity)
 parseDeclaration = \case
     D.Value loc binding locals -> D.Value loc <$> parseBinding binding <*> traverse parseDeclaration locals
-    D.Type loc name vars constrs -> pure $ D.Type loc name vars $ constrs & map \(D.Constructor cloc cname args) -> D.Constructor cloc cname (T.cast id <$> args)
+    D.Type loc name vars constrs ->
+        pure $ D.Type loc name vars $ constrs & map \(D.Constructor cloc cname args) -> D.Constructor cloc cname (T.cast id <$> args)
     D.Alias loc name ty -> pure $ D.Alias loc name (T.cast id ty)
     D.Signature loc name ty -> pure $ D.Signature loc name (T.cast id ty)
 
@@ -71,13 +72,13 @@ parse = \case
     E.Application loc lhs rhs -> E.Application loc <$> parse lhs <*> parse rhs
     E.Let loc binding expr -> E.Let loc <$> parseBinding binding <*> parse expr
     E.Case loc arg cases -> E.Case loc <$> parse arg <*> traverse (bitraverse (pure . castP) parse) cases
-    -- | Haskell's \cases
+    -- \| Haskell's \cases
     E.Match loc cases -> E.Match loc <$> traverse (bitraverse (pure . map castP) parse) cases
     E.If loc cond true false -> E.If loc <$> parse cond <*> parse true <*> parse false
-    -- | value : Type
+    -- \| value : Type
     E.Annotation loc e ty -> E.Annotation loc <$> parse e <*> pure (T.cast id ty)
     E.Name name -> pure $ E.Name name
-    -- | .field.otherField.thirdField
+    -- \| .field.otherField.thirdField
     E.RecordLens loc row -> pure $ E.RecordLens loc row
     E.Constructor name -> pure $ E.Constructor name
     E.Variant name -> pure $ E.Variant name
@@ -86,7 +87,7 @@ parse = \case
     E.IntLiteral loc n -> pure $ E.IntLiteral loc n
     E.TextLiteral loc txt -> pure $ E.TextLiteral loc txt
     E.CharLiteral loc c -> pure $ E.CharLiteral loc c
-    -- | an unresolved expression with infix / prefix operators
+    -- \| an unresolved expression with infix / prefix operators
     E.Infix _ pairs last' -> join $ go' <$> traverse (bitraverse parse pure) pairs <*> parse last'
   where
     go' :: Ctx es => [(Expression 'Fixity, Op)] -> Expression 'Fixity -> Eff es (Expression 'Fixity)
@@ -137,27 +138,28 @@ castP = P.cast \recur -> \case
     P.Annotation loc pat ty -> P.Annotation loc (recur pat) (T.cast id ty)
     other -> recur other
 
-
 ---
 
 testOpMap :: OpMap
 testOpMap =
-    HashMap.fromList 
+    HashMap.fromList
         [ (Nothing, (InfixL, EqClass 0))
-        --, ("+", (InfixL, EqClass 0))
-        --, ("*", (InfixL, EqClass 1))
-        --, ("?", (InfixR, EqClass 2))
-        --, ("^", (InfixR, EqClass 3))
-        --, ("==", (InfixChain, EqClass 4))
+        -- , ("+", (InfixL, EqClass 0))
+        -- , ("*", (InfixL, EqClass 1))
+        -- , ("?", (InfixR, EqClass 2))
+        -- , ("^", (InfixR, EqClass 3))
+        -- , ("==", (InfixChain, EqClass 4))
         ]
 
 testGraph :: PriorityGraph
 testGraph =
-    HashMap.fromList $ map (second $ HashSet.fromList . map EqClass)
-        [ (EqClass 0, [])
-        --, (EqClass 3, [0, 1, 2, 4])
-        --, (EqClass 2, [0, 4])
-        --, (EqClass 1, [0, 4])
-        --, (EqClass 0, [4])
-        --, (EqClass 4, [])
-        ]
+    HashMap.fromList $
+        map
+            (second $ HashSet.fromList . map EqClass)
+            [ (EqClass 0, [])
+            -- , (EqClass 3, [0, 1, 2, 4])
+            -- , (EqClass 2, [0, 4])
+            -- , (EqClass 1, [0, 4])
+            -- , (EqClass 0, [4])
+            -- , (EqClass 4, [])
+            ]

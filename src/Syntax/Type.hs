@@ -24,8 +24,9 @@ data Type' (p :: Pass) where
     Variant :: Loc -> ExtRow (Type' p) -> Type' p
     Record :: Loc -> ExtRow (Type' p) -> Type' p
 
-deriving instance Show (NameAt pass) => Show (Type' pass)
-deriving instance Eq (NameAt pass) => Eq (Type' pass)
+deriving instance Show (Type' 'DuringTypecheck)
+deriving instance Show (Type' 'Fixity)
+deriving instance Eq (Type' 'DuringTypecheck)
 
 -- >>> pretty $ Function (Var "a") (Record (fromList [("x", Name "Int"), ("x", Name "a")]) Nothing)
 -- >>> pretty $ Forall "a" $ Forall "b" $ Forall "c" $ Name "a" `Function` (Name "b" `Function` Name "c")
