@@ -4,7 +4,7 @@
 
 module Fixity (resolveFixity, testOpMap, testGraph, Fixity(..)) where
 
-import Common (Name (..), Pass (..), zipLocOf)
+import Common (Name (..), Pass (..), zipLocOf, mkNotes, getLoc, Loc (..))
 import Control.Monad (foldM)
 import Data.HashMap.Strict qualified as HashMap
 import Data.HashSet qualified as HashSet
@@ -19,6 +19,7 @@ import Syntax.Declaration qualified as D
 import Syntax.Expression qualified as E
 import Syntax.Pattern qualified as P
 import Syntax.Type qualified as T
+import Error.Diagnose (Report(..), Marker (This))
 
 newtype EqClass = EqClass Int deriving (Show, Eq, Hashable, Pretty)
 
@@ -26,11 +27,38 @@ type PriorityGraph = HashMap EqClass (HashSet EqClass)
 type Op = Maybe Name
 type OpMap = HashMap Op (Fixity, EqClass)
 
-data Fixity = InfixL | InfixR | InfixChain | Infix deriving (Eq)
+data Fixity = InfixL | InfixR | InfixChain | Infix deriving (Show, Eq)
 
 data Priority = Left' | Right' deriving (Show)
 
 type Ctx es = (Reader OpMap :> es, Reader PriorityGraph :> es, Diagnose :> es)
+
+data OpError
+    = IncompatibleFixity Op Op
+    | UndefinedOrdering Op Op
+    | MissingOperator Op
+
+opError :: Ctx es => OpError -> Eff es a
+opError = fatal . \case
+    IncompatibleFixity prev next ->
+        Err
+        Nothing
+        ("incompatible fixity of" <+> pretty prev <+> "and" <+> pretty next)
+        (mkNotes [(getLocMb next, This "next operator"), (getLocMb prev, This "previous operator")])
+        []
+    UndefinedOrdering prev next ->
+        Err
+        Nothing
+        ("undefined ordering of" <+> pretty prev <+> "and" <+> pretty next)
+        (mkNotes [(getLocMb next, This "next operator"), (getLocMb prev, This "previous operator")])
+        []
+    MissingOperator op ->
+        Err
+        Nothing
+        ("missing operator" <+> pretty op)
+        (mkNotes [(getLocMb op, This "is lacking a fixity declaration")])
+        []
+  where getLocMb = maybe Blank getLoc
 
 lookup' :: (Diagnose :> es, Hashable k, Pretty k) => k -> HashMap k v -> Eff es v
 lookup' key hmap = case HashMap.lookup key hmap of
@@ -50,11 +78,10 @@ priority prev next = do
         | prevEq == nextEq -> case (prevFixity, nextFixity) of
             (InfixL, InfixL) -> pure Left'
             (InfixR, InfixR) -> pure Right'
-            _ -> fatal $ dummy $ "incompatible fixity of" <+> pretty prev <+> "and" <+> pretty next
+            _ -> opError $ IncompatibleFixity prev next
         | HashSet.member nextEq prevHigherThan -> pure Left'
         | HashSet.member prevEq nextHigherThan -> pure Right'
-        | otherwise -> fatal $ dummy $ "undefined ordering of" <+> pretty prev <+> "and" <+> pretty next
-
+        | otherwise -> opError $ UndefinedOrdering prev next
 resolveFixity :: Diagnose :> es => OpMap -> PriorityGraph -> [Declaration 'NameRes] -> Eff es [Declaration 'Fixity]
 resolveFixity opMap graph = runReader opMap . runReader graph . traverse parseDeclaration
 

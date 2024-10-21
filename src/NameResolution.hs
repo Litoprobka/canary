@@ -35,6 +35,8 @@ import Syntax.Declaration qualified as D
 import Syntax.Expression qualified as E
 import Syntax.Pattern qualified as P
 import Syntax.Type qualified as T
+import Error.Diagnose (Report(..))
+import qualified Error.Diagnose as M
 
 {-
 The name resolution pass. Transforms 'Parse AST into 'NameRes AST. It doesn't short-circuit on errors
@@ -51,18 +53,33 @@ makeEffect ''Declare
 -- * other types
 
 newtype Scope = Scope {table :: HashMap Text Name}
-data Warning = Shadowing SimpleName | UnusedVar SimpleName deriving (Show)
+data Warning = Shadowing SimpleName Loc | UnusedVar SimpleName deriving (Show)
 newtype Error = UnboundVar SimpleName
 
 warn :: Diagnose :> es => Warning -> Eff es ()
 warn =
-    nonFatal . dummy . \case
-        Shadowing name -> "The binding" <+> pretty name <+> "shadows an earlier binding"
-        UnusedVar name -> "The binding" <+> pretty name <+> "is unused"
+    nonFatal . \case
+        Shadowing name loc -> 
+            Warn
+            Nothing
+            ("The binding" <+> pretty name <+> "shadows an earlier binding")
+            (mkNotes [(getLoc name, M.This ""), (loc, M.Where "previously bound at")])
+            []
+        UnusedVar name ->
+            Warn
+            Nothing
+            ("The binding" <+> pretty name <+> "is unused")
+            (mkNotes [(getLoc name, M.This "bound at")])
+            []
 
 error :: Diagnose :> es => Error -> Eff es ()
-error = nonFatal . dummy . \case
-    UnboundVar name -> "The variable" <+> pretty name <+> "is unbound"
+error = nonFatal . \case
+    UnboundVar name ->
+        Err
+        Nothing
+        ("The variable" <+> pretty name <+> "is unbound")
+        (mkNotes [(getLoc name, M.This "")])
+        []
 
 -- | run a state action without changing the `Scope` part of the state
 scoped :: EnvEffs es => Eff (Declare : es) a -> Eff es a
@@ -82,7 +99,7 @@ runDeclare = interpret \_ -> \case
         scope <- get @Scope
         disambiguatedName <- freshName name.loc name.name
         case Map.lookup name.name scope.table of
-            Just _ -> warn (Shadowing name)
+            Just oldName -> warn (Shadowing name $ getLoc oldName)
             Nothing -> pass
         put $ Scope $ Map.insert name.name disambiguatedName scope.table
         pure disambiguatedName

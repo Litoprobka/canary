@@ -159,7 +159,9 @@ expression' termParser = label "expression" $ infixExpr termParser
     infixExpr varParser = do
         firstExpr <- noPrec varParser
         pairs <- many $ (,) <$> optional someOperator <*> noPrec varParser
-        pure $ uncurry (E.Infix E.Yes) $ shift firstExpr pairs
+        pure case pairs of
+            [] -> firstExpr
+            (_:_) -> uncurry (E.Infix E.Yes) $ shift firstExpr pairs
       where
         -- x [(+, y), (*, z), (+, w)] --> [(x, +), (y, *), (z, +)] w
         shift expr [] = ([], expr)

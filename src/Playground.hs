@@ -105,7 +105,8 @@ mkDefaults = do
                 , ("True", "Bool")
                 , ("False", "Bool")
                 , ("id", T.Forall Blank "'a" $ "'a" --> "'a")
-                , ("cons", T.Forall Blank "'a" $ "'a" --> list "'a" --> list "'a")
+                , ("Cons", T.Forall Blank "'a" $ "'a" --> list "'a" --> list "'a")
+                , ("Nil", T.Forall Blank "'a" $ list "'a")
                 , ("reverse", T.Forall Blank "'a" $ list "'a" --> list "'a")
                 ]
             )

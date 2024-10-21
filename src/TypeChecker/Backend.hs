@@ -16,7 +16,7 @@ import Control.Monad (foldM)
 import Data.HashMap.Strict qualified as HashMap
 import Data.HashSet qualified as HashSet
 import Data.Traversable (for)
-import Diagnostic (Diagnose, fatal, dummy)
+import Diagnostic (Diagnose, fatal)
 import Effectful
 import Effectful.Dispatch.Dynamic (interpret, reinterpret)
 import Effectful.Error.Static (runErrorNoCallStack, throwError)
@@ -32,6 +32,8 @@ import Syntax.Row qualified as Row
 import Syntax.Type qualified as T
 import Prelude (show)
 import Prettyprinter.Render.Terminal (AnsiStyle)
+import Error.Diagnose (Report(..))
+import Error.Diagnose qualified as M (Marker(..))
 
 type Expr = Expression 'Fixity
 type Pat = Pattern 'Fixity
@@ -88,9 +90,78 @@ data InfState = InfState
     deriving (Show)
 
 data TypeError
-    = Internal (Doc AnsiStyle)
-    | DanglingTypeVar Name
-    | NotASubtype Type Type
+    = Internal Loc (Doc AnsiStyle)
+    | CannotUnify Name Name
+    | NotASubtype Type Type (Maybe OpenName)
+    | MissingField Type OpenName
+    | MissingVariant Type OpenName
+    | EmptyMatch Loc -- empty match expression
+    | ArgCountMismatch Loc -- "different amount of arguments in a match statement"
+    | ArgCountMismatchPattern Pat Int Int
+    | NotAFunction Type -- pretty fTy <+> "is not a function type"
+
+typeError :: InfEffs es => TypeError -> Eff es a
+typeError = fatal . \case
+    Internal loc doc ->
+        Err
+        Nothing
+        ("Internal error:" <+> doc)
+        (mkNotes [(loc, M.This "arising from")])
+        []
+    CannotUnify lhs rhs -> 
+        Err
+        Nothing
+        ("cannot unify" <+> pretty lhs <+> "with" <+> pretty rhs)
+        (mkNotes [(getLoc lhs, M.This "lhs"), (getLoc rhs, M.This "rhs")])
+        []
+    NotASubtype lhs rhs mbField -> 
+        Err
+        Nothing
+        (pretty lhs <+> "is not a subtype of" <+> pretty rhs <> fieldMsg)
+        (mkNotes [(getLoc lhs, M.This "lhs"), (getLoc rhs, M.This "rhs")])
+        []
+      where 
+        fieldMsg = case mbField of
+            Nothing -> ""
+            Just field -> ": right hand side does not contain" <+> pretty field
+    MissingField ty field -> 
+        Err
+        Nothing
+        (pretty ty <+> "does not contain field" <+> pretty field)
+        (mkNotes [(getLoc ty, M.This "type arising from"), (getLoc field, M.This "field arising from")])
+        []
+    MissingVariant ty variant ->
+        Err
+        Nothing
+        (pretty ty <+> "does not contain variant" <+> pretty variant)
+        (mkNotes [(getLoc ty, M.This "type arising from"), (getLoc variant, M.This "variant arising from")])
+        []
+    EmptyMatch loc -> 
+        Err
+        Nothing
+        "empty match expression"
+        (mkNotes [(loc, M.This "")])
+        []
+    ArgCountMismatch loc ->
+        Err
+        Nothing
+        "different amount of arguments in a match statement"
+        (mkNotes [(loc, M.This "")])
+        []
+    ArgCountMismatchPattern pat expected got ->
+        Err
+        Nothing
+        ("incorrect arg count (" <> pretty got <> ") in pattern" <+> pretty pat <> ". Expected" <+> pretty expected)
+        (mkNotes [(getLoc pat, M.This "")])
+        []
+    NotAFunction ty ->
+        Err
+        Nothing
+        (pretty ty <+> "is not a function type")
+        (mkNotes [(getLoc ty, M.This "type arising from")])
+        []
+
+
 
 type InfEffs es = (NameGen :> es, State InfState :> es, Diagnose :> es, Reader (Builtins Name) :> es)
 
@@ -149,9 +220,6 @@ runWithFinalEnv env builtins = do
         . runReader builtins
         . runDeclare
 
-typeError :: InfEffs es => Doc AnsiStyle -> Eff es a
-typeError err = fatal $ dummy err
-
 freshUniVar :: InfEffs es => Loc -> Eff es Type
 freshUniVar loc = T.UniVar loc <$> freshUniVar'
 
@@ -177,7 +245,7 @@ freshTypeVar loc = do
     cycleChar c = succ c
 
 lookupUniVar :: InfEffs es => UniVar -> Eff es (Either Scope Monotype)
-lookupUniVar uni = maybe (typeError $ "missing univar " <> pretty uni) pure . HashMap.lookup uni =<< gets @InfState (.vars)
+lookupUniVar uni = maybe (typeError $ Internal Blank $ "missing univar " <> pretty uni) pure . HashMap.lookup uni =<< gets @InfState (.vars)
 
 withUniVar :: InfEffs es => UniVar -> (Monotype -> Eff es a) -> Eff es ()
 withUniVar uni f =
@@ -195,7 +263,7 @@ alterUniVar :: InfEffs es => Bool -> UniVar -> Monotype -> Eff es ()
 alterUniVar override uni ty = do
     -- here comes the magic. If the new type contains other univars, we change their scope
     lookupUniVar uni >>= \case
-        Right _ | not override -> typeError $ "Internal error (probably a bug): attempted to solve a solved univar " <> pretty uni
+        Right _ | not override -> typeError $ Internal Blank $ "Internal error (probably a bug): attempted to solve a solved univar " <> pretty uni
         Right _ -> pass
         Left scope -> rescope scope ty
     noCycle <- cycleCheck (Direct, HashSet.singleton uni) ty
@@ -207,7 +275,7 @@ alterUniVar override uni ty = do
     cycleCheck (selfRefType, acc) = \case
         MUniVar _ uni2 | HashSet.member uni2 acc -> case selfRefType of
             Direct -> pure False
-            Indirect -> typeError "self-referential type"
+            Indirect -> typeError $ Internal (getLoc $ unMono ty) $ "self-referential type" <+> pretty ty
         MUniVar _ uni2 ->
             lookupUniVar uni2 >>= \case
                 Left _ -> pure True
@@ -315,7 +383,7 @@ data Variance = In | Out | Inv
 -}
 mono :: InfEffs es => Variance -> Type -> Eff es Monotype
 mono variance = \case
-    T.Var var -> typeError $ "mono: dangling var" <+> pretty var -- pure $ MVar var
+    T.Var var -> typeError $ Internal (getLoc var) $ "mono: dangling var" <+> pretty var -- pure $ MVar var
     T.Name name -> pure $ MName name
     T.Skolem skolem -> pure $ MSkolem skolem
     T.UniVar loc uni -> pure $ MUniVar loc uni
@@ -358,7 +426,7 @@ unMono = \case
 -}
 monoLayer :: InfEffs es => Variance -> Type -> Eff es MonoLayer
 monoLayer variance = \case
-    T.Var var -> typeError $ "monoLayer: dangling var" <+> pretty var -- pure $ MLVar var
+    T.Var var -> typeError $ Internal (getLoc var) $ "monoLayer: dangling var" <+> pretty var -- pure $ MLVar var
     T.Name name -> pure $ MLName name
     T.Skolem skolem -> pure $ MLSkolem skolem
     T.UniVar loc uni -> pure $ MLUniVar loc uni

@@ -1,0 +1,2 @@
+f x = let x = 3 + 3; x
+f = if True then 1 else "txt"

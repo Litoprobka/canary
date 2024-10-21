@@ -29,7 +29,7 @@ main = do
         (path : _) -> (path,) . decodeUtf8 <$> readFileBS path
     input & parse (usingReaderT pos1 code) fileName & \case
         Left err -> putStrLn $ errorBundlePretty err
-        Right decls -> void . runEff . runDiagnose (fileName, input) $ runNameGen do
+        Right decls -> void . runEff . runDiagnose ("none", input) $ runNameGen do
                 prettyAST decls
                 (scope, builtins, env) <- mkDefaults
                 (bindings, evalBuiltins, constrs) <- runNameResolution scope do

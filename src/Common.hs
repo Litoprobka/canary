@@ -1,17 +1,35 @@
+{-# LANGUAGE DataKinds #-}
 {-# LANGUAGE DeriveAnyClass #-}
 {-# LANGUAGE DerivingStrategies #-}
 {-# LANGUAGE LambdaCase #-}
-{-# LANGUAGE NoFieldSelectors #-}
 {-# LANGUAGE OverloadedRecordDot #-}
-{-# OPTIONS_GHC -Wno-partial-fields #-}
 {-# LANGUAGE TypeFamilies #-}
-{-# LANGUAGE DataKinds #-}
+{-# LANGUAGE NoFieldSelectors #-}
+{-# OPTIONS_GHC -Wno-partial-fields #-}
 
-module Common (Name (..), UniVar (..), Skolem (..), Scope (..), Id (..), inc, Loc (..), SimpleName (..), HasLoc(..), zipLoc, NameAt, Pass(..), bifix, zipLocOf, locFromSourcePos) where
+module Common (
+    Name (..),
+    UniVar (..),
+    Skolem (..),
+    Scope (..),
+    Id (..),
+    inc,
+    Loc (..),
+    SimpleName (..),
+    HasLoc (..),
+    zipLoc,
+    NameAt,
+    Pass (..),
+    bifix,
+    zipLocOf,
+    locFromSourcePos,
+    mkNotes,
+) where
 
+import Error.Diagnose (Position (..), end)
+import Error.Diagnose qualified as M
 import Prettyprinter
 import Relude
-import Error.Diagnose (Position (..), end)
 import Text.Megaparsec (SourcePos (..), unPos)
 
 -- this file is a bit of a crutch. Perhaps it's better to move the definitions to Type or TypeChecker
@@ -46,8 +64,15 @@ data Name
     deriving (Show, Eq, Generic, Hashable)
 
 instance HasLoc Name where
-    getLoc (Name loc _ _) = loc
-    getLoc _ = Blank
+    getLoc = \case
+        Name loc _ _ -> loc
+        BoolName loc -> loc
+        ListName loc -> loc
+        IntName loc -> loc
+        NatName loc -> loc
+        TextName loc -> loc
+        CharName loc -> loc
+        LensName loc -> loc
 
 data SimpleName = SimpleName {loc :: Loc, name :: Text} deriving (Show, Eq, Generic, Hashable)
 
@@ -122,12 +147,22 @@ zipLocOf lhs rhs = zipLoc (getLoc lhs) (getLoc rhs)
 
 locFromSourcePos :: SourcePos -> SourcePos -> Loc
 locFromSourcePos start end =
-        Loc $
-            Position
-                { file = start.sourceName
-                , begin = (unPos start.sourceLine, unPos start.sourceColumn)
-                , end = (unPos end.sourceLine, unPos end.sourceColumn)
-                }
+    Loc $
+        Position
+            { file = start.sourceName
+            , begin = (unPos start.sourceLine, unPos start.sourceColumn)
+            , end = (unPos end.sourceLine, unPos end.sourceColumn)
+            }
+
+instance Pretty Loc where
+    pretty = \case
+        Blank -> "<blank>"
+        Loc pos -> pretty pos
+
+mkNotes :: [(Loc, M.Marker a)] -> [(Position, M.Marker a)]
+mkNotes = mapMaybe \case
+    (Blank, _) -> Nothing
+    (Loc pos, marker) -> Just (pos{file = "none"}, marker)
 
 -- * Some fancy boilerplate prevention stuff
 
@@ -135,4 +170,3 @@ locFromSourcePos start end =
 -- we don't need a special case to make bifix it monadic. We do need monadic baseCast-s though
 bifix :: ((a -> b) -> a -> b) -> ((a -> b) -> a -> b) -> a -> b
 bifix f g = let recur = f (g recur) in recur
-

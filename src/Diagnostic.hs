@@ -29,14 +29,14 @@ runDiagnose file action = do
 
 runDiagnose' :: (FilePath, Text) -> Eff (Diagnose : es) a -> Eff es (Maybe a, Diagnostic (Doc AnsiStyle))
 runDiagnose' (filePath, fileContents) = reinterpret
-    (fmap eitherToPair . runErrorNoCallStack . runState (addFile mempty filePath $ toString fileContents))
+    (fmap joinReports . runState (addFile mempty filePath $ toString fileContents) . runErrorNoCallStack)
     \_ -> \case
         NonFatal report -> modify $ flip addReport report
         Fatal report -> throwError report
   where
-    eitherToPair = \case
-        Left fatalError -> (Nothing, addReport mempty fatalError)
-        Right (val, reports) -> (Just val, reports)
+    joinReports = \case
+        (Left fatalError, diagnostic) -> (Nothing, addReport diagnostic fatalError)
+        (Right val, diagnostic) -> (Just val, diagnostic)
 
 dummy :: Doc style -> Report (Doc style)
 dummy msg = Err Nothing msg [] []

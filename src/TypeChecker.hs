@@ -107,7 +107,7 @@ inferDecls decls = do
                 declareTopLevel nameTypePairs
                 case HashMap.lookup name nameTypePairs of
                     -- this can only happen if `inferBinding` returns an incorrect map of types
-                    Nothing -> typeError $ "Internal error: type closure for" <+> pretty name <+> "didn't infer its type"
+                    Nothing -> typeError $ Internal (getLoc name) $ "type closure for" <+> pretty name <+> "didn't infer its type"
                     Just ty -> pure ty
          in modify \s ->
                 s{topLevel = HashMap.insertWith (\_ x -> x) name (Left closure) s.topLevel}
@@ -136,7 +136,7 @@ subtype lhs_ rhs_ = join $ match <$> monoLayer In lhs_ <*> monoLayer Out rhs_
         (MLUniVar _ uni) rhs -> solveOr (mono Out $ unMonoLayer rhs) ((`subtype` unMonoLayer rhs) . unMono) uni
         (MLName lhs) (MLName rhs) ->
             unlessM (elem (lhs, rhs) <$> builtin (.subtypeRelations)) $
-                typeError ("cannot unify" <+> pretty lhs <+> "with" <+> pretty rhs)
+                typeError $ CannotUnify lhs rhs -- "cannot unify" <+> pretty lhs <+> "with" <+> pretty rhs
         (MLFn _ inl outl) (MLFn _ inr outr) -> do
             subtype inr inl
             subtype outl outr
@@ -151,22 +151,16 @@ subtype lhs_ rhs_ = join $ match <$> monoLayer In lhs_ <*> monoLayer Out rhs_
             subtype rhs rhs'
         (MLVariant locL lhs) (MLVariant locR rhs) -> rowCase Variant (locL, lhs) (locR, rhs)
         (MLRecord locL lhs) (MLRecord locR rhs) -> rowCase Record (locL, lhs) (locR, rhs)
-        (MLVar var) _ -> typeError $ "dangling type variable" <+> pretty var
-        _ (MLVar var) -> typeError $ "dangling type variable" <+> pretty var
-        lhs rhs -> typeError $ pretty lhs <+> "is not a subtype of" <+> pretty rhs
+        (MLVar var) _ -> typeError $ Internal (getLoc var) $ "dangling type variable" <+> pretty var
+        _ (MLVar var) -> typeError $ Internal (getLoc var) $ "dangling type variable" <+> pretty var
+        lhs rhs -> typeError $ NotASubtype (unMonoLayer lhs) (unMonoLayer rhs) Nothing
 
     rowCase :: InfEffs es => RecordOrVariant -> (Loc, ExtRow Type) -> (Loc, ExtRow Type) -> Eff es ()
     rowCase whatToMatch (locL, lhsRow) (locR, rhsRow) = do
         let con = conOf whatToMatch
         for_ (IsList.toList lhsRow.row) \(name, lhsTy) ->
             deepLookup whatToMatch name (con locR rhsRow) >>= \case
-                Nothing ->
-                    typeError $
-                        pretty (con locL lhsRow)
-                            <+> "is not a subtype of"
-                            <+> pretty (con locR rhsRow)
-                            <> ": right hand side does not contain"
-                                <+> pretty name
+                Nothing -> typeError $ NotASubtype (con locL lhsRow) (con locR rhsRow) (Just name)
                 Just rhsTy -> subtype lhsTy rhsTy
         -- if the lhs has an extension, it should be compatible with rhs without the already matched fields
         for_ (Row.extension lhsRow) \ext -> subtype ext . con locL =<< diff whatToMatch rhsRow lhsRow.row
@@ -201,7 +195,7 @@ check e type_ = scoped $ match e type_
         (E.Record _ row) ty -> do
             for_ (IsList.toList row) \(name, expr) ->
                 deepLookup Record name ty >>= \case
-                    Nothing -> typeError $ pretty ty <+> "does not contain field" <+> pretty name
+                    Nothing -> typeError $ MissingField ty name
                     Just fieldTy -> check expr fieldTy
         expr (T.UniVar _ uni) ->
             lookupUniVar uni >>= \case
@@ -229,12 +223,12 @@ checkPattern = \cases
     -- we probably do need a case for P.Constructor for the same reason
     (P.Variant name arg) ty ->
         deepLookup Variant name ty >>= \case
-            Nothing -> typeError $ pretty ty <+> "does not contain variant" <+> pretty name
+            Nothing -> typeError $ MissingVariant ty name
             Just argTy -> checkPattern arg argTy
     (P.Record _ patRow) ty -> do
         for_ (IsList.toList patRow) \(name, pat) ->
             deepLookup Record name ty >>= \case
-                Nothing -> typeError $ pretty ty <+> "does not contain field" <+> pretty name
+                Nothing -> typeError $ MissingField ty name
                 Just fieldTy -> checkPattern pat fieldTy
     pat ty -> do
         inferredTy <- inferPattern pat
@@ -273,7 +267,7 @@ infer =
                 checkPattern pat argTy
                 check body result
             pure result
-        E.Match _ [] -> typeError "empty match expression"
+        E.Match loc [] -> typeError $ EmptyMatch loc
         E.Match loc ((firstPats, firstBody) : ms) -> {-forallScope-} do
             bodyType <- infer firstBody
             patTypes <- traverse inferPattern firstPats
@@ -281,7 +275,7 @@ infer =
                 traverse_ (`checkPattern` bodyType) pats
                 check body bodyType
             unless (all ((== length patTypes) . length . fst) ms) $
-                typeError "different amount of arguments in a match statement"
+                typeError $ ArgCountMismatch loc
             pure $ foldr (T.Function loc) bodyType patTypes
         E.List loc items -> do
             itemTy <- freshUniVar loc
@@ -317,7 +311,7 @@ inferApp fTy arg = do
             to <$ subtype (T.UniVar loc uni) (T.Function loc from to)
         MLFn _ from to -> do
             to <$ check arg from
-        _ -> typeError $ pretty fTy <+> "is not a function type"
+        _ -> typeError $ NotAFunction fTy
 
 -- infers the type of a function / variables in a pattern
 -- does not implicitly declare anything
@@ -376,11 +370,7 @@ inferPattern = \case
     p@(P.Constructor name args) -> do
         (resultType, argTypes) <- conArgTypes name
         unless (length argTypes == length args) $
-            typeError $
-                "incorrect arg count ("
-                    <> pretty (length args)
-                    <> ") in pattern" <+> pretty p <+> "(expected" <+> pretty (length argTypes)
-                    <> ")"
+            typeError $ ArgCountMismatchPattern p (length argTypes) (length args)
         zipWithM_ checkPattern args argTypes
         pure resultType
     P.List loc pats -> do
@@ -408,7 +398,7 @@ inferPattern = \case
             -- i.e. types of value constructors have the shape `a -> b -> c -> d -> ConcreteType a b c d`
             --
             -- solved univars cannot appear here either, since `lookupSig` on a pattern returns a type with no univars
-            MLUniVar _ uni -> typeError $ "unexpected univar" <+> pretty uni <+> "in a constructor type"
+            MLUniVar loc uni -> typeError $ Internal loc $ "unexpected univar" <+> pretty uni <+> "in a constructor type"
             -- this kind of repetition is necwithUniVaressary to retain missing pattern warnings
             MLName name -> pure (T.Name name, [])
             MLApp lhs rhs -> pure (T.Application lhs rhs, [])
@@ -422,9 +412,9 @@ normalise :: InfEffs es => Type -> Eff es (Type' 'Fixity)
 normalise = uniVarsToForall {->=> skolemsToExists-} >=> go
   where
     go = \case
-        T.UniVar _ uni ->
+        T.UniVar loc uni ->
             lookupUniVar uni >>= \case
-                Left _ -> typeError $ "dangling univar " <> pretty uni
+                Left _ -> typeError $ Internal loc $ "dangling univar " <> pretty uni
                 Right body -> go (unMono body)
         T.Forall loc var body -> T.Forall loc var <$> go body
         T.Exists loc var body -> T.Exists loc var <$> go body
@@ -434,7 +424,7 @@ normalise = uniVarsToForall {->=> skolemsToExists-} >=> go
         T.Record loc row -> T.Record loc <$> traverse go row
         T.Var v -> pure $ T.Var v
         T.Name name -> pure $ T.Name name
-        skolem@T.Skolem{} -> typeError $ "skolem " <> pretty skolem <> " remains in code"
+        T.Skolem skolem -> typeError $ Internal (getLoc skolem) $ "skolem " <> pretty (T.Skolem skolem) <> " remains in code"
 
     -- this is an alternative to forallScope that's only suitable at the top level
     -- it also compresses any records found along the way, because I don't feel like
