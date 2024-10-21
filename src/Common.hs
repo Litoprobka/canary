@@ -7,11 +7,12 @@
 {-# LANGUAGE TypeFamilies #-}
 {-# LANGUAGE DataKinds #-}
 
-module Common (Name (..), UniVar (..), Skolem (..), Scope (..), Id (..), inc, Loc (..), SimpleName (..), HasLoc(..), zipLoc, NameAt, Pass(..), bifix, zipLocOf) where
+module Common (Name (..), UniVar (..), Skolem (..), Scope (..), Id (..), inc, Loc (..), SimpleName (..), HasLoc(..), zipLoc, NameAt, Pass(..), bifix, zipLocOf, locFromSourcePos) where
 
 import Prettyprinter
 import Relude
-import Text.Megaparsec (SourcePos)
+import Error.Diagnose (Position (..), end)
+import Text.Megaparsec (SourcePos (..), unPos)
 
 -- this file is a bit of a crutch. Perhaps it's better to move the definitions to Type or TypeChecker
 -- however, they don't really belong to Type, and moving them to TypeChecker introduces a cyclic dependency (which may or may not be fine)
@@ -97,7 +98,7 @@ instance Pretty Skolem where
     pretty (Skolem builtin) = pretty builtin <> "?"
 
 data Loc
-    = Loc {start :: SourcePos, end :: SourcePos}
+    = Loc Position
     | Blank
     deriving (Show)
 
@@ -114,10 +115,19 @@ class HasLoc a where
 zipLoc :: Loc -> Loc -> Loc
 zipLoc loc Blank = loc
 zipLoc Blank loc = loc
-zipLoc (Loc start _) (Loc _ end) = Loc start end
+zipLoc (Loc lhs) (Loc rhs) = Loc $ lhs{end = rhs.end}
 
 zipLocOf :: (HasLoc a, HasLoc b) => a -> b -> Loc
 zipLocOf lhs rhs = zipLoc (getLoc lhs) (getLoc rhs)
+
+locFromSourcePos :: SourcePos -> SourcePos -> Loc
+locFromSourcePos start end =
+        Loc $
+            Position
+                { file = start.sourceName
+                , begin = (unPos start.sourceLine, unPos start.sourceColumn)
+                , end = (unPos end.sourceLine, unPos end.sourceColumn)
+                }
 
 -- * Some fancy boilerplate prevention stuff
 

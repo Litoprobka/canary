@@ -16,7 +16,7 @@ import Syntax.Type qualified as T
 import Control.Monad.Combinators.Expr
 import Control.Monad.Combinators.NonEmpty qualified as NE
 
-import Common (Loc (..), Pass (..), SimpleName (..), zipLocOf)
+import Common (Loc (..), Pass (..), SimpleName (..), zipLocOf, locFromSourcePos)
 import Syntax.Row
 import Syntax.Row qualified as Row
 import Text.Megaparsec
@@ -96,7 +96,7 @@ lambdaLike con kw argP endSym = do
     args <- NE.some $ (,) <$> getSourcePos <*> argP
     specialSymbol endSym
     end <- getSourcePos
-    pure \body -> foldr (\(start, arg) -> con (Loc start end) arg) body args
+    pure \body -> foldr (\(start, arg) -> con (locFromSourcePos start end) arg) body args
 
 pattern' :: ParserM m => m (Pattern 'Parse)
 pattern' = do

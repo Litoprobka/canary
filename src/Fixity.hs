@@ -2,7 +2,7 @@
 {-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE MultiWayIf #-}
 
-module Fixity where
+module Fixity (resolveFixity, testOpMap, testGraph, Fixity(..)) where
 
 import Common (Name (..), Pass (..), zipLocOf)
 import Control.Monad (foldM)

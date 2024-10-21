@@ -1,3 +1,4 @@
+{-# LANGUAGE OverloadedRecordDot #-}
 {-# OPTIONS_GHC -Wno-unrecognised-pragmas #-}
 
 {-# HLINT ignore "Use <$>" #-}
@@ -36,7 +37,7 @@ module Lexer (
     mkName,
 ) where
 
-import Common (Loc (..), SimpleName (..))
+import Common (Loc (..), SimpleName (..), locFromSourcePos)
 import Control.Monad.Combinators.NonEmpty qualified as NE
 import Data.Char (isAlphaNum, isSpace, isUpperCase)
 import Data.HashSet qualified as Set
@@ -249,7 +250,7 @@ withLoc p = do
     start <- getSourcePos
     f <- p
     end <- getSourcePos
-    let loc = if start == end then Blank else Loc start end
+    let loc = if start == end then Blank else locFromSourcePos start end
     pure $ f loc
 
 withLoc' :: ParserM m => (Loc -> a -> b) -> m a -> m b

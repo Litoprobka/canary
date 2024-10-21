@@ -1,7 +1,7 @@
 {-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE OverloadedRecordDot #-}
 {-# LANGUAGE DataKinds #-}
-module Interpreter where
+module Interpreter (InterpreterBuiltins(..), eval) where
 
 import Common (Name, Pass (..))
 import Relude
