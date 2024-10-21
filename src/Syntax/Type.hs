@@ -6,7 +6,7 @@
 
 module Syntax.Type (Type' (..), cast, castM) where
 
-import Common (HasLoc, Loc, NameAt, Pass (..), bifix)
+import Common (HasLoc, Loc, NameAt, Pass (..), bifix, getLoc, zipLocOf)
 import Common qualified as CT
 import Prettyprinter (Doc, Pretty, braces, brackets, comma, parens, pretty, punctuate, sep, (<+>))
 import Relude
@@ -16,8 +16,8 @@ data Type' (p :: Pass) where
     Name :: NameAt p -> Type' p
     Var :: NameAt p -> Type' p
     UniVar :: Loc -> CT.UniVar -> Type' 'DuringTypecheck
-    Skolem :: Loc -> CT.Skolem -> Type' 'DuringTypecheck
-    Application :: Loc -> Type' p -> Type' p -> Type' p
+    Skolem :: CT.Skolem -> Type' 'DuringTypecheck
+    Application :: Type' p -> Type' p -> Type' p
     Function :: Loc -> Type' p -> Type' p -> Type' p -- doesn't need a Loc, unless it's used in an infix position
     Forall :: Loc -> NameAt p -> Type' p -> Type' p
     Exists :: Loc -> NameAt p -> Type' p -> Type' p
@@ -47,9 +47,9 @@ instance Pretty (NameAt pass) => Pretty (Type' pass) where
         prettyPrec prec = \case
             Name name -> pretty name
             Var name -> pretty name
-            Skolem _ skolem -> pretty skolem
+            Skolem skolem -> pretty skolem
             UniVar _ uni -> pretty uni
-            Application _ lhs rhs -> parensWhen 3 $ prettyPrec 2 lhs <+> prettyPrec 3 rhs
+            Application lhs rhs -> parensWhen 3 $ prettyPrec 2 lhs <+> prettyPrec 3 rhs
             Function _ from to -> parensWhen 2 $ prettyPrec 2 from <+> "->" <+> pretty to
             Forall _ var body -> parensWhen 1 $ "∀" <> pretty var <> "." <+> pretty body
             Exists _ var body -> parensWhen 1 $ "∃" <> pretty var <> "." <+> pretty body
@@ -68,11 +68,11 @@ instance Pretty (NameAt pass) => Pretty (Type' pass) where
 
 instance HasLoc (NameAt pass) => HasLoc (Type' pass) where
     getLoc = \case
-        Name name -> CT.getLoc name
-        Var name -> CT.getLoc name
-        Skolem loc _ -> loc
+        Name name -> getLoc name
+        Var name -> getLoc name
+        Skolem skolem -> getLoc skolem
         UniVar loc _ -> loc
-        Application loc _ _ -> loc
+        Application lhs rhs -> zipLocOf lhs rhs
         Function loc _ _ -> loc
         Forall loc _ _ -> loc
         Exists loc _ _ -> loc
@@ -84,7 +84,7 @@ baseCast :: NameAt p ~ NameAt q => (Type' p -> Type' q) -> Type' p -> Type' q
 baseCast recur = \case
     Name name -> Name name
     Var name -> Var name
-    Application loc lhs rhs -> Application loc (recur lhs) (recur rhs)
+    Application lhs rhs -> Application (recur lhs) (recur rhs)
     Function loc lhs rhs -> Function loc (recur lhs) (recur rhs)
     Forall loc var body -> Forall loc var (recur body)
     Exists loc var body -> Exists loc var (recur body)
@@ -96,7 +96,7 @@ baseCastM :: Applicative m => NameAt p ~ NameAt q => (Type' p -> m (Type' q)) ->
 baseCastM recur = \case
     Name name -> pure $ Name name
     Var name -> pure $ Var name
-    Application loc lhs rhs -> Application loc <$> recur lhs <*> recur rhs
+    Application lhs rhs -> Application <$> recur lhs <*> recur rhs
     Function loc lhs rhs -> Function loc <$> recur lhs <*> recur rhs
     Forall loc var body -> Forall loc var <$> recur body
     Exists loc var body -> Exists loc var <$> recur body

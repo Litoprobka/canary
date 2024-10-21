@@ -1,0 +1,9 @@
+type Stack 'a = Cons 'a (Stack 'a) | Nil
+
+//xos = Cons 0 (Cons 1 xos)
+
+xs = Cons 0 os
+os = Cons 1 xs
+
+// higherRank : (forall 'a. 'a -> 'a -> 'a) -> 'b -> 'b -> 'b
+// higherRank f x y = if f True False then f x y else f y x

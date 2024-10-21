@@ -16,7 +16,7 @@ import Syntax.Type qualified as T
 import Control.Monad.Combinators.Expr
 import Control.Monad.Combinators.NonEmpty qualified as NE
 
-import Common (Loc (..), Pass (..), SimpleName (..), getLoc, zipLoc)
+import Common (Loc (..), Pass (..), SimpleName (..), zipLocOf)
 import Syntax.Row
 import Syntax.Row qualified as Row
 import Text.Megaparsec
@@ -61,9 +61,9 @@ type' = makeExprParser typeParens [[typeApp], [function], [forall', exists]]
     forall' = Prefix $ lambdaLike T.Forall forallKeyword typeVariable "."
     exists = Prefix $ lambdaLike T.Exists existsKeyword typeVariable "."
 
-    typeApp = InfixL $ pure $ appLoc T.Application
+    typeApp = InfixL $ pure T.Application
     function = InfixR $ appLoc T.Function <$ specialSymbol "->"
-    appLoc con lhs rhs = con (zipLoc (getLoc lhs) (getLoc rhs)) lhs rhs
+    appLoc con lhs rhs = con (zipLocOf lhs rhs) lhs rhs
 
 -- a type expression with higher precedence than application
 -- used when parsing constructor arguement types and the like
@@ -102,13 +102,13 @@ pattern' :: ParserM m => m (Pattern 'Parse)
 pattern' = do
     pat <-
         choice
-            [ withLoc $ flip3 P.Constructor <$> typeName <*> many patternParens
-            , withLoc $ flip3 P.Variant <$> variantConstructor <*> patternParens
+            [ P.Constructor <$> typeName <*> many patternParens
+            , P.Variant <$> variantConstructor <*> patternParens
             , patternParens
             ]
-    option pat $ withLoc do
+    option pat do
         specialSymbol ":"
-        flip3 P.Annotation pat <$> type'
+        P.Annotation pat <$> type'
 
 {- | parses a pattern with constructors enclosed in parens
 should be used in cases where multiple patterns in a row are accepted, i.e.
@@ -123,8 +123,8 @@ patternParens =
         , withLoc' P.IntLiteral intLiteral
         , withLoc' P.TextLiteral textLiteral
         , withLoc' P.CharLiteral charLiteral
-        , withLoc $ flip3 P.Constructor <$> typeName <*> pure [] -- a constructor without arguments
-        , withLoc $ flip3 P.Variant <$> variantConstructor <*> pure unit -- some sugar for variants with a unit payload
+        , P.Constructor <$> typeName <*> pure [] -- a constructor without arguments
+        , P.Variant <$> variantConstructor <*> pure unit -- some sugar for variants with a unit payload
         , parens pattern'
         ]
   where

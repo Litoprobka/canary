@@ -39,10 +39,10 @@ type Type = Type' 'DuringTypecheck
 
 data Monotype
     = MName Name
-    | MSkolem Loc Skolem
+    | MSkolem Skolem
     | MUniVar Loc UniVar
     | MVar Name -- a (probably out of scope) type var
-    | MApp Loc Monotype Monotype
+    | MApp Monotype Monotype
     | MFn Loc Monotype Monotype
     | MVariant Loc (ExtRow Monotype)
     | MRecord Loc (ExtRow Monotype)
@@ -51,10 +51,10 @@ data Monotype
 -- а type whose outer constructor is monomorphic
 data MonoLayer
     = MLName Name
-    | MLSkolem Loc Skolem
+    | MLSkolem Skolem
     | MLUniVar Loc UniVar
     | MLVar Name
-    | MLApp Loc Type Type
+    | MLApp Type Type
     | MLFn Loc Type Type
     | MLVariant Loc (ExtRow Type)
     | MLRecord Loc (ExtRow Type)
@@ -85,6 +85,11 @@ data InfState = InfState
     , vars :: HashMap UniVar (Either Scope Monotype) -- contains either the scope of an unsolved var or a type
     }
     deriving (Show)
+
+data TypeError
+    = Internal (Doc AnsiStyle)
+    | DanglingTypeVar Name
+    | NotASubtype Type Type
 
 type InfEffs es = (NameGen :> es, State InfState :> es, Diagnose :> es, Reader (Builtins Name) :> es)
 
@@ -158,8 +163,8 @@ freshUniVar' = do
     pure var
 
 freshSkolem :: InfEffs es => Name -> Eff es Type
-freshSkolem (Name loc name _) = T.Skolem loc . Skolem <$> freshName loc name
-freshSkolem _ = T.Skolem Blank . Skolem <$> freshName Blank "what" -- why?
+freshSkolem (Name loc name _) = T.Skolem . Skolem <$> freshName loc name
+freshSkolem _ = T.Skolem . Skolem <$> freshName Blank "what" -- why?
 
 freshTypeVar :: Loc -> InfEffs es => Eff es Name
 freshTypeVar loc = do
@@ -207,7 +212,7 @@ alterUniVar override uni ty = do
                 Left _ -> pure True
                 Right ty' -> cycleCheck (selfRefType, HashSet.insert uni2 acc) ty'
         MFn _ from to -> cycleCheck (Indirect, acc) from >> cycleCheck (Indirect, acc) to
-        MApp _ lhs rhs -> cycleCheck (Indirect, acc) lhs >> cycleCheck (Indirect, acc) rhs
+        MApp lhs rhs -> cycleCheck (Indirect, acc) lhs >> cycleCheck (Indirect, acc) rhs
         MVariant _ row -> True <$ traverse_ (cycleCheck (Indirect, acc)) row
         MRecord _ row -> True <$ traverse_ (cycleCheck (Indirect, acc)) row
         MName{} -> pure True
@@ -220,7 +225,7 @@ alterUniVar override uni ty = do
 foldUniVars :: InfEffs es => (UniVar -> Eff es ()) -> Monotype -> Eff es ()
 foldUniVars action = \case
     MUniVar _ v -> action v >> lookupUniVar v >>= either (const pass) (foldUniVars action)
-    MApp _ lhs rhs -> foldUniVars action lhs >> foldUniVars action rhs
+    MApp lhs rhs -> foldUniVars action lhs >> foldUniVars action rhs
     MFn _ from to -> foldUniVars action from >> foldUniVars action to
     MVariant _ row -> traverse_ (foldUniVars action) row
     MRecord _ row -> traverse_ (foldUniVars action) row
@@ -311,9 +316,9 @@ mono :: InfEffs es => Variance -> Type -> Eff es Monotype
 mono variance = \case
     T.Var var -> typeError $ "mono: dangling var" <+> pretty var -- pure $ MVar var
     T.Name name -> pure $ MName name
-    T.Skolem loc skolem -> pure $ MSkolem loc skolem
+    T.Skolem skolem -> pure $ MSkolem skolem
     T.UniVar loc uni -> pure $ MUniVar loc uni
-    T.Application loc lhs rhs -> MApp loc <$> go lhs <*> go rhs
+    T.Application lhs rhs -> MApp <$> go lhs <*> go rhs
     T.Function loc from to -> MFn loc <$> mono (flipVariance variance) from <*> go to
     T.Variant loc row -> MVariant loc <$> traverse go row
     T.Record loc row -> MRecord loc <$> traverse go row
@@ -331,10 +336,10 @@ flipVariance = \case
 unMono :: Monotype -> Type
 unMono = \case
     MName name -> T.Name name
-    MSkolem loc skolem -> T.Skolem loc skolem
+    MSkolem skolem -> T.Skolem skolem
     MUniVar loc uniVar -> T.UniVar loc uniVar
     MVar var -> T.Var var
-    MApp loc lhs rhs -> T.Application loc (unMono lhs) (unMono rhs)
+    MApp lhs rhs -> T.Application (unMono lhs) (unMono rhs)
     MFn loc from to -> T.Function loc (unMono from) (unMono to)
     MVariant loc row -> T.Variant loc $ fmap unMono row
     MRecord loc row -> T.Record loc $ fmap unMono row
@@ -354,9 +359,9 @@ monoLayer :: InfEffs es => Variance -> Type -> Eff es MonoLayer
 monoLayer variance = \case
     T.Var var -> typeError $ "monoLayer: dangling var" <+> pretty var -- pure $ MLVar var
     T.Name name -> pure $ MLName name
-    T.Skolem loc skolem -> pure $ MLSkolem loc skolem
+    T.Skolem skolem -> pure $ MLSkolem skolem
     T.UniVar loc uni -> pure $ MLUniVar loc uni
-    T.Application loc lhs rhs -> pure $ MLApp loc lhs rhs
+    T.Application lhs rhs -> pure $ MLApp lhs rhs
     T.Function loc from to -> pure $ MLFn loc from to
     T.Variant loc row -> pure $ MLVariant loc row
     T.Record loc row -> pure $ MLRecord loc row
@@ -366,10 +371,10 @@ monoLayer variance = \case
 unMonoLayer :: MonoLayer -> Type
 unMonoLayer = \case
     MLName name -> T.Name name
-    MLSkolem loc skolem -> T.Skolem loc skolem
+    MLSkolem skolem -> T.Skolem skolem
     MLUniVar loc uni -> T.UniVar loc uni
     MLVar name -> T.Var name
-    MLApp loc lhs rhs -> T.Application loc lhs rhs
+    MLApp lhs rhs -> T.Application lhs rhs
     MLFn loc lhs rhs -> T.Function loc lhs rhs
     MLVariant loc row -> T.Variant loc row
     MLRecord loc row -> T.Record loc row
@@ -392,7 +397,7 @@ substitute variance var ty = do
             | v /= var -> T.Exists loc v <$> go replacement body
             | otherwise -> pure $ T.Exists loc v body
         T.Function loc from to -> T.Function loc <$> go replacement from <*> go replacement to
-        T.Application loc lhs rhs -> T.Application loc <$> go replacement lhs <*> go replacement rhs
+        T.Application lhs rhs -> T.Application <$> go replacement lhs <*> go replacement rhs
         T.Variant loc row -> T.Variant loc <$> traverse (go replacement) row
         T.Record loc row -> T.Record loc <$> traverse (go replacement) row
         name@T.Name{} -> pure name
@@ -419,7 +424,7 @@ substituteTy from to = go
         T.Forall loc v body -> T.Forall loc v <$> go body
         T.Exists loc v body -> T.Exists loc v <$> go body
         T.Function loc in' out' -> T.Function loc <$> go in' <*> go out'
-        T.Application loc lhs rhs -> T.Application loc <$> go lhs <*> go rhs
+        T.Application lhs rhs -> T.Application <$> go lhs <*> go rhs
         T.Variant loc row -> T.Variant loc <$> traverse go row
         T.Record loc row -> T.Record loc <$> traverse go row
         v@T.Var{} -> pure v

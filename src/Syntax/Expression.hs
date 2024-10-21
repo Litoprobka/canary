@@ -7,7 +7,7 @@ module Syntax.Expression (Expression (..), Binding (..), HasInfix(..), noInfix) 
 
 import Relude
 
-import Common (HasLoc (..), Loc, NameAt, Pass (..), zipLoc)
+import Common (HasLoc (..), Loc, NameAt, Pass (..), zipLocOf)
 import Prettyprinter (
     Pretty,
     braces,
@@ -39,14 +39,14 @@ data Binding (p :: Pass)
 -- Application, Annotation and some others
 data Expression (p :: Pass)
     = Lambda Loc (Pattern p) (Expression p)
-    | Application Loc (Expression p) (Expression p)
+    | Application (Expression p) (Expression p)
     | Let Loc (Binding p) (Expression p)
     | Case Loc (Expression p) [(Pattern p, Expression p)]
     | -- | Haskell's \cases
       Match Loc [([Pattern p], Expression p)]
     | If Loc (Expression p) (Expression p) (Expression p)
     | -- | value : Type
-      Annotation Loc (Expression p) (Type' p)
+      Annotation (Expression p) (Type' p)
     | Name (NameAt p)
     | -- | .field.otherField.thirdField
       RecordLens Loc (NonEmpty OpenName)
@@ -84,12 +84,12 @@ instance Pretty (NameAt p) => Pretty (Expression p) where
       where
         go n = \case
             Lambda _ arg body -> parensWhen 1 $ "λ" <> pretty arg <+> "->" <+> pretty body
-            Application _ lhs rhs -> parensWhen 3 $ go 2 lhs <+> go 3 rhs
+            Application lhs rhs -> parensWhen 3 $ go 2 lhs <+> go 3 rhs
             Let _ binding body -> "let" <+> pretty binding <> ";" <+> pretty body
             Case _ arg matches -> nest 4 (vsep $ ("case" <+> pretty arg <+> "of" :) $ matches <&> \(pat, body) -> pretty pat <+> "->" <+> pretty body)
             Match _ matches -> nest 4 (vsep $ ("match" :) $ matches <&> \(pats, body) -> sep (parens . pretty <$> pats) <+> "->" <+> pretty body)
             If _ cond true false -> "if" <+> pretty cond <+> "then" <+> pretty true <+> "else" <+> pretty false
-            Annotation _ expr ty -> parensWhen 1 $ pretty expr <+> ":" <+> pretty ty
+            Annotation expr ty -> parensWhen 1 $ pretty expr <+> ":" <+> pretty ty
             Name name -> pretty name
             RecordLens _ fields -> encloseSep "." "" "." $ toList $ pretty <$> fields
             Constructor name -> pretty name
@@ -109,12 +109,12 @@ instance Pretty (NameAt p) => Pretty (Expression p) where
 instance HasLoc (NameAt p) => HasLoc (Expression p) where
     getLoc = \case
         Lambda loc _ _ -> loc
-        Application loc _ _ -> loc
+        Application lhs rhs -> zipLocOf lhs rhs
         Let loc _ _ -> loc
         Case loc _ _ -> loc
         Match loc _ -> loc
         If loc _ _ _ -> loc
-        Annotation loc _ _ -> loc
+        Annotation expr ty -> zipLocOf expr ty
         Name name -> getLoc name
         RecordLens loc _ -> loc
         Constructor name -> getLoc name
@@ -124,5 +124,5 @@ instance HasLoc (NameAt p) => HasLoc (Expression p) where
         IntLiteral loc _ -> loc
         TextLiteral loc _ -> loc
         CharLiteral loc _ -> loc
-        Infix _ ((e, _) : _) l -> zipLoc (getLoc e) (getLoc l)
+        Infix _ ((e, _) : _) l -> zipLocOf e l
         Infix _ [] l -> getLoc l

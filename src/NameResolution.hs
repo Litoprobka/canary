@@ -174,10 +174,10 @@ resolveBinding locals =
     -- this could have been a Traversable instance
     resolvePat :: EnvEffs es => Pattern 'Parse -> Eff es (Pattern 'NameRes)
     resolvePat = \case
-        P.Constructor loc con pats -> P.Constructor loc <$> resolve con <*> traverse resolvePat pats
-        P.Annotation loc pat ty -> P.Annotation loc <$> resolvePat pat <*> resolveType ty
+        P.Constructor con pats -> P.Constructor <$> resolve con <*> traverse resolvePat pats
+        P.Annotation pat ty -> P.Annotation <$> resolvePat pat <*> resolveType ty
         P.Record loc row -> P.Record loc <$> traverse resolvePat row
-        P.Variant loc openName arg -> P.Variant loc openName <$> resolvePat arg
+        P.Variant openName arg -> P.Variant openName <$> resolvePat arg
         P.Var name -> P.Var <$> resolve name
         P.List loc pats -> P.List loc <$> traverse resolvePat pats
         P.IntLiteral loc n -> pure $ P.IntLiteral loc n
@@ -187,10 +187,10 @@ resolveBinding locals =
 -- | resolves names in a pattern. Adds all new names to the current scope
 declarePat :: (EnvEffs es, Declare :> es) => Pattern 'Parse -> Eff es (Pattern 'NameRes)
 declarePat = \case
-    P.Constructor loc con pats -> P.Constructor loc <$> resolve con <*> traverse declarePat pats
-    P.Annotation loc pat ty -> P.Annotation loc <$> declarePat pat <*> resolveType ty
+    P.Constructor con pats -> P.Constructor <$> resolve con <*> traverse declarePat pats
+    P.Annotation pat ty -> P.Annotation <$> declarePat pat <*> resolveType ty
     P.Record loc row -> P.Record loc <$> traverse declarePat row
-    P.Variant loc openName arg -> P.Variant loc openName <$> declarePat arg
+    P.Variant openName arg -> P.Variant openName <$> declarePat arg
     P.Var name -> P.Var <$> declare name
     P.List loc pats -> P.List loc <$> traverse declarePat pats
     P.IntLiteral loc n -> pure $ P.IntLiteral loc n
@@ -207,7 +207,7 @@ resolveExpr e = scoped case e of
         arg' <- declarePat arg
         body' <- resolveExpr body
         pure $ E.Lambda loc arg' body'
-    E.Application loc f arg -> E.Application loc <$> resolveExpr f <*> resolveExpr arg
+    E.Application f arg -> E.Application <$> resolveExpr f <*> resolveExpr arg
     E.Let loc binding expr -> do
         -- resolveBinding is intended for top-level bindings and where clauses,
         -- so we have to declare the new vars with `collectNames`
@@ -227,7 +227,7 @@ resolveExpr e = scoped case e of
             pats' <- traverse declarePat pats
             expr' <- resolveExpr expr
             pure (pats', expr')
-    E.Annotation loc body ty -> E.Annotation loc <$> resolveExpr body <*> resolveType ty
+    E.Annotation body ty -> E.Annotation <$> resolveExpr body <*> resolveType ty
     E.If loc cond true false -> E.If loc <$> resolveExpr cond <*> resolveExpr true <*> resolveExpr false
     E.Record loc row -> E.Record loc <$> traverse resolveExpr row
     E.List loc items -> E.List loc <$> traverse resolveExpr items
@@ -254,7 +254,7 @@ resolveType ty = scoped case ty of
         var' <- declare var
         body' <- resolveType body
         pure $ T.Exists loc var' body'
-    T.Application loc lhs rhs -> T.Application loc <$> resolveType lhs <*> resolveType rhs
+    T.Application lhs rhs -> T.Application <$> resolveType lhs <*> resolveType rhs
     T.Function loc from to -> T.Function loc <$> resolveType from <*> resolveType to
     T.Name name -> T.Name <$> resolve name
     T.Var var -> T.Var <$> resolve var

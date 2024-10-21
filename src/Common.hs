@@ -7,7 +7,7 @@
 {-# LANGUAGE TypeFamilies #-}
 {-# LANGUAGE DataKinds #-}
 
-module Common (Name (..), UniVar (..), Skolem (..), Scope (..), Id (..), inc, Loc (..), SimpleName (..), HasLoc(..), zipLoc, NameAt, Pass(..), bifix) where
+module Common (Name (..), UniVar (..), Skolem (..), Scope (..), Id (..), inc, Loc (..), SimpleName (..), HasLoc(..), zipLoc, NameAt, Pass(..), bifix, zipLocOf) where
 
 import Prettyprinter
 import Relude
@@ -75,6 +75,9 @@ newtype Skolem = Skolem Name
     deriving (Show, Eq)
     deriving newtype (Hashable)
 
+instance HasLoc Skolem where
+    getLoc (Skolem name) = getLoc name
+
 newtype Scope = Scope Int deriving (Show, Eq, Ord)
 
 instance Pretty Name where
@@ -112,6 +115,9 @@ zipLoc :: Loc -> Loc -> Loc
 zipLoc loc Blank = loc
 zipLoc Blank loc = loc
 zipLoc (Loc start _) (Loc _ end) = Loc start end
+
+zipLocOf :: (HasLoc a, HasLoc b) => a -> b -> Loc
+zipLocOf lhs rhs = zipLoc (getLoc lhs) (getLoc rhs)
 
 -- * Some fancy boilerplate prevention stuff
 

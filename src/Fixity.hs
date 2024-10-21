@@ -4,7 +4,7 @@
 
 module Fixity where
 
-import Common (Name (..), Pass (..), getLoc, zipLoc)
+import Common (Name (..), Pass (..), zipLocOf)
 import Control.Monad (foldM)
 import Data.HashMap.Strict qualified as HashMap
 import Data.HashSet qualified as HashSet
@@ -69,14 +69,14 @@ parseDeclaration = \case
 parse :: Ctx es => Expression 'NameRes -> Eff es (Expression 'Fixity)
 parse = \case
     E.Lambda loc arg body -> E.Lambda loc (castP arg) <$> parse body
-    E.Application loc lhs rhs -> E.Application loc <$> parse lhs <*> parse rhs
+    E.Application lhs rhs -> E.Application <$> parse lhs <*> parse rhs
     E.Let loc binding expr -> E.Let loc <$> parseBinding binding <*> parse expr
     E.Case loc arg cases -> E.Case loc <$> parse arg <*> traverse (bitraverse (pure . castP) parse) cases
     -- \| Haskell's \cases
     E.Match loc cases -> E.Match loc <$> traverse (bitraverse (pure . map castP) parse) cases
     E.If loc cond true false -> E.If loc <$> parse cond <*> parse true <*> parse false
     -- \| value : Type
-    E.Annotation loc e ty -> E.Annotation loc <$> parse e <*> pure (T.cast id ty)
+    E.Annotation  e ty -> E.Annotation <$> parse e <*> pure (T.cast id ty)
     E.Name name -> pure $ E.Name name
     -- \| .field.otherField.thirdField
     E.RecordLens loc row -> pure $ E.RecordLens loc row
@@ -117,14 +117,14 @@ parse = \case
     appOrMerge mbOp lhs rhs = do
         opMap <- ask @OpMap
         (fixity, _) <- lookup' mbOp opMap
-        let loc = zipLoc (getLoc lhs) (getLoc rhs)
+        let loc = zipLocOf lhs rhs
         pure case (mbOp, fixity, lhs) of
-            (Nothing, _, _) -> E.Application loc lhs rhs
-            (Just op, InfixChain, E.Application _ (E.Name op') (E.List _ args))
+            (Nothing, _, _) -> E.Application lhs rhs
+            (Just op, InfixChain, E.Application (E.Name op') (E.List _ args))
                 | op == op' ->
-                    E.Application loc (E.Name op') (E.List loc $ args <> [rhs])
-            (Just op, InfixChain, _) -> E.Application loc (E.Name op) $ E.List loc [lhs, rhs]
-            (Just op, _, _) -> E.Application loc (E.Application loc (E.Name op) lhs) rhs
+                    E.Application (E.Name op') (E.List loc $ args <> [rhs])
+            (Just op, InfixChain, _) -> E.Application (E.Name op) $ E.List loc [lhs, rhs]
+            (Just op, _, _) -> E.Application (E.Application (E.Name op) lhs) rhs
 
 -- * Helpers
 
@@ -135,7 +135,7 @@ parseBinding = \case
 
 castP :: Pattern 'NameRes -> Pattern 'Fixity
 castP = P.cast \recur -> \case
-    P.Annotation loc pat ty -> P.Annotation loc (recur pat) (T.cast id ty)
+    P.Annotation pat ty -> P.Annotation (recur pat) (T.cast id ty)
     other -> recur other
 
 ---

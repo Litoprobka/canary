@@ -52,10 +52,10 @@ eval :: InterpreterBuiltins Name -> HashMap Name Value -> HashMap Name Value -> 
 eval builtins constrs = go where
   go env = \case
     E.Lambda _ pat body -> Lambda \arg -> go (forceMatch env pat arg) body
-    E.Application _ f arg -> case go env f of
+    E.Application f arg -> case go env f of
         Lambda closure -> closure (go env arg)
         other -> error $ "cannot apply " <> showValue other
-    E.Annotation _ x _ -> go env x
+    E.Annotation x _ -> go env x
     E.Let _ binding body -> case binding of
         E.ValueBinding _ pat bindingBody -> go (forceMatch env pat $ go env bindingBody) body
         E.FunctionBinding loc name args bindingBody ->
@@ -87,14 +87,14 @@ eval builtins constrs = go where
   match :: HashMap Name Value -> Pattern 'Fixity -> Value -> Maybe (HashMap Name Value)
   match env = \cases
     (P.Var var) val -> Just $ HashMap.insert var val env
-    (P.Annotation _ pat _) val -> match env pat val
-    (P.Variant _ name argPat) (Variant name' arg)
+    (P.Annotation pat _) val -> match env pat val
+    (P.Variant name argPat) (Variant name' arg)
         | name == name' -> match env argPat arg
         | otherwise -> Nothing
     (P.Record _ patRow) (Record valRow) -> do
         valPatPairs <- traverse (\(name, pat) -> (pat, ) <$> Row.lookup name valRow) $ IsList.toList patRow
         fold <$> traverse (uncurry $ match env) valPatPairs
-    (P.Constructor _ name pats) (Constructor name' args) -> do
+    (P.Constructor name pats) (Constructor name' args) -> do
         guard (name == name')
         guard (length pats == length args)
         fold <$> zipWithM (match env) pats args

@@ -47,14 +47,14 @@ infixr 2 -->
 
 infixl 1 #
 (#) :: Expression p -> Expression p -> Expression p
-(#) = E.Application Blank
+(#) = E.Application
 
 binApp :: Expression 'Parse -> Expression 'Parse -> Expression 'Parse -> Expression 'Parse
 binApp f arg1 arg2 = f # arg1 # arg2
 
 infixl 3 $:
 ($:) :: Type' p -> Type' p -> Type' p
-($:) = T.Application Blank
+($:) = T.Application
 
 λ :: Pattern p -> Expression p -> Expression p
 λ = E.Lambda Blank
@@ -66,7 +66,7 @@ lam = E.Lambda Blank
 (∃) = T.Exists Blank
 
 con :: NameAt p -> [Pattern p] -> Pattern p
-con = P.Constructor Blank
+con = P.Constructor
 
 runDefault :: Eff '[Declare, Reader (Builtins Name), State InfState, NameGen, Diagnose] a -> (Maybe a, Diagnostic (Doc AnsiStyle))
 runDefault action = runPureEff . runDiagnose' ("<none>", "") $ runNameGen do
@@ -158,7 +158,7 @@ instance IsString (Expression 'Parse) where
     fromString str = str & matchCase (E.Constructor . mkName) (E.Name . mkName)
 
 instance IsString (Pattern 'Parse) where
-    fromString = matchCase (\name -> P.Constructor Blank (mkName name) []) (P.Var . mkName)
+    fromString = matchCase (\name -> P.Constructor (mkName name) []) (P.Var . mkName)
 
 instance IsString (Type' 'Parse) where
     fromString str@('\'' : _) = T.Var . mkName $ fromString str
@@ -178,7 +178,7 @@ instance {-# OVERLAPPABLE #-} NameAt p ~ Name => IsString (Expression p) where
     fromString str = str & matchCase (E.Constructor . nameFromText) (E.Name . nameFromText)
 
 instance {-# OVERLAPPABLE #-} NameAt p ~ Name => IsString (Pattern p) where
-    fromString = matchCase (\txt -> P.Constructor Blank (nameFromText txt) []) (P.Var . nameFromText)
+    fromString = matchCase (\txt -> P.Constructor (nameFromText txt) []) (P.Var . nameFromText)
 
 instance {-# OVERLAPPABLE #-} NameAt p ~ Name => IsString (Type' p) where
     fromString str@('\'' : _) = T.Var $ nameFromText $ fromString str
