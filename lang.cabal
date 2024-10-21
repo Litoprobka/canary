@@ -26,8 +26,8 @@ library
   exposed-modules:
       Common
       Diagnostic
+      Fixity
       IL
-      Infix
       Interpreter
       Lexer
       NameGen

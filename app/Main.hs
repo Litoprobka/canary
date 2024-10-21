@@ -17,7 +17,7 @@ import qualified Syntax.Declaration as D
 import qualified Data.HashMap.Strict as HashMap
 import qualified Syntax.Expression as E
 import Interpreter (eval, InterpreterBuiltins (..))
-import Infix hiding (parse)
+import Fixity hiding (parse)
 import Diagnostic
 import Common
 
@@ -30,7 +30,7 @@ main = do
     input & parse (usingReaderT pos1 code) fileName & \case
         Left err -> putStrLn $ errorBundlePretty err
         Right decls -> void . runEff . runDiagnose (fileName, input) $ runNameGen do
-                traverse_ (liftIO . putDoc . (<> line) . pretty) decls
+                prettyAST decls
                 (scope, builtins, env) <- mkDefaults
                 (bindings, evalBuiltins, constrs) <- runNameResolution scope do
                     bindings <- resolveNames decls
@@ -39,9 +39,10 @@ main = do
                     pure (bindings, evalBuiltins, constrs)
 
                 putTextLn "resolved names:"
-                traverse_ (liftIO . putDoc . (<> line) . pretty) bindings
+                prettyAST bindings
 
                 fixityResolvedBindings <- resolveFixity testOpMap testGraph bindings
+                prettyAST fixityResolvedBindings
 
                 putTextLn "typechecking:"
                 types <- typecheck env builtins fixityResolvedBindings 
@@ -50,3 +51,6 @@ main = do
                     (D.Value _ (E.ValueBinding _ _ body) _) : _ ->
                         liftIO . putDoc $ (<> line) $ pretty $ eval evalBuiltins constrs HashMap.empty body
                     _ -> putTextLn "Not a value"
+
+prettyAST :: (Traversable t, Pretty a, MonadIO m) => t a -> m ()
+prettyAST = liftIO . traverse_ (putDoc . (<> line) . pretty)

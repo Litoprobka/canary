@@ -2,7 +2,7 @@
 {-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE MultiWayIf #-}
 
-module Infix where
+module Fixity where
 
 import Common (Name (..), Pass (..), getLoc, zipLoc)
 import Control.Monad (foldM)

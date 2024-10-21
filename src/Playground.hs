@@ -37,7 +37,7 @@ import TypeChecker
 import Diagnostic (runDiagnose, Diagnose, runDiagnose')
 import Error.Diagnose (Diagnostic)
 import Prettyprinter.Render.Terminal (AnsiStyle)
-import Infix (resolveFixity, testGraph, testOpMap)
+import Fixity (resolveFixity, testGraph, testOpMap)
 
 -- a lot of what is used here is only reasonable for interactive use
 
