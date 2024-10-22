@@ -101,7 +101,7 @@ data TypeError
     | NotAFunction Type -- pretty fTy <+> "is not a function type"
 
 typeError :: InfEffs es => TypeError -> Eff es a
-typeError = fatal . \case
+typeError = fatal . one . \case
     Internal loc doc ->
         Err
         Nothing

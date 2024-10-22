@@ -2,22 +2,27 @@
 {-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE TemplateHaskell #-}
 {-# LANGUAGE TypeFamilies #-}
+{-# LANGUAGE MultiWayIf #-}
+{-# LANGUAGE RecordWildCards #-}
+{-# LANGUAGE ViewPatterns #-}
 
-module Diagnostic (Diagnose, runDiagnose, runDiagnose', dummy, nonFatal, fatal) where
+module Diagnostic (Diagnose, runDiagnose, runDiagnose', dummy, nonFatal, fatal, reportsFromBundle) where
 
 import Effectful
 import Effectful.Dispatch.Dynamic
 import Effectful.Error.Static (runErrorNoCallStack, throwError)
-import Effectful.State.Static.Shared (modify, runState)
+import Effectful.Writer.Static.Shared (tell, runWriter)
 import Effectful.TH
 import Error.Diagnose
-import Prettyprinter (Doc)
+import Prettyprinter (Doc, pretty)
 import Relude hiding (modify, runState)
 import Prettyprinter.Render.Terminal (AnsiStyle)
+import Text.Megaparsec qualified as MP
+import qualified Data.DList as DList
 
 data Diagnose :: Effect where
     NonFatal :: Report (Doc AnsiStyle) -> Diagnose m ()
-    Fatal :: Report (Doc AnsiStyle) -> Diagnose m a
+    Fatal :: NonEmpty (Report (Doc AnsiStyle)) -> Diagnose m a
 
 makeEffect ''Diagnose
 
@@ -29,14 +34,48 @@ runDiagnose file action = do
 
 runDiagnose' :: (FilePath, Text) -> Eff (Diagnose : es) a -> Eff es (Maybe a, Diagnostic (Doc AnsiStyle))
 runDiagnose' (filePath, fileContents) = reinterpret
-    (fmap joinReports . runState (addFile mempty filePath $ toString fileContents) . runErrorNoCallStack)
+    (fmap (joinReports . second diagnosticFromReports) . runWriter . runErrorNoCallStack)
+    -- (addFile mempty filePath $ toString fileContents)
     \_ -> \case
-        NonFatal report -> modify $ flip addReport report
-        Fatal report -> throwError report
+        NonFatal report -> tell $ DList.singleton report
+        Fatal reports -> throwError reports
   where
+    baseDiagnostic = addFile mempty filePath $ toString fileContents
+    diagnosticFromReports = DList.foldr (flip addReport) baseDiagnostic
     joinReports = \case
-        (Left fatalError, diagnostic) -> (Nothing, addReport diagnostic fatalError)
+        (Left fatalErrors, diagnostic) -> (Nothing, foldl' @NonEmpty addReport diagnostic fatalErrors)
         (Right val, diagnostic) -> (Just val, diagnostic)
 
 dummy :: Doc style -> Report (Doc style)
 dummy msg = Err Nothing msg [] []
+
+
+-- this is 90% copypasted from Error.Diagnose.Compat.Megaparsec, because enabling the feature flag
+-- hangs the compiler for some reason
+
+reportsFromBundle ::
+  forall s e.
+  ( MP.ShowErrorComponent e, MP.VisualStream s, MP.TraversableStream s) =>
+  MP.ParseErrorBundle s e ->
+  NonEmpty (Report (Doc AnsiStyle))
+reportsFromBundle MP.ParseErrorBundle {..} =
+  toLabeledPosition <$> bundleErrors
+  where
+    toLabeledPosition :: MP.ParseError s e -> Report (Doc AnsiStyle)
+    toLabeledPosition parseError =
+      let (_, pos) = MP.reachOffset (MP.errorOffset parseError) bundlePosState
+          source = fromSourcePos (MP.pstateSourcePos pos)
+          msgs = fmap (pretty @_ @AnsiStyle . toString) $ lines $ toText (MP.parseErrorTextPretty parseError)
+       in flip
+            (Err Nothing "Parse error")
+            []
+            case msgs of
+              [m] -> [(source, This m)]
+              [m1, m2] -> [(source, This m1), (source, Where m2)]
+              _ -> [(source, This "<<Unknown error>>")]
+
+    fromSourcePos :: MP.SourcePos -> Position
+    fromSourcePos MP.SourcePos {..} =
+      let start = bimap MP.unPos MP.unPos (sourceLine, sourceColumn)
+          end = second (+ 1) start
+       in Position start end sourceName

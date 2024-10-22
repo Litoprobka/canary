@@ -2,7 +2,7 @@
 {-# LANGUAGE DataKinds #-}
 {-# OPTIONS_GHC -Wno-unrecognised-pragmas #-}
 
-module Parser (code, declaration, type', pattern', expression) where
+module Parser (code, declaration, type', pattern', expression, parseModule) where
 
 import Relude hiding (many, some)
 
@@ -20,6 +20,11 @@ import Common (Loc (..), Pass (..), SimpleName (..), zipLocOf, locFromSourcePos)
 import Syntax.Row
 import Syntax.Row qualified as Row
 import Text.Megaparsec
+import Effectful (Eff, (:>))
+import Diagnostic (Diagnose, fatal, reportsFromBundle)
+
+parseModule :: (Diagnose :> es) => (FilePath, Text) -> Eff es [Declaration 'Parse]
+parseModule (fileName, fileContents) = either (fatal . reportsFromBundle) pure $ parse (usingReaderT pos1 code) fileName fileContents
 
 code :: Parser [Declaration 'Parse]
 code = topLevelBlock declaration
@@ -161,7 +166,9 @@ expression' termParser = label "expression" $ infixExpr termParser
         pairs <- many $ (,) <$> optional someOperator <*> noPrec varParser
         pure case pairs of
             [] -> firstExpr
-            (_:_) -> uncurry (E.Infix E.Yes) $ shift firstExpr pairs
+            [(Nothing, secondExpr)] -> firstExpr `E.Application` secondExpr
+            [(Just op, secondExpr)] -> E.Name op `E.Application` firstExpr `E.Application` secondExpr
+            (_:_:_) -> uncurry (E.Infix E.Yes) $ shift firstExpr pairs
       where
         -- x [(+, y), (*, z), (+, w)] --> [(x, +), (y, *), (z, +)] w
         shift expr [] = ([], expr)

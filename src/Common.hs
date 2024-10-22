@@ -26,7 +26,7 @@ module Common (
     mkNotes,
 ) where
 
-import Error.Diagnose (Position (..), end)
+import Error.Diagnose (Position (..))
 import Error.Diagnose qualified as M
 import Prettyprinter
 import Relude
@@ -162,7 +162,7 @@ instance Pretty Loc where
 mkNotes :: [(Loc, M.Marker a)] -> [(Position, M.Marker a)]
 mkNotes = mapMaybe \case
     (Blank, _) -> Nothing
-    (Loc pos, marker) -> Just (pos{file = "none"}, marker)
+    (Loc pos, marker) -> Just (pos, marker)
 
 -- * Some fancy boilerplate prevention stuff
 

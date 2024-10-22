@@ -54,6 +54,7 @@ library
   build-depends:
       base >=4.7 && <5
     , diagnose
+    , dlist
     , effectful >=2.3 && <3
     , effectful-th
     , megaparsec >=9.5.0 && <10
@@ -79,6 +80,7 @@ executable lang-exe
   build-depends:
       base >=4.7 && <5
     , diagnose
+    , dlist
     , effectful >=2.3 && <3
     , effectful-th
     , lang
@@ -108,6 +110,7 @@ test-suite lang-test
   build-depends:
       base >=4.7 && <5
     , diagnose
+    , dlist
     , effectful >=2.3 && <3
     , effectful-th
     , hspec ==2.*

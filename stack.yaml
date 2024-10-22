@@ -42,7 +42,9 @@ packages:
 extra-deps: [ diagnose-2.5.1 ]
 
 # Override default flag values for local packages and extra-deps
-# flags: {}
+# flags:
+  # diagnose:
+   # megaparsec-compat: true # for whatever reason, compilation hangs with this flag
 
 # Extra package databases containing global packages
 # extra-package-dbs: []

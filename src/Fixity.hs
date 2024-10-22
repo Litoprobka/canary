@@ -39,7 +39,7 @@ data OpError
     | MissingOperator Op
 
 opError :: Ctx es => OpError -> Eff es a
-opError = fatal . \case
+opError = fatal . one . \case
     IncompatibleFixity prev next ->
         Err
         Nothing
@@ -62,7 +62,7 @@ opError = fatal . \case
 
 lookup' :: (Diagnose :> es, Hashable k, Pretty k) => k -> HashMap k v -> Eff es v
 lookup' key hmap = case HashMap.lookup key hmap of
-    Nothing -> fatal $ dummy $ "missing operator" <+> pretty key
+    Nothing -> fatal . one . dummy $ "missing operator" <+> pretty key
     Just v -> pure v
 
 priority :: Ctx es => Op -> Op -> Eff es Priority
