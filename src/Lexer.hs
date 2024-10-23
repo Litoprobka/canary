@@ -11,6 +11,7 @@ module Lexer (
     block1,
     topLevelBlock,
     letBlock,
+    lexeme,
     lambda,
     keyword,
     specialSymbol,
@@ -35,6 +36,7 @@ module Lexer (
     withLoc,
     withLoc',
     mkName,
+    constructorName,
 ) where
 
 import Common (Loc (..), SimpleName (..), locFromSourcePos)
@@ -96,8 +98,11 @@ symbol = L.symbol spaceOrLineWrap
 keywords :: HashSet Text
 keywords = Set.fromList ["if", "then", "else", "type", "alias", "case", "where", "let", "match", "of", "forall", "∀", "exists", "∃"]
 
+-- | punctuation that has a special meaningng, like keywords
 specialSymbols :: [Text]
-specialSymbols = ["=", "|", ":", ".", ",", "->", "=>", "<-", "(", ")", "{", "}"]
+specialSymbols = ["=", "|", ":", ".", ",", "λ", "\\", "∀", "∃", "->", "=>", "<-", "(", ")", "{", "}"]
+
+-- lambda, forall and exists all have an ASCII and a unicode version
 
 lambda :: ParserM m => m ()
 lambda = void $ symbol "\\" <|> symbol "λ" -- should we allow `λx -> expr` without a space after λ?
@@ -125,6 +130,9 @@ block' sep kw p = do
     -- prevents stuff like:
     -- > f x = expr where
     -- > expr = x + x
+    -- that being said, the check wouldn't make sense if also use `block` for
+    -- top-level blocks
+    --
     -- note that the preceding whitespace is already consumed by `keyword`
     void $ ask >>= L.indentGuard pass GT
 
@@ -151,13 +159,14 @@ letBlock kw f declaration expression = do
         f dec <$> expression
 
 topLevelBlock :: Parser a -> Parser [a]
-topLevelBlock p = L.nonIndented spaceOrLineWrap $ p `sepEndBy` newline <* eof
+topLevelBlock p = newlines *> L.nonIndented spaceOrLineWrap (p `sepEndBy` newline <* eof)
 
 -- | intended to be called with one of `specialSymbols`
 specialSymbol :: ParserM m => Text -> m ()
 specialSymbol sym = label (toString sym) $ try $ lexeme $ string sym *> notFollowedBy (satisfy isOperatorChar) -- note that `symbol` isn't used here, since the whitespace matters in this case
 
 -- | parses a keyword, i.e. a symbol not followed by an alphanum character
+-- it is assumed that `kw` appears in the `keywords` list
 keyword :: ParserM m => Text -> m ()
 keyword kw = label (toString kw) $ try $ lexeme $ string kw *> notFollowedBy (satisfy isIdentifierChar)
 
@@ -165,7 +174,7 @@ keyword kw = label (toString kw) $ try $ lexeme $ string kw *> notFollowedBy (sa
 termName' :: ParserM m => m Text
 termName' = do
     void $ lookAhead (satisfy $ not . isUpperCase)
-    identifier
+    lexeme identifier
 
 termName :: ParserM m => m SimpleName
 termName = mkName termName'
@@ -179,31 +188,42 @@ nonWildcardTerm =
         ]
 
 -- | a termName that starts with an underscore
+-- note: the current implementation forbids `_1`, `_1abc`, etc. That may be undesired
 wildcard :: ParserM m => m SimpleName
 wildcard = lexeme $ mkName $ Text.cons <$> single '_' <*> option "" identifier
 
 -- | an identifier that starts with an uppercase letter
+-- this is not a lexeme
 typeName' :: ParserM m => m Text
 typeName' = do
     void $ lookAhead (satisfy isUpperCase)
     identifier
 
+-- | an identifier that starts with an uppercase letter  
+-- unlike `typeName'`, this /is/ a lexeme
 typeName :: ParserM m => m SimpleName
-typeName = mkName typeName'
+typeName = lexeme $ mkName typeName'
+
+-- | a value constructor name  
+-- this is not a lexeme
+constructorName :: ParserM m => m SimpleName
+constructorName = mkName typeName'
 
 -- | an identifier that starts with a ' and a lowercase letter, i.e. 'acc
 typeVariable :: ParserM m => m SimpleName
 typeVariable = try $ mkName $ liftA2 Text.cons (single '\'') termName'
 
--- an identifier that starts with a ' and an uppercase letter, i.e. 'Some
+-- | an identifier that starts with a ' and an uppercase letter, i.e. 'Some
+-- this is not a lexeme
 variantConstructor :: ParserM m => m SimpleName
 variantConstructor = try $ mkName $ liftA2 Text.cons (single '\'') typeName'
 
--- a helper for other identifier parsers
+-- | a helper for other identifier parsers  
+-- note that it's not a lexeme, i.e. it doesn't consume trailing whitespace
 identifier :: ParserM m => m Text
-identifier = try $ do
-    ident <- lexeme $ Text.cons <$> (letterChar <|> char '_') <*> takeWhileP (Just "identifier") isIdentifierChar
-    when (ident `Set.member` keywords) (fail $ "expected an identifier, got " <> toString ident)
+identifier = try do
+    ident <- Text.cons <$> (letterChar <|> char '_') <*> takeWhileP (Just "identifier") isIdentifierChar
+    when (ident `Set.member` keywords) (fail $ "unexpected keyword '" <> toString ident <> "'")
     pure ident
 
 {- | a record lens, i.e. .field.otherField.thirdField
@@ -212,8 +232,9 @@ Chances are, this parser will only ever be used with E.RecordLens
 recordLens :: ParserM m => m (NonEmpty SimpleName)
 recordLens = label "record lens" $ lexeme $ single '.' *> mkName identifier `NE.sepBy1` single '.'
 
+-- for anybody wondering, `empty` is *not* a noop parser
 intLiteral :: ParserM m => m Int
-intLiteral = label "int literal" $ try $ lexeme $ L.signed empty L.decimal
+intLiteral = label "int literal" $ try $ lexeme $ L.signed pass L.decimal
 
 -- todo: handle escape sequences and interpolation
 textLiteral :: ParserM m => m Text
@@ -237,14 +258,34 @@ isOperatorChar = (`elem` ("+-*/%^=><&.~!?|" :: String))
 isIdentifierChar :: Char -> Bool
 isIdentifierChar c = isAlphaNum c || c == '_' || c == '\''
 
+{- todo: it might be a good idea to ignore strict newlines when inside the brackets
+i.e. that would allow
+> stuff = [
+>   x,
+>   y,
+>   z,
+> ]
+the indentation inside the list is optional as well  
+using anythinging indentation-sensitve, i.e. do notation, reintroduces strict newlines
+> otherStuff = [
+>   x,
+>   do
+>     action1
+>     action2,
+>   y,   
+> ]
+-}
 parens, brackets, braces :: ParserM m => m a -> m a
 parens = between (specialSymbol "(") (specialSymbol ")")
 brackets = between (specialSymbol "[") (specialSymbol "]")
 braces = between (specialSymbol "{") (specialSymbol "}")
 
+-- leading commas, trailing commas, anything goes
 commaSep :: ParserM m => m a -> m [a]
-commaSep = (`sepEndBy` specialSymbol ",")
+commaSep p = optional (specialSymbol ",") *> p `sepEndBy` specialSymbol ","
 
+-- | parses an AST node with location info
+-- todo: don't include trailing whitespace where possible
 withLoc :: ParserM m => m (Loc -> a) -> m a
 withLoc p = do
     start <- getSourcePos

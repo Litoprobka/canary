@@ -1,5 +1,6 @@
 {-# HLINT ignore "Use <$>" #-}
 {-# LANGUAGE DataKinds #-}
+{-# LANGUAGE LambdaCase #-}
 {-# OPTIONS_GHC -Wno-unrecognised-pragmas #-}
 
 module Parser (code, declaration, type', pattern', expression, parseModule) where
@@ -16,21 +17,21 @@ import Syntax.Type qualified as T
 import Control.Monad.Combinators.Expr
 import Control.Monad.Combinators.NonEmpty qualified as NE
 
-import Common (Loc (..), Pass (..), SimpleName (..), zipLocOf, locFromSourcePos)
+import Common (Loc (..), Pass (..), SimpleName (..), locFromSourcePos, zipLocOf)
+import Diagnostic (Diagnose, fatal, reportsFromBundle)
+import Effectful (Eff, (:>))
 import Syntax.Row
 import Syntax.Row qualified as Row
 import Text.Megaparsec
-import Effectful (Eff, (:>))
-import Diagnostic (Diagnose, fatal, reportsFromBundle)
 
-parseModule :: (Diagnose :> es) => (FilePath, Text) -> Eff es [Declaration 'Parse]
+parseModule :: Diagnose :> es => (FilePath, Text) -> Eff es [Declaration 'Parse]
 parseModule (fileName, fileContents) = either (fatal . reportsFromBundle) pure $ parse (usingReaderT pos1 code) fileName fileContents
 
 code :: Parser [Declaration 'Parse]
 code = topLevelBlock declaration
 
 declaration :: Parser (Declaration 'Parse)
-declaration = withLoc $ choice [typeDec, valueDec, signature]
+declaration = withLoc $ choice [typeDec, signature, valueDec]
   where
     valueDec = flip3 D.Value <$> binding <*> whereBlock
     whereBlock = option [] $ block "where" (withLoc valueDec)
@@ -44,7 +45,7 @@ declaration = withLoc $ choice [typeDec, valueDec, signature]
 
     typeDec' = do
         name <- typeName
-        vars <- many typeVariable -- placeholder
+        vars <- many typeVariable -- in the future, this should also support kind-annotated variables
         specialSymbol "="
         flip4 D.Type name vars <$> typePattern `sepBy` specialSymbol "|"
 
@@ -56,8 +57,7 @@ declaration = withLoc $ choice [typeDec, valueDec, signature]
 
     signature :: Parser (Loc -> Declaration 'Parse)
     signature = do
-        name <- termName
-        specialSymbol ":"
+        name <- try $ termName <* specialSymbol ":"
         flip3 D.Signature name <$> type'
 
 type' :: ParserM m => m (Type' 'Parse)
@@ -71,16 +71,17 @@ type' = makeExprParser typeParens [[typeApp], [function], [forall', exists]]
     appLoc con lhs rhs = con (zipLocOf lhs rhs) lhs rhs
 
 -- a type expression with higher precedence than application
--- used when parsing constructor arguement types and the like
+-- used when parsing constructor argument types and the like
 typeParens :: ParserM m => m (Type' 'Parse)
 typeParens =
-    choice
-        [ T.Name <$> typeName
-        , T.Var <$> typeVariable
-        , parens type'
-        , withLoc' T.Record $ NoExtRow <$> someRecord ":" type' Nothing
-        , withLoc' T.Variant $ NoExtRow <$> brackets (fromList <$> commaSep variantItem)
-        ]
+    label "type" $
+        choice
+            [ T.Name <$> typeName
+            , T.Var <$> typeVariable
+            , parens type'
+            , withLoc' T.Record $ NoExtRow <$> someRecord ":" type' Nothing
+            , withLoc' T.Variant $ NoExtRow <$> brackets (fromList <$> commaSep variantItem)
+            ]
   where
     variantItem = (,) <$> variantConstructor <*> option (T.Name $ SimpleName Blank "Unit") typeParens
 
@@ -104,35 +105,37 @@ lambdaLike con kw argP endSym = do
     pure \body -> foldr (\(start, arg) -> con (locFromSourcePos start end) arg) body args
 
 pattern' :: ParserM m => m (Pattern 'Parse)
-pattern' = do
-    pat <-
-        choice
-            [ P.Constructor <$> typeName <*> many patternParens
-            , P.Variant <$> variantConstructor <*> patternParens
-            , patternParens
-            ]
-    option pat do
-        specialSymbol ":"
-        P.Annotation pat <$> type'
+pattern' =
+    choice
+        [ P.Constructor <$> typeName <*> many patternParens
+        , P.Variant <$> variantConstructor <*> patternParens
+        , patternParens
+        ]
 
 {- | parses a pattern with constructors enclosed in parens
 should be used in cases where multiple patterns in a row are accepted, i.e.
 function definitions and match expressions
 -}
 patternParens :: ParserM m => m (Pattern 'Parse)
-patternParens =
-    choice
-        [ P.Var <$> termName
-        , withLoc' P.Record $ someRecord "=" pattern' (Just P.Var)
-        , withLoc' P.List $ brackets (commaSep pattern')
-        , withLoc' P.IntLiteral intLiteral
-        , withLoc' P.TextLiteral textLiteral
-        , withLoc' P.CharLiteral charLiteral
-        , P.Constructor <$> typeName <*> pure [] -- a constructor without arguments
-        , P.Variant <$> variantConstructor <*> pure unit -- some sugar for variants with a unit payload
-        , parens pattern'
-        ]
+patternParens = do
+    pat <-
+        choice
+            [ P.Var <$> termName
+            , record
+            , withLoc' P.List $ brackets (commaSep pattern')
+            , withLoc' P.IntLiteral intLiteral
+            , withLoc' P.TextLiteral textLiteral
+            , withLoc' P.CharLiteral charLiteral
+            , -- a constructor without arguments or with a tightly-bound record pattern
+              lexeme $ P.Constructor <$> constructorName <*> option [] (one <$> record)
+            , flip P.Variant unit <$> variantConstructor -- some sugar for variants with a unit payload
+            , parens pattern'
+            ]
+    option pat do
+        specialSymbol ":"
+        P.Annotation pat <$> type'
   where
+    record = withLoc' P.Record $ someRecord "=" pattern' (Just P.Var)
     unit = P.Record Blank Row.empty
 
 binding :: ParserM m => m (Binding 'Parse)
@@ -148,8 +151,17 @@ binding = withLoc do
 expression :: ParserM m => m (Expression 'Parse)
 expression = expression' $ E.Name <$> nonWildcardTerm
 
+-- an expression with infix operators and unresolved priorities
+-- the `E.Infix` constructor is only used when there is more than one operator
 expression' :: ParserM m => m (Expression 'Parse) -> m (Expression 'Parse)
-expression' termParser = label "expression" $ infixExpr termParser
+expression' termParser = do
+        firstExpr <- noPrec termParser
+        pairs <- many $ (,) <$> optional someOperator <*> noPrec termParser
+        pure case pairs of
+            [] -> firstExpr
+            [(Nothing, secondExpr)] -> firstExpr `E.Application` secondExpr
+            [(Just op, secondExpr)] -> E.Name op `E.Application` firstExpr `E.Application` secondExpr
+            (_ : _ : _) -> uncurry (E.Infix E.Yes) $ shift firstExpr pairs
   where
     sameScopeExpr = expression' termParser
 
@@ -161,30 +173,21 @@ expression' termParser = label "expression" $ infixExpr termParser
             withLoc (nextVar <* wildcard)
                 <|> fmap E.Name termName
 
-    infixExpr varParser = do
-        firstExpr <- noPrec varParser
-        pairs <- many $ (,) <$> optional someOperator <*> noPrec varParser
-        pure case pairs of
-            [] -> firstExpr
-            [(Nothing, secondExpr)] -> firstExpr `E.Application` secondExpr
-            [(Just op, secondExpr)] -> E.Name op `E.Application` firstExpr `E.Application` secondExpr
-            (_:_:_) -> uncurry (E.Infix E.Yes) $ shift firstExpr pairs
-      where
-        -- x [(+, y), (*, z), (+, w)] --> [(x, +), (y, *), (z, +)] w
-        shift expr [] = ([], expr)
-        shift lhs ((op, rhs) : rest) = first ((lhs, op) :) $ shift rhs rest
-    -- parse Annotation somewhere
+    -- x [(+, y), (*, z), (+, w)] --> [(x, +), (y, *), (z, +)] w
+    shift expr [] = ([], expr)
+    shift lhs ((op, rhs) : rest) = first ((lhs, op) :) $ shift rhs rest
+    -- todo: parse Annotation somewhere
     noPrec varParser = choice $ keywordBased <> terminals <> [varParser]
 
     -- expression forms that have a leading keyword/symbol
     keywordBased =
-        [ -- note that we don't use `sameScopeExpression` here, since interliving explicit and implicit lambdas, i.e. `(\f -> f _)`, is way too confusing
+        [ -- note that we don't use `sameScopeExpression` here, since interleaving explicit and implicit lambdas, i.e. `(\f -> f _)`, is way too confusing
           lambdaLike E.Lambda lambda pattern' "->" <*> expression
         , let'
         , case'
         , match'
         , if'
-        , withWildcards $ withLoc $ flip E.Record <$> someRecord "=" newScopeExpr (Just E.Name)
+        , record
         , withWildcards $ withLoc $ flip E.List <$> brackets (commaSep newScopeExpr)
         , parens $ withWildcards newScopeExpr
         ]
@@ -194,7 +197,7 @@ expression' termParser = label "expression" $ infixExpr termParser
                 letBlock "let" (flip3 E.Let) binding expression -- wildcards do not propagate through let bindings. Use an explicit lambda instead!
         case' = withLoc do
             keyword "case"
-            arg <- expression -- `case _ of` is redundant, since it has the same meaning as one arg `match`
+            arg <- expression -- `case _ of` is redundant, since it has the same meaning as a one arg `match`
             matches <- block "of" $ (,) <$> pattern' <* specialSymbol "->" <*> expression
             pure $ flip3 E.Case arg matches
         match' = withLoc $ flip E.Match <$> block "match" ((,) <$> some patternParens <* specialSymbol "->" <*> expression)
@@ -206,15 +209,22 @@ expression' termParser = label "expression" $ infixExpr termParser
             keyword "else"
             false <- sameScopeExpr
             pure $ flip4 E.If cond true false
+    record =
+        withWildcards $ withLoc $ flip E.Record <$> someRecord "=" newScopeExpr (Just E.Name)
 
     terminals =
         [ withLoc' E.RecordLens recordLens
-        , E.Constructor <$> typeName
+        , constructor
         , E.Variant <$> variantConstructor
         , withLoc' E.IntLiteral intLiteral
         , withLoc' E.CharLiteral charLiteral
         , withLoc' E.TextLiteral textLiteral
         ]
+    constructor = lexeme do
+        name <- constructorName
+        optional record <&> \case
+            Nothing -> E.Constructor name
+            Just arg -> E.Constructor name `E.Application` arg
 
 -- turns out that respecting operator precedence makes for confusing code
 -- i.e. consider, say, `3 + _ * 4`

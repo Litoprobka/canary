@@ -26,7 +26,7 @@ resolveSilent env = fmap fst . runNameResolution env
 unitE = E.Record []
 unitT = T.Record (NoExtRow [])
 
-exprs :: [(Text, Expression Text)]
+exprs :: [(Text, Expression 'Parse)]
 exprs =
     [ ("\\x f -> f x", λ "x" $ λ "f" $ "f" # "x")
     , ("\\x f -> f (f x)", λ "x" $ λ "f" $ "f" # ("f" # "x"))
@@ -63,7 +63,7 @@ exprs =
     , ("[id, \\{} -> {}]", E.List ["id", λ (P.Record []) unitE])
     ]
 
-errorExprs :: [(Text, Expression Text)]
+errorExprs :: [(Text, Expression 'Parse)]
 errorExprs =
     [
         ( "\\x y z -> z (y x) (x y) (x y {})"
@@ -74,7 +74,7 @@ errorExprs =
       ("\\f g -> g (f {}) (f Nothing)", λ "f" $ λ "g" $ "g" # ("f" # unitE) # ("f" # "Nothing"))
     ]
 
-exprsToCheck :: [(Text, Expression Text, Type' Text)]
+exprsToCheck :: [(Text, Expression 'Parse, Type' 'Parse)]
 exprsToCheck =
     [ ("Nothing : ∀a. Maybe a", "Nothing", T.Forall "'a" $ "Maybe" $: "'a")
     , ("Nothing : Maybe (∀a. a)", "Nothing", "Maybe" $: T.Forall "'a" "'a")
@@ -92,7 +92,7 @@ exprsToCheck =
     , ("[1, []] : List (∃a. a)", E.List [E.IntLiteral 1, E.List []], "List" $: T.Exists "'a" "'a")
     ]
 
-quickLookExamples :: [(Text, Expression Text)]
+quickLookExamples :: [(Text, Expression 'Parse)]
 quickLookExamples =
     [ ("cons id ids", "cons" # "id" # "ids")
     , ("head (cons id ids)", "head" # ("cons" # "id" # "ids"))
@@ -102,7 +102,7 @@ quickLookExamples =
     , ("\\x y -> [x : ∀'a. 'a -> 'a, y]", λ "x" $ λ "y" $ E.List [E.Annotation "x" (T.Forall "'a" $ "'a" --> "'a"), "y"])
     ]
 
-quickLookDefs :: [(Text, Type' Text)]
+quickLookDefs :: [(Text, Type' 'Parse)]
 quickLookDefs =
     [ ("head", T.Forall "'a" $ list "'a" --> "Maybe" $: "'a")
     , ("single", T.Forall "'a" $ "'a" --> list "'a")
@@ -113,13 +113,13 @@ quickLookDefs =
         )
     ]
 
-deepSkolemisation :: [(Text, Expression Text)]
+deepSkolemisation :: [(Text, Expression 'Parse)]
 deepSkolemisation =
     [ ("f g", "f" # "g")
     , ("f2 g2", "f2" # "g2")
     ]
 
-dsDefs :: [(Text, Type' Text)]
+dsDefs :: [(Text, Type' 'Parse)]
 dsDefs =
     [ ("f", T.Forall "'a" $ T.Forall "'b" $ "'a" --> "'b" --> "'b")
     , ("g", T.Forall "'p" ("'p" --> T.Forall "'q" ("'q" --> "'q")) --> "Int")
@@ -127,14 +127,14 @@ dsDefs =
     , ("f2", "Int" --> "Int" --> "Bool")
     ]
 
-patterns :: [(Text, Pattern Text)]
+patterns :: [(Text, Pattern 'Parse)]
 patterns =
     [ ("Nothing : Maybe (∀ 'a. 'a)", P.Annotation (con "Nothing" []) (T.Name "Maybe" $: T.Forall "'a" "'a"))
     , ("Just x  : Maybe (∀ 'a. 'a)", P.Annotation (con "Just" ["x"]) (T.Name "Maybe" $: T.Forall "'a" "'a"))
     , ("Just (x : ∀ 'a. 'a -> 'a)", con "Just" [P.Annotation "x" (T.Name "Maybe" $: T.Forall "'a" ("'a" --> "'a"))])
     ]
 
-mutualRecursion :: [(Text, [Declaration Text])]
+mutualRecursion :: [(Text, [Declaration 'Parse])]
 mutualRecursion =
     [
         ("f and myId", [ D.Value (E.FunctionBinding "f" ["x", "y"] $ E.Record [("x", "myId" # "x"), ("y", "myId" # "y")]) []
@@ -167,7 +167,7 @@ mutualRecursion =
         ])
     ]
 
-list :: Type' Text -> Type' Text
+list :: Type' Text -> Type' 'Parse
 list ty = "List" $: ty
 
 spec :: Spec
