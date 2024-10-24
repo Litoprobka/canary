@@ -19,6 +19,7 @@ import Relude hiding (modify, runState)
 import Prettyprinter.Render.Terminal (AnsiStyle)
 import Text.Megaparsec qualified as MP
 import qualified Data.DList as DList
+import Data.DList (DList)
 
 data Diagnose :: Effect where
     NonFatal :: Report (Doc AnsiStyle) -> Diagnose m ()
@@ -41,7 +42,7 @@ runDiagnose' (filePath, fileContents) = reinterpret
         Fatal reports -> throwError reports
   where
     baseDiagnostic = addFile mempty filePath $ toString fileContents
-    diagnosticFromReports = DList.foldr (flip addReport) baseDiagnostic
+    diagnosticFromReports = foldl' @DList addReport baseDiagnostic
     joinReports = \case
         (Left fatalErrors, diagnostic) -> (Nothing, foldl' @NonEmpty addReport diagnostic fatalErrors)
         (Right val, diagnostic) -> (Just val, diagnostic)

@@ -12,3 +12,7 @@ addVec MkVec{x, y, z} MkVec{x = x2, y = y2, z = z2} =
     id' MkVec{x = add x x2, y = add y y2, z = add z z2}
 
 negative = -1
+
+add5 = add 5 : Int -> Int
+
+dumdum = (if True then 1 else 2 : Int) : Int

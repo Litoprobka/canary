@@ -155,13 +155,16 @@ expression = expression' $ E.Name <$> nonWildcardTerm
 -- the `E.Infix` constructor is only used when there is more than one operator
 expression' :: ParserM m => m (Expression 'Parse) -> m (Expression 'Parse)
 expression' termParser = do
-        firstExpr <- noPrec termParser
-        pairs <- many $ (,) <$> optional someOperator <*> noPrec termParser
-        pure case pairs of
+    firstExpr <- noPrec termParser
+    pairs <- many $ (,) <$> optional someOperator <*> noPrec termParser
+    let expr = case pairs of
             [] -> firstExpr
             [(Nothing, secondExpr)] -> firstExpr `E.Application` secondExpr
             [(Just op, secondExpr)] -> E.Name op `E.Application` firstExpr `E.Application` secondExpr
             (_ : _ : _) -> uncurry (E.Infix E.Yes) $ shift firstExpr pairs
+    option expr do
+        specialSymbol ":"
+        E.Annotation expr <$> type'
   where
     sameScopeExpr = expression' termParser
 
@@ -176,7 +179,6 @@ expression' termParser = do
     -- x [(+, y), (*, z), (+, w)] --> [(x, +), (y, *), (z, +)] w
     shift expr [] = ([], expr)
     shift lhs ((op, rhs) : rest) = first ((lhs, op) :) $ shift rhs rest
-    -- todo: parse Annotation somewhere
     noPrec varParser = choice $ keywordBased <> terminals <> [varParser]
 
     -- expression forms that have a leading keyword/symbol

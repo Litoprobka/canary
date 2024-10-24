@@ -1,4 +1,3 @@
-{-# LANGUAGE OverloadedRecordDot #-}
 {-# OPTIONS_GHC -Wno-unrecognised-pragmas #-}
 
 {-# HLINT ignore "Use <$>" #-}
@@ -69,7 +68,7 @@ newlines = C.newline *> L.space C.space1 lineComment blockComment
 nonNewlineSpace, lineComment, blockComment :: ParserM m => m ()
 nonNewlineSpace = void $ takeWhile1P (Just "space") \c -> isSpace c && c /= '\n' -- we can ignore \r here
 lineComment = L.skipLineComment "--"
-blockComment = L.skipBlockCommentNested "---" "---"
+blockComment = L.skipBlockComment "---" "---" -- this syntax doesn't work well with nested comments; it does look neat though
 
 -- | space or a newline with increased indentation
 spaceOrLineWrap :: ParserM m => m ()
@@ -159,7 +158,7 @@ letBlock kw f declaration expression = do
         f dec <$> expression
 
 topLevelBlock :: Parser a -> Parser [a]
-topLevelBlock p = newlines *> L.nonIndented spaceOrLineWrap (p `sepEndBy` newline <* eof)
+topLevelBlock p = optional newlines *> L.nonIndented spaceOrLineWrap (p `sepEndBy` newline <* eof)
 
 -- | intended to be called with one of `specialSymbols`
 specialSymbol :: ParserM m => Text -> m ()
