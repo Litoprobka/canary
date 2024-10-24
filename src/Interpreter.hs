@@ -3,7 +3,7 @@
 {-# LANGUAGE DataKinds #-}
 module Interpreter (InterpreterBuiltins(..), eval) where
 
-import Common (Name, Pass (..))
+import Common (Name, Pass (..), Literal (..))
 import Relude
 import Syntax.Row (OpenName)
 import Syntax
@@ -76,9 +76,10 @@ eval builtins constrs = go where
     E.Variant name -> Lambda $ Variant name
     E.Record _ row -> Record $ fmap (go env) row
     E.List _ xs -> foldr (\h t -> Constructor builtins.cons [go env h, t]) (Constructor builtins.nil []) xs
-    E.IntLiteral _ n -> Int n
-    E.TextLiteral _ txt -> Text txt
-    E.CharLiteral _ c -> Char c
+    E.Literal lit -> case lit of
+        IntLiteral _ n -> Int n
+        TextLiteral _ txt -> Text txt
+        CharLiteral _ c -> Char c
     E.Infix witness _ _ -> E.noInfix witness
 
   forceMatch :: HashMap Name Value -> Pattern 'Fixity -> Value -> HashMap Name Value
@@ -102,9 +103,9 @@ eval builtins constrs = go where
         env' <- match env pat h
         match env' (P.List loc pats) t
     (P.List _ []) (Constructor name []) | name == builtins.nil -> Just env
-    (P.IntLiteral _ n) (Int m) -> env <$ guard (n == m)
-    (P.TextLiteral _ txt) (Text txt') -> env <$ guard (txt == txt')
-    (P.CharLiteral _ c) (Char c') -> env <$ guard (c == c')
+    (P.Literal (IntLiteral _ n)) (Int m) -> env <$ guard (n == m)
+    (P.Literal (TextLiteral _ txt)) (Text txt') -> env <$ guard (txt == txt')
+    (P.Literal (CharLiteral _ c)) (Char c') -> env <$ guard (c == c')
     _ _ -> Nothing
 
   mkLambda :: Int -> ([Value] -> Value) -> Value

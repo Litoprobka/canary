@@ -24,6 +24,7 @@ module Common (
     zipLocOf,
     locFromSourcePos,
     mkNotes,
+    Literal(..),
 ) where
 
 import Error.Diagnose (Position (..))
@@ -132,6 +133,23 @@ instance Eq Loc where
 
 instance Hashable Loc where
     hashWithSalt salt _ = salt
+
+data Literal =
+    IntLiteral Loc Int
+    | TextLiteral Loc Text
+    | CharLiteral Loc Text
+
+instance HasLoc Literal where
+    getLoc = \case
+        IntLiteral loc _ -> loc
+        TextLiteral loc _ -> loc
+        CharLiteral loc _ -> loc
+
+instance Pretty Literal where
+    pretty = \case
+        IntLiteral _ num -> pretty num
+        TextLiteral _ txt -> dquotes $ pretty txt
+        CharLiteral _ c -> "'" <> pretty c <> "'"
 
 -- this should probably be replaced by a classy lens
 class HasLoc a where

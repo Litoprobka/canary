@@ -197,9 +197,7 @@ resolveBinding locals =
         P.Variant openName arg -> P.Variant openName <$> resolvePat arg
         P.Var name -> P.Var <$> resolve name
         P.List loc pats -> P.List loc <$> traverse resolvePat pats
-        P.IntLiteral loc n -> pure $ P.IntLiteral loc n
-        P.TextLiteral loc txt -> pure $ P.TextLiteral loc txt
-        P.CharLiteral loc c -> pure $ P.CharLiteral loc c
+        P.Literal lit -> pure $ P.Literal lit
 
 -- | resolves names in a pattern. Adds all new names to the current scope
 declarePat :: (EnvEffs es, Declare :> es) => Pattern 'Parse -> Eff es (Pattern 'NameRes)
@@ -210,9 +208,7 @@ declarePat = \case
     P.Variant openName arg -> P.Variant openName <$> declarePat arg
     P.Var name -> P.Var <$> declare name
     P.List loc pats -> P.List loc <$> traverse declarePat pats
-    P.IntLiteral loc n -> pure $ P.IntLiteral loc n
-    P.TextLiteral loc txt -> pure $ P.TextLiteral loc txt
-    P.CharLiteral loc c -> pure $ P.CharLiteral loc c
+    P.Literal lit -> pure $ P.Literal lit
 
 {- | resolves names in an expression. Doesn't change the current scope
 
@@ -256,9 +252,7 @@ resolveExpr e = scoped case e of
     E.Constructor name -> E.Constructor <$> resolve name
     E.RecordLens loc lens -> pure $ E.RecordLens loc lens
     E.Variant openName -> pure $ E.Variant openName
-    E.IntLiteral loc n -> pure $ E.IntLiteral loc n
-    E.TextLiteral loc txt -> pure $ E.TextLiteral loc txt
-    E.CharLiteral loc c -> pure $ E.CharLiteral loc c
+    E.Literal lit -> pure $ E.Literal lit
 
 -- | resolves names in a type. Doesn't change the current scope
 resolveType :: EnvEffs es => Type' 'Parse -> Eff es (Type' 'NameRes)

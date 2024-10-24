@@ -1,9 +1,9 @@
 {-# LANGUAGE DataKinds #-}
 {-# LANGUAGE DerivingStrategies #-}
+{-# LANGUAGE GADTs #-}
 {-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE OverloadedRecordDot #-}
 {-# LANGUAGE NoFieldSelectors #-}
-{-# LANGUAGE GADTs #-}
 
 module TypeChecker (
     run,
@@ -28,6 +28,7 @@ import Data.Foldable1 (foldr1)
 import Data.HashMap.Strict qualified as HashMap
 import Data.HashSet qualified as HashSet
 import Data.Traversable (for)
+import Diagnostic (Diagnose)
 import Effectful
 import Effectful.State.Static.Local (State, get, gets, modify, runState)
 import GHC.IsList qualified as IsList
@@ -42,7 +43,6 @@ import Syntax.Row (ExtRow (..))
 import Syntax.Row qualified as Row
 import Syntax.Type qualified as T
 import TypeChecker.Backend
-import Diagnostic (Diagnose)
 
 typecheck
     :: (NameGen :> es, Diagnose :> es)
@@ -136,7 +136,8 @@ subtype lhs_ rhs_ = join $ match <$> monoLayer In lhs_ <*> monoLayer Out rhs_
         (MLUniVar _ uni) rhs -> solveOr (mono Out $ unMonoLayer rhs) ((`subtype` unMonoLayer rhs) . unMono) uni
         (MLName lhs) (MLName rhs) ->
             unlessM (elem (lhs, rhs) <$> builtin (.subtypeRelations)) $
-                typeError $ CannotUnify lhs rhs -- "cannot unify" <+> pretty lhs <+> "with" <+> pretty rhs
+                typeError $
+                    CannotUnify lhs rhs -- "cannot unify" <+> pretty lhs <+> "with" <+> pretty rhs
         (MLFn _ inl outl) (MLFn _ inr outr) -> do
             subtype inr inl
             subtype outl outr
@@ -169,7 +170,7 @@ subtype lhs_ rhs_ = join $ match <$> monoLayer In lhs_ <*> monoLayer Out rhs_
     solveOr :: InfEffs es => Eff es Monotype -> (Monotype -> Eff es ()) -> UniVar -> Eff es ()
     solveOr solveWith whenSolved uni = lookupUniVar uni >>= either (const $ solveUniVar uni =<< solveWith) whenSolved
 
-check :: (InfEffs es) => Expr -> Type -> Eff es ()
+check :: InfEffs es => Expr -> Type -> Eff es ()
 check e type_ = scoped $ match e type_
   where
     match = \cases
@@ -275,7 +276,8 @@ infer =
                 traverse_ (`checkPattern` bodyType) pats
                 check body bodyType
             unless (all ((== length patTypes) . length . fst) ms) $
-                typeError $ ArgCountMismatch loc
+                typeError $
+                    ArgCountMismatch loc
             pure $ foldr (T.Function loc) bodyType patTypes
         E.List loc items -> do
             itemTy <- freshUniVar loc
@@ -295,11 +297,12 @@ infer =
                     `T.Application` mkNestedRecord b
                     `T.Application` a
                     `T.Application` b
-        E.IntLiteral loc num
-            | num >= 0 -> pure $ T.Name $ NatName loc
-            | otherwise -> pure $ T.Name $ IntName loc
-        E.TextLiteral loc _ -> pure $ T.Name $ TextName loc
-        E.CharLiteral loc _ -> pure $ T.Name $ TextName loc
+        E.Literal lit -> pure $ T.Name case lit of
+            IntLiteral loc num
+                | num >= 0 -> NatName loc
+                | otherwise -> IntName loc
+            TextLiteral loc _ -> TextName loc
+            CharLiteral loc _ -> TextName loc -- huh?
         E.Infix witness _ _ -> E.noInfix witness
 
 inferApp :: InfEffs es => Type -> Expr -> Eff es Type
@@ -350,10 +353,7 @@ collectNames = \case
     P.Constructor _ pats -> foldMap collectNames pats
     P.List _ pats -> foldMap collectNames pats
     P.Record _ row -> foldMap collectNames $ toList row
-    -- once again, exhaustiveness checking is worth writing some boilerplate
-    P.IntLiteral{} -> []
-    P.TextLiteral{} -> []
-    P.CharLiteral{} -> []
+    P.Literal _ -> []
 
 collectNamesInBinding :: Binding p -> [NameAt p]
 collectNamesInBinding = \case
@@ -370,7 +370,8 @@ inferPattern = \case
     p@(P.Constructor name args) -> do
         (resultType, argTypes) <- conArgTypes name
         unless (length argTypes == length args) $
-            typeError $ ArgCountMismatchPattern p (length argTypes) (length args)
+            typeError $
+                ArgCountMismatchPattern p (length argTypes) (length args)
         zipWithM_ checkPattern args argTypes
         pure resultType
     P.List loc pats -> do
@@ -383,11 +384,12 @@ inferPattern = \case
     P.Record loc row -> do
         typeRow <- traverse inferPattern row
         T.Record loc . ExtRow typeRow <$> freshUniVar loc
-    P.IntLiteral loc num
-        | num >= 0 -> pure $ T.Name $ NatName loc
-        | otherwise -> pure $ T.Name $ IntName loc
-    P.TextLiteral loc _ -> pure $ T.Name $ TextName loc
-    P.CharLiteral loc _ -> pure $ T.Name $ TextName loc
+    P.Literal lit -> pure $ T.Name case lit of
+        IntLiteral loc num
+            | num >= 0 -> NatName loc
+            | otherwise -> IntName loc
+        TextLiteral loc _ -> TextName loc
+        CharLiteral loc _ -> TextName loc -- huh?
   where
     -- conArgTypes and the zipM may be unified into a single function
     conArgTypes name = lookupSig name >>= go

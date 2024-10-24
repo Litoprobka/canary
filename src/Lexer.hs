@@ -36,9 +36,10 @@ module Lexer (
     withLoc',
     mkName,
     constructorName,
+    literal,
 ) where
 
-import Common (Loc (..), SimpleName (..), locFromSourcePos)
+import Common (Loc (..), SimpleName (..), locFromSourcePos, Literal (..))
 import Control.Monad.Combinators.NonEmpty qualified as NE
 import Data.Char (isAlphaNum, isSpace, isUpperCase)
 import Data.HashSet qualified as Set
@@ -232,15 +233,19 @@ recordLens :: ParserM m => m (NonEmpty SimpleName)
 recordLens = label "record lens" $ lexeme $ single '.' *> mkName identifier `NE.sepBy1` single '.'
 
 -- for anybody wondering, `empty` is *not* a noop parser
-intLiteral :: ParserM m => m Int
-intLiteral = label "int literal" $ try $ lexeme $ L.signed pass L.decimal
+intLiteral :: ParserM m => m Literal
+intLiteral = label "int literal" $ try $ lexeme $ withLoc' IntLiteral $ L.signed pass L.decimal
 
 -- todo: handle escape sequences and interpolation
-textLiteral :: ParserM m => m Text
-textLiteral = label "text literal" $ between (symbol "\"") (symbol "\"") $ takeWhileP (Just "text literal body") (/= '"')
+textLiteral :: ParserM m => m Literal
+textLiteral = label "text literal" $ withLoc' TextLiteral $ between (symbol "\"") (symbol "\"") $ takeWhileP (Just "text literal body") (/= '"')
 
-charLiteral :: ParserM m => m Text
-charLiteral = label "char literal" $ try $ one <$> between (single '\'') (symbol "'") anySingle
+charLiteral :: ParserM m => m Literal
+charLiteral = label "char literal" $ try $ withLoc' CharLiteral $ one <$> between (single '\'') (symbol "'") anySingle
+
+-- | any literal
+literal :: ParserM m => m Literal
+literal = choice [intLiteral, textLiteral, charLiteral]
 
 operator :: ParserM m => Text -> m Loc
 operator sym = label "operator" $ lexeme $ withLoc' const $ string sym *> notFollowedBy (satisfy isOperatorChar)

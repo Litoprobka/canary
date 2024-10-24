@@ -7,14 +7,13 @@ module Syntax.Expression (Expression (..), Binding (..), HasInfix(..), noInfix) 
 
 import Relude
 
-import Common (HasLoc (..), Loc, NameAt, Pass (..), zipLocOf)
+import Common (HasLoc (..), Loc, NameAt, Pass (..), Literal, zipLocOf)
 import Prettyprinter (
     Pretty,
     braces,
     brackets,
     comma,
     concatWith,
-    dquotes,
     encloseSep,
     nest,
     parens,
@@ -57,9 +56,7 @@ data Expression (p :: Pass)
       Variant OpenName
     | Record Loc (Row (Expression p))
     | List Loc [Expression p]
-    | IntLiteral Loc Int
-    | TextLiteral Loc Text
-    | CharLiteral Loc Text
+    | Literal Literal
     | -- | an unresolved expression with infix / prefix operators
       Infix (HasInfix p) [(Expression p, Maybe (NameAt p))] (Expression p)
 
@@ -96,9 +93,7 @@ instance Pretty (NameAt p) => Pretty (Expression p) where
             Variant name -> pretty name
             Record _ row -> braces . sep . punctuate comma . map recordField $ sortedRow row
             List _ xs -> brackets . sep . punctuate comma $ pretty <$> xs
-            IntLiteral _ num -> pretty num
-            TextLiteral _ txt -> dquotes $ pretty txt
-            CharLiteral _ c -> "'" <> pretty c <> "'"
+            Literal lit -> pretty lit
             Infix _ pairs last' -> "?(" <> sep (concatMap (\(lhs, op) -> pretty lhs : maybe [] (pure . pretty) op) pairs <> [pretty last']) <> ")"
           where
             parensWhen minPrec
@@ -121,8 +116,6 @@ instance HasLoc (NameAt p) => HasLoc (Expression p) where
         Variant name -> getLoc name
         Record loc _ -> loc
         List loc _ -> loc
-        IntLiteral loc _ -> loc
-        TextLiteral loc _ -> loc
-        CharLiteral loc _ -> loc
+        Literal lit -> getLoc lit
         Infix _ ((e, _) : _) l -> zipLocOf e l
         Infix _ [] l -> getLoc l

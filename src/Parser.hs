@@ -123,9 +123,7 @@ patternParens = do
             [ P.Var <$> termName
             , record
             , withLoc' P.List $ brackets (commaSep pattern')
-            , withLoc' P.IntLiteral intLiteral
-            , withLoc' P.TextLiteral textLiteral
-            , withLoc' P.CharLiteral charLiteral
+            , P.Literal <$> literal
             , -- a constructor without arguments or with a tightly-bound record pattern
               lexeme $ P.Constructor <$> constructorName <*> option [] (one <$> record)
             , flip P.Variant unit <$> variantConstructor -- some sugar for variants with a unit payload
@@ -218,9 +216,7 @@ expression' termParser = do
         [ withLoc' E.RecordLens recordLens
         , constructor
         , E.Variant <$> variantConstructor
-        , withLoc' E.IntLiteral intLiteral
-        , withLoc' E.CharLiteral charLiteral
-        , withLoc' E.TextLiteral textLiteral
+        , E.Literal <$> literal
         ]
     constructor = lexeme do
         name <- constructorName

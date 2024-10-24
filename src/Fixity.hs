@@ -111,9 +111,7 @@ parse = \case
     E.Variant name -> pure $ E.Variant name
     E.Record loc row -> E.Record loc <$> traverse parse row
     E.List loc exprs -> E.List loc <$> traverse parse exprs
-    E.IntLiteral loc n -> pure $ E.IntLiteral loc n
-    E.TextLiteral loc txt -> pure $ E.TextLiteral loc txt
-    E.CharLiteral loc c -> pure $ E.CharLiteral loc c
+    E.Literal lit -> pure $ E.Literal lit
     -- \| an unresolved expression with infix / prefix operators
     E.Infix _ pairs last' -> join $ go' <$> traverse (bitraverse parse pure) pairs <*> parse last'
   where

@@ -7,7 +7,6 @@ import Relude
 import NameResolution
 import NameGen (runNameGen)
 import Effectful
-import Text.Megaparsec
 import Parser (parseModule)
 import Prettyprinter.Render.Text (putDoc)
 import Prettyprinter
