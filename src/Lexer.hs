@@ -96,7 +96,7 @@ symbol :: ParserM m => Text -> m Text
 symbol = L.symbol spaceOrLineWrap
 
 keywords :: HashSet Text
-keywords = Set.fromList ["if", "then", "else", "type", "alias", "case", "where", "let", "match", "of", "forall", "∀", "exists", "∃"]
+keywords = Set.fromList ["if", "then", "else", "type", "alias", "case", "where", "let", "match", "of", "forall", "∀", "exists", "∃", "do", "with"]
 
 -- | punctuation that has a special meaningng, like keywords
 specialSymbols :: [Text]
@@ -130,7 +130,7 @@ block' sep kw p = do
     -- prevents stuff like:
     -- > f x = expr where
     -- > expr = x + x
-    -- that being said, the check wouldn't make sense if also use `block` for
+    -- that being said, the check wouldn't make sense if we also use `block` for
     -- top-level blocks
     --
     -- note that the preceding whitespace is already consumed by `keyword`

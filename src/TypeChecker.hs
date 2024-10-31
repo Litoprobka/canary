@@ -231,6 +231,7 @@ checkPattern = \cases
             deepLookup Record name ty >>= \case
                 Nothing -> typeError $ MissingField ty name
                 Just fieldTy -> checkPattern pat fieldTy
+    -- todo: a case for do-notation
     pat ty -> do
         inferredTy <- inferPattern pat
         subtype inferredTy ty
@@ -297,6 +298,7 @@ infer =
                     `T.Application` mkNestedRecord b
                     `T.Application` a
                     `T.Application` b
+        E.Do loc _ _ -> typeError $ Internal loc "do-notation is not supported yet"
         E.Literal lit -> pure $ T.Name case lit of
             IntLiteral loc num
                 | num >= 0 -> NatName loc

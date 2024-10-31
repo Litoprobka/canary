@@ -20,6 +20,7 @@ import Syntax.Expression qualified as E
 import Syntax.Pattern qualified as P
 import Syntax.Type qualified as T
 import Error.Diagnose (Report(..), Marker (This))
+import Syntax.Expression (DoStatement)
 
 newtype EqClass = EqClass Int deriving (Show, Eq, Hashable, Pretty)
 
@@ -111,6 +112,7 @@ parse = \case
     E.Variant name -> pure $ E.Variant name
     E.Record loc row -> E.Record loc <$> traverse parse row
     E.List loc exprs -> E.List loc <$> traverse parse exprs
+    E.Do loc stmts lastAction -> E.Do loc <$> traverse parseStmt stmts <*> parse lastAction
     E.Literal lit -> pure $ E.Literal lit
     -- \| an unresolved expression with infix / prefix operators
     E.Infix _ pairs last' -> join $ go' <$> traverse (bitraverse parse pure) pairs <*> parse last'
@@ -157,6 +159,13 @@ parseBinding :: Ctx es => Binding 'NameRes -> Eff es (Binding 'Fixity)
 parseBinding = \case
     E.ValueBinding loc pat expr -> E.ValueBinding loc (castP pat) <$> parse expr
     E.FunctionBinding loc name pats body -> E.FunctionBinding loc name (fmap castP pats) <$> parse body
+
+parseStmt :: Ctx es => DoStatement 'NameRes -> Eff es (DoStatement 'Fixity)
+parseStmt = \case
+    E.Bind pat body -> E.Bind (castP pat) <$> parse body
+    E.With loc pat body -> E.With loc (castP pat) <$> parse body
+    E.DoLet loc binding -> E.DoLet loc <$> parseBinding binding
+    E.Action expr -> E.Action <$> parse expr
 
 castP :: Pattern 'NameRes -> Pattern 'Fixity
 castP = P.cast \recur -> \case

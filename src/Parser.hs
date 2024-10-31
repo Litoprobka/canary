@@ -187,6 +187,7 @@ expression' termParser = do
         , case'
         , match'
         , if'
+        , doBlock
         , record
         , withWildcards $ withLoc $ flip E.List <$> brackets (commaSep newScopeExpr)
         , parens $ withWildcards newScopeExpr
@@ -209,6 +210,21 @@ expression' termParser = do
             keyword "else"
             false <- sameScopeExpr
             pure $ flip4 E.If cond true false
+        doBlock = withLoc do
+            stmts <- block "do" $ choice 
+                [ try $ E.Bind <$> pattern' <* specialSymbol "<-" <*> expression
+                , withLoc $ flip3 E.With <$ keyword "with" <*> pattern' <* specialSymbol "<-" <*> expression
+                , withLoc' E.DoLet $ keyword "let" *> binding
+                , E.Action <$> expression
+                ]
+            case unsnoc stmts of
+                Nothing -> fail "empty do block"
+                Just (stmts', E.Action lastAction) -> pure $ flip3 E.Do stmts' lastAction
+                _ -> fail "last statement in a do block must be an expression"
+        unsnoc [] = Nothing
+        unsnoc [x] = Just ([], x)
+        unsnoc (x : xs) = first (x :) <$> unsnoc xs
+
     record =
         withWildcards $ withLoc $ flip E.Record <$> someRecord "=" newScopeExpr (Just E.Name)
 

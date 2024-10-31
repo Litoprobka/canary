@@ -37,6 +37,7 @@ import Syntax.Pattern qualified as P
 import Syntax.Type qualified as T
 import Error.Diagnose (Report(..))
 import qualified Error.Diagnose as M
+import Syntax.Expression (DoStatement)
 
 {-
 The name resolution pass. Transforms 'Parse AST into 'NameRes AST. It doesn't short-circuit on errors
@@ -244,6 +245,7 @@ resolveExpr e = scoped case e of
     E.If loc cond true false -> E.If loc <$> resolveExpr cond <*> resolveExpr true <*> resolveExpr false
     E.Record loc row -> E.Record loc <$> traverse resolveExpr row
     E.List loc items -> E.List loc <$> traverse resolveExpr items
+    E.Do loc stmts lastAction -> E.Do loc <$> traverse resolveStmt stmts <*> resolveExpr lastAction
     E.Infix E.Yes pairs last' ->
         E.Infix E.Yup
             <$> traverse (bitraverse resolveExpr (traverse resolve)) pairs
@@ -253,6 +255,19 @@ resolveExpr e = scoped case e of
     E.RecordLens loc lens -> pure $ E.RecordLens loc lens
     E.Variant openName -> pure $ E.Variant openName
     E.Literal lit -> pure $ E.Literal lit
+
+resolveStmt :: (EnvEffs es, Declare :> es) => DoStatement 'Parse -> Eff es (DoStatement 'NameRes)
+resolveStmt = \case
+    E.Bind pat body -> do
+        body' <- resolveExpr body
+        pat' <- declarePat pat
+        pure $ E.Bind pat' body'
+    E.With loc pat body -> do
+        body' <- resolveExpr body
+        pat' <- declarePat pat
+        pure $ E.With loc pat' body'
+    E.DoLet loc binding -> E.DoLet loc <$> resolveBinding [] binding
+    E.Action expr -> E.Action <$> resolveExpr expr
 
 -- | resolves names in a type. Doesn't change the current scope
 resolveType :: EnvEffs es => Type' 'Parse -> Eff es (Type' 'NameRes)
