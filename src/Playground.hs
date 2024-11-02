@@ -73,32 +73,32 @@ runDefault action = runPureEff . runDiagnose' ("<none>", "") $ runNameGen do
     (_, builtins, defaultEnv) <- mkDefaults
     run (Right <$> defaultEnv) builtins action
 
-mkDefaults :: (NameGen :> es, Diagnose :> es) => Eff es (HashMap Text Name, Builtins Name, HashMap Name (Type' 'Fixity))
+mkDefaults :: (NameGen :> es, Diagnose :> es) => Eff es (HashMap SimpleName_ Name, Builtins Name, HashMap Name (Type' 'Fixity))
 mkDefaults = do
-    let builtins = Builtins{subtypeRelations = [(NatName Blank, IntName Blank)]}
+    let builtins = Builtins{subtypeRelations = [(noLoc NatName, noLoc IntName)]}
     types <-
-        traverse (freshName Blank) $
+        traverse (freshName . noLoc . Name') $
             HashMap.fromList $
-                (\x -> (x, x))
+                (\x -> (Name' x, x))
                     <$> [ "Unit"
                         , "Maybe"
                         , "Tuple"
                         ]
     let initScope =
             types
-                <> HashMap.fromList
-                    [ ("Bool", BoolName Blank)
-                    , ("List", ListName Blank)
-                    , ("Int", IntName Blank)
-                    , ("Nat", NatName Blank)
-                    , ("Text", TextName Blank)
-                    , ("Char", CharName Blank)
-                    , ("Lens", LensName Blank)
-                    ]
+                <> HashMap.fromList (fmap (bimap Name' noLoc)
+                    [ ("Bool", BoolName)
+                    , ("List", ListName)
+                    , ("Int", IntName)
+                    , ("Nat", NatName)
+                    , ("Text", TextName)
+                    , ("Char", CharName)
+                    , ("Lens", LensName)
+                    ])
     (env, Scope scope) <-
         (runState (Scope initScope) . fmap HashMap.fromList . NameResolution.runDeclare)
             ( traverse
-                (\(name, ty) -> liftA2 (,) (declare $ SimpleName Blank name) (resolveType ty))
+                (\(name, ty) -> liftA2 (,) (declare $ noLoc $ Name' name) (resolveType ty))
                 [ ("()", "Unit")
                 , ("Nothing", T.Forall Blank "'a" $ "Maybe" $: "'a")
                 , ("Just", T.Forall Blank "'a" $ "'a" --> "Maybe" $: "'a")
@@ -152,10 +152,13 @@ matchCase whenUpper whenLower str@(h : _)
     | otherwise = whenLower $ fromString str
 
 mkName :: Text -> SimpleName
-mkName = SimpleName Blank
+mkName = noLoc . Name'
+
+noLoc :: a -> Located a
+noLoc = Located Blank
 
 instance IsString (Expression 'Parse) where
-    fromString ('\'' : rest) = rest & matchCase (E.Variant . SimpleName Blank . ("'" <>)) (error $ "type variable " <> fromString rest <> " at value level")
+    fromString ('\'' : rest) = rest & matchCase (E.Variant . mkName . ("'" <>)) (error $ "type variable " <> fromString rest <> " at value level")
     fromString str = str & matchCase (E.Constructor . mkName) (E.Name . mkName)
 
 instance IsString (Pattern 'Parse) where
@@ -172,10 +175,10 @@ instance IsString Name where
     fromString = nameFromText . fromString
 
 nameFromText :: Text -> Name
-nameFromText txt = Name Blank txt (Id $ hashWithSalt 0 txt)
+nameFromText txt = noLoc $ Name txt (Id $ hashWithSalt 0 txt)
 
 instance {-# OVERLAPPABLE #-} NameAt p ~ Name => IsString (Expression p) where
-    fromString ('\'' : rest) = rest & matchCase (E.Variant . SimpleName Blank . ("'" <>)) (error $ "type variable " <> fromString rest <> " at value level")
+    fromString ('\'' : rest) = rest & matchCase (E.Variant . mkName . ("'" <>)) (error $ "type variable " <> fromString rest <> " at value level")
     fromString str = str & matchCase (E.Constructor . nameFromText) (E.Name . nameFromText)
 
 instance {-# OVERLAPPABLE #-} NameAt p ~ Name => IsString (Pattern p) where

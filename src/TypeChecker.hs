@@ -184,7 +184,7 @@ check e type_ = scoped $ match e type_
             check expr $ T.cast id annTy
             subtype (T.cast id annTy) ty
         (E.If _ cond true false) ty -> do
-            check cond $ T.Name $ BoolName $ getLoc cond
+            check cond $ T.Name $ Located (getLoc cond) BoolName
             check true ty
             check false ty
         (E.Case _ arg matches) ty -> do
@@ -192,7 +192,7 @@ check e type_ = scoped $ match e type_
             for_ matches \(pat, body) -> do
                 checkPattern pat argTy
                 check body ty
-        (E.List _ items) (T.Application (T.Name (ListName _)) itemTy) -> for_ items (`check` itemTy)
+        (E.List _ items) (T.Application (T.Name (Located _ ListName)) itemTy) -> for_ items (`check` itemTy)
         (E.Record _ row) ty -> do
             for_ (IsList.toList row) \(name, expr) ->
                 deepLookup Record name ty >>= \case
@@ -253,12 +253,15 @@ infer =
         E.Lambda loc arg body -> {-forallScope-} do
             argTy <- inferPattern arg
             T.Function loc argTy <$> infer body
+        -- chances are, I'd want to add some specific error messages or context for wildcard lambdas
+        -- for now, they are just desugared to normal lambdas before inference
+        E.WildcardLambda loc args body -> infer $ foldr (E.Lambda loc . P.Var) body args
         E.Let _ binding body -> do
             declareAll =<< inferBinding binding
             infer body
         E.Annotation expr ty -> T.cast id ty <$ check expr (T.cast id ty)
         E.If loc cond true false -> do
-            check cond $ T.Name $ BoolName loc
+            check cond $ T.Name $ Located loc BoolName
             result <- unMono <$> (mono In =<< infer true)
             check false result
             pure result
@@ -283,7 +286,7 @@ infer =
         E.List loc items -> do
             itemTy <- freshUniVar loc
             traverse_ (`check` itemTy) items
-            pure $ T.Application (T.Name $ ListName loc) itemTy
+            pure $ T.Application (T.Name $ Located loc ListName) itemTy
         E.Record loc row -> T.Record loc . NoExtRow <$> traverse infer row
         E.RecordLens loc fields -> do
             recordParts <- for fields \field -> do
@@ -293,18 +296,18 @@ infer =
             a <- freshUniVar loc
             b <- freshUniVar loc
             pure $
-                T.Name (LensName loc)
+                T.Name (Located loc LensName)
                     `T.Application` mkNestedRecord a
                     `T.Application` mkNestedRecord b
                     `T.Application` a
                     `T.Application` b
         E.Do loc _ _ -> typeError $ Internal loc "do-notation is not supported yet"
-        E.Literal lit -> pure $ T.Name case lit of
-            IntLiteral loc num
-                | num >= 0 -> NatName loc
-                | otherwise -> IntName loc
-            TextLiteral loc _ -> TextName loc
-            CharLiteral loc _ -> TextName loc -- huh?
+        E.Literal (Located loc lit) -> pure $ T.Name . Located loc $ case lit of
+            IntLiteral num
+                | num >= 0 -> NatName
+                | otherwise -> IntName
+            TextLiteral _ -> TextName
+            CharLiteral _ -> TextName -- huh?
         E.Infix witness _ _ -> E.noInfix witness
 
 inferApp :: InfEffs es => Type -> Expr -> Eff es Type
@@ -350,6 +353,7 @@ inferBinding =
 collectNames :: Pattern p -> [NameAt p]
 collectNames = \case
     P.Var name -> [name]
+    P.Wildcard{} -> []
     P.Annotation pat _ -> collectNames pat
     P.Variant _ pat -> collectNames pat
     P.Constructor _ pats -> foldMap collectNames pats
@@ -368,6 +372,7 @@ inferPattern = \case
         uni <- freshUniVar $ getLoc name
         updateSig name uni
         pure uni
+    P.Wildcard loc _ -> freshUniVar loc
     P.Annotation pat ty -> T.cast id ty <$ checkPattern pat (T.cast id ty)
     p@(P.Constructor name args) -> do
         (resultType, argTypes) <- conArgTypes name
@@ -379,19 +384,19 @@ inferPattern = \case
     P.List loc pats -> do
         result <- freshUniVar loc
         traverse_ (`checkPattern` result) pats
-        pure $ T.Application (T.Name $ ListName loc) result
+        pure $ T.Application (T.Name $ Located loc ListName) result
     v@(P.Variant name arg) -> {-forallScope-} do
         argTy <- inferPattern arg
         T.Variant (getLoc v) . ExtRow (fromList [(name, argTy)]) <$> freshUniVar (getLoc v)
     P.Record loc row -> do
         typeRow <- traverse inferPattern row
         T.Record loc . ExtRow typeRow <$> freshUniVar loc
-    P.Literal lit -> pure $ T.Name case lit of
-        IntLiteral loc num
-            | num >= 0 -> NatName loc
-            | otherwise -> IntName loc
-        TextLiteral loc _ -> TextName loc
-        CharLiteral loc _ -> TextName loc -- huh?
+    P.Literal (Located loc lit) -> pure $ T.Name . Located loc $ case lit of
+        IntLiteral num
+            | num >= 0 -> NatName
+            | otherwise -> IntName
+        TextLiteral _ -> TextName
+        CharLiteral _ -> TextName -- huh?
   where
     -- conArgTypes and the zipM may be unified into a single function
     conArgTypes name = lookupSig name >>= go

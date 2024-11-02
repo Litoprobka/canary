@@ -17,12 +17,15 @@ import Syntax.Type qualified as T
 import Control.Monad.Combinators.Expr
 import Control.Monad.Combinators.NonEmpty qualified as NE
 
-import Common (Loc (..), Pass (..), SimpleName (..), locFromSourcePos, zipLocOf)
+import Common (Loc (..), Located (..), Pass (..), SimpleName, SimpleName_ (..), locFromSourcePos, zipLocOf)
+import Data.List.NonEmpty qualified as NE
+import Data.Sequence qualified as Seq
 import Diagnostic (Diagnose, fatal, reportsFromBundle)
 import Effectful (Eff, (:>))
 import Syntax.Row
 import Syntax.Row qualified as Row
 import Text.Megaparsec
+import Text.Megaparsec.Char (string)
 
 parseModule :: Diagnose :> es => (FilePath, Text) -> Eff es [Declaration 'Parse]
 parseModule (fileName, fileContents) = either (fatal . reportsFromBundle) pure $ parse (usingReaderT pos1 code) fileName fileContents
@@ -83,7 +86,7 @@ typeParens =
             , withLoc' T.Variant $ NoExtRow <$> brackets (fromList <$> commaSep variantItem)
             ]
   where
-    variantItem = (,) <$> variantConstructor <*> option (T.Name $ SimpleName Blank "Unit") typeParens
+    variantItem = (,) <$> variantConstructor <*> option (T.Name $ Located Blank $ Name' "Unit") typeParens
 
 someRecord :: ParserM m => Text -> m value -> Maybe (SimpleName -> value) -> m (Row value)
 someRecord delim valueP missingValue = braces (fromList <$> commaSep recordItem)
@@ -121,6 +124,7 @@ patternParens = do
     pat <-
         choice
             [ P.Var <$> termName
+            , lexeme $ withLoc' P.Wildcard $ string "_" <* option "" termName'
             , record
             , withLoc' P.List $ brackets (commaSep pattern')
             , P.Literal <$> literal
@@ -147,7 +151,7 @@ binding = withLoc do
     f <$> expression
 
 expression :: ParserM m => m (Expression 'Parse)
-expression = expression' $ E.Name <$> nonWildcardTerm
+expression = expression' $ E.Name <$> termName
 
 -- an expression with infix operators and unresolved priorities
 -- the `E.Infix` constructor is only used when there is more than one operator
@@ -168,10 +172,10 @@ expression' termParser = do
 
     -- overrides the term parser of expression to collect wildcards
     -- has to be called in the scope of `withWildcards`
-    newScopeExpr :: ParserM m => StateT Int m (Expression 'Parse)
+    newScopeExpr :: ParserM m => StateT (Seq Loc) m (Expression 'Parse)
     newScopeExpr =
         expression' $
-            withLoc (nextVar <* wildcard)
+            nextVar
                 <|> fmap E.Name termName
 
     -- x [(+, y), (*, z), (+, w)] --> [(x, +), (y, *), (z, +)] w
@@ -211,12 +215,14 @@ expression' termParser = do
             false <- sameScopeExpr
             pure $ flip4 E.If cond true false
         doBlock = withLoc do
-            stmts <- block "do" $ choice 
-                [ try $ E.Bind <$> pattern' <* specialSymbol "<-" <*> expression
-                , withLoc $ flip3 E.With <$ keyword "with" <*> pattern' <* specialSymbol "<-" <*> expression
-                , withLoc' E.DoLet $ keyword "let" *> binding
-                , E.Action <$> expression
-                ]
+            stmts <-
+                block "do" $
+                    choice
+                        [ try $ E.Bind <$> pattern' <* specialSymbol "<-" <*> expression
+                        , withLoc $ flip3 E.With <$ keyword "with" <*> pattern' <* specialSymbol "<-" <*> expression
+                        , withLoc' E.DoLet $ keyword "let" *> binding
+                        , E.Action <$> expression
+                        ]
             case unsnoc stmts of
                 Nothing -> fail "empty do block"
                 Just (stmts', E.Action lastAction) -> pure $ flip3 E.Do stmts' lastAction
@@ -252,17 +258,23 @@ expression' termParser = do
 -- on one hand, `({x = 3, y = 3})` looks a bit janky
 -- on the other hand, without that you wouldn't be able to write `f {x = 3, y = _}`
 -- if you want it to mean `\y -> f {x = 3, y}`
-withWildcards :: ParserM m => StateT Int m (Expression 'Parse) -> m (Expression 'Parse)
+withWildcards :: ParserM m => StateT (Seq Loc) m (Expression 'Parse) -> m (Expression 'Parse)
 withWildcards p = do
     -- todo: collect a list of var names along with the counter
-    ((expr, varCount), loc) <- withLoc $ (,) <$> runStateT p 0
-    pure $ foldr (\i -> E.Lambda loc (P.Var $ SimpleName Blank $ "$" <> show i)) expr [1 .. varCount]
+    ((expr, mbVarLocs), loc) <- withLoc $ (,) <$> runStateT p Seq.empty
+    pure case NE.nonEmpty $ zip [1 ..] $ toList mbVarLocs of
+        Just varLocs ->
+            E.WildcardLambda loc ((\(i, varLoc) -> Located varLoc $ Wildcard' i) <$> varLocs) expr
+        Nothing -> expr
 
-nextVar :: MonadParsec Void Text m => StateT Int m (Loc -> Expression 'Parse)
+-- foldr (\i -> E.Lambda loc (P.Var $ SimpleName Blank $ "$" <> show i)) expr [1 .. varCount]
+
+nextVar :: ParserM m => StateT (Seq Loc) m (Expression 'Parse)
 nextVar = do
-    modify succ
-    i <- get
-    pure \loc -> E.Name $ SimpleName loc $ "$" <> show i
+    loc <- withLoc' const wildcard
+    modify (Seq.|> loc)
+    i <- gets Seq.length
+    pure . E.Name . Located loc $ Wildcard' i
 
 flip3 :: (a -> b -> c -> d) -> b -> c -> a -> d
 flip3 f y z x = f x y z

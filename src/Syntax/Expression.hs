@@ -37,7 +37,9 @@ data Binding (p :: Pass)
 --
 -- Application, Annotation and some others
 data Expression (p :: Pass)
-  = Lambda Loc (Pattern p) (Expression p)
+  = Lambda Loc (Pattern p) (Expression p) -- it's still unclear to me whether I want to desugar multi-arg lambdas while parsing
+  | -- | (f _ x + _ y)
+    WildcardLambda Loc (NonEmpty (NameAt p)) (Expression p)
   | Application (Expression p) (Expression p)
   | Let Loc (Binding p) (Expression p)
   | Case Loc (Expression p) [(Pattern p, Expression p)]
@@ -85,6 +87,9 @@ instance Pretty (NameAt p) => Pretty (Expression p) where
    where
     go n = \case
       Lambda _ arg body -> parensWhen 1 $ "λ" <> pretty arg <+> "->" <+> pretty body
+      WildcardLambda _ _ l@List{} -> pretty l
+      WildcardLambda _ _ r@Record{} -> pretty r
+      WildcardLambda _ _ body -> "(" <> pretty body <> ")"
       Application lhs rhs -> parensWhen 3 $ go 2 lhs <+> go 3 rhs
       Let _ binding body -> "let" <+> pretty binding <> ";" <+> pretty body
       Case _ arg matches -> nest 4 (vsep $ ("case" <+> pretty arg <+> "of" :) $ matches <&> \(pat, body) -> pretty pat <+> "->" <+> pretty body)
@@ -116,6 +121,7 @@ instance Pretty (NameAt p) => Pretty (DoStatement p) where
 instance HasLoc (NameAt p) => HasLoc (Expression p) where
   getLoc = \case
     Lambda loc _ _ -> loc
+    WildcardLambda loc _ _ -> loc
     Application lhs rhs -> zipLocOf lhs rhs
     Let loc _ _ -> loc
     Case loc _ _ -> loc

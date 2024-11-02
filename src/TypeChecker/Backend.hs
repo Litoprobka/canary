@@ -232,14 +232,14 @@ freshUniVar' = do
     pure var
 
 freshSkolem :: InfEffs es => Name -> Eff es Type
-freshSkolem (Name loc name _) = T.Skolem . Skolem <$> freshName loc name
-freshSkolem _ = T.Skolem . Skolem <$> freshName Blank "what" -- why?
+freshSkolem (Located loc (Name name _)) = T.Skolem . Skolem . Located loc <$> freshName_ (Name' name)
+freshSkolem _ = T.Skolem . Skolem <$> freshName (Located Blank $ Name' "what") -- why?
 
 freshTypeVar :: Loc -> InfEffs es => Eff es Name
 freshTypeVar loc = do
     id' <- freshId
     letter <- gets @InfState (.nextTypeVar) <* modify \s -> s{nextTypeVar = cycleChar s.nextTypeVar}
-    pure $ Name loc (one letter) id'
+    pure $ Located loc $ Name (one letter) id'
   where
     cycleChar 'z' = 'a'
     cycleChar c = succ c

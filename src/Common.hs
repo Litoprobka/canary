@@ -8,14 +8,17 @@
 {-# OPTIONS_GHC -Wno-partial-fields #-}
 
 module Common (
-    Name (..),
+    Name,
+    Name_(..),
     UniVar (..),
     Skolem (..),
     Scope (..),
     Id (..),
     inc,
     Loc (..),
-    SimpleName (..),
+    Located (..),
+    SimpleName,
+    SimpleName_(..),
     HasLoc (..),
     zipLoc,
     NameAt,
@@ -24,7 +27,8 @@ module Common (
     zipLocOf,
     locFromSourcePos,
     mkNotes,
-    Literal(..),
+    Literal_(..),
+    Literal,
 ) where
 
 import Error.Diagnose (Position (..))
@@ -53,38 +57,48 @@ type family NameAt (pass :: Pass) where
 --
 -- it is also convenient to pretty print local ids as `name` or `name#10`, which is
 -- not really an option with global ids
-data Name
-    = Name Loc Text Id
-    | BoolName Loc
-    | ListName Loc
-    | IntName Loc
-    | NatName Loc
-    | TextName Loc
-    | CharName Loc
-    | LensName Loc
+data Name_
+    = Name Text Id
+    | Wildcard Int Id
+    | BoolName
+    | ListName
+    | IntName
+    | NatName
+    | TextName
+    | CharName
+    | LensName
     deriving (Show, Eq, Generic, Hashable)
 
-instance HasLoc Name where
-    getLoc = \case
-        Name loc _ _ -> loc
-        BoolName loc -> loc
-        ListName loc -> loc
-        IntName loc -> loc
-        NatName loc -> loc
-        TextName loc -> loc
-        CharName loc -> loc
-        LensName loc -> loc
+type Name = Located Name_
 
-data SimpleName = SimpleName {loc :: Loc, name :: Text} deriving (Show, Eq, Generic, Hashable)
+data SimpleName_
+    = Name' Text
+    | Wildcard' Int
+    deriving (Show, Eq, Ord, Generic, Hashable)
 
-instance Ord SimpleName where
-    compare lhs rhs = compare lhs.name rhs.name
 
-instance Pretty SimpleName where
-    pretty SimpleName{name} = pretty name
+-- using 
+data Located a = Located Loc a deriving (Show, Generic)
+type SimpleName = Located SimpleName_
 
-instance HasLoc SimpleName where
-    getLoc name = name.loc
+instance Eq a => Eq (Located a) where
+    (Located _ lhs) == (Located _ rhs) = lhs == rhs
+
+instance Ord a => Ord (Located a) where
+    compare (Located _ lhs) (Located _ rhs) = compare lhs rhs
+
+instance Hashable a => Hashable (Located a) where
+    hashWithSalt salt (Located _ x) = hashWithSalt salt x
+instance HasLoc (Located a) where
+    getLoc (Located loc _) = loc
+
+instance Pretty a => Pretty (Located a) where
+    pretty (Located _ x) = pretty x
+
+instance Pretty SimpleName_ where
+    pretty (Name' name) = pretty name
+    pretty (Wildcard' n) = "_" <> pretty n
+
 
 -- univars use a different range of ids, so it's not clear they should use the same Id newtype
 newtype UniVar = UniVar Int
@@ -107,20 +121,21 @@ instance HasLoc Skolem where
 
 newtype Scope = Scope Int deriving (Show, Eq, Ord)
 
-instance Pretty Name where
+instance Pretty Name_ where
     pretty = \case
-        (Name _ name n) -> pretty name <> "#" <> pretty n
-        BoolName{} -> "Bool"
-        ListName{} -> "List"
-        IntName{} -> "Int"
-        NatName{} -> "Nat"
-        TextName{} -> "Text"
-        CharName{} -> "Char"
-        LensName{} -> "Lens"
+        (Name name id') -> pretty name <> "#" <> pretty id'
+        (Wildcard n id') -> "_" <> pretty n <> "#" <> pretty id'
+        BoolName -> "Bool"
+        ListName -> "List"
+        IntName -> "Int"
+        NatName -> "Nat"
+        TextName -> "Text"
+        CharName -> "Char"
+        LensName -> "Lens"
 instance Pretty UniVar where
     pretty (UniVar n) = "#" <> pretty n
 instance Pretty Skolem where
-    pretty (Skolem (Name _ name n)) = pretty name <> "?" <> pretty n
+    pretty (Skolem (Located _ (Name name n))) = pretty name <> "?" <> pretty n
     pretty (Skolem builtin) = pretty builtin <> "?"
 
 data Loc
@@ -134,22 +149,17 @@ instance Eq Loc where
 instance Hashable Loc where
     hashWithSalt salt _ = salt
 
-data Literal =
-    IntLiteral Loc Int
-    | TextLiteral Loc Text
-    | CharLiteral Loc Text
+type Literal = Located Literal_
+data Literal_ =
+    IntLiteral Int
+    | TextLiteral Text
+    | CharLiteral Text
 
-instance HasLoc Literal where
-    getLoc = \case
-        IntLiteral loc _ -> loc
-        TextLiteral loc _ -> loc
-        CharLiteral loc _ -> loc
-
-instance Pretty Literal where
+instance Pretty Literal_ where
     pretty = \case
-        IntLiteral _ num -> pretty num
-        TextLiteral _ txt -> dquotes $ pretty txt
-        CharLiteral _ c -> "'" <> pretty c <> "'"
+        IntLiteral num -> pretty num
+        TextLiteral txt -> dquotes $ pretty txt
+        CharLiteral c -> "'" <> pretty c <> "'"
 
 -- this should probably be replaced by a classy lens
 class HasLoc a where

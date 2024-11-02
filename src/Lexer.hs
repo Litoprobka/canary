@@ -19,6 +19,7 @@ module Lexer (
     charLiteral,
     operator,
     termName,
+    termName',
     typeName,
     typeVariable,
     variantConstructor,
@@ -28,7 +29,6 @@ module Lexer (
     braces,
     commaSep,
     someOperator,
-    nonWildcardTerm,
     wildcard,
     forallKeyword,
     existsKeyword,
@@ -37,9 +37,10 @@ module Lexer (
     mkName,
     constructorName,
     literal,
+    located,
 ) where
 
-import Common (Loc (..), SimpleName (..), locFromSourcePos, Literal (..))
+import Common (Loc (..), SimpleName, locFromSourcePos, Literal, SimpleName_ (..), Located (..), Literal_ (..))
 import Control.Monad.Combinators.NonEmpty qualified as NE
 import Data.Char (isAlphaNum, isSpace, isUpperCase)
 import Data.HashSet qualified as Set
@@ -174,23 +175,16 @@ keyword kw = label (toString kw) $ try $ lexeme $ string kw *> notFollowedBy (sa
 termName' :: ParserM m => m Text
 termName' = do
     void $ lookAhead (satisfy $ not . isUpperCase)
+    void $ lookAhead (anySingleBut '_') <|> fail "unexpected wildcard"
     lexeme identifier
 
 termName :: ParserM m => m SimpleName
 termName = mkName termName'
 
--- | a term name that doesn't start with an underscore
-nonWildcardTerm :: ParserM m => m SimpleName
-nonWildcardTerm =
-    choice
-        [ lookAhead (anySingleBut '_') *> termName
-        , wildcard *> fail "unexpected wildcard"
-        ]
-
 -- | a termName that starts with an underscore
 -- note: the current implementation forbids `_1`, `_1abc`, etc. That may be undesired
-wildcard :: ParserM m => m SimpleName
-wildcard = lexeme $ mkName $ Text.cons <$> single '_' <*> option "" identifier
+wildcard :: ParserM m => m ()
+wildcard = single '_' *> void identifier
 
 -- | an identifier that starts with an uppercase letter
 -- this is not a lexeme
@@ -234,14 +228,14 @@ recordLens = label "record lens" $ lexeme $ single '.' *> mkName identifier `NE.
 
 -- for anybody wondering, `empty` is *not* a noop parser
 intLiteral :: ParserM m => m Literal
-intLiteral = label "int literal" $ try $ lexeme $ withLoc' IntLiteral $ L.signed pass L.decimal
+intLiteral = label "int literal" $ try $ lexeme $ located $ fmap IntLiteral $ L.signed pass L.decimal
 
 -- todo: handle escape sequences and interpolation
 textLiteral :: ParserM m => m Literal
-textLiteral = label "text literal" $ withLoc' TextLiteral $ between (symbol "\"") (symbol "\"") $ takeWhileP (Just "text literal body") (/= '"')
+textLiteral = label "text literal" $ located $ fmap TextLiteral $ between (symbol "\"") (symbol "\"") $ takeWhileP (Just "text literal body") (/= '"')
 
 charLiteral :: ParserM m => m Literal
-charLiteral = label "char literal" $ try $ withLoc' CharLiteral $ one <$> between (single '\'') (symbol "'") anySingle
+charLiteral = label "char literal" $ try $ located $ fmap CharLiteral $ one <$> between (single '\'') (symbol "'") anySingle
 
 -- | any literal
 literal :: ParserM m => m Literal
@@ -301,5 +295,8 @@ withLoc p = do
 withLoc' :: ParserM m => (Loc -> a -> b) -> m a -> m b
 withLoc' f p = withLoc $ flip f <$> p
 
+located :: ParserM m => m a -> m (Located a)
+located p = withLoc $ flip Located <$> p
+
 mkName :: ParserM m => m Text -> m SimpleName
-mkName = withLoc' SimpleName
+mkName = located . fmap Name'

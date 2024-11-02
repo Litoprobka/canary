@@ -3,7 +3,7 @@
 {-# LANGUAGE DataKinds #-}
 module Interpreter (InterpreterBuiltins(..), eval) where
 
-import Common (Name, Pass (..), Literal (..))
+import Common (Name, Pass (..), Located (..), Literal_ (..))
 import Relude
 import Syntax.Row (OpenName)
 import Syntax
@@ -52,6 +52,7 @@ eval :: InterpreterBuiltins Name -> HashMap Name Value -> HashMap Name Value -> 
 eval builtins constrs = go where
   go env = \case
     E.Lambda _ pat body -> Lambda \arg -> go (forceMatch env pat arg) body
+    E.WildcardLambda loc args body -> go env $ foldr (E.Lambda loc . P.Var) body args
     E.Application f arg -> case go env f of
         Lambda closure -> closure (go env arg)
         other -> error $ "cannot apply " <> showValue other
@@ -76,11 +77,12 @@ eval builtins constrs = go where
     E.Variant name -> Lambda $ Variant name
     E.Record _ row -> Record $ fmap (go env) row
     E.List _ xs -> foldr (\h t -> Constructor builtins.cons [go env h, t]) (Constructor builtins.nil []) xs
-    E.Literal lit -> case lit of
-        IntLiteral _ n -> Int n
-        TextLiteral _ txt -> Text txt
-        CharLiteral _ c -> Char c
+    E.Literal (Located _ lit) -> case lit of
+        IntLiteral n -> Int n
+        TextLiteral txt -> Text txt
+        CharLiteral c -> Char c
     E.Infix witness _ _ -> E.noInfix witness
+    E.Do{} -> error "do notation is not supported yet"
 
   forceMatch :: HashMap Name Value -> Pattern 'Fixity -> Value -> HashMap Name Value
   forceMatch env pat arg = fromMaybe (error "pattern mismatch") $ match env pat arg
@@ -103,9 +105,11 @@ eval builtins constrs = go where
         env' <- match env pat h
         match env' (P.List loc pats) t
     (P.List _ []) (Constructor name []) | name == builtins.nil -> Just env
-    (P.Literal (IntLiteral _ n)) (Int m) -> env <$ guard (n == m)
-    (P.Literal (TextLiteral _ txt)) (Text txt') -> env <$ guard (txt == txt')
-    (P.Literal (CharLiteral _ c)) (Char c') -> env <$ guard (c == c')
+    (P.Literal (Located _ lit)) value -> case (lit, value) of
+        (IntLiteral n, Int m) -> env <$ guard (n == m)
+        (TextLiteral txt, Text txt') -> env <$ guard (txt == txt')
+        (CharLiteral c, Char c') -> env <$ guard (c == c')
+        _ -> Nothing
     _ _ -> Nothing
 
   mkLambda :: Int -> ([Value] -> Value) -> Value

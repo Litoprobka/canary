@@ -4,6 +4,7 @@
 {-# LANGUAGE OverloadedRecordDot #-}
 {-# LANGUAGE TemplateHaskell #-}
 {-# LANGUAGE TypeFamilies #-}
+{-# LANGUAGE DeriveAnyClass #-}
 
 module NameResolution (
     runNameResolution,
@@ -53,14 +54,14 @@ makeEffect ''Declare
 
 -- * other types
 
-newtype Scope = Scope {table :: HashMap Text Name}
+newtype Scope = Scope {table :: HashMap SimpleName_ Name}
 data Warning = Shadowing SimpleName Loc | UnusedVar SimpleName deriving (Show)
 newtype Error = UnboundVar SimpleName
 
 warn :: Diagnose :> es => Warning -> Eff es ()
 warn =
     nonFatal . \case
-        Shadowing name loc -> 
+        Shadowing name loc ->
             Warn
             Nothing
             ("The binding" <+> pretty name <+> "shadows an earlier binding")
@@ -95,23 +96,23 @@ scoped action' =
 runDeclare :: EnvEffs es => Eff (Declare : es) a -> Eff es a
 runDeclare = interpret \_ -> \case
     -- each wildcard gets a unique id
-    Declare (SimpleName loc "_") -> freshName loc "_"
-    Declare name -> do
+    Declare w@(Located _ Wildcard'{}) -> freshName w
+    Declare name@(Located _ name_) -> do
         scope <- get @Scope
-        disambiguatedName <- freshName name.loc name.name
-        case Map.lookup name.name scope.table of
+        disambiguatedName <- freshName name
+        case Map.lookup name_ scope.table of
             Just oldName -> warn (Shadowing name $ getLoc oldName)
             Nothing -> pass
-        put $ Scope $ Map.insert name.name disambiguatedName scope.table
+        put $ Scope $ Map.insert name_ disambiguatedName scope.table
         pure disambiguatedName
 
 type EnvEffs es = (State Scope :> es, NameGen :> es, Diagnose :> es)
 
 -- | looks up a name in the current scope
 resolve :: EnvEffs es => SimpleName -> Eff es Name
-resolve name = do
+resolve name@(Located _ name_) = do
     scope <- get @Scope
-    case scope.table & Map.lookup name.name of
+    case scope.table & Map.lookup name_ of
         Just id' -> pure id'
         Nothing -> do
             error (UnboundVar name)
@@ -119,7 +120,7 @@ resolve name = do
             scoped $ declare name
 
 runNameResolution
-    :: (NameGen :> es, Diagnose :> es) => HashMap Text Name -> Eff (Declare : State Scope : es) a -> Eff es a
+    :: (NameGen :> es, Diagnose :> es) => HashMap SimpleName_ Name -> Eff (Declare : State Scope : es) a -> Eff es a
 runNameResolution env = evalState (Scope env) . runDeclare
 
 resolveNames :: (EnvEffs es, Declare :> es) => [Declaration 'Parse] -> Eff es [Declaration 'NameRes]
@@ -166,7 +167,10 @@ resolveDec decl = case decl of
                     args' <- traverse resolveType args
                     pure (con, D.Constructor conLoc con' args')
             pure (name', vars', constrsToDeclare)
-        for_ constrsToDeclare \(textName, D.Constructor _ conName _) -> modify \(Scope table) -> Scope (Map.insert textName.name conName table)
+        -- this is a bit of a crutch, since we want name' and vars' to be scoped and constrs to be global
+        -- NAMESPACES: constrs should be declared in a corresponding type namespace
+        for_ constrsToDeclare \(Located _ name_, D.Constructor _ conName _) ->
+            modify \(Scope table) -> Scope (Map.insert name_ conName table)
         pure $ D.Type loc name' vars' (snd <$> constrsToDeclare)
     D.Alias loc alias body -> D.Alias loc <$> resolve alias <*> resolveType body
     D.Signature loc name ty -> D.Signature loc <$> resolve name <*> resolveType ty
@@ -198,6 +202,7 @@ resolveBinding locals =
         P.Variant openName arg -> P.Variant openName <$> resolvePat arg
         P.Var name -> P.Var <$> resolve name
         P.List loc pats -> P.List loc <$> traverse resolvePat pats
+        P.Wildcard loc name -> pure $ P.Wildcard loc name
         P.Literal lit -> pure $ P.Literal lit
 
 -- | resolves names in a pattern. Adds all new names to the current scope
@@ -209,6 +214,7 @@ declarePat = \case
     P.Variant openName arg -> P.Variant openName <$> declarePat arg
     P.Var name -> P.Var <$> declare name
     P.List loc pats -> P.List loc <$> traverse declarePat pats
+    P.Wildcard loc name -> pure $ P.Wildcard loc name
     P.Literal lit -> pure $ P.Literal lit
 
 {- | resolves names in an expression. Doesn't change the current scope
@@ -221,6 +227,10 @@ resolveExpr e = scoped case e of
         arg' <- declarePat arg
         body' <- resolveExpr body
         pure $ E.Lambda loc arg' body'
+    E.WildcardLambda loc args body -> do
+        args' <- traverse declare args
+        body' <- resolveExpr body
+        pure $ E.WildcardLambda loc args' body'
     E.Application f arg -> E.Application <$> resolveExpr f <*> resolveExpr arg
     E.Let loc binding expr -> do
         -- resolveBinding is intended for top-level bindings and where clauses,

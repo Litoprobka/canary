@@ -4,7 +4,7 @@
 
 module Fixity (resolveFixity, testOpMap, testGraph, Fixity(..)) where
 
-import Common (Name (..), Pass (..), zipLocOf, mkNotes, getLoc, Loc (..))
+import Common (Name, Pass (..), zipLocOf, mkNotes, getLoc, Loc (..))
 import Control.Monad (foldM)
 import Data.HashMap.Strict qualified as HashMap
 import Data.HashSet qualified as HashSet
@@ -97,6 +97,7 @@ parseDeclaration = \case
 parse :: Ctx es => Expression 'NameRes -> Eff es (Expression 'Fixity)
 parse = \case
     E.Lambda loc arg body -> E.Lambda loc (castP arg) <$> parse body
+    E.WildcardLambda loc args body -> E.WildcardLambda loc args <$> parse body
     E.Application lhs rhs -> E.Application <$> parse lhs <*> parse rhs
     E.Let loc binding expr -> E.Let loc <$> parseBinding binding <*> parse expr
     E.Case loc arg cases -> E.Case loc <$> parse arg <*> traverse (bitraverse (pure . castP) parse) cases

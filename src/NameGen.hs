@@ -2,10 +2,11 @@
 {-# LANGUAGE TypeFamilies #-}
 {-# LANGUAGE DataKinds #-}
 {-# LANGUAGE LambdaCase #-}
-module NameGen (runNameGen, freshId, freshName, NameGen) where
+{-# LANGUAGE DeriveAnyClass #-}
+module NameGen (runNameGen, freshId, freshName, freshName_, NameGen) where
 
 import Relude hiding (evalState, get, modify)
-import Common (Id (..), inc, Name (..), Loc)
+import Common (Id (..), inc, Name, SimpleName, SimpleName_(..), Located (..), Name_ (..))
 import Effectful
 import Effectful.TH
 import Effectful.State.Static.Local (evalState, get, modify)
@@ -16,8 +17,13 @@ data NameGen :: Effect where
 
 makeEffect ''NameGen
 
-freshName :: (NameGen :> es) => Loc -> Text -> Eff es Name
-freshName loc name = Name loc name <$> freshId
+freshName :: (NameGen :> es) => SimpleName -> Eff es Name
+freshName (Located loc name) = Located loc <$> freshName_ name
+
+freshName_ :: NameGen :> es => SimpleName_ -> Eff es Name_
+freshName_ = \case
+    Name' name -> Name name <$> freshId
+    Wildcard' n -> Wildcard n <$> freshId
 
 runNameGen :: Eff (NameGen : es) a -> Eff es a
 runNameGen = reinterpret (evalState $ Id 0) \_ FreshId -> get <* modify inc
