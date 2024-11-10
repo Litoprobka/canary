@@ -1,3 +1,4 @@
+{-# LANGUAGE AllowAmbiguousTypes #-}
 {-# LANGUAGE DataKinds #-}
 {-# LANGUAGE DeriveAnyClass #-}
 {-# LANGUAGE DerivingStrategies #-}
@@ -9,7 +10,7 @@
 
 module Common (
     Name,
-    Name_(..),
+    Name_ (..),
     UniVar (..),
     Skolem (..),
     Scope (..),
@@ -18,7 +19,7 @@ module Common (
     Loc (..),
     Located (..),
     SimpleName,
-    SimpleName_(..),
+    SimpleName_ (..),
     HasLoc (..),
     zipLoc,
     NameAt,
@@ -27,7 +28,7 @@ module Common (
     zipLocOf,
     locFromSourcePos,
     mkNotes,
-    Literal_(..),
+    Literal_ (..),
     Literal,
 ) where
 
@@ -76,8 +77,7 @@ data SimpleName_
     | Wildcard' Int
     deriving (Show, Eq, Ord, Generic, Hashable)
 
-
--- using 
+-- using
 data Located a = Located Loc a deriving (Show, Generic)
 type SimpleName = Located SimpleName_
 
@@ -98,7 +98,6 @@ instance Pretty a => Pretty (Located a) where
 instance Pretty SimpleName_ where
     pretty (Name' name) = pretty name
     pretty (Wildcard' n) = "_" <> pretty n
-
 
 -- univars use a different range of ids, so it's not clear they should use the same Id newtype
 newtype UniVar = UniVar Int
@@ -150,10 +149,11 @@ instance Hashable Loc where
     hashWithSalt salt _ = salt
 
 type Literal = Located Literal_
-data Literal_ =
-    IntLiteral Int
+data Literal_
+    = IntLiteral Int
     | TextLiteral Text
     | CharLiteral Text
+    deriving (Eq)
 
 instance Pretty Literal_ where
     pretty = \case
@@ -191,6 +191,15 @@ mkNotes :: [(Loc, M.Marker a)] -> [(Position, M.Marker a)]
 mkNotes = mapMaybe \case
     (Blank, _) -> Nothing
     (Loc pos, marker) -> Just (pos, marker)
+
+{-
+ReflWitness : Eq a => a -> a -> Type
+ReflWitness x y
+    | x == y = ()
+    | otherwise = Void
+
+reflWitness : forall (a :: k) (b :: k). (a ~ b) => ReflWitness a b
+-}
 
 -- * Some fancy boilerplate prevention stuff
 

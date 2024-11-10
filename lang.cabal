@@ -1,6 +1,6 @@
 cabal-version: 1.12
 
--- This file has been generated from package.yaml by hpack version 0.37.0.
+-- This file has been generated from package.yaml by hpack version 0.36.0.
 --
 -- see: https://github.com/sol/hpack
 
@@ -29,6 +29,7 @@ library
       Fixity
       IL
       Interpreter
+      LensyUniplate
       Lexer
       NameGen
       NameResolution
@@ -50,6 +51,8 @@ library
       NoImplicitPrelude
       BlockArguments
       OverloadedStrings
+      DataKinds
+      LambdaCase
   ghc-options: -Wall -Wcompat -Widentities -Wincomplete-record-updates -Wincomplete-uni-patterns -Wmissing-export-lists -Wmissing-home-modules -Wpartial-fields -Wredundant-constraints
   build-depends:
       base >=4.7 && <5
@@ -64,6 +67,7 @@ library
     , prettyprinter-ansi-terminal
     , relude >=1.2.1.0 && <2
     , template-haskell
+    , uniplate
   default-language: GHC2021
 
 executable lang-exe
@@ -76,6 +80,8 @@ executable lang-exe
       NoImplicitPrelude
       BlockArguments
       OverloadedStrings
+      DataKinds
+      LambdaCase
   ghc-options: -Wall -Wcompat -Widentities -Wincomplete-record-updates -Wincomplete-uni-patterns -Wmissing-export-lists -Wmissing-home-modules -Wpartial-fields -Wredundant-constraints -threaded -rtsopts -with-rtsopts=-N
   build-depends:
       base >=4.7 && <5
@@ -91,6 +97,7 @@ executable lang-exe
     , prettyprinter-ansi-terminal
     , relude >=1.2.1.0 && <2
     , template-haskell
+    , uniplate
   default-language: GHC2021
 
 test-suite lang-test
@@ -106,6 +113,8 @@ test-suite lang-test
       NoImplicitPrelude
       BlockArguments
       OverloadedStrings
+      DataKinds
+      LambdaCase
   ghc-options: -Wall -Wcompat -Widentities -Wincomplete-record-updates -Wincomplete-uni-patterns -Wmissing-export-lists -Wmissing-home-modules -Wpartial-fields -Wredundant-constraints -threaded -rtsopts -with-rtsopts=-N
   build-depends:
       base >=4.7 && <5
@@ -123,5 +132,6 @@ test-suite lang-test
     , prettyprinter-ansi-terminal
     , relude >=1.2.1.0 && <2
     , template-haskell
+    , uniplate
   default-language: GHC2021
   build-tool-depends: hspec-discover:hspec-discover == 2.*

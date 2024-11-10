@@ -141,12 +141,12 @@ patternParens = do
     unit = P.Record Blank Row.empty
 
 binding :: ParserM m => m (Binding 'Parse)
-binding = withLoc do
+binding = do
     f <-
         -- it should probably be `try (E.FunctionBinding <$> termName) <*> NE.some patternParens
         -- for cleaner parse errors
-        try (flip4 E.FunctionBinding <$> termName <*> NE.some patternParens)
-            <|> (flip3 E.ValueBinding <$> pattern')
+        try (E.FunctionBinding <$> termName <*> NE.some patternParens)
+            <|> (E.ValueBinding <$> pattern')
     specialSymbol "="
     f <$> expression
 

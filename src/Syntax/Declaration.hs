@@ -1,13 +1,13 @@
-{-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE UndecidableInstances #-}
 
 module Syntax.Declaration (Declaration (..), Constructor (..)) where
 
-import Common (Loc, NameAt, Pass)
+import Common (HasLoc (..), Loc, NameAt, Pass (..))
 import Prettyprinter (Pretty (pretty), encloseSep, line, nest, sep, space, vsep, (<+>))
-import Relude
+import Relude hiding (show)
 import Syntax.Expression (Binding)
 import Syntax.Type (Type')
+import Prelude (show)
 
 data Declaration (p :: Pass)
     = Value Loc (Binding p) [Declaration p] -- todo: forbid local type declarations?
@@ -15,7 +15,10 @@ data Declaration (p :: Pass)
     | Alias Loc (NameAt p) (Type' p)
     | Signature Loc (NameAt p) (Type' p)
 
+deriving instance Eq (Declaration 'Parse)
+
 data Constructor p = Constructor Loc (NameAt p) [Type' p]
+deriving instance Eq (Constructor 'Parse)
 
 instance Pretty (NameAt p) => Pretty (Declaration p) where
     pretty = \case
@@ -29,3 +32,16 @@ instance Pretty (NameAt p) => Pretty (Declaration p) where
         whereIfNonEmpty locals
             | null locals = ""
             | otherwise = nest 2 "where"
+
+instance Pretty (NameAt p) => Show (Declaration p) where
+    show = show . pretty
+
+instance HasLoc (Declaration p) where
+    getLoc = \case
+        Value loc _ _ -> loc
+        Type loc _ _ _ -> loc
+        Alias loc _ _ -> loc
+        Signature loc _ _ -> loc
+
+instance HasLoc (Constructor p) where
+    getLoc (Constructor loc _ _) = loc

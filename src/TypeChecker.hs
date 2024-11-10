@@ -32,6 +32,7 @@ import Diagnostic (Diagnose)
 import Effectful
 import Effectful.State.Static.Local (State, get, gets, modify, runState)
 import GHC.IsList qualified as IsList
+import LensyUniplate
 import NameGen
 import Prettyprinter (pretty, (<+>))
 import Relude hiding (Reader, State, Type, ask, bool, get, gets, modify, put, runReader, runState)
@@ -58,24 +59,20 @@ inferTypeVars :: Type' 'Fixity -> Type' 'Fixity
 inferTypeVars ty = uncurry (foldr (T.Forall $ getLoc ty)) . second snd . runPureEff . runState (HashSet.empty, HashSet.empty) . go $ ty
   where
     go :: Type' 'Fixity -> Eff '[State (HashSet Name, HashSet Name)] (Type' 'Fixity)
-    go = \case
+    go = transformM T.uniplate \case
         T.Var var -> do
             isNew <- not . HashSet.member var <$> gets @(HashSet Name, HashSet Name) snd
             when isNew $ modify @(HashSet Name, HashSet Name) (second $ HashSet.insert var)
             pure $ T.Var var
         T.Forall loc var body -> modify @(HashSet Name, HashSet Name) (first $ HashSet.insert var) >> T.Forall loc var <$> go body
         T.Exists loc var body -> modify @(HashSet Name, HashSet Name) (first $ HashSet.insert var) >> T.Exists loc var <$> go body
-        T.Function loc from to -> T.Function loc <$> go from <*> go to
-        T.Application lhs rhs -> T.Application <$> go lhs <*> go rhs
-        T.Variant loc row -> T.Variant loc <$> traverse go row
-        T.Record loc row -> T.Record loc <$> traverse go row
-        T.Name name -> pure $ T.Name name
+        other -> pure other
 
 -- | check / infer types of a list of declarations that may reference each other
 inferDecls :: InfEffs es => [Declaration 'Fixity] -> Eff es (HashMap Name Type)
 inferDecls decls = do
     traverse_ updateTopLevel decls
-    let (values, sigs) = second (fmap (T.cast id) . HashMap.fromList) $ foldr getValueDecls ([], []) decls
+    let (values, sigs) = second (fmap (cast uniplateCast) . HashMap.fromList) $ foldr getValueDecls ([], []) decls
     fold <$> for values \(binding, locals) ->
         binding & collectNamesInBinding & listToMaybe >>= (`HashMap.lookup` sigs) & \case
             Just ty -> do
@@ -87,13 +84,13 @@ inferDecls decls = do
             Nothing -> scoped do
                 declareAll =<< inferDecls locals
                 typeMap <- traverse normalise =<< inferBinding binding -- todo: true top level should be separated from the parent scopes
-                fmap (T.cast id) typeMap <$ declareTopLevel typeMap
+                fmap (cast uniplateCast) typeMap <$ declareTopLevel typeMap
   where
     updateTopLevel = \case
         D.Signature _ name sig ->
             modify \s -> s{topLevel = HashMap.insert name (Right $ inferTypeVars sig) s.topLevel}
-        D.Value _ binding@(E.FunctionBinding _ name _ _) locals -> insertBinding name binding locals
-        D.Value _ binding@(E.ValueBinding _ (P.Var name) _) locals -> insertBinding name binding locals
+        D.Value _ binding@(E.FunctionBinding name _ _) locals -> insertBinding name binding locals
+        D.Value _ binding@(E.ValueBinding (P.Var name) _) locals -> insertBinding name binding locals
         D.Value _ E.ValueBinding{} _ -> pass -- todo
         D.Type _ name vars constrs ->
             for_ (mkConstrSigs name vars constrs) \(con, sig) ->
@@ -181,8 +178,8 @@ check e type_ = scoped $ match e type_
             checkPattern arg from
             check body to
         (E.Annotation expr annTy) ty -> do
-            check expr $ T.cast id annTy
-            subtype (T.cast id annTy) ty
+            check expr $ cast uniplateCast annTy
+            subtype (cast uniplateCast annTy) ty
         (E.If _ cond true false) ty -> do
             check cond $ T.Name $ Located (getLoc cond) BoolName
             check true ty
@@ -214,8 +211,8 @@ check e type_ = scoped $ match e type_
 
 checkBinding :: InfEffs es => Binding 'Fixity -> Type -> Eff es ()
 checkBinding binding ty = case binding of
-    E.FunctionBinding loc _ args body -> check (foldr (E.Lambda loc) body args) ty
-    E.ValueBinding _ pat body -> scoped $ checkPattern pat ty >> check body ty
+    E.FunctionBinding _ args body -> check (foldr (E.Lambda (getLoc binding)) body args) ty
+    E.ValueBinding pat body -> scoped $ checkPattern pat ty >> check body ty
 
 checkPattern :: (InfEffs es, Declare :> es) => Pat -> Type -> Eff es ()
 checkPattern = \cases
@@ -259,7 +256,7 @@ infer =
         E.Let _ binding body -> do
             declareAll =<< inferBinding binding
             infer body
-        E.Annotation expr ty -> T.cast id ty <$ check expr (T.cast id ty)
+        E.Annotation expr ty -> cast uniplateCast ty <$ check expr (cast uniplateCast ty)
         E.If loc cond true false -> do
             check cond $ T.Name $ Located loc BoolName
             result <- unMono <$> (mono In =<< infer true)
@@ -326,7 +323,7 @@ inferApp fTy arg = do
 inferBinding :: InfEffs es => Binding 'Fixity -> Eff es (HashMap Name Type)
 inferBinding =
     scoped . forallScope . \case
-        E.ValueBinding _ pat body -> do
+        E.ValueBinding pat body -> do
             (patTy, bodyTy) <- do
                 patTy <- inferPattern pat
                 bodyTy <- infer body
@@ -334,15 +331,15 @@ inferBinding =
             subtype patTy bodyTy
             checkPattern pat bodyTy
             traverse lookupSig (HashMap.fromList $ (\x -> (x, x)) <$> collectNames pat)
-        E.FunctionBinding loc name args body -> do
+        binding@(E.FunctionBinding name args body) -> do
             -- note: we can only infer monotypes for recursive functions
             -- while checking the body, the function itself is assigned a univar
             -- in the end, we check that the inferred type is compatible with the one in the univar (inferred from recursive calls)
             uni <- freshUniVar'
-            updateSig name $ T.UniVar loc uni
+            updateSig name $ T.UniVar (getLoc binding) uni
             argTypes <- traverse inferPattern args
             bodyTy <- infer body
-            let ty = foldr (T.Function loc) bodyTy argTypes
+            let ty = foldr (T.Function $ getLoc binding) bodyTy argTypes
             -- since we can still infer higher-rank types for non-recursive functions,
             -- we only need the subtype check when the univar is solved, i.e. when the
             -- functions contains any recursive calls at all
@@ -363,8 +360,8 @@ collectNames = \case
 
 collectNamesInBinding :: Binding p -> [NameAt p]
 collectNamesInBinding = \case
-    E.FunctionBinding _ name _ _ -> [name]
-    E.ValueBinding _ pat _ -> collectNames pat
+    E.FunctionBinding name _ _ -> [name]
+    E.ValueBinding pat _ -> collectNames pat
 
 inferPattern :: (InfEffs es, Declare :> es) => Pat -> Eff es Type
 inferPattern = \case
@@ -373,7 +370,7 @@ inferPattern = \case
         updateSig name uni
         pure uni
     P.Wildcard loc _ -> freshUniVar loc
-    P.Annotation pat ty -> T.cast id ty <$ checkPattern pat (T.cast id ty)
+    P.Annotation pat ty -> cast uniplateCast ty <$ checkPattern pat (cast uniplateCast ty)
     p@(P.Constructor name args) -> do
         (resultType, argTypes) <- conArgTypes name
         unless (length argTypes == length args) $
@@ -420,20 +417,13 @@ inferPattern = \case
 normalise :: InfEffs es => Type -> Eff es (Type' 'Fixity)
 normalise = uniVarsToForall {->=> skolemsToExists-} >=> go
   where
-    go = \case
+    go = transformM' (T.uniplate' coerce (error "univar in uniplate") (error "skolem in uniplate")) \case
         T.UniVar loc uni ->
             lookupUniVar uni >>= \case
                 Left _ -> typeError $ Internal loc $ "dangling univar " <> pretty uni
-                Right body -> go (unMono body)
-        T.Forall loc var body -> T.Forall loc var <$> go body
-        T.Exists loc var body -> T.Exists loc var <$> go body
-        T.Function loc from to -> T.Function loc <$> go from <*> go to
-        T.Application lhs rhs -> T.Application <$> go lhs <*> go rhs
-        T.Variant loc row -> T.Variant loc <$> traverse go row
-        T.Record loc row -> T.Record loc <$> traverse go row
-        T.Var v -> pure $ T.Var v
-        T.Name name -> pure $ T.Name name
+                Right body -> Left <$> go (unMono body)
         T.Skolem skolem -> typeError $ Internal (getLoc skolem) $ "skolem " <> pretty (T.Skolem skolem) <> " remains in code"
+        other -> pure $ Right other
 
     -- this is an alternative to forallScope that's only suitable at the top level
     -- it also compresses any records found along the way, because I don't feel like
@@ -441,26 +431,21 @@ normalise = uniVarsToForall {->=> skolemsToExists-} >=> go
     -- means that it has to be run early
     uniVarsToForall ty = uncurry (foldr (T.Forall (getLoc ty))) <$> runState HashMap.empty (uniGo ty)
     uniGo :: InfEffs es => Type -> Eff (State (HashMap UniVar Name) : es) Type
-    uniGo = \case
-        T.UniVar loc uni -> do
-            gets @(HashMap UniVar Name) (HashMap.lookup uni) >>= \case
-                Just var -> pure $ T.Var var -- I'm not sure where should typevars originate from
-                Nothing ->
-                    lookupUniVar uni >>= \case
-                        Left _ -> do
-                            tyVar <- freshTypeVar loc
-                            modify $ HashMap.insert uni tyVar
-                            pure $ T.Var tyVar
-                        Right body -> uniGo $ unMono body
-        T.Forall loc var body -> T.Forall loc var <$> uniGo body
-        T.Exists loc var body -> T.Exists loc var <$> uniGo body
-        T.Function loc from to -> T.Function loc <$> uniGo from <*> uniGo to
-        T.Application lhs rhs -> T.Application <$> uniGo lhs <*> uniGo rhs
-        T.Variant loc row -> T.Variant loc <$> (traverse uniGo =<< compress Variant row)
-        T.Record loc row -> T.Record loc <$> (traverse uniGo =<< compress Record row)
-        v@T.Var{} -> pure v
-        name@T.Name{} -> pure name
-        skolem@T.Skolem{} -> pure skolem
+    uniGo = transformM' T.uniplate \case
+        T.UniVar loc uni ->
+            Left <$> do
+                gets @(HashMap UniVar Name) (HashMap.lookup uni) >>= \case
+                    Just var -> pure $ T.Var var -- I'm not sure where should typevars originate from
+                    Nothing ->
+                        lookupUniVar uni >>= \case
+                            Left _ -> do
+                                tyVar <- freshTypeVar loc
+                                modify $ HashMap.insert uni tyVar
+                                pure $ T.Var tyVar
+                            Right body -> uniGo (unMono body)
+        T.Variant loc row -> Left . T.Variant loc <$> (traverse uniGo =<< compress Variant row)
+        T.Record loc row -> Left . T.Record loc <$> (traverse uniGo =<< compress Record row)
+        other -> pure $ Right other
 
 -- these two functions have the same problem as the old `forallScope` - they capture skolems from an outer scope
 -- it's not clear whether anything should be done about them
@@ -481,7 +466,7 @@ replaceSkolems :: InfEffs es => (Loc -> Name -> Type -> Type) -> Type -> Eff es 
 replaceSkolems con ty = uncurry (foldr (con $ getLoc ty)) <$> runState HashMap.empty (go ty)
   where
     go :: InfEffs es => Type -> Eff (State (HashMap Skolem Name) : es) Type
-    go = \case
+    go = transformM T.uniplate \case
         T.Skolem skolem ->
             get @(HashMap Skolem Name) >>= \acc -> case HashMap.lookup skolem acc of
                 Just tyVar -> pure $ T.Var tyVar
@@ -496,11 +481,4 @@ replaceSkolems con ty = uncurry (foldr (con $ getLoc ty)) <$> runState HashMap.e
                     body' <- go $ undefined body
                     overrideUniVar uni $ undefined body'
                     pure body'
-        T.Forall loc var body -> T.Forall loc var <$> go body
-        T.Exists loc var body -> T.Exists loc var <$> go body
-        T.Function loc from to -> T.Function loc <$> go from <*> go to
-        T.Application lhs rhs -> T.Application <$> go lhs <*> go rhs
-        T.Record loc row -> T.Record loc <$> traverse go row
-        T.Variant loc row -> T.Variant loc <$> traverse go row
-        v@T.Var{} -> pure v
-        name@T.Name{} -> pure name
+        other -> pure other

@@ -46,7 +46,7 @@ main = do
         types <- typecheck env builtins fixityResolvedBindings 
         liftIO . putDoc $ (<> line) $ vsep $ pretty . uncurry (D.Signature Blank) <$> HashMap.toList types
         case fixityResolvedBindings of
-            (D.Value _ (E.ValueBinding _ _ body) _) : _ ->
+            (D.Value _ (E.ValueBinding _ body) _) : _ ->
                 liftIO . putDoc $ (<> line) $ pretty $ eval evalBuiltins constrs HashMap.empty body
             _ -> putTextLn "Not a value"
 

@@ -3,11 +3,14 @@
 {-# LANGUAGE TypeFamilies #-}
 {-# LANGUAGE UndecidableInstances #-}
 
-module Syntax.Expression (Expression (..), DoStatement (..), Binding (..), HasInfix (..), noInfix) where
+-- {-# OPTIONS_GHC -freduction-depth=0 #-}
 
-import Relude
+module Syntax.Expression (Expression (..), DoStatement (..), Binding (..), HasInfix (..), noInfix, uniplate) where
+
+import Relude hiding (show)
 
 import Common (HasLoc (..), Literal, Loc, NameAt, Pass (..), zipLocOf)
+import LensyUniplate
 import Prettyprinter (
   Pretty,
   braces,
@@ -26,16 +29,14 @@ import Prettyprinter (
 import Syntax.Pattern (Pattern)
 import Syntax.Row
 import Syntax.Type (Type')
+import Prelude (show)
 
 data Binding (p :: Pass)
-  = ValueBinding Loc (Pattern p) (Expression p)
-  | FunctionBinding Loc (NameAt p) (NonEmpty (Pattern p)) (Expression p)
+  = ValueBinding (Pattern p) (Expression p)
+  | FunctionBinding (NameAt p) (NonEmpty (Pattern p)) (Expression p)
 
--- todo: some nodes don't need to store an explicit Loc. Instead, getLoc may zip the child node locs
--- the only difference is whether outer parenthesis are included, but seems like that only makes a differenc
--- for wildcard lambdas
---
--- Application, Annotation and some others
+deriving instance Eq (Binding 'Parse)
+
 data Expression (p :: Pass)
   = Lambda Loc (Pattern p) (Expression p) -- it's still unclear to me whether I want to desugar multi-arg lambdas while parsing
   | -- | (f _ x + _ y)
@@ -63,24 +64,29 @@ data Expression (p :: Pass)
   | -- | an unresolved expression with infix / prefix operators
     Infix (HasInfix p) [(Expression p, Maybe (NameAt p))] (Expression p)
 
+deriving instance Eq (Expression 'Parse)
+
 data DoStatement (p :: Pass)
   = Bind (Pattern p) (Expression p)
   | With Loc (Pattern p) (Expression p) -- with and let have leading keywords, so
   | DoLet Loc (Binding p) -- their locations are not derivable from argument locations
   | Action (Expression p)
 
+deriving instance Eq (DoStatement 'Parse)
+
 -- unresolved infix operators may only appear before the fixity resolution pass
 data HasInfix (pass :: Pass) where
   Yes :: HasInfix 'Parse
   Yup :: HasInfix 'NameRes
+deriving instance Eq (HasInfix p)
 
 noInfix :: HasInfix 'Fixity -> a
 noInfix = \case {}
 
 instance Pretty (NameAt p) => Pretty (Binding p) where
   pretty = \case
-    ValueBinding _ pat body -> pretty pat <+> "=" <+> pretty body
-    FunctionBinding _ name args body -> pretty name <+> concatWith (<+>) (pretty <$> args) <+> "=" <+> pretty body
+    ValueBinding pat body -> pretty pat <+> "=" <+> pretty body
+    FunctionBinding name args body -> pretty name <+> concatWith (<+>) (pretty <$> args) <+> "=" <+> pretty body
 
 instance Pretty (NameAt p) => Pretty (Expression p) where
   pretty = go (0 :: Int)
@@ -118,6 +124,9 @@ instance Pretty (NameAt p) => Pretty (DoStatement p) where
     DoLet _ binding -> pretty binding
     Action expr -> pretty expr
 
+instance Pretty (NameAt p) => Show (Expression p) where
+  show = show . pretty
+
 instance HasLoc (NameAt p) => HasLoc (Expression p) where
   getLoc = \case
     Lambda loc _ _ -> loc
@@ -145,3 +154,78 @@ instance HasLoc (NameAt p) => HasLoc (DoStatement p) where
     With loc _ _ -> loc
     DoLet loc _ -> loc
     Action expr -> getLoc expr
+
+instance HasLoc (NameAt p) => HasLoc (Binding p) where
+  getLoc = \case
+    ValueBinding pat body -> zipLocOf pat body
+    FunctionBinding name _ body -> zipLocOf name body
+
+uniplate :: SelfTraversal Expression p p
+uniplate f = \case
+  Lambda loc pat body -> Lambda loc pat <$> f body
+  WildcardLambda loc args body -> WildcardLambda loc args <$> f body
+  Application lhs rhs -> Application <$> f lhs <*> f rhs
+  Let loc binding expr -> Let loc binding <$> f expr
+  Case loc arg matches -> Case loc <$> f arg <*> traverse (traverse f) matches
+  Match loc matches -> Match loc <$> traverse (traverse f) matches
+  If loc cond true false -> If loc <$> f cond <*> f true <*> f false
+  Annotation expr ty -> Annotation <$> f expr <*> pure ty
+  Record loc row -> Record loc <$> traverse f row
+  List loc exprs -> List loc <$> traverse f exprs
+  Do loc stmts ret -> Do loc <$> traverse (plateStmt f) stmts <*> f ret
+  Infix loc pairs l -> Infix loc <$> traverse (\(e, op) -> (,op) <$> f e) pairs <*> pure l
+  Constructor name -> pure $ Constructor name
+  n@Name{} -> pure n
+  r@RecordLens{} -> pure r
+  v@Variant{} -> pure v
+  l@Literal{} -> pure l
+ where
+  plateStmt :: Traversal' (DoStatement p) (Expression p)
+  plateStmt f' = \case
+    Bind pat expr -> Bind pat <$> uniplate f' expr
+    With loc pat expr -> With loc pat <$> uniplate f' expr
+    DoLet loc binding -> DoLet loc <$> plateBinding f' binding
+    Action expr -> Action <$> uniplate f' expr
+
+  plateBinding :: Traversal' (Binding p) (Expression p)
+  plateBinding f' = \case
+    ValueBinding pat body -> ValueBinding pat <$> uniplate f' body
+    FunctionBinding name args body -> FunctionBinding name args <$> uniplate f' body
+
+{-
+uniplate'
+  :: NameAt p ~ NameAt q
+  => (Pattern p -> Pattern q)
+  -> (Type' p -> Type' q)
+  -> SelfTraversal Expression p q
+uniplate' castPat castTy f = \case
+  Lambda loc pat body -> Lambda loc (castPat pat) <$> f body
+  WildcardLambda loc args body -> WildcardLambda loc args <$> f body
+  Application lhs rhs -> Application <$> f lhs <*> f rhs
+  Let loc binding expr -> Let loc (plateBinding binding) <$> f expr
+  Case loc arg matches -> Case loc <$> f arg <*> traverse (bitraverse (pure . castPat) f) matches
+  Match loc matches -> Match loc <$> traverse (bitraverse (pure . map castPat) f) matches
+  If loc cond true false -> If loc <$> f cond <*> f true <*> f false
+  Annotation expr ty -> Annotation <$> f expr <*> pure (castTy ty)
+  Record loc row -> Record loc <$> traverse f row
+  List loc exprs -> List loc <$> traverse f exprs
+  Do loc stmts ret -> Do loc <$> traverse (plateStmt f) stmts <*> f ret
+  Infix loc pairs l -> Infix loc <$> traverse (\(e, op) -> (,op) <$> f e) pairs <*> pure l
+  Constructor name -> pure $ Constructor name
+  n@Name{} -> pure n
+  r@RecordLens{} -> pure r
+  v@Variant{} -> pure v
+  l@Literal{} -> pure l
+ where
+  plateStmt :: Traversal' (DoStatement p) (Expression p)
+  plateStmt f' = \case
+    Bind pat expr -> Bind pat <$> uniplate' f' expr
+    With loc pat expr -> With loc pat <$> uniplate' f' expr
+    DoLet loc binding -> DoLet loc <$> plateBinding f' binding
+    Action expr -> Action <$> uniplate' f' expr
+
+  plateBinding :: Traversal' (Binding p) (Expression p)
+  plateBinding f' = \case
+    ValueBinding loc pat body -> ValueBinding loc pat <$> uniplate' f' body
+    FunctionBinding loc name args body -> FunctionBinding loc name args <$> uniplate' f' body
+-}

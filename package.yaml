@@ -23,6 +23,8 @@ default-extensions:
   - NoImplicitPrelude
   - BlockArguments
   - OverloadedStrings
+  - DataKinds
+  - LambdaCase
 
 dependencies:
 - base >= 4.7 && < 5
@@ -37,6 +39,7 @@ dependencies:
 - prettyprinter >=1.7 && <2
 - prettyprinter-ansi-terminal
 - template-haskell
+- uniplate
 
 ghc-options:
 - -Wall

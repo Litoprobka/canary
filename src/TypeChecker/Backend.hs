@@ -23,17 +23,18 @@ import Effectful.Error.Static (runErrorNoCallStack, throwError)
 import Effectful.Reader.Static (Reader, asks, runReader)
 import Effectful.State.Static.Local (State, get, gets, modify, runState)
 import Effectful.TH
+import Error.Diagnose (Report (..))
+import Error.Diagnose qualified as M (Marker (..))
+import LensyUniplate
 import NameGen
 import Prettyprinter (Doc, Pretty, pretty, (<+>))
+import Prettyprinter.Render.Terminal (AnsiStyle)
 import Relude hiding (Reader, State, Type, ask, asks, bool, break, evalState, get, gets, modify, put, runReader, runState)
 import Syntax
 import Syntax.Row
 import Syntax.Row qualified as Row
 import Syntax.Type qualified as T
 import Prelude (show)
-import Prettyprinter.Render.Terminal (AnsiStyle)
-import Error.Diagnose (Report(..))
-import Error.Diagnose qualified as M (Marker(..))
 
 type Expr = Expression 'Fixity
 type Pat = Pattern 'Fixity
@@ -50,6 +51,14 @@ data Monotype
     | MVariant Loc (ExtRow Monotype)
     | MRecord Loc (ExtRow Monotype)
     deriving (Show, Eq)
+
+uniplateMono :: Traversal' Monotype Monotype
+uniplateMono f = \case
+    MApp lhs rhs -> MApp <$> f lhs <*> f rhs
+    MFn loc lhs rhs -> MFn loc <$> f lhs <*> f rhs
+    MVariant loc row -> MVariant loc <$> traverse f row
+    MRecord loc row -> MRecord loc <$> traverse f row
+    term -> pure term
 
 -- а type whose outer constructor is monomorphic
 data MonoLayer
@@ -99,69 +108,75 @@ data TypeError
     | ArgCountMismatch Loc -- "different amount of arguments in a match statement"
     | ArgCountMismatchPattern Pat Int Int
     | NotAFunction Type -- pretty fTy <+> "is not a function type"
+    | SelfReferential Type
 
 typeError :: InfEffs es => TypeError -> Eff es a
-typeError = fatal . one . \case
-    Internal loc doc ->
-        Err
-        Nothing
-        ("Internal error:" <+> doc)
-        (mkNotes [(loc, M.This "arising from")])
-        []
-    CannotUnify lhs rhs -> 
-        Err
-        Nothing
-        ("cannot unify" <+> pretty lhs <+> "with" <+> pretty rhs)
-        (mkNotes [(getLoc lhs, M.This "lhs"), (getLoc rhs, M.This "rhs")])
-        []
-    NotASubtype lhs rhs mbField -> 
-        Err
-        Nothing
-        (pretty lhs <+> "is not a subtype of" <+> pretty rhs <> fieldMsg)
-        (mkNotes [(getLoc lhs, M.This "lhs"), (getLoc rhs, M.This "rhs")])
-        []
-      where 
-        fieldMsg = case mbField of
-            Nothing -> ""
-            Just field -> ": right hand side does not contain" <+> pretty field
-    MissingField ty field -> 
-        Err
-        Nothing
-        (pretty ty <+> "does not contain field" <+> pretty field)
-        (mkNotes [(getLoc ty, M.This "type arising from"), (getLoc field, M.This "field arising from")])
-        []
-    MissingVariant ty variant ->
-        Err
-        Nothing
-        (pretty ty <+> "does not contain variant" <+> pretty variant)
-        (mkNotes [(getLoc ty, M.This "type arising from"), (getLoc variant, M.This "variant arising from")])
-        []
-    EmptyMatch loc -> 
-        Err
-        Nothing
-        "empty match expression"
-        (mkNotes [(loc, M.This "")])
-        []
-    ArgCountMismatch loc ->
-        Err
-        Nothing
-        "different amount of arguments in a match statement"
-        (mkNotes [(loc, M.This "")])
-        []
-    ArgCountMismatchPattern pat expected got ->
-        Err
-        Nothing
-        ("incorrect arg count (" <> pretty got <> ") in pattern" <+> pretty pat <> ". Expected" <+> pretty expected)
-        (mkNotes [(getLoc pat, M.This "")])
-        []
-    NotAFunction ty ->
-        Err
-        Nothing
-        (pretty ty <+> "is not a function type")
-        (mkNotes [(getLoc ty, M.This "type arising from")])
-        []
-
-
+typeError =
+    fatal . one . \case
+        Internal loc doc ->
+            Err
+                Nothing
+                ("Internal error:" <+> doc)
+                (mkNotes [(loc, M.This "arising from")])
+                []
+        CannotUnify lhs rhs ->
+            Err
+                Nothing
+                ("cannot unify" <+> pretty lhs <+> "with" <+> pretty rhs)
+                (mkNotes [(getLoc lhs, M.This "lhs"), (getLoc rhs, M.This "rhs")])
+                []
+        NotASubtype lhs rhs mbField ->
+            Err
+                Nothing
+                (pretty lhs <+> "is not a subtype of" <+> pretty rhs <> fieldMsg)
+                (mkNotes [(getLoc lhs, M.This "lhs"), (getLoc rhs, M.This "rhs")])
+                []
+          where
+            fieldMsg = case mbField of
+                Nothing -> ""
+                Just field -> ": right hand side does not contain" <+> pretty field
+        MissingField ty field ->
+            Err
+                Nothing
+                (pretty ty <+> "does not contain field" <+> pretty field)
+                (mkNotes [(getLoc ty, M.This "type arising from"), (getLoc field, M.This "field arising from")])
+                []
+        MissingVariant ty variant ->
+            Err
+                Nothing
+                (pretty ty <+> "does not contain variant" <+> pretty variant)
+                (mkNotes [(getLoc ty, M.This "type arising from"), (getLoc variant, M.This "variant arising from")])
+                []
+        EmptyMatch loc ->
+            Err
+                Nothing
+                "empty match expression"
+                (mkNotes [(loc, M.This "")])
+                []
+        ArgCountMismatch loc ->
+            Err
+                Nothing
+                "different amount of arguments in a match statement"
+                (mkNotes [(loc, M.This "")])
+                []
+        ArgCountMismatchPattern pat expected got ->
+            Err
+                Nothing
+                ("incorrect arg count (" <> pretty got <> ") in pattern" <+> pretty pat <> ". Expected" <+> pretty expected)
+                (mkNotes [(getLoc pat, M.This "")])
+                []
+        NotAFunction ty ->
+            Err
+                Nothing
+                (pretty ty <+> "is not a function type")
+                (mkNotes [(getLoc ty, M.This "type arising from")])
+                []
+        SelfReferential ty ->
+            Err
+                Nothing
+                ("self-referential type" <+> pretty ty)
+                (mkNotes [(getLoc ty, M.This "arising from")])
+                []
 
 type InfEffs es = (NameGen :> es, State InfState :> es, Diagnose :> es, Reader (Builtins Name) :> es)
 
@@ -263,7 +278,9 @@ alterUniVar :: InfEffs es => Bool -> UniVar -> Monotype -> Eff es ()
 alterUniVar override uni ty = do
     -- here comes the magic. If the new type contains other univars, we change their scope
     lookupUniVar uni >>= \case
-        Right _ | not override -> typeError $ Internal Blank $ "Internal error (probably a bug): attempted to solve a solved univar " <> pretty uni
+        Right _
+            | not override ->
+                typeError $ Internal Blank $ "Internal error (probably a bug): attempted to solve a solved univar " <> pretty uni
         Right _ -> pass
         Left scope -> rescope scope ty
     noCycle <- cycleCheck (Direct, HashSet.singleton uni) ty
@@ -275,7 +292,7 @@ alterUniVar override uni ty = do
     cycleCheck (selfRefType, acc) = \case
         MUniVar _ uni2 | HashSet.member uni2 acc -> case selfRefType of
             Direct -> pure False
-            Indirect -> typeError $ Internal (getLoc $ unMono ty) $ "self-referential type" <+> pretty ty
+            Indirect -> typeError $ SelfReferential (unMono ty)
         MUniVar _ uni2 ->
             lookupUniVar uni2 >>= \case
                 Left _ -> pure True
@@ -292,24 +309,22 @@ alterUniVar override uni ty = do
     rescopeVar v scope oldScope = modify \s -> s{vars = HashMap.insert v (Left $ min oldScope scope) s.vars}
 
 foldUniVars :: InfEffs es => (UniVar -> Eff es ()) -> Monotype -> Eff es ()
-foldUniVars action = \case
-    MUniVar _ v -> action v >> lookupUniVar v >>= either (const pass) (foldUniVars action)
-    MApp lhs rhs -> foldUniVars action lhs >> foldUniVars action rhs
-    MFn _ from to -> foldUniVars action from >> foldUniVars action to
-    MVariant _ row -> traverse_ (foldUniVars action) row
-    MRecord _ row -> traverse_ (foldUniVars action) row
-    MName{} -> pass
-    MSkolem{} -> pass
-    MVar{} -> pass
+foldUniVars action =
+    void . transformM uniplateMono \case
+        var@(MUniVar _ v) -> do
+            action v
+            lookupUniVar v >>= either (const pass) (foldUniVars action)
+            pure var
+        other -> pure other
 
 -- looks up a type of a binding. Local binding take precedence over uninferred globals, but not over inferred ones
 lookupSig :: (InfEffs es, Declare :> es) => Name -> Eff es Type
 lookupSig name = do
     InfState{topLevel, locals} <- get @InfState
     case (HashMap.lookup name topLevel, HashMap.lookup name locals) of
-        (Just (Right ty), _) -> pure $ T.cast id ty
+        (Just (Right ty), _) -> pure $ cast (T.uniplate' id T.UniVar T.Skolem) ty
         (_, Just ty) -> pure ty
-        (Just (Left (UninferredType closure)), _) -> T.cast id <$> closure
+        (Just (Left (UninferredType closure)), _) -> cast (T.uniplate' id T.UniVar T.Skolem) <$> closure
         (Nothing, Nothing) -> do
             -- assuming that type checking is performed after name resolution,
             -- all encountered names have to be in scope
@@ -453,24 +468,21 @@ substitute variance var ty = do
     someVar <- freshSomething Blank var variance
     go someVar ty
   where
-    go replacement = \case
-        T.Var v | v == var -> pure replacement
-        T.Var name -> pure $ T.Var name
+    go replacement = transformM' T.uniplate \case
+        T.Var v | v == var -> pure $ Left replacement
+        T.Var name -> pure $ Left $ T.Var name
         T.UniVar loc uni ->
-            T.UniVar loc uni
-                <$ withUniVar uni \body -> overrideUniVar uni =<< mono In =<< go replacement (unMono body)
+            Left
+                <$> ( T.UniVar loc uni
+                        <$ withUniVar uni \body -> overrideUniVar uni =<< mono In =<< go replacement (unMono body)
+                    )
         T.Forall loc v body
-            | v /= var -> T.Forall loc v <$> go replacement body
-            | otherwise -> pure $ T.Forall loc v body
+            | v /= var -> Left . T.Forall loc v <$> go replacement body
+            | otherwise -> pure $ Left $ T.Forall loc v body
         T.Exists loc v body
-            | v /= var -> T.Exists loc v <$> go replacement body
-            | otherwise -> pure $ T.Exists loc v body
-        T.Function loc from to -> T.Function loc <$> go replacement from <*> go replacement to
-        T.Application lhs rhs -> T.Application <$> go replacement lhs <*> go replacement rhs
-        T.Variant loc row -> T.Variant loc <$> traverse (go replacement) row
-        T.Record loc row -> T.Record loc <$> traverse (go replacement) row
-        name@T.Name{} -> pure name
-        skolem@T.Skolem{} -> pure skolem
+            | v /= var -> Left . T.Exists loc v <$> go replacement body
+            | otherwise -> pure $ Left $ T.Exists loc v body
+        other -> pure $ Right other
 
     -- freshUniVar or freshSkolem, depending on variance
     -- should it be the other way around?
@@ -487,18 +499,10 @@ substitute variance var ty = do
 substituteTy :: InfEffs es => Type -> Monotype -> Type -> Eff es Type
 substituteTy from to = go
   where
-    go = \case
-        ty | ty == from -> pure $ unMono to
-        T.UniVar loc uni -> T.UniVar loc uni <$ withUniVar uni (pure . unMono >=> go >=> mono Inv >=> overrideUniVar uni)
-        T.Forall loc v body -> T.Forall loc v <$> go body
-        T.Exists loc v body -> T.Exists loc v <$> go body
-        T.Function loc in' out' -> T.Function loc <$> go in' <*> go out'
-        T.Application lhs rhs -> T.Application <$> go lhs <*> go rhs
-        T.Variant loc row -> T.Variant loc <$> traverse go row
-        T.Record loc row -> T.Record loc <$> traverse go row
-        v@T.Var{} -> pure v
-        skolem@T.Skolem{} -> pure skolem
-        name@T.Name{} -> pure name
+    go = transformM' T.uniplate \case
+        ty | ty == from -> pure $ Left $ unMono to
+        T.UniVar loc uni -> fmap Left $ T.UniVar loc uni <$ withUniVar uni (pure . unMono >=> go >=> mono Inv >=> overrideUniVar uni)
+        other -> pure $ Right other
 
 -- what to match
 data RecordOrVariant = Record | Variant deriving (Eq)

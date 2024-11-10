@@ -4,13 +4,15 @@
 {-# LANGUAGE OverloadedRecordDot #-}
 {-# LANGUAGE UndecidableInstances #-}
 
-module Syntax.Type (Type' (..), cast, castM) where
+module Syntax.Type (Type' (..), uniplate, uniplate') where
 
-import Common (HasLoc, Loc, NameAt, Pass (..), bifix, getLoc, zipLocOf)
+import Common (HasLoc, Loc, NameAt, Pass (..), getLoc, zipLocOf)
 import Common qualified as CT
+import LensyUniplate
 import Prettyprinter (Doc, Pretty, braces, brackets, comma, parens, pretty, punctuate, sep, (<+>))
-import Relude
+import Relude hiding (show)
 import Syntax.Row
+import Prelude (show)
 
 data Type' (p :: Pass) where
     Name :: NameAt p -> Type' p
@@ -24,9 +26,8 @@ data Type' (p :: Pass) where
     Variant :: Loc -> ExtRow (Type' p) -> Type' p
     Record :: Loc -> ExtRow (Type' p) -> Type' p
 
-deriving instance Show (Type' 'DuringTypecheck)
-deriving instance Show (Type' 'Fixity)
 deriving instance Eq (Type' 'DuringTypecheck)
+deriving instance Eq (Type' 'Parse)
 
 -- >>> pretty $ Function (Var "a") (Record (fromList [("x", Name "Int"), ("x", Name "a")]) Nothing)
 -- >>> pretty $ Forall "a" $ Forall "b" $ Forall "c" $ Name "a" `Function` (Name "b" `Function` Name "c")
@@ -66,6 +67,9 @@ instance Pretty (NameAt pass) => Pretty (Type' pass) where
         variantItem (name, ty) = pretty name <+> pretty ty
         recordField (name, ty) = pretty name <+> ":" <+> pretty ty
 
+instance Pretty (NameAt p) => Show (Type' p) where
+    show = show . pretty
+
 instance HasLoc (NameAt pass) => HasLoc (Type' pass) where
     getLoc = \case
         Name name -> getLoc name
@@ -79,33 +83,29 @@ instance HasLoc (NameAt pass) => HasLoc (Type' pass) where
         Variant loc _ -> loc
         Record loc _ -> loc
 
--- | this is a cast template to be used with bifix. It doesn't handle univars and skolems
-baseCast :: NameAt p ~ NameAt q => (Type' p -> Type' q) -> Type' p -> Type' q
-baseCast recur = \case
-    Name name -> Name name
-    Var name -> Var name
-    Application lhs rhs -> Application (recur lhs) (recur rhs)
-    Function loc lhs rhs -> Function loc (recur lhs) (recur rhs)
-    Forall loc var body -> Forall loc var (recur body)
-    Exists loc var body -> Exists loc var (recur body)
-    Variant loc row -> Variant loc (recur <$> row)
-    Record loc row -> Record loc (recur <$> row)
-    other -> recur other
+uniplate :: Traversal' (Type' p) (Type' p)
+uniplate = uniplate' id UniVar Skolem
 
-baseCastM :: Applicative m => NameAt p ~ NameAt q => (Type' p -> m (Type' q)) -> Type' p -> m (Type' q)
-baseCastM recur = \case
-    Name name -> pure $ Name name
-    Var name -> pure $ Var name
+instance NameAt p ~ CT.Name => UniplateCast (Type' p) (Type' DuringTypecheck) where
+    uniplateCast = uniplate' id UniVar Skolem
+
+instance UniplateCast (Type' NameRes) (Type' Fixity) where
+    uniplateCast = uniplate' id undefined undefined -- we need some kind of `absurd` here
+
+-- type-changing uniplate
+uniplate'
+    :: (NameAt p -> NameAt q)
+    -> (p ~ DuringTypecheck => Loc -> CT.UniVar -> Type' q)
+    -> (p ~ DuringTypecheck => CT.Skolem -> Type' q)
+    -> SelfTraversal Type' p q
+uniplate' castName castUni castSkolem recur = \case
     Application lhs rhs -> Application <$> recur lhs <*> recur rhs
     Function loc lhs rhs -> Function loc <$> recur lhs <*> recur rhs
-    Forall loc var body -> Forall loc var <$> recur body
-    Exists loc var body -> Exists loc var <$> recur body
+    Forall loc var body -> Forall loc (castName var) <$> recur body
+    Exists loc var body -> Exists loc (castName var) <$> recur body
     Variant loc row -> Variant loc <$> traverse recur row
     Record loc row -> Record loc <$> traverse recur row
-    other -> recur other
-
-cast :: NameAt p ~ NameAt q => ((Type' p -> Type' q) -> Type' p -> Type' q) -> Type' p -> Type' q
-cast terminals = bifix terminals baseCast
-
-castM :: Applicative m => NameAt p ~ NameAt q => ((Type' p -> m (Type' q)) -> Type' p -> m (Type' q)) -> Type' p ->  m (Type' q)
-castM terminals = bifix terminals baseCastM
+    Name name -> pure $ Name $ castName name
+    Var name -> pure $ Var $ castName name
+    UniVar loc uni -> pure $ castUni loc uni
+    Skolem skolem -> pure $ castSkolem skolem

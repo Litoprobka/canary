@@ -1,10 +1,10 @@
 {-# LANGUAGE AllowAmbiguousTypes #-}
 {-# LANGUAGE DataKinds #-}
+{-# LANGUAGE DeriveAnyClass #-}
 {-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE OverloadedRecordDot #-}
 {-# LANGUAGE TemplateHaskell #-}
 {-# LANGUAGE TypeFamilies #-}
-{-# LANGUAGE DeriveAnyClass #-}
 
 module NameResolution (
     runNameResolution,
@@ -16,6 +16,7 @@ module NameResolution (
     declare,
     declarePat,
     Scope (..),
+    Declare,
 ) where
 
 import Relude hiding (State, error, evalState, get, modify, put, runState)
@@ -29,16 +30,16 @@ import Effectful (Eff, Effect, (:>))
 import Effectful.Dispatch.Dynamic (interpret)
 import Effectful.State.Static.Local (State, evalState, get, modify, put)
 import Effectful.TH (makeEffect)
+import Error.Diagnose (Report (..))
+import Error.Diagnose qualified as M
 import NameGen
 import Prettyprinter (pretty, (<+>))
 import Syntax
 import Syntax.Declaration qualified as D
+import Syntax.Expression (DoStatement)
 import Syntax.Expression qualified as E
 import Syntax.Pattern qualified as P
 import Syntax.Type qualified as T
-import Error.Diagnose (Report(..))
-import qualified Error.Diagnose as M
-import Syntax.Expression (DoStatement)
 
 {-
 The name resolution pass. Transforms 'Parse AST into 'NameRes AST. It doesn't short-circuit on errors
@@ -63,25 +64,26 @@ warn =
     nonFatal . \case
         Shadowing name loc ->
             Warn
-            Nothing
-            ("The binding" <+> pretty name <+> "shadows an earlier binding")
-            (mkNotes [(getLoc name, M.This ""), (loc, M.Where "previously bound at")])
-            []
+                Nothing
+                ("The binding" <+> pretty name <+> "shadows an earlier binding")
+                (mkNotes [(getLoc name, M.This ""), (loc, M.Where "previously bound at")])
+                []
         UnusedVar name ->
             Warn
-            Nothing
-            ("The binding" <+> pretty name <+> "is unused")
-            (mkNotes [(getLoc name, M.This "bound at")])
-            []
+                Nothing
+                ("The binding" <+> pretty name <+> "is unused")
+                (mkNotes [(getLoc name, M.This "bound at")])
+                []
 
 error :: Diagnose :> es => Error -> Eff es ()
-error = nonFatal . \case
-    UnboundVar name ->
-        Err
-        Nothing
-        ("The variable" <+> pretty name <+> "is unbound")
-        (mkNotes [(getLoc name, M.This "")])
-        []
+error =
+    nonFatal . \case
+        UnboundVar name ->
+            Err
+                Nothing
+                ("The variable" <+> pretty name <+> "is unbound")
+                (mkNotes [(getLoc name, M.This "")])
+                []
 
 -- | run a state action without changing the `Scope` part of the state
 scoped :: EnvEffs es => Eff (Declare : es) a -> Eff es a
@@ -144,8 +146,8 @@ generate different IDs when called twice on the same data
 -}
 collectNames :: (EnvEffs es, Declare :> es) => [Declaration 'Parse] -> Eff es ()
 collectNames decls = for_ decls \case
-    D.Value _ (E.FunctionBinding _ name _ _) _ -> void $ declare name
-    D.Value _ (E.ValueBinding _ pat _) _ -> void $ declarePat pat
+    D.Value _ (E.FunctionBinding name _ _) _ -> void $ declare name
+    D.Value _ (E.ValueBinding pat _) _ -> void $ declarePat pat
     D.Type _ name _ _ -> void $ declare name
     D.Alias _ name _ -> void $ declare name
     D.Signature{} -> pass
@@ -181,17 +183,17 @@ takes local definitions as an argument, and uses them after resolving the name /
 resolveBinding :: EnvEffs es => [Declaration 'Parse] -> Binding 'Parse -> Eff es (Binding 'NameRes)
 resolveBinding locals =
     scoped . \case
-        E.FunctionBinding loc name args body -> do
+        E.FunctionBinding name args body -> do
             name' <- resolve name
             args' <- traverse declarePat args
             collectNames locals
             body' <- resolveExpr body
-            pure $ E.FunctionBinding loc name' args' body'
-        E.ValueBinding loc pat body -> do
+            pure $ E.FunctionBinding name' args' body'
+        E.ValueBinding pat body -> do
             pat' <- resolvePat pat
             collectNames locals
             body' <- resolveExpr body
-            pure $ E.ValueBinding loc pat' body'
+            pure $ E.ValueBinding pat' body'
   where
     -- this could have been a Traversable instance
     resolvePat :: EnvEffs es => Pattern 'Parse -> Eff es (Pattern 'NameRes)

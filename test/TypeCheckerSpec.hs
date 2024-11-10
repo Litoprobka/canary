@@ -1,18 +1,20 @@
+{-# LANGUAGE DataKinds #-}
 {-# LANGUAGE OverloadedLists #-}
 
 module TypeCheckerSpec (spec) where
 
-import Data.HashMap.Strict qualified as HashMap
+import Common
 import Data.Text qualified as Text
-import Effectful (Eff, runPureEff, (:>))
+import Diagnostic (runDiagnose')
+import Effectful (runPureEff)
+import Fixity (resolveFixity, testGraph, testOpMap)
+import LensyUniplate
 import NameGen
 import NameResolution
 import Playground
 import Prettyprinter hiding (list)
-import Prettyprinter.Render.Text (putDoc)
 import Relude hiding (State)
 import Syntax
-import Syntax.Declaration qualified as D
 import Syntax.Expression qualified as E
 import Syntax.Pattern qualified as P
 import Syntax.Row (ExtRow (..))
@@ -20,11 +22,9 @@ import Syntax.Type qualified as T
 import Test.Hspec
 import TypeChecker
 
--- resolve names, silently discarding the scope errors
-resolveSilent env = fmap fst . runNameResolution env
-
-unitE = E.Record []
-unitT = T.Record (NoExtRow [])
+unitE = E.Record Blank []
+unitT = T.Record Blank (NoExtRow [])
+forall_ = T.Forall Blank
 
 exprs :: [(Text, Expression 'Parse)]
 exprs =
@@ -43,24 +43,24 @@ exprs =
     , ("\\x -> Just (Just x)", λ "x" $ "Just" # ("Just" # "x"))
     , ("\\x -> Just (Just Nothing)", λ "x" $ "Just" # ("Just" # "Nothing"))
     , ("Just", "Just")
-    , ("\\y -> {} : forall a. Maybe a -> {}", E.Annotation (λ "y" unitE) $ T.Forall "'a" $ "Maybe" $: "'a" --> unitT)
+    , ("\\y -> {} : forall a. Maybe a -> {}", E.Annotation (λ "y" unitE) $ forall_ "'a" $ "Maybe" $: "'a" --> unitT)
     ,
         ( "\\x -> ((\\y -> {}) : forall a. Maybe a -> {}) x"
-        , λ "x" $ E.Annotation (λ "y" unitE) (T.Forall "'a" $ "Maybe" $: "'a" --> unitT) # "x"
+        , λ "x" $ E.Annotation (λ "y" unitE) (forall_ "'a" $ "Maybe" $: "'a" --> unitT) # "x"
         )
     , ("\\(Just x) -> x", λ (con "Just" ["x"]) "x")
     ,
         ( "\\def mb -> case mb of { Nothing -> def; Just x -> x }"
-        , λ "def" $ λ "mb" $ E.Case "mb" [("Nothing", "def"), (con "Just" ["x"], "x")]
+        , λ "def" $ λ "mb" $ case_ "mb" [("Nothing", "def"), (con "Just" ["x"], "x")]
         )
     ,
         ( "\\cond -> case cond of { True -> id; False -> reverse }"
-        , λ "cond" $ E.Case "cond" [("True", "id"), ("False", "reverse")]
+        , λ "cond" $ case_ "cond" [("True", "id"), ("False", "reverse")]
         )
-    , ("\\cond -> if cond then id else reverse", λ "cond" $ E.If "cond" "id" "reverse")
-    , ("\\x y -> [x, y]", λ "x" $ λ "y" $ E.List ["x", "y"])
-    , ("\\(x : ∀'a. 'a -> 'a) y -> [x, y]", λ (P.Annotation "x" $ T.Forall "'a" $ "'a" --> "'a") $ λ "y" $ E.List ["x", "y"])
-    , ("[id, \\{} -> {}]", E.List ["id", λ (P.Record []) unitE])
+    , ("\\cond -> if cond then id else reverse", λ "cond" $ if_ "cond" "id" "reverse")
+    , ("\\x y -> [x, y]", λ "x" $ λ "y" $ list ["x", "y"])
+    , ("\\(x : ∀'a. 'a -> 'a) y -> [x, y]", λ (P.Annotation "x" $ forall_ "'a" $ "'a" --> "'a") $ λ "y" $ list ["x", "y"])
+    , ("[id, \\{} -> {}]", list ["id", λ (P.Record Blank []) unitE])
     ]
 
 errorExprs :: [(Text, Expression 'Parse)]
@@ -76,40 +76,40 @@ errorExprs =
 
 exprsToCheck :: [(Text, Expression 'Parse, Type' 'Parse)]
 exprsToCheck =
-    [ ("Nothing : ∀a. Maybe a", "Nothing", T.Forall "'a" $ "Maybe" $: "'a")
-    , ("Nothing : Maybe (∀a. a)", "Nothing", "Maybe" $: T.Forall "'a" "'a")
+    [ ("Nothing : ∀a. Maybe a", "Nothing", forall_ "'a" $ "Maybe" $: "'a")
+    , ("Nothing : Maybe (∀a. a)", "Nothing", "Maybe" $: forall_ "'a" "'a")
     , ("Nothing : Maybe (∃a. a)", "Nothing", "Maybe" $: (∃) "'a" "'a")
     , ("{} : ∃a. a", "Nothing", (∃) "'a" "'a")
-    , ("\\x -> {} : (∃a. a) -> {}", λ "x" (E.Record []), (∃) "'a" "'a" --> T.Record (NoExtRow []))
+    , ("\\x -> {} : (∃a. a) -> {}", λ "x" (recordExpr []), (∃) "'a" "'a" --> unitT)
     , ("\\x -> Just x : (∃a. a -> Maybe {})", λ "x" $ "Just" # "x", (∃) "'a" $ "'a" --> "Maybe" $: unitT)
     , ("\\x -> Just x : (∃a. a -> Maybe a)", λ "x" $ "Just" # "x", (∃) "'a" $ "'a" --> "Maybe" $: "'a")
-    , ("\\f -> f {} : (∀a. a -> a) -> {}", λ "f" $ "f" # unitE, T.Forall "'a" ("'a" --> "'a") --> unitT)
+    , ("\\f -> f {} : (∀a. a -> a) -> {}", λ "f" $ "f" # unitE, forall_ "'a" ("'a" --> "'a") --> unitT)
     ,
         ( "\\f g -> g (f {}) (f Nothing) : ∀a. ∀b. (∀c. c -> a) -> (a -> a -> b) -> b"
         , λ "f" $ λ "g" $ "g" # ("f" # unitE) # ("f" # "Nothing")
-        , T.Forall "'a" $ T.Forall "'b" $ T.Forall "'c" ("'c" --> "'a") --> ("'a" --> "'a" --> "'b") --> "'b"
+        , forall_ "'a" $ forall_ "'b" $ forall_ "'c" ("'c" --> "'a") --> ("'a" --> "'a" --> "'b") --> "'b"
         )
-    , ("[1, []] : List (∃a. a)", E.List [E.IntLiteral 1, E.List []], "List" $: T.Exists "'a" "'a")
+    , ("[1, []] : List (∃a. a)", list [E.Literal $ intLit 1, list []], "List" $: T.Exists Blank "'a" "'a")
     ]
 
 quickLookExamples :: [(Text, Expression 'Parse)]
 quickLookExamples =
     [ ("cons id ids", "cons" # "id" # "ids")
     , ("head (cons id ids)", "head" # ("cons" # "id" # "ids"))
-    , ("single id : List (∀a. a -> a)", E.Annotation ("single" # "id") $ list $ T.Forall "'a" $ "'a" --> "'a")
+    , ("single id : List (∀a. a -> a)", E.Annotation ("single" # "id") $ listTy $ forall_ "'a" $ "'a" --> "'a")
     , ("(\\x -> x) ids)", λ "x" "x" # "ids")
     , ("wikiF (Just reverse)", "wikiF" # ("Just" # "reverse"))
-    , ("\\x y -> [x : ∀'a. 'a -> 'a, y]", λ "x" $ λ "y" $ E.List [E.Annotation "x" (T.Forall "'a" $ "'a" --> "'a"), "y"])
+    , ("\\x y -> [x : ∀'a. 'a -> 'a, y]", λ "x" $ λ "y" $ list [E.Annotation "x" (forall_ "'a" $ "'a" --> "'a"), "y"])
     ]
 
-quickLookDefs :: [(Text, Type' 'Parse)]
+quickLookDefs :: [(SimpleName, Type' 'Parse)]
 quickLookDefs =
-    [ ("head", T.Forall "'a" $ list "'a" --> "Maybe" $: "'a")
-    , ("single", T.Forall "'a" $ "'a" --> list "'a")
-    , ("ids", list $ T.Forall "'a" $ "'a" --> "'a")
+    [ ("head", forall_ "'a" $ listTy "'a" --> "Maybe" $: "'a")
+    , ("single", forall_ "'a" $ "'a" --> listTy "'a")
+    , ("ids", listTy $ forall_ "'a" $ "'a" --> "'a")
     ,
         ( "wikiF"
-        , "Maybe" $: T.Forall "'a" (list "'a" --> list "'a") --> "Maybe" $: ("Tuple" $: ("List" $: "Int") $: ("List" $: "Char"))
+        , "Maybe" $: forall_ "'a" (listTy "'a" --> listTy "'a") --> "Maybe" $: ("Tuple" $: ("List" $: "Int") $: ("List" $: "Char"))
         )
     ]
 
@@ -119,126 +119,141 @@ deepSkolemisation =
     , ("f2 g2", "f2" # "g2")
     ]
 
-dsDefs :: [(Text, Type' 'Parse)]
+dsDefs :: [(SimpleName, Type' 'Parse)]
 dsDefs =
-    [ ("f", T.Forall "'a" $ T.Forall "'b" $ "'a" --> "'b" --> "'b")
-    , ("g", T.Forall "'p" ("'p" --> T.Forall "'q" ("'q" --> "'q")) --> "Int")
-    , ("g2", (T.Forall "'a" ("'a" --> "'a") --> "Bool") --> "Text")
+    [ ("f", forall_ "'a" $ forall_ "'b" $ "'a" --> "'b" --> "'b")
+    , ("g", forall_ "'p" ("'p" --> forall_ "'q" ("'q" --> "'q")) --> "Int")
+    , ("g2", (forall_ "'a" ("'a" --> "'a") --> "Bool") --> "Text")
     , ("f2", "Int" --> "Int" --> "Bool")
     ]
 
 patterns :: [(Text, Pattern 'Parse)]
 patterns =
-    [ ("Nothing : Maybe (∀ 'a. 'a)", P.Annotation (con "Nothing" []) (T.Name "Maybe" $: T.Forall "'a" "'a"))
-    , ("Just x  : Maybe (∀ 'a. 'a)", P.Annotation (con "Just" ["x"]) (T.Name "Maybe" $: T.Forall "'a" "'a"))
-    , ("Just (x : ∀ 'a. 'a -> 'a)", con "Just" [P.Annotation "x" (T.Name "Maybe" $: T.Forall "'a" ("'a" --> "'a"))])
+    [ ("Nothing : Maybe (∀ 'a. 'a)", P.Annotation (con "Nothing" []) (T.Name "Maybe" $: forall_ "'a" "'a"))
+    , ("Just x  : Maybe (∀ 'a. 'a)", P.Annotation (con "Just" ["x"]) (T.Name "Maybe" $: forall_ "'a" "'a"))
+    , ("Just (x : ∀ 'a. 'a -> 'a)", con "Just" [P.Annotation "x" (T.Name "Maybe" $: forall_ "'a" ("'a" --> "'a"))])
     ]
 
 mutualRecursion :: [(Text, [Declaration 'Parse])]
 mutualRecursion =
     [
-        ("f and myId", [ D.Value (E.FunctionBinding "f" ["x", "y"] $ E.Record [("x", "myId" # "x"), ("y", "myId" # "y")]) []
-        , D.Value (E.FunctionBinding "myId" ["x"] "x") []
-        ])
+        ( "f and myId"
+        ,
+            [ valueDec (E.FunctionBinding "f" ["x", "y"] $ recordExpr [("x", "myId" # "x"), ("y", "myId" # "y")]) []
+            , valueDec (E.FunctionBinding "myId" ["x"] "x") []
+            ]
+        )
     ,
-        ("f double cond n", [ D.Value
-            (E.FunctionBinding "f" ["double", "cond", "n"] $ E.If ("cond" # "n") "n" ("f" # "double" # "cond" # ("double" # "n")))
-            []
-        ])
+        ( "f double cond n"
+        ,
+            [ valueDec
+                (E.FunctionBinding "f" ["double", "cond", "n"] $ if_ ("cond" # "n") "n" ("f" # "double" # "cond" # ("double" # "n")))
+                []
+            ]
+        )
     ,
-        ("length", [ D.Type "Stack" ["'a"] [("Cons", ["'a", "Stack" $: "'a"]), ("Nil", [])]
-        , D.Type "Peano" [] [("S", ["Peano"]), ("Z", [])]
-        , D.Value
-            ( E.FunctionBinding
-                "length"
-                ["xs"]
-                ( E.Case
-                    "xs"
-                    [ (con "Cons" ["head", "tail"], "S" # ("length" # "tail"))
-                    , (con "Nil" [], "Z")
-                    ]
+        ( "length"
+        ,
+            [ typeDec "Stack" ["'a"] [conDec "Cons" ["'a", "Stack" $: "'a"], conDec "Nil" []]
+            , typeDec "Peano" [] [conDec "S" ["Peano"], conDec "Z" []]
+            , valueDec
+                ( E.FunctionBinding
+                    "length"
+                    ["xs"]
+                    ( case_
+                        "xs"
+                        [ (con "Cons" ["head", "tail"], "S" # ("length" # "tail"))
+                        , (con "Nil" [], "Z")
+                        ]
+                    )
                 )
-            )
-            []
-        ])
-    ,   ("xs and os (mutual recursion)", [ D.Value (E.ValueBinding "xs" $ "Cons" # E.IntLiteral 0 # "os") []
-        , D.Value (E.ValueBinding "os" $ "Cons" # E.IntLiteral 1 # "xs") []
-        , D.Type "Stack" ["'a"] [("Cons", ["'a", "Stack" $: "'a"]), ("Nil", [])]
-        ])
+                []
+            ]
+        )
+    ,
+        ( "xs and os (mutual recursion)"
+        ,
+            [ valueDec (E.ValueBinding "xs" $ "Cons" # E.Literal (intLit 0) # "os") []
+            , valueDec (E.ValueBinding "os" $ "Cons" # E.Literal (intLit 1) # "xs") []
+            , typeDec "Stack" ["'a"] [conDec "Cons" ["'a", "Stack" $: "'a"], conDec "Nil" []]
+            ]
+        )
     ]
 
-list :: Type' Text -> Type' 'Parse
-list ty = "List" $: ty
+listTy :: Type' 'Parse -> Type' 'Parse
+listTy ty = "List" $: ty
 
 spec :: Spec
 spec = do
     describe "sanity check" $ for_ exprs \(txt, expr) ->
         it
             (Text.unpack txt)
-            let tcResult = runPureEff $ runNameGen do
-                    (scope, builtins, env) <- mkDefaults
-                    expr' <- resolveSilent scope $ resolveExpr expr
-                    run (Right <$> env) builtins $ check expr' =<< normalise =<< infer expr'
-             in tcResult `shouldSatisfy` isRight
+            let tcResult =
+                    testCheck
+                        (dummyFixity =<< resolveExpr expr)
+                        (\expr' -> infer expr' >>= normalise >>= check expr' . cast uniplateCast)
+             in tcResult `shouldSatisfy` isJust
     describe "errors" $ for_ errorExprs \(txt, expr) ->
         it
             (Text.unpack txt)
-            let tcResult = runPureEff $ runNameGen do
-                    (scope, builtins, env) <- mkDefaults
-                    expr' <- resolveSilent scope $ resolveExpr expr
-                    run (Right <$> env) builtins $ check expr' =<< normalise =<< infer expr'
-             in tcResult `shouldSatisfy` isLeft
+            let tcResult =
+                    testCheck
+                        (dummyFixity =<< resolveExpr expr)
+                        (\expr' -> infer expr' >>= normalise >>= check expr' . cast uniplateCast)
+             in tcResult `shouldSatisfy` isNothing
     describe "testing check" $ for_ exprsToCheck \(txt, expr, ty) ->
         it
             (Text.unpack txt)
-            let tcResult = runPureEff $ runNameGen do
-                    (scope, builtins, env) <- mkDefaults
-                    (expr', ty') <- resolveSilent scope do
-                        expr' <- resolveExpr expr
-                        ty' <- resolveType ty
-                        pure (expr', ty')
-                    run (Right <$> env) builtins $ check expr' ty'
-             in tcResult `shouldSatisfy` isRight
+            let tcResult =
+                    testCheck
+                        ( do
+                            expr' <- dummyFixity =<< resolveExpr expr
+                            ty' <- cast uniplateCast <$> resolveType ty
+                            pure (expr', ty')
+                        )
+                        (uncurry check)
+             in tcResult `shouldSatisfy` isJust
     describe "quick look-esque impredicativity" $ for_ quickLookExamples \(txt, expr) ->
         it
             (Text.unpack txt)
-            let tcResult = runPureEff $ runNameGen do
+            let tcResult = fst $ runPureEff $ runDiagnose' ("<none>", "") $ runNameGen do
                     (scope, builtins, env) <- mkDefaults
-                    (expr', quickLookDefs') <- resolveSilent scope do
-                        expr' <- resolveExpr expr
-                        quickLookDefs' <- fromList <$> traverse (\(name, ty) -> liftA2 (,) (declare name) (resolveType ty)) quickLookDefs
+                    (expr', quickLookDefs') <- runNameResolution scope do
+                        expr' <- dummyFixity =<< resolveExpr expr
+                        quickLookDefs' <-
+                            fromList <$> traverse (\(name, ty) -> liftA2 (,) (declare name) (cast uniplateCast <$> resolveType ty)) quickLookDefs
                         pure (expr', quickLookDefs')
-                    run (fmap Right $ quickLookDefs' <> env) builtins $ check expr' =<< normalise =<< infer expr'
-             in tcResult `shouldSatisfy` isRight
+                    run (fmap Right $ quickLookDefs' <> env) builtins $ check expr' . cast uniplateCast =<< normalise =<< infer expr'
+             in tcResult `shouldSatisfy` isJust
     describe "deep subsumption examples" $ for_ deepSkolemisation \(txt, expr) ->
         it
             (Text.unpack txt)
-            let tcResult = runPureEff $ runNameGen do
+            let tcResult = fst $ runPureEff $ runDiagnose' ("<none>", "") $ runNameGen do
                     (scope, builtins, env) <- mkDefaults
-                    (expr', dsDefs') <- resolveSilent scope do
-                        expr' <- resolveExpr expr
-                        dsDefs' <- fromList <$> traverse (\(name, ty) -> liftA2 (,) (declare name) (resolveType ty)) dsDefs
+                    (expr', dsDefs') <- runNameResolution scope do
+                        expr' <- dummyFixity =<< resolveExpr expr
+                        dsDefs' <- fromList <$> traverse (\(name, ty) -> liftA2 (,) (declare name) (cast uniplateCast <$> resolveType ty)) dsDefs
                         pure (expr', dsDefs')
-                    run (fmap Right $ dsDefs' <> env) builtins $ check expr' =<< normalise =<< infer expr'
-             in tcResult `shouldSatisfy` isRight
+                    run (fmap Right $ dsDefs' <> env) builtins $ check expr' . cast uniplateCast =<< normalise =<< infer expr'
+             in tcResult `shouldSatisfy` isJust
     describe "impredicative patterns" $ for_ patterns \(txt, pat) ->
         it
             (Text.unpack txt)
-            let tcResult = runPureEff $ runNameGen do
-                    (scope, builtins, env) <- mkDefaults
-                    pat' <- resolveSilent scope $ declarePat pat
-                    run (Right <$> env) builtins $ inferPattern pat'
-             in tcResult `shouldSatisfy` isRight
+            let tcResult =
+                    testCheck
+                        (cast uniplateCast <$> declarePat pat)
+                        inferPattern
+             in tcResult `shouldSatisfy` isJust
     describe "mutual recursion" $ for_ mutualRecursion \(name, decls) ->
         it
             (toString name)
-            let tcResult = runPureEff $ runNameGen do
+            let tcResult = fst $ runPureEff $ runDiagnose' ("<none>", "") $ runNameGen do
                     (scope, builtins, env) <- mkDefaults
-                    resolvedDecls <- fst <$> runNameResolution scope (resolveNames decls)
+                    resolvedDecls <- resolveFixity testOpMap testGraph =<< runNameResolution scope (resolveNames decls)
                     typecheck env builtins resolvedDecls
              in do
                     {- case tcResult of
                         Left _ -> pass
                         Right checkedBindings -> putDoc $ sep $ pretty . uncurry D.Signature <$> HashMap.toList checkedBindings
                     -}
-                    tcResult `shouldSatisfy` isRight
+                    tcResult `shouldSatisfy` isJust

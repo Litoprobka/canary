@@ -2,9 +2,9 @@
 {-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE MultiWayIf #-}
 
-module Fixity (resolveFixity, testOpMap, testGraph, Fixity(..)) where
+module Fixity (resolveFixity, testOpMap, testGraph, parse, Fixity (..)) where
 
-import Common (Name, Pass (..), zipLocOf, mkNotes, getLoc, Loc (..))
+import Common (Loc (..), Name, Pass (..), getLoc, mkNotes, zipLocOf)
 import Control.Monad (foldM)
 import Data.HashMap.Strict qualified as HashMap
 import Data.HashSet qualified as HashSet
@@ -12,15 +12,14 @@ import Data.List.NonEmpty qualified as NE
 import Diagnostic (Diagnose, dummy, fatal)
 import Effectful (Eff, (:>))
 import Effectful.Reader.Static (Reader, ask, runReader)
+import Error.Diagnose (Marker (This), Report (..))
+import LensyUniplate
 import Prettyprinter (Pretty, pretty, (<+>))
 import Relude hiding (Op, Reader, ask, runReader)
 import Syntax
 import Syntax.Declaration qualified as D
-import Syntax.Expression qualified as E
-import Syntax.Pattern qualified as P
-import Syntax.Type qualified as T
-import Error.Diagnose (Report(..), Marker (This))
 import Syntax.Expression (DoStatement)
+import Syntax.Expression qualified as E
 
 newtype EqClass = EqClass Int deriving (Show, Eq, Hashable, Pretty)
 
@@ -40,26 +39,28 @@ data OpError
     | MissingOperator Op
 
 opError :: Ctx es => OpError -> Eff es a
-opError = fatal . one . \case
-    IncompatibleFixity prev next ->
-        Err
-        Nothing
-        ("incompatible fixity of" <+> pretty prev <+> "and" <+> pretty next)
-        (mkNotes [(getLocMb next, This "next operator"), (getLocMb prev, This "previous operator")])
-        []
-    UndefinedOrdering prev next ->
-        Err
-        Nothing
-        ("undefined ordering of" <+> pretty prev <+> "and" <+> pretty next)
-        (mkNotes [(getLocMb next, This "next operator"), (getLocMb prev, This "previous operator")])
-        []
-    MissingOperator op ->
-        Err
-        Nothing
-        ("missing operator" <+> pretty op)
-        (mkNotes [(getLocMb op, This "is lacking a fixity declaration")])
-        []
-  where getLocMb = maybe Blank getLoc
+opError =
+    fatal . one . \case
+        IncompatibleFixity prev next ->
+            Err
+                Nothing
+                ("incompatible fixity of" <+> pretty prev <+> "and" <+> pretty next)
+                (mkNotes [(getLocMb next, This "next operator"), (getLocMb prev, This "previous operator")])
+                []
+        UndefinedOrdering prev next ->
+            Err
+                Nothing
+                ("undefined ordering of" <+> pretty prev <+> "and" <+> pretty next)
+                (mkNotes [(getLocMb next, This "next operator"), (getLocMb prev, This "previous operator")])
+                []
+        MissingOperator op ->
+            Err
+                Nothing
+                ("missing operator" <+> pretty op)
+                (mkNotes [(getLocMb op, This "is lacking a fixity declaration")])
+                []
+  where
+    getLocMb = maybe Blank getLoc
 
 lookup' :: (Diagnose :> es, Hashable k, Pretty k) => k -> HashMap k v -> Eff es v
 lookup' key hmap = case HashMap.lookup key hmap of
@@ -90,22 +91,24 @@ parseDeclaration :: Ctx es => Declaration 'NameRes -> Eff es (Declaration 'Fixit
 parseDeclaration = \case
     D.Value loc binding locals -> D.Value loc <$> parseBinding binding <*> traverse parseDeclaration locals
     D.Type loc name vars constrs ->
-        pure $ D.Type loc name vars $ constrs & map \(D.Constructor cloc cname args) -> D.Constructor cloc cname (T.cast id <$> args)
-    D.Alias loc name ty -> pure $ D.Alias loc name (T.cast id ty)
-    D.Signature loc name ty -> pure $ D.Signature loc name (T.cast id ty)
+        pure $
+            D.Type loc name vars $
+                constrs & map \(D.Constructor cloc cname args) -> D.Constructor cloc cname (cast uniplateCast <$> args)
+    D.Alias loc name ty -> pure $ D.Alias loc name (cast uniplateCast ty)
+    D.Signature loc name ty -> pure $ D.Signature loc name (cast uniplateCast ty)
 
 parse :: Ctx es => Expression 'NameRes -> Eff es (Expression 'Fixity)
 parse = \case
-    E.Lambda loc arg body -> E.Lambda loc (castP arg) <$> parse body
+    E.Lambda loc arg body -> E.Lambda loc (cast uniplateCast arg) <$> parse body
     E.WildcardLambda loc args body -> E.WildcardLambda loc args <$> parse body
     E.Application lhs rhs -> E.Application <$> parse lhs <*> parse rhs
     E.Let loc binding expr -> E.Let loc <$> parseBinding binding <*> parse expr
-    E.Case loc arg cases -> E.Case loc <$> parse arg <*> traverse (bitraverse (pure . castP) parse) cases
+    E.Case loc arg cases -> E.Case loc <$> parse arg <*> traverse (bitraverse (pure . cast uniplateCast) parse) cases
     -- \| Haskell's \cases
-    E.Match loc cases -> E.Match loc <$> traverse (bitraverse (pure . map castP) parse) cases
+    E.Match loc cases -> E.Match loc <$> traverse (bitraverse (pure . map (cast uniplateCast)) parse) cases
     E.If loc cond true false -> E.If loc <$> parse cond <*> parse true <*> parse false
     -- \| value : Type
-    E.Annotation  e ty -> E.Annotation <$> parse e <*> pure (T.cast id ty)
+    E.Annotation e ty -> E.Annotation <$> parse e <*> pure (cast uniplateCast ty)
     E.Name name -> pure $ E.Name name
     -- \| .field.otherField.thirdField
     E.RecordLens loc row -> pure $ E.RecordLens loc row
@@ -158,20 +161,15 @@ parse = \case
 
 parseBinding :: Ctx es => Binding 'NameRes -> Eff es (Binding 'Fixity)
 parseBinding = \case
-    E.ValueBinding loc pat expr -> E.ValueBinding loc (castP pat) <$> parse expr
-    E.FunctionBinding loc name pats body -> E.FunctionBinding loc name (fmap castP pats) <$> parse body
+    E.ValueBinding pat expr -> E.ValueBinding (cast uniplateCast pat) <$> parse expr
+    E.FunctionBinding name pats body -> E.FunctionBinding name (fmap (cast uniplateCast) pats) <$> parse body
 
 parseStmt :: Ctx es => DoStatement 'NameRes -> Eff es (DoStatement 'Fixity)
 parseStmt = \case
-    E.Bind pat body -> E.Bind (castP pat) <$> parse body
-    E.With loc pat body -> E.With loc (castP pat) <$> parse body
+    E.Bind pat body -> E.Bind (cast uniplateCast pat) <$> parse body
+    E.With loc pat body -> E.With loc (cast uniplateCast pat) <$> parse body
     E.DoLet loc binding -> E.DoLet loc <$> parseBinding binding
     E.Action expr -> E.Action <$> parse expr
-
-castP :: Pattern 'NameRes -> Pattern 'Fixity
-castP = P.cast \recur -> \case
-    P.Annotation pat ty -> P.Annotation (recur pat) (T.cast id ty)
-    other -> recur other
 
 ---
 

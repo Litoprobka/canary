@@ -1,13 +1,17 @@
+{-# LANGUAGE DataKinds #-}
 {-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE RoleAnnotations #-}
 {-# LANGUAGE UndecidableInstances #-}
-module Syntax.Pattern (Pattern (..), cast) where
 
-import Relude
+module Syntax.Pattern (Pattern (..), uniplate) where
+
+import Common (HasLoc, Literal, Loc, NameAt, Pass (..), getLoc, zipLocOf)
+import LensyUniplate
+import Prettyprinter (Doc, Pretty, braces, brackets, comma, parens, pretty, punctuate, sep, (<+>))
+import Relude hiding (show)
 import Syntax.Row
-import Prettyprinter (Pretty, pretty, Doc, braces, parens, sep, (<+>), punctuate, comma, brackets)
 import Syntax.Type (Type')
-import Common (Loc, Pass, NameAt, bifix, HasLoc, getLoc, zipLocOf, Literal)
+import Prelude (show)
 
 data Pattern (p :: Pass)
     = Var (NameAt p)
@@ -19,8 +23,11 @@ data Pattern (p :: Pass)
     | List Loc [Pattern p]
     | Literal Literal
 
+deriving instance Eq (Pattern 'Parse)
+
 instance Pretty (NameAt pass) => Pretty (Pattern pass) where
-    pretty = go 0 where
+    pretty = go 0
+      where
         go :: Int -> Pattern pass -> Doc ann
         go n = \case
             Var name -> pretty name
@@ -35,8 +42,11 @@ instance Pretty (NameAt pass) => Pretty (Pattern pass) where
             parensWhen minPrec
                 | n >= minPrec = parens
                 | otherwise = id
-            
+
             recordField (name, pat) = pretty name <+> "=" <+> pretty pat
+
+instance Pretty (NameAt p) => Show (Pattern p) where
+    show = show . pretty
 
 instance HasLoc (NameAt p) => HasLoc (Pattern p) where
     getLoc = \case
@@ -47,22 +57,31 @@ instance HasLoc (NameAt p) => HasLoc (Pattern p) where
             Nothing -> getLoc name
             Just lastArg -> zipLocOf name lastArg
         Variant name arg -> zipLocOf name arg
-        
         Record loc _ -> loc
         List loc _ -> loc
         Literal lit -> getLoc lit
 
--- | a cast template for bifix. Doesn't handle annotations
-baseCast :: NameAt p ~ NameAt q => (Pattern p -> Pattern q) -> Pattern p -> Pattern q
-baseCast recur = \case
-    Var name -> Var name
-    Wildcard loc name -> Wildcard loc name
-    Constructor name pats -> Constructor name (map recur pats)
-    Variant name pat -> Variant name (recur pat)
-    Record loc pats -> Record loc (fmap recur pats)
-    List loc pats -> List loc (map recur pats)
-    Literal lit -> Literal lit
-    ann@Annotation{} -> recur ann
+instance (UniplateCast (Type' p) (Type' q), NameAt p ~ NameAt q) => UniplateCast (Pattern p) (Pattern q) where
+    uniplateCast = uniplate' (cast uniplateCast)
 
-cast :: (NameAt p ~ NameAt q) => ((Pattern p -> Pattern q) -> Pattern p -> Pattern q) -> Pattern p -> Pattern q
-cast terminals = bifix terminals baseCast
+uniplate :: SelfTraversal Pattern p p
+uniplate f = \case
+    Var name -> pure $ Var name
+    Wildcard loc name -> pure $ Wildcard loc name
+    Annotation pat ty -> Annotation <$> f pat <*> pure ty
+    Constructor name pats -> Constructor name <$> traverse f pats
+    Variant name pat -> Variant name <$> f pat
+    Record loc row -> Record loc <$> traverse f row
+    List loc pats -> List loc <$> traverse f pats
+    Literal lit -> pure $ Literal lit
+
+uniplate' :: NameAt p ~ NameAt q => (Type' p -> Type' q) -> SelfTraversal Pattern p q
+uniplate' castTy f = \case
+    Var name -> pure $ Var name
+    Wildcard loc name -> pure $ Wildcard loc name
+    Annotation pat ty -> Annotation <$> f pat <*> pure (castTy ty)
+    Constructor name pats -> Constructor name <$> traverse f pats
+    Variant name pat -> Variant name <$> f pat
+    Record loc row -> Record loc <$> traverse f row
+    List loc pats -> List loc <$> traverse f pats
+    Literal lit -> pure $ Literal lit

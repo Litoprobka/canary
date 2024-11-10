@@ -4,12 +4,12 @@
 
 module Syntax.Row (OpenName, Row, ExtRow (..), empty, lookup, has, sortedRow, extension, visible, extend, diff, unionWithM) where
 
+import Common (SimpleName)
 import Data.HashMap.Strict qualified as HashMap
 import Data.Sequence.NonEmpty (NESeq)
 import Data.Sequence.NonEmpty qualified as NESeq
-import GHC.IsList qualified (Item, toList)
+import GHC.IsList qualified as IsList
 import Relude hiding (empty)
-import Common (SimpleName)
 
 type OpenName = SimpleName
 
@@ -76,3 +76,23 @@ instance IsList (Row a) where
 -- Row (fromList [("a",fromList (1 :| [2,7])),("b",fromList (1 :| [4]))])
 instance Semigroup (Row a) where
   Row lhs <> Row rhs = Row $ HashMap.unionWith (<>) lhs rhs
+
+{-
+data PlatePair k v = PlatePair k v
+newtype ListWrapper a = ListWrapper { unListWrapper :: [a] }
+pp = uncurry PlatePair
+unPP (PlatePair k v) = (k, v)
+
+instance (Biplate from to, Uniplate to) => Biplate (ListWrapper from) to where
+  biplate (ListWrapper xs) = plate ListWrapper ||+ xs
+instance Uniplate v => Biplate (PlatePair k v) v where
+  biplate (PlatePair k v) = plate (PlatePair k) |* v
+
+instance Uniplate a => Biplate (Row a) a where
+  biplate = plateProject (ListWrapper . map pp . IsList.toList) (IsList.fromList . map unPP . (.unListWrapper))
+
+instance (Uniplate a, Biplate (Row a) a) => Biplate (ExtRow a) a where
+  biplate = \case
+    NoExtRow r -> plate NoExtRow |+ r
+    ExtRow r ext -> plate ExtRow |+ r |* ext
+-}
