@@ -112,7 +112,7 @@ inferIO' mkEnv expr = do
   where
     getTy = runEff $ runDiagnose ("<none>", "") $ runNameGen do
         (env, builtins) <- mkEnv
-        runWithFinalEnv (Right <$> env) builtins $ normalise =<< infer expr
+        runWithFinalEnv (Right <$> env) builtins $ normalise $ infer expr
 
 parseInfer :: Text -> IO ()
 parseInfer input = void . runEff . runDiagnose ("cli", input) $ runNameGen

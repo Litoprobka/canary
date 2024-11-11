@@ -51,7 +51,7 @@ typecheck
     -> Builtins Name
     -> [Declaration 'Fixity]
     -> Eff es (HashMap Name (Type' 'Fixity)) -- type checking doesn't add anything new to the AST, so we reuse 'Fixity for simplicity
-typecheck env builtins decls = run (Right <$> env) builtins $ traverse normalise =<< inferDecls decls
+typecheck env builtins decls = run (Right <$> env) builtins $ normaliseAll $ inferDecls decls
 
 -- finds all type parameters used in a type and creates corresponding forall clauses
 -- ignores univars, because the intended use case is pre-processing user-supplied types
@@ -83,7 +83,7 @@ inferDecls decls = do
                             (\x -> (x, x)) <$> collectNamesInBinding binding
             Nothing -> scoped do
                 declareAll =<< inferDecls locals
-                typeMap <- traverse normalise =<< inferBinding binding -- todo: true top level should be separated from the parent scopes
+                typeMap <- normaliseAll $ inferBinding binding -- todo: true top level should be separated from the parent scopes
                 fmap (cast uniplateCast) typeMap <$ declareTopLevel typeMap
   where
     updateTopLevel = \case
@@ -100,7 +100,7 @@ inferDecls decls = do
     insertBinding name binding locals =
         let closure = UninferredType $ scoped do
                 declareAll =<< inferDecls locals
-                nameTypePairs <- traverse normalise =<< inferBinding binding
+                nameTypePairs <- normaliseAll $ inferBinding binding
                 declareTopLevel nameTypePairs
                 case HashMap.lookup name nameTypePairs of
                     -- this can only happen if `inferBinding` returns an incorrect map of types
@@ -322,7 +322,7 @@ inferApp fTy arg = do
 -- does not implicitly declare anything
 inferBinding :: InfEffs es => Binding 'Fixity -> Eff es (HashMap Name Type)
 inferBinding =
-    scoped . forallScope . \case
+    scoped . generaliseAll . \case
         E.ValueBinding pat body -> do
             (patTy, bodyTy) <- do
                 patTy <- inferPattern pat
@@ -413,9 +413,12 @@ inferPattern = \case
             MLSkolem skolem -> pure (T.Skolem skolem, [])
             MLVar var -> pure (T.Var var, [])
 
+normalise :: InfEffs es => Eff es Type -> Eff es (Type' 'Fixity)
+normalise = fmap runIdentity . normaliseAll . fmap Identity
+
 -- gets rid of all univars
-normalise :: InfEffs es => Type -> Eff es (Type' 'Fixity)
-normalise = uniVarsToForall {->=> skolemsToExists-} >=> go
+normaliseAll :: (Traversable t, InfEffs es) => Eff es (t Type) -> Eff es (t (Type' 'Fixity))
+normaliseAll = generaliseAll {->=> skolemsToExists-} >=> traverse go
   where
     go = transformM' (T.uniplate' coerce (error "univar in uniplate") (error "skolem in uniplate")) \case
         T.UniVar loc uni ->
@@ -424,61 +427,3 @@ normalise = uniVarsToForall {->=> skolemsToExists-} >=> go
                 Right body -> Left <$> go (unMono body)
         T.Skolem skolem -> typeError $ Internal (getLoc skolem) $ "skolem " <> pretty (T.Skolem skolem) <> " remains in code"
         other -> pure $ Right other
-
-    -- this is an alternative to forallScope that's only suitable at the top level
-    -- it also compresses any records found along the way, because I don't feel like
-    -- making that a different pass, and `compress` uses `mono` under the hood, which
-    -- means that it has to be run early
-    uniVarsToForall ty = uncurry (foldr (T.Forall (getLoc ty))) <$> runState HashMap.empty (uniGo ty)
-    uniGo :: InfEffs es => Type -> Eff (State (HashMap UniVar Name) : es) Type
-    uniGo = transformM' T.uniplate \case
-        T.UniVar loc uni ->
-            Left <$> do
-                gets @(HashMap UniVar Name) (HashMap.lookup uni) >>= \case
-                    Just var -> pure $ T.Var var -- I'm not sure where should typevars originate from
-                    Nothing ->
-                        lookupUniVar uni >>= \case
-                            Left _ -> do
-                                tyVar <- freshTypeVar loc
-                                modify $ HashMap.insert uni tyVar
-                                pure $ T.Var tyVar
-                            Right body -> uniGo (unMono body)
-        T.Variant loc row -> Left . T.Variant loc <$> (traverse uniGo =<< compress Variant row)
-        T.Record loc row -> Left . T.Record loc <$> (traverse uniGo =<< compress Record row)
-        other -> pure $ Right other
-
--- these two functions have the same problem as the old `forallScope` - they capture skolems from an outer scope
--- it's not clear whether anything should be done about them
--- the only problem I can see is a univar unifying with a type var from an inner scope, but I'm not sure how would that happen
---
--- it is still safe to use these at the top-level, however
-skolemsToExists, skolemsToForall :: forall es. InfEffs es => Type -> Eff es Type
--- ∃a. a -> a <: b
--- ?a -> ?a <: b
--- b ~ ∃a. a -> a
-skolemsToExists = replaceSkolems T.Exists
--- b <: ∀a. a -> a
--- b <: ?a -> ?a
--- b ~ ∀a. a -> a
-skolemsToForall = replaceSkolems T.Forall
-
-replaceSkolems :: InfEffs es => (Loc -> Name -> Type -> Type) -> Type -> Eff es Type
-replaceSkolems con ty = uncurry (foldr (con $ getLoc ty)) <$> runState HashMap.empty (go ty)
-  where
-    go :: InfEffs es => Type -> Eff (State (HashMap Skolem Name) : es) Type
-    go = transformM T.uniplate \case
-        T.Skolem skolem ->
-            get @(HashMap Skolem Name) >>= \acc -> case HashMap.lookup skolem acc of
-                Just tyVar -> pure $ T.Var tyVar
-                Nothing -> do
-                    tyVar <- freshTypeVar $ getLoc skolem
-                    modify $ HashMap.insert skolem tyVar
-                    pure $ T.Var tyVar
-        T.UniVar loc uni ->
-            lookupUniVar uni >>= \case
-                Left _ -> pure $ T.UniVar loc uni
-                Right body -> do
-                    body' <- go $ undefined body
-                    overrideUniVar uni $ undefined body'
-                    pure body'
-        other -> pure other

@@ -12,10 +12,8 @@
 module TypeChecker.Backend where
 
 import Common
-import Control.Monad (foldM)
 import Data.HashMap.Strict qualified as HashMap
 import Data.HashSet qualified as HashSet
-import Data.Traversable (for)
 import Diagnostic (Diagnose, fatal)
 import Effectful
 import Effectful.Dispatch.Dynamic (interpret, reinterpret)
@@ -29,7 +27,7 @@ import LensyUniplate
 import NameGen
 import Prettyprinter (Doc, Pretty, pretty, (<+>))
 import Prettyprinter.Render.Terminal (AnsiStyle)
-import Relude hiding (Reader, State, Type, ask, asks, bool, break, evalState, get, gets, modify, put, runReader, runState)
+import Relude hiding (Reader, State, Type, ask, asks, bool, break, cycle, evalState, get, gets, modify, put, runReader, runState)
 import Syntax
 import Syntax.Row
 import Syntax.Row qualified as Row
@@ -273,6 +271,7 @@ solveUniVar = alterUniVar False
 overrideUniVar = alterUniVar True
 
 data SelfRef = Direct | Indirect
+data Cycle = DirectCycle | NoCycle deriving (Eq)
 
 alterUniVar :: InfEffs es => Bool -> UniVar -> Monotype -> Eff es ()
 alterUniVar override uni ty = do
@@ -283,27 +282,27 @@ alterUniVar override uni ty = do
                 typeError $ Internal Blank $ "Internal error (probably a bug): attempted to solve a solved univar " <> pretty uni
         Right _ -> pass
         Left scope -> rescope scope ty
-    noCycle <- cycleCheck (Direct, HashSet.singleton uni) ty
-    when noCycle $ modify \s -> s{vars = HashMap.insert uni (Right ty) s.vars}
+    cycle <- cycleCheck (Direct, HashSet.singleton uni) ty
+    when (cycle == NoCycle) $ modify \s -> s{vars = HashMap.insert uni (Right ty) s.vars}
   where
     -- errors out on indirect cycles (i.e. a ~ Maybe a)
     -- returns False on direct univar cycles (i.e. a ~ b, b ~ c, c ~ a)
     -- returns True when there are no cycles
     cycleCheck (selfRefType, acc) = \case
         MUniVar _ uni2 | HashSet.member uni2 acc -> case selfRefType of
-            Direct -> pure False
+            Direct -> pure DirectCycle
             Indirect -> typeError $ SelfReferential (unMono ty)
         MUniVar _ uni2 ->
             lookupUniVar uni2 >>= \case
-                Left _ -> pure True
+                Left _ -> pure NoCycle
                 Right ty' -> cycleCheck (selfRefType, HashSet.insert uni2 acc) ty'
         MFn _ from to -> cycleCheck (Indirect, acc) from >> cycleCheck (Indirect, acc) to
         MApp lhs rhs -> cycleCheck (Indirect, acc) lhs >> cycleCheck (Indirect, acc) rhs
-        MVariant _ row -> True <$ traverse_ (cycleCheck (Indirect, acc)) row
-        MRecord _ row -> True <$ traverse_ (cycleCheck (Indirect, acc)) row
-        MName{} -> pure True
-        MSkolem{} -> pure True
-        MVar{} -> pure True
+        MVariant _ row -> NoCycle <$ traverse_ (cycleCheck (Indirect, acc)) row
+        MRecord _ row -> NoCycle <$ traverse_ (cycleCheck (Indirect, acc)) row
+        MName{} -> pure NoCycle
+        MSkolem{} -> pure NoCycle
+        MVar{} -> pure NoCycle
 
     rescope scope = foldUniVars \v -> lookupUniVar v >>= either (rescopeVar v scope) (const pass)
     rescopeVar v scope oldScope = modify \s -> s{vars = HashMap.insert v (Left $ min oldScope scope) s.vars}
@@ -340,46 +339,38 @@ declareTopLevel types = modify \s -> s{topLevel = fmap Right types <> s.topLevel
 builtin :: Reader (Builtins Name) :> es => (Builtins Name -> a) -> Eff es a
 builtin = asks @(Builtins Name)
 
-forallScope :: InfEffs es => Eff es (HashMap n Type) -> Eff es (HashMap n Type)
-forallScope = forallScope' >=> uncurry for
+generalise :: InfEffs es => Eff es Type -> Eff es Type
+generalise = fmap runIdentity . generaliseAll . fmap Identity
 
--- turns out it's tricky to get this function right.
--- just taking all of the new univars and turning them into type vars is not enough,
--- since a univar may be produced when specifying a univar from parent scope (i.e. `#a` to `#b -> #c`)
-forallScope' :: InfEffs es => Eff es a -> Eff es (a, Type -> Eff es Type)
-forallScope' action = do
-    start <- gets @InfState (.nextUniVarId) -- todo: scoped univarsToForall
+-- TODO: this function should also handle the generalisation of skolems
+generaliseAll :: Traversable t => InfEffs es => Eff es (t Type) -> Eff es (t Type)
+generaliseAll action = do
     modify \s@InfState{currentScope = Scope n} -> s{currentScope = Scope $ succ n}
-    out <- action
+    types <- action
     modify \s@InfState{currentScope = Scope n} -> s{currentScope = Scope $ pred n}
-    end <- pred <$> gets @InfState (.nextUniVarId)
     outerScope <- gets @InfState (.currentScope)
-    -- I'm not sure whether it's sound to convert all skolems in scope
-    -- skolems may need a scope approach similar to univars
-    -- skolemsToExists =<<
-    pure (out, \ty -> foldM (applyVar outerScope) ty (UniVar <$> [start .. end]))
+    traverse (generaliseOne outerScope) types
   where
-    -- note: chances are, substituteTy and isRelevant cause this function to be /O(n * m)/,
-    -- where n is the size of the type and m is uni var count
-    applyVar outerScope bodyTy uni =
-        lookupUniVar uni >>= \case
-            Right ty ->
-                -- univars don't work well with instantiation of polymorphic types (aka `mono`),
-                -- so we actively have to get rid of them
-                substituteTy (T.UniVar Blank uni) ty bodyTy
-            Left scope | scope > outerScope -> do
-                relevant <- isRelevant uni bodyTy
-                if not relevant
-                    then pure bodyTy
-                    else do
-                        tyVar <- freshTypeVar Blank
-                        solveUniVar uni (MVar tyVar)
-                        pure $ T.Forall (getLoc bodyTy) tyVar bodyTy
-            Left _ -> pure bodyTy
-    isRelevant uni ty = do
-        monoTy <- mono Inv ty
-        output <- runBreak @() $ monoTy & foldUniVars \v -> when (v == uni) (break ())
-        pure $ isLeft output
+    generaliseOne scope ty = do
+        (ty', vars) <- runState HashMap.empty $ go scope ty
+        pure $ foldr (T.Forall (getLoc ty)) ty' $ HashMap.mapMaybe getVar vars
+
+    getVar :: Type -> Maybe Name
+    getVar (T.Var name) = Just name
+    getVar _ = Nothing
+
+    go :: InfEffs es => Scope -> Type -> Eff (State (HashMap UniVar Type) : es) Type
+    go scope = transformM' T.uniplate \case
+        T.UniVar loc uni -> fmap Left do
+            whenNothingM (gets @(HashMap UniVar Type) (HashMap.lookup uni)) do
+                lookupUniVar uni >>= \case
+                    -- don't generalise outer-scoped vars
+                    Left varScope | varScope <= scope -> pure $ T.UniVar loc uni
+                    innerScoped -> do
+                        newTy <- either (const $ T.Var <$> freshTypeVar loc) (go scope . unMono) innerScoped
+                        modify @(HashMap UniVar Type) $ HashMap.insert uni newTy
+                        pure newTy
+        other -> pure $ Right other
 
 --
 
@@ -493,16 +484,6 @@ substitute variance var ty = do
         In -> freshUniVar loc
         Out -> freshSkolem name
         Inv -> freshSkolem name
-
--- `substituteTy` shouldn't be used for type vars, because it fails in cases like `forall a. (forall a. body)`
--- normally those are removed by name resolution, but they may still occur when checking, say `f (f x)`
-substituteTy :: InfEffs es => Type -> Monotype -> Type -> Eff es Type
-substituteTy from to = go
-  where
-    go = transformM' T.uniplate \case
-        ty | ty == from -> pure $ Left $ unMono to
-        T.UniVar loc uni -> fmap Left $ T.UniVar loc uni <$ withUniVar uni (pure . unMono >=> go >=> mono Inv >=> overrideUniVar uni)
-        other -> pure $ Right other
 
 -- what to match
 data RecordOrVariant = Record | Variant deriving (Eq)

@@ -1,9 +1,9 @@
 type Peano = Z | S Peano
 
-odd = match
+odd x = case x of
     Z -> False
-    (S n) -> even n
+    S n -> even n
 
-even = match
+even x = case x of
     Z -> True
-    (S n) -> odd n
+    S n -> odd n

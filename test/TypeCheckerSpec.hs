@@ -191,7 +191,7 @@ spec = do
             let tcResult =
                     testCheck
                         (dummyFixity =<< resolveExpr expr)
-                        (\expr' -> infer expr' >>= normalise >>= check expr' . cast uniplateCast)
+                        (\expr' ->  infer expr' & normalise >>= check expr' . cast uniplateCast)
              in tcResult `shouldSatisfy` isJust
     describe "errors" $ for_ errorExprs \(txt, expr) ->
         it
@@ -199,7 +199,7 @@ spec = do
             let tcResult =
                     testCheck
                         (dummyFixity =<< resolveExpr expr)
-                        (\expr' -> infer expr' >>= normalise >>= check expr' . cast uniplateCast)
+                        (\expr' -> infer expr' & normalise >>= check expr' . cast uniplateCast)
              in tcResult `shouldSatisfy` isNothing
     describe "testing check" $ for_ exprsToCheck \(txt, expr, ty) ->
         it
@@ -223,7 +223,7 @@ spec = do
                         quickLookDefs' <-
                             fromList <$> traverse (\(name, ty) -> liftA2 (,) (declare name) (cast uniplateCast <$> resolveType ty)) quickLookDefs
                         pure (expr', quickLookDefs')
-                    run (fmap Right $ quickLookDefs' <> env) builtins $ check expr' . cast uniplateCast =<< normalise =<< infer expr'
+                    run (fmap Right $ quickLookDefs' <> env) builtins $ check expr' . cast uniplateCast =<< normalise (infer expr')
              in tcResult `shouldSatisfy` isJust
     describe "deep subsumption examples" $ for_ deepSkolemisation \(txt, expr) ->
         it
@@ -234,7 +234,7 @@ spec = do
                         expr' <- dummyFixity =<< resolveExpr expr
                         dsDefs' <- fromList <$> traverse (\(name, ty) -> liftA2 (,) (declare name) (cast uniplateCast <$> resolveType ty)) dsDefs
                         pure (expr', dsDefs')
-                    run (fmap Right $ dsDefs' <> env) builtins $ check expr' . cast uniplateCast =<< normalise =<< infer expr'
+                    run (fmap Right $ dsDefs' <> env) builtins $ check expr' . cast uniplateCast =<< normalise (infer expr')
              in tcResult `shouldSatisfy` isJust
     describe "impredicative patterns" $ for_ patterns \(txt, pat) ->
         it
