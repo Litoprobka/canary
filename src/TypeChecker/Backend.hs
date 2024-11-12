@@ -413,6 +413,15 @@ generaliseAll action = do
                     else pure $ T.Skolem skolem
         other -> pure $ Right other
 
+-- perform an action at top level, discarding all var / skolem changes
+topLevelScope :: InfEffs es => Eff es a -> Eff es a
+topLevelScope action = do
+    InfState{currentScope, vars, skolems} <- get
+    modify @InfState \s -> s{currentScope = Scope 0}
+    out <- action
+    modify @InfState \s -> s{currentScope, vars, skolems}
+    pure out
+
 --
 
 data Variance = In | Out | Inv

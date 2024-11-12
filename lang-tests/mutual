@@ -8,3 +8,7 @@ even = match
     Z -> True
     (S n) -> odd n
 
+xs x y = Cons x (os x y)
+os x y = Cons y (xs x y)
+
+xsos x y = Cons x (xsos y x)

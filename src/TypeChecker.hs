@@ -54,7 +54,6 @@ typecheck
 typecheck env builtins decls = run (Right <$> env) builtins $ normaliseAll $ inferDecls decls
 
 -- finds all type parameters used in a type and creates corresponding forall clauses
--- ignores univars, because the intended use case is pre-processing user-supplied types
 inferTypeVars :: Type' 'Fixity -> Type' 'Fixity
 inferTypeVars ty = uncurry (foldr (T.Forall $ getLoc ty)) . second snd . runPureEff . runState (HashSet.empty, HashSet.empty) . go $ ty
   where
@@ -64,8 +63,8 @@ inferTypeVars ty = uncurry (foldr (T.Forall $ getLoc ty)) . second snd . runPure
             isNew <- not . HashSet.member var <$> gets @(HashSet Name, HashSet Name) snd
             when isNew $ modify @(HashSet Name, HashSet Name) (second $ HashSet.insert var)
             pure $ T.Var var
-        T.Forall loc var body -> modify @(HashSet Name, HashSet Name) (first $ HashSet.insert var) >> T.Forall loc var <$> go body
-        T.Exists loc var body -> modify @(HashSet Name, HashSet Name) (first $ HashSet.insert var) >> T.Exists loc var <$> go body
+        forall_@(T.Forall _ var _) -> forall_ <$ modify @(HashSet Name, HashSet Name) (first $ HashSet.insert var)
+        exists_@(T.Exists _ var _) -> exists_ <$ modify @(HashSet Name, HashSet Name) (first $ HashSet.insert var)
         other -> pure other
 
 -- | check / infer types of a list of declarations that may reference each other
@@ -100,7 +99,7 @@ inferDecls decls = do
     insertBinding name binding locals =
         let closure = UninferredType $ scoped do
                 declareAll =<< inferDecls locals
-                nameTypePairs <- normaliseAll $ inferBinding binding
+                nameTypePairs <- topLevelScope $ normaliseAll $ inferBinding binding
                 declareTopLevel nameTypePairs
                 case HashMap.lookup name nameTypePairs of
                     -- this can only happen if `inferBinding` returns an incorrect map of types
@@ -237,7 +236,7 @@ infer =
     scoped . \case
         E.Name name -> lookupSig name
         E.Constructor name -> lookupSig name
-        E.Variant name -> {-forallScope-} do
+        E.Variant name -> do
             let loc = getLoc name
             var <- freshUniVar loc
             rowVar <- freshUniVar loc
@@ -246,7 +245,7 @@ infer =
         E.Application f x -> do
             fTy <- infer f
             inferApp fTy x
-        E.Lambda loc arg body -> {-forallScope-} do
+        E.Lambda loc arg body -> do
             argTy <- inferPattern arg
             T.Function loc argTy <$> infer body
         -- chances are, I'd want to add some specific error messages or context for wildcard lambdas
@@ -269,7 +268,7 @@ infer =
                 check body result
             pure result
         E.Match loc [] -> typeError $ EmptyMatch loc
-        E.Match loc ((firstPats, firstBody) : ms) -> {-forallScope-} do
+        E.Match loc ((firstPats, firstBody) : ms) -> do
             -- NOTE: this implementation is biased towards the first match
             bodyType <- fmap unMono . mono In =<< infer firstBody
             patTypes <- traverse inferPattern firstPats
@@ -382,7 +381,7 @@ inferPattern = \case
         result <- freshUniVar loc
         traverse_ (`checkPattern` result) pats
         pure $ T.Application (T.Name $ Located loc ListName) result
-    v@(P.Variant name arg) -> {-forallScope-} do
+    v@(P.Variant name arg) -> do
         argTy <- inferPattern arg
         T.Variant (getLoc v) . ExtRow (fromList [(name, argTy)]) <$> freshUniVar (getLoc v)
     P.Record loc row -> do
