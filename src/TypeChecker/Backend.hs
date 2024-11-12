@@ -14,6 +14,7 @@ module TypeChecker.Backend where
 import Common
 import Data.HashMap.Strict qualified as HashMap
 import Data.HashSet qualified as HashSet
+import Data.List (nub)
 import Diagnostic (Diagnose, fatal)
 import Effectful
 import Effectful.Dispatch.Dynamic (interpret, reinterpret)
@@ -27,7 +28,23 @@ import LensyUniplate
 import NameGen
 import Prettyprinter (Doc, Pretty, pretty, (<+>))
 import Prettyprinter.Render.Terminal (AnsiStyle)
-import Relude hiding (Reader, State, Type, ask, asks, bool, break, cycle, evalState, get, gets, modify, put, runReader, runState)
+import Relude hiding (
+    Reader,
+    State,
+    Type,
+    ask,
+    asks,
+    bool,
+    break,
+    cycle,
+    evalState,
+    get,
+    gets,
+    modify,
+    put,
+    runReader,
+    runState,
+ )
 import Syntax
 import Syntax.Row
 import Syntax.Row qualified as Row
@@ -88,11 +105,10 @@ data InfState = InfState
     , nextTypeVar :: Char
     , currentScope :: Scope
     , topLevel :: TopLevelBindings
-    -- ^ top level bindings that may or may not have a type signature.
-    --       only solved types may appear here, but it's not clear whether
-    --       it's worth it to make that distinction at type level
+    -- ^ top level bindings that may or may not have a type signature
     , locals :: HashMap Name Type -- local variables
     , vars :: HashMap UniVar (Either Scope Monotype) -- contains either the scope of an unsolved var or a type
+    , skolems :: HashMap Skolem Scope -- skolem scopes
     }
     deriving (Show)
 
@@ -229,6 +245,7 @@ runWithFinalEnv env builtins = do
             , topLevel = env
             , locals = HashMap.empty
             , vars = HashMap.empty
+            , skolems = HashMap.empty
             }
         . runReader builtins
         . runDeclare
@@ -245,8 +262,14 @@ freshUniVar' = do
     pure var
 
 freshSkolem :: InfEffs es => Name -> Eff es Type
-freshSkolem (Located loc (Name name _)) = T.Skolem . Skolem . Located loc <$> freshName_ (Name' name)
-freshSkolem _ = T.Skolem . Skolem <$> freshName (Located Blank $ Name' "what") -- why?
+freshSkolem name = do
+    skolem <- Skolem <$> mkName name
+    scope <- gets @InfState (.currentScope)
+    modify \s -> s{skolems = HashMap.insert skolem scope s.skolems}
+    pure $ T.Skolem skolem
+  where
+    mkName (Located loc (Name txtName _)) = Located loc <$> freshName_ (Name' txtName)
+    mkName _ = freshName (Located Blank $ Name' "what") -- why?
 
 freshTypeVar :: Loc -> InfEffs es => Eff es Name
 freshTypeVar loc = do
@@ -258,7 +281,7 @@ freshTypeVar loc = do
     cycleChar c = succ c
 
 lookupUniVar :: InfEffs es => UniVar -> Eff es (Either Scope Monotype)
-lookupUniVar uni = maybe (typeError $ Internal Blank $ "missing univar " <> pretty uni) pure . HashMap.lookup uni =<< gets @InfState (.vars)
+lookupUniVar uni = maybe (typeError $ Internal Blank $ "missing univar" <+> pretty uni) pure . HashMap.lookup uni =<< gets @InfState (.vars)
 
 withUniVar :: InfEffs es => UniVar -> (Monotype -> Eff es a) -> Eff es ()
 withUniVar uni f =
@@ -316,6 +339,12 @@ foldUniVars action =
             pure var
         other -> pure other
 
+skolemScope :: InfEffs es => Skolem -> Eff es Scope
+skolemScope skolem =
+    maybe (typeError $ Internal (getLoc skolem) $ "missing skolem" <+> pretty skolem) pure
+        . HashMap.lookup skolem
+        =<< gets @InfState (.skolems)
+
 -- looks up a type of a binding. Local binding take precedence over uninferred globals, but not over inferred ones
 lookupSig :: (InfEffs es, Declare :> es) => Name -> Eff es Type
 lookupSig name = do
@@ -343,7 +372,7 @@ generalise :: InfEffs es => Eff es Type -> Eff es Type
 generalise = fmap runIdentity . generaliseAll . fmap Identity
 
 -- TODO: this function should also handle the generalisation of skolems
-generaliseAll :: Traversable t => InfEffs es => Eff es (t Type) -> Eff es (t Type)
+generaliseAll :: (Traversable t, InfEffs es) => Eff es (t Type) -> Eff es (t Type)
 generaliseAll action = do
     modify \s@InfState{currentScope = Scope n} -> s{currentScope = Scope $ succ n}
     types <- action
@@ -352,14 +381,17 @@ generaliseAll action = do
     traverse (generaliseOne outerScope) types
   where
     generaliseOne scope ty = do
-        (ty', vars) <- runState HashMap.empty $ go scope ty
-        pure $ foldr (T.Forall (getLoc ty)) ty' $ HashMap.mapMaybe getVar vars
+        ((ty', vars), skolems) <- runState HashMap.empty $ runState HashMap.empty $ go scope ty
+        let forallVars = nub . mapMaybe (getFreeVar skolems) $ toList vars
+        pure $ foldr (T.Forall (getLoc ty)) (foldr (T.Exists (getLoc ty)) ty' skolems) forallVars
 
-    getVar :: Type -> Maybe Name
-    getVar (T.Var name) = Just name
-    getVar _ = Nothing
+    -- get all univars that have been solved to unique type variables
+    getFreeVar :: HashMap k Name -> Type -> Maybe Name
+    getFreeVar skolems (T.Var name)
+        | name `notElem` skolems = Just name
+    getFreeVar _ _ = Nothing
 
-    go :: InfEffs es => Scope -> Type -> Eff (State (HashMap UniVar Type) : es) Type
+    go :: InfEffs es => Scope -> Type -> Eff (State (HashMap UniVar Type) : State (HashMap Skolem Name) : es) Type
     go scope = transformM' T.uniplate \case
         T.UniVar loc uni -> fmap Left do
             whenNothingM (gets @(HashMap UniVar Type) (HashMap.lookup uni)) do
@@ -370,6 +402,15 @@ generaliseAll action = do
                         newTy <- either (const $ T.Var <$> freshTypeVar loc) (go scope . unMono) innerScoped
                         modify @(HashMap UniVar Type) $ HashMap.insert uni newTy
                         pure newTy
+        T.Skolem skolem -> fmap Left do
+            whenNothingM (gets @(HashMap Skolem Name) (fmap T.Var . HashMap.lookup skolem)) do
+                skScope <- skolemScope skolem
+                if skScope > scope
+                    then do
+                        var <- freshTypeVar (getLoc skolem)
+                        modify @(HashMap Skolem Name) $ HashMap.insert skolem var
+                        pure $ T.Var var
+                    else pure $ T.Skolem skolem
         other -> pure $ Right other
 
 --
