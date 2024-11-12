@@ -2,21 +2,21 @@ module Main (main) where
 
 import Relude
 
-import NameResolution
-import NameGen (runNameGen)
-import Effectful
-import Parser (parseModule)
-import Prettyprinter.Render.Text (putDoc)
-import Prettyprinter
-import TypeChecker (typecheck)
-import Playground (mkDefaults)
-import qualified Syntax.Declaration as D
-import qualified Data.HashMap.Strict as HashMap
-import qualified Syntax.Expression as E
-import Interpreter (eval, InterpreterBuiltins (..))
-import Fixity
-import Diagnostic
 import Common
+import Data.HashMap.Strict qualified as HashMap
+import Diagnostic
+import Effectful
+import Fixity
+import Interpreter (InterpreterBuiltins (..), eval)
+import NameGen (runNameGen)
+import NameResolution
+import Parser (parseModule)
+import Playground (mkDefaults)
+import Prettyprinter
+import Prettyprinter.Render.Text (putDoc)
+import Syntax.Declaration qualified as D
+import Syntax.Expression qualified as E
+import TypeChecker (typecheck)
 
 main :: IO ()
 main = do
@@ -34,14 +34,12 @@ main = do
             let constrs = HashMap.empty
             pure (bindings, evalBuiltins, constrs)
 
-        putTextLn "resolved names:"
-        prettyAST bindings
-
         fixityResolvedBindings <- resolveFixity testOpMap testGraph bindings
+        putTextLn "resolved names:"
         prettyAST fixityResolvedBindings
 
         putTextLn "typechecking:"
-        types <- typecheck env builtins fixityResolvedBindings 
+        types <- typecheck env builtins fixityResolvedBindings
         liftIO . putDoc $ (<> line) $ vsep $ pretty . uncurry (D.Signature Blank) <$> HashMap.toList types
         case fixityResolvedBindings of
             (D.Value _ (E.ValueBinding _ body) _) : _ ->

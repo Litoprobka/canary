@@ -40,7 +40,7 @@ module Lexer (
     located,
 ) where
 
-import Common (Loc (..), SimpleName, locFromSourcePos, Literal, SimpleName_ (..), Located (..), Literal_ (..))
+import Common (Literal, Literal_ (..), Loc (..), Located (..), SimpleName, SimpleName_ (..), locFromSourcePos)
 import Control.Monad.Combinators.NonEmpty qualified as NE
 import Data.Char (isAlphaNum, isSpace, isUpperCase)
 import Data.HashSet qualified as Set
@@ -69,7 +69,7 @@ newlines = C.newline *> L.space C.space1 lineComment blockComment
 -- they're not in a where block, because monomorphism restriction
 nonNewlineSpace, lineComment, blockComment :: ParserM m => m ()
 nonNewlineSpace = void $ takeWhile1P (Just "space") \c -> isSpace c && c /= '\n' -- we can ignore \r here
-lineComment = L.skipLineComment "--"
+lineComment = try $ string "--" *> notFollowedBy (satisfy isOperatorChar) *> void (takeWhileP (Just "character") (/= '\n'))
 blockComment = L.skipBlockComment "---" "---" -- this syntax doesn't work well with nested comments; it does look neat though
 
 -- | space or a newline with increased indentation
@@ -97,7 +97,9 @@ symbol :: ParserM m => Text -> m Text
 symbol = L.symbol spaceOrLineWrap
 
 keywords :: HashSet Text
-keywords = Set.fromList ["if", "then", "else", "type", "alias", "case", "where", "let", "match", "of", "forall", "∀", "exists", "∃", "do", "with"]
+keywords =
+    Set.fromList
+        ["if", "then", "else", "type", "alias", "case", "where", "let", "match", "of", "forall", "∀", "exists", "∃", "do", "with"]
 
 -- | punctuation that has a special meaningng, like keywords
 specialSymbols :: [Text]
@@ -166,8 +168,9 @@ topLevelBlock p = optional newlines *> L.nonIndented spaceOrLineWrap (p `sepEndB
 specialSymbol :: ParserM m => Text -> m ()
 specialSymbol sym = label (toString sym) $ try $ lexeme $ string sym *> notFollowedBy (satisfy isOperatorChar) -- note that `symbol` isn't used here, since the whitespace matters in this case
 
--- | parses a keyword, i.e. a symbol not followed by an alphanum character
--- it is assumed that `kw` appears in the `keywords` list
+{- | parses a keyword, i.e. a symbol not followed by an alphanum character
+it is assumed that `kw` appears in the `keywords` list
+-}
 keyword :: ParserM m => Text -> m ()
 keyword kw = label (toString kw) $ try $ lexeme $ string kw *> notFollowedBy (satisfy isIdentifierChar)
 
@@ -181,25 +184,29 @@ termName' = do
 termName :: ParserM m => m SimpleName
 termName = mkName termName'
 
--- | a termName that starts with an underscore
--- note: the current implementation forbids `_1`, `_1abc`, etc. That may be undesired
+{- | a termName that starts with an underscore
+note: the current implementation forbids `_1`, `_1abc`, etc. That may be undesired
+-}
 wildcard :: ParserM m => m ()
 wildcard = single '_' *> void identifier
 
--- | an identifier that starts with an uppercase letter
--- this is not a lexeme
+{- | an identifier that starts with an uppercase letter
+this is not a lexeme
+-}
 typeName' :: ParserM m => m Text
 typeName' = do
     void $ lookAhead (satisfy isUpperCase)
     identifier
 
--- | an identifier that starts with an uppercase letter  
--- unlike `typeName'`, this /is/ a lexeme
+{- | an identifier that starts with an uppercase letter
+unlike `typeName'`, this /is/ a lexeme
+-}
 typeName :: ParserM m => m SimpleName
 typeName = lexeme $ mkName typeName'
 
--- | a value constructor name  
--- this is not a lexeme
+{- | a value constructor name
+this is not a lexeme
+-}
 constructorName :: ParserM m => m SimpleName
 constructorName = mkName typeName'
 
@@ -207,13 +214,15 @@ constructorName = mkName typeName'
 typeVariable :: ParserM m => m SimpleName
 typeVariable = try $ mkName $ liftA2 Text.cons (single '\'') termName'
 
--- | an identifier that starts with a ' and an uppercase letter, i.e. 'Some
--- this is not a lexeme
+{- | an identifier that starts with a ' and an uppercase letter, i.e. 'Some
+this is not a lexeme
+-}
 variantConstructor :: ParserM m => m SimpleName
 variantConstructor = try $ mkName $ liftA2 Text.cons (single '\'') typeName'
 
--- | a helper for other identifier parsers  
--- note that it's not a lexeme, i.e. it doesn't consume trailing whitespace
+{- | a helper for other identifier parsers
+note that it's not a lexeme, i.e. it doesn't consume trailing whitespace
+-}
 identifier :: ParserM m => m Text
 identifier = try do
     ident <- Text.cons <$> (letterChar <|> char '_') <*> takeWhileP (Just "identifier") isIdentifierChar
@@ -232,7 +241,12 @@ intLiteral = label "int literal" $ try $ lexeme $ located $ fmap IntLiteral $ L.
 
 -- todo: handle escape sequences and interpolation
 textLiteral :: ParserM m => m Literal
-textLiteral = label "text literal" $ located $ fmap TextLiteral $ between (symbol "\"") (symbol "\"") $ takeWhileP (Just "text literal body") (/= '"')
+textLiteral =
+    label "text literal" $
+        located $
+            fmap TextLiteral $
+                between (symbol "\"") (symbol "\"") $
+                    takeWhileP (Just "text literal body") (/= '"')
 
 charLiteral :: ParserM m => m Literal
 charLiteral = label "char literal" $ try $ located $ fmap CharLiteral $ one <$> between (single '\'') (symbol "'") anySingle
@@ -263,14 +277,14 @@ i.e. that would allow
 >   y,
 >   z,
 > ]
-the indentation inside the list is optional as well  
+the indentation inside the list is optional as well
 using anythinging indentation-sensitve, i.e. do notation, reintroduces strict newlines
 > otherStuff = [
 >   x,
 >   do
 >     action1
 >     action2,
->   y,   
+>   y,
 > ]
 -}
 parens, brackets, braces :: ParserM m => m a -> m a
@@ -282,8 +296,9 @@ braces = between (specialSymbol "{") (specialSymbol "}")
 commaSep :: ParserM m => m a -> m [a]
 commaSep p = optional (specialSymbol ",") *> p `sepEndBy` specialSymbol ","
 
--- | parses an AST node with location info
--- todo: don't include trailing whitespace where possible
+{- | parses an AST node with location info
+todo: don't include trailing whitespace where possible
+-}
 withLoc :: ParserM m => m (Loc -> a) -> m a
 withLoc p = do
     start <- getSourcePos

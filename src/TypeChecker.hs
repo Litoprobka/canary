@@ -30,7 +30,7 @@ import Data.HashSet qualified as HashSet
 import Data.Traversable (for)
 import Diagnostic (Diagnose)
 import Effectful
-import Effectful.State.Static.Local (State, get, gets, modify, runState)
+import Effectful.State.Static.Local (State, gets, modify, runState)
 import GHC.IsList qualified as IsList
 import LensyUniplate
 import NameGen
@@ -132,9 +132,8 @@ subtype lhs_ rhs_ = join $ match <$> monoLayer In lhs_ <*> monoLayer Out rhs_
         lhs (MLUniVar _ uni) -> solveOr (mono In $ unMonoLayer lhs) (subtype (unMonoLayer lhs) . unMono) uni
         (MLUniVar _ uni) rhs -> solveOr (mono Out $ unMonoLayer rhs) ((`subtype` unMonoLayer rhs) . unMono) uni
         (MLName lhs) (MLName rhs) ->
-            unlessM (elem (lhs, rhs) <$> builtin (.subtypeRelations)) $
-                typeError $
-                    CannotUnify lhs rhs -- "cannot unify" <+> pretty lhs <+> "with" <+> pretty rhs
+            unlessM (elem (lhs, rhs) <$> builtin (.subtypeRelations)) do
+                typeError $ CannotUnify lhs rhs
         (MLFn _ inl outl) (MLFn _ inr outr) -> do
             subtype inr inl
             subtype outl outr
@@ -259,7 +258,7 @@ infer =
         E.Annotation expr ty -> cast uniplateCast ty <$ check expr (cast uniplateCast ty)
         E.If loc cond true false -> do
             check cond $ T.Name $ Located loc BoolName
-            result <- unMono <$> (mono In =<< infer true)
+            result <- fmap unMono . mono In =<< infer true
             check false result
             pure result
         E.Case loc arg matches -> do
@@ -271,10 +270,11 @@ infer =
             pure result
         E.Match loc [] -> typeError $ EmptyMatch loc
         E.Match loc ((firstPats, firstBody) : ms) -> {-forallScope-} do
-            bodyType <- infer firstBody
+            -- NOTE: this implementation is biased towards the first match
+            bodyType <- fmap unMono . mono In =<< infer firstBody
             patTypes <- traverse inferPattern firstPats
             for_ ms \(pats, body) -> do
-                traverse_ (`checkPattern` bodyType) pats
+                zipWithM_ checkPattern pats patTypes
                 check body bodyType
             unless (all ((== length patTypes) . length . fst) ms) $
                 typeError $

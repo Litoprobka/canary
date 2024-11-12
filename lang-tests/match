@@ -1,0 +1,5 @@
+type Peano = Z | S Peano
+
+f = match
+    Z -> id
+    (S n) -> \_ -> n
