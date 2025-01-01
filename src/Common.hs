@@ -24,12 +24,12 @@ module Common (
     zipLoc,
     NameAt,
     Pass (..),
-    bifix,
     zipLocOf,
     locFromSourcePos,
     mkNotes,
     Literal_ (..),
     Literal,
+    Fixity (..),
 ) where
 
 import Error.Diagnose (Position (..))
@@ -46,6 +46,8 @@ data Pass
     | NameRes -- etc
     | Fixity
     | DuringTypecheck -- an intermediate state for univars and skolems
+
+data Fixity = InfixL | InfixR | InfixChain | Infix deriving (Show, Eq)
 
 type family NameAt (pass :: Pass) where
     NameAt 'Parse = SimpleName
@@ -191,19 +193,3 @@ mkNotes :: [(Loc, M.Marker a)] -> [(Position, M.Marker a)]
 mkNotes = mapMaybe \case
     (Blank, _) -> Nothing
     (Loc pos, marker) -> Just (pos, marker)
-
-{-
-ReflWitness : Eq a => a -> a -> Type
-ReflWitness x y
-    | x == y = ()
-    | otherwise = Void
-
-reflWitness : forall (a :: k) (b :: k). (a ~ b) => ReflWitness a b
--}
-
--- * Some fancy boilerplate prevention stuff
-
--- bifix f g = f $ g $ f $ g $ ...
--- we don't need a special case to make bifix it monadic. We do need monadic baseCast-s though
-bifix :: ((a -> b) -> a -> b) -> ((a -> b) -> a -> b) -> a -> b
-bifix f g = let recur = f (g recur) in recur

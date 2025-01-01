@@ -95,6 +95,7 @@ inferDecls decls = do
             for_ (mkConstrSigs name vars constrs) \(con, sig) ->
                 modify \s -> s{topLevel = HashMap.insert con (Right sig) s.topLevel}
         D.Alias{} -> pass
+        D.Fixity{} -> pass
 
     insertBinding name binding locals =
         let closure = UninferredType $ scoped do
@@ -113,6 +114,7 @@ inferDecls decls = do
         D.Signature _ name sig -> (values, (name, sig) : sigs)
         D.Type _ name vars constrs -> (values, mkConstrSigs name vars constrs ++ sigs)
         D.Alias{} -> (values, sigs)
+        D.Fixity{} -> (values, sigs)
 
     mkConstrSigs :: Name -> [Name] -> [Constructor 'Fixity] -> [(Name, Type' 'Fixity)]
     mkConstrSigs name vars constrs =
@@ -187,6 +189,26 @@ check e type_ = scoped $ match e type_
             for_ matches \(pat, body) -> do
                 checkPattern pat argTy
                 check body ty
+        (E.Match loc matches) ty -> do
+            n <- whenNothing (getArgCount matches) $ typeError $ ArgCountMismatch loc
+            (patTypes, bodyTy) <- unwrapFn n ty
+            for_ matches \(pats, body) -> do
+                zipWithM_ checkPattern pats patTypes
+                check body bodyTy
+          where
+            unwrapFn 0 = pure . ([],)
+            unwrapFn n =
+                monoLayer Out >=> \case
+                    MLFn _ from to -> first (from :) <$> unwrapFn (pred n) to
+                    MLUniVar loc' uni ->
+                        lookupUniVar uni >>= \case
+                            Right ty' -> unwrapFn n $ unMono ty'
+                            Left _ -> do
+                                argVars <- replicateM n freshUniVar'
+                                bodyVar <- freshUniVar'
+                                solveUniVar uni $ foldr (MFn loc' . MUniVar loc') (MUniVar loc' bodyVar) argVars
+                                pure (T.UniVar loc' <$> argVars, T.UniVar loc' bodyVar)
+                    other -> typeError $ ArgCountMismatch $ getLoc other
         (E.List _ items) (T.Application (T.Name (Located _ ListName)) itemTy) -> for_ items (`check` itemTy)
         (E.Record _ row) ty -> do
             for_ (IsList.toList row) \(name, expr) ->
@@ -206,6 +228,13 @@ check e type_ = scoped $ match e type_
         expr ty -> do
             inferredTy <- infer expr
             subtype inferredTy ty
+
+-- a helper function for matches
+getArgCount :: [([Pat], Expr)] -> Maybe Int
+getArgCount [] = Just 0
+getArgCount ((firstPats, _) : matches) = argCount <$ guard (all ((== argCount) . length . fst) matches)
+  where
+    argCount = length firstPats
 
 checkBinding :: InfEffs es => Binding 'Fixity -> Type -> Eff es ()
 checkBinding binding ty = case binding of
@@ -268,16 +297,14 @@ infer =
                 check body result
             pure result
         E.Match loc [] -> typeError $ EmptyMatch loc
-        E.Match loc ((firstPats, firstBody) : ms) -> do
+        E.Match loc matches@((firstPats, firstBody) : rest) -> do
             -- NOTE: this implementation is biased towards the first match
             bodyType <- fmap unMono . mono In =<< infer firstBody
             patTypes <- traverse inferPattern firstPats
-            for_ ms \(pats, body) -> do
+            whenNothing_ (getArgCount matches) $ typeError $ ArgCountMismatch loc
+            for_ rest \(pats, body) -> do
                 zipWithM_ checkPattern pats patTypes
                 check body bodyType
-            unless (all ((== length patTypes) . length . fst) ms) $
-                typeError $
-                    ArgCountMismatch loc
             pure $ foldr (T.Function loc) bodyType patTypes
         E.List loc items -> do
             itemTy <- freshUniVar loc
@@ -341,7 +368,7 @@ inferBinding =
             let ty = foldr (T.Function $ getLoc binding) bodyTy argTypes
             -- since we can still infer higher-rank types for non-recursive functions,
             -- we only need the subtype check when the univar is solved, i.e. when the
-            -- functions contains any recursive calls at all
+            -- function contains any recursive calls at all
             withUniVar uni (subtype ty . unMono)
             pure $ HashMap.singleton name ty
 

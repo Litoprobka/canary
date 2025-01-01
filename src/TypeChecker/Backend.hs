@@ -87,6 +87,17 @@ data MonoLayer
     | MLRecord Loc (ExtRow Type)
     deriving (Show, Eq)
 
+instance HasLoc MonoLayer where
+    getLoc = \case
+        MLName name -> getLoc name
+        MLSkolem skolem -> getLoc skolem
+        MLUniVar loc _ -> loc
+        MLVar name -> getLoc name
+        MLApp lhs rhs -> zipLocOf lhs rhs
+        MLFn loc _ _ -> loc
+        MLVariant loc _ -> loc
+        MLRecord loc _ -> loc
+
 newtype Builtins a = Builtins
     { subtypeRelations :: [(a, a)]
     }
@@ -124,7 +135,7 @@ data TypeError
     | NotAFunction Type -- pretty fTy <+> "is not a function type"
     | SelfReferential Type
 
-typeError :: InfEffs es => TypeError -> Eff es a
+typeError :: Diagnose :> es => TypeError -> Eff es a
 typeError =
     fatal . one . \case
         Internal loc doc ->
@@ -413,13 +424,14 @@ generaliseAll action = do
                     else pure $ T.Skolem skolem
         other -> pure $ Right other
 
--- perform an action at top level, discarding all var / skolem changes
+-- perform an action at top level
+-- at the moment this function doesn't work as intended
 topLevelScope :: InfEffs es => Eff es a -> Eff es a
 topLevelScope action = do
-    InfState{currentScope, vars, skolems} <- get
+    InfState{currentScope} <- get
     modify @InfState \s -> s{currentScope = Scope 0}
     out <- action
-    modify @InfState \s -> s{currentScope, vars, skolems}
+    modify @InfState \s -> s{currentScope}
     pure out
 
 --

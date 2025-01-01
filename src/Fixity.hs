@@ -4,7 +4,7 @@
 
 module Fixity (resolveFixity, testOpMap, testGraph, parse, Fixity (..)) where
 
-import Common (Loc (..), Name, Pass (..), getLoc, mkNotes, zipLocOf)
+import Common (Fixity (..), Loc (..), Name, Pass (..), getLoc, mkNotes, zipLocOf)
 import Control.Monad (foldM)
 import Data.HashMap.Strict qualified as HashMap
 import Data.HashSet qualified as HashSet
@@ -26,8 +26,6 @@ newtype EqClass = EqClass Int deriving (Show, Eq, Hashable, Pretty)
 type PriorityGraph = HashMap EqClass (HashSet EqClass)
 type Op = Maybe Name
 type OpMap = HashMap Op (Fixity, EqClass)
-
-data Fixity = InfixL | InfixR | InfixChain | Infix deriving (Show, Eq)
 
 data Priority = Left' | Right' deriving (Show)
 
@@ -96,6 +94,7 @@ parseDeclaration = \case
                 constrs & map \(D.Constructor cloc cname args) -> D.Constructor cloc cname (cast uniplateCast <$> args)
     D.Alias loc name ty -> pure $ D.Alias loc name (cast uniplateCast ty)
     D.Signature loc name ty -> pure $ D.Signature loc name (cast uniplateCast ty)
+    D.Fixity loc fixity op above below -> pure $ D.Fixity loc fixity op above below
 
 parse :: Ctx es => Expression 'NameRes -> Eff es (Expression 'Fixity)
 parse = \case

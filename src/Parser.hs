@@ -14,10 +14,10 @@ import Syntax.Expression qualified as E
 import Syntax.Pattern qualified as P
 import Syntax.Type qualified as T
 
-import Control.Monad.Combinators.Expr
+import Control.Monad.Combinators.Expr qualified as Expr
 import Control.Monad.Combinators.NonEmpty qualified as NE
 
-import Common (Loc (..), Located (..), Pass (..), SimpleName, SimpleName_ (..), locFromSourcePos, zipLocOf)
+import Common (Fixity (..), Loc (..), Located (..), Pass (..), SimpleName, SimpleName_ (..), locFromSourcePos, zipLocOf)
 import Data.List.NonEmpty qualified as NE
 import Data.Sequence qualified as Seq
 import Diagnostic (Diagnose, fatal, reportsFromBundle)
@@ -34,7 +34,7 @@ code :: Parser [Declaration 'Parse]
 code = topLevelBlock declaration
 
 declaration :: Parser (Declaration 'Parse)
-declaration = withLoc $ choice [typeDec, signature, valueDec]
+declaration = withLoc $ choice [typeDec, fixityDec, signature, valueDec]
   where
     valueDec = flip3 D.Value <$> binding <*> whereBlock
     whereBlock = option [] $ block "where" (withLoc valueDec)
@@ -58,19 +58,38 @@ declaration = withLoc $ choice [typeDec, signature, valueDec]
         args <- many typeParens
         pure $ flip3 D.Constructor name args
 
-    signature :: Parser (Loc -> Declaration 'Parse)
     signature = do
         name <- try $ termName <* specialSymbol ":"
         flip3 D.Signature name <$> type'
 
-type' :: ParserM m => m (Type' 'Parse)
-type' = makeExprParser typeParens [[typeApp], [function], [forall', exists]]
-  where
-    forall' = Prefix $ lambdaLike T.Forall forallKeyword typeVariable "."
-    exists = Prefix $ lambdaLike T.Exists existsKeyword typeVariable "."
+    fixityDec = do
+        keyword "infix"
+        traceM "fixity dec"
+        fixity <-
+            choice
+                [ InfixL <$ keyword "left"
+                , InfixR <$ keyword "right"
+                , InfixChain <$ keyword "chain"
+                , pure Infix
+                ]
+        op <- someOperator
+        aboveList <- option [] do
+            keyword "above"
+            commaSep someOperator
+        belowList <- option [] do
+            keyword "below"
+            commaSep someOperator
+        traceShowM aboveList
+        pure $ \loc -> D.Fixity loc fixity op aboveList belowList
 
-    typeApp = InfixL $ pure T.Application
-    function = InfixR $ appLoc T.Function <$ specialSymbol "->"
+type' :: ParserM m => m (Type' 'Parse)
+type' = Expr.makeExprParser typeParens [[typeApp], [function], [forall', exists]]
+  where
+    forall' = Expr.Prefix $ lambdaLike T.Forall forallKeyword typeVariable "."
+    exists = Expr.Prefix $ lambdaLike T.Exists existsKeyword typeVariable "."
+
+    typeApp = Expr.InfixL $ pure T.Application
+    function = Expr.InfixR $ appLoc T.Function <$ specialSymbol "->"
     appLoc con lhs rhs = con (zipLocOf lhs rhs) lhs rhs
 
 -- a type expression with higher precedence than application
@@ -181,7 +200,7 @@ expression' termParser = do
     -- x [(+, y), (*, z), (+, w)] --> [(x, +), (y, *), (z, +)] w
     shift expr [] = ([], expr)
     shift lhs ((op, rhs) : rest) = first ((lhs, op) :) $ shift rhs rest
-    noPrec varParser = choice $ keywordBased <> terminals <> [varParser]
+    noPrec varParser = choice $ [varParser] <> keywordBased <> terminals
 
     -- expression forms that have a leading keyword/symbol
     keywordBased =

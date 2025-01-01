@@ -1,3 +1,4 @@
-h1 a b = h2 b Unit
-
-h2 a b = h1 b False 
+-- h1 : Unit -> Bool -> c
+h1 _ x = h2 x Unit
+-- h2 : Bool -> Unit -> c
+h2 _ x = h1 x False

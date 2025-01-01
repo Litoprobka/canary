@@ -69,7 +69,12 @@ newlines = C.newline *> L.space C.space1 lineComment blockComment
 -- they're not in a where block, because monomorphism restriction
 nonNewlineSpace, lineComment, blockComment :: ParserM m => m ()
 nonNewlineSpace = void $ takeWhile1P (Just "space") \c -> isSpace c && c /= '\n' -- we can ignore \r here
-lineComment = try $ string "--" *> notFollowedBy (satisfy isOperatorChar) *> void (takeWhileP (Just "character") (/= '\n'))
+lineComment =
+    try $
+        string "--"
+            *> notFollowedBy (satisfy isOperatorChar)
+            *> void (takeWhileP (Just "character") (/= '\n'))
+            *> void (optional newline)
 blockComment = L.skipBlockComment "---" "---" -- this syntax doesn't work well with nested comments; it does look neat though
 
 -- | space or a newline with increased indentation
@@ -99,7 +104,24 @@ symbol = L.symbol spaceOrLineWrap
 keywords :: HashSet Text
 keywords =
     Set.fromList
-        ["if", "then", "else", "type", "alias", "case", "where", "let", "match", "of", "forall", "∀", "exists", "∃", "do", "with"]
+        [ "if"
+        , "then"
+        , "else"
+        , "type"
+        , "alias"
+        , "case"
+        , "where"
+        , "let"
+        , "match"
+        , "of"
+        , "forall"
+        , "∀"
+        , "exists"
+        , "∃"
+        , "do"
+        , "with"
+        , "infix"
+        ]
 
 -- | punctuation that has a special meaningng, like keywords
 specialSymbols :: [Text]
@@ -181,8 +203,9 @@ termName' = do
     void $ lookAhead (anySingleBut '_') <|> fail "unexpected wildcard"
     lexeme identifier
 
+-- | an identifier that doesn't start with a lowercase letter or a parenthesised operator
 termName :: ParserM m => m SimpleName
-termName = mkName termName'
+termName = try (parens someOperator) <|> mkName termName'
 
 {- | a termName that starts with an underscore
 note: the current implementation forbids `_1`, `_1abc`, etc. That may be undesired

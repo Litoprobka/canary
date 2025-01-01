@@ -2,8 +2,8 @@
 
 module Syntax.Declaration (Declaration (..), Constructor (..)) where
 
-import Common (HasLoc (..), Loc, NameAt, Pass (..))
-import Prettyprinter (Pretty (pretty), encloseSep, line, nest, sep, space, vsep, (<+>))
+import Common (Fixity (..), HasLoc (..), Loc, NameAt, Pass (Parse))
+import Prettyprinter (Pretty (pretty), comma, encloseSep, line, nest, punctuate, sep, space, vsep, (<+>))
 import Relude hiding (show)
 import Syntax.Expression (Binding)
 import Syntax.Type (Type')
@@ -14,6 +14,7 @@ data Declaration (p :: Pass)
     | Type Loc (NameAt p) [NameAt p] [Constructor p]
     | Alias Loc (NameAt p) (Type' p)
     | Signature Loc (NameAt p) (Type' p)
+    | Fixity Loc Fixity (NameAt p) [NameAt p] [NameAt p] -- above, below
 
 deriving instance Eq (Declaration 'Parse)
 
@@ -28,7 +29,15 @@ instance Pretty (NameAt p) => Pretty (Declaration p) where
             sep ("type" : pretty name : map pretty vars)
                 <+> encloseSep "= " "" (space <> "|" <> space) (cons <&> \(Constructor _ con args) -> sep (pretty con : map pretty args))
         Alias _ name ty -> "type alias" <+> pretty name <+> "=" <+> pretty ty
+        Fixity _ fixity op above below -> fixityKeyword fixity <+> pretty op <+> listIfNonEmpty "above" above <+> listIfNonEmpty "below" below
       where
+        fixityKeyword = \case
+            InfixL -> "infix left"
+            InfixR -> "infix right"
+            InfixChain -> "infix chain"
+            Infix -> "infix"
+        listIfNonEmpty _ [] = ""
+        listIfNonEmpty kw xs = kw <+> sep (punctuate comma $ map pretty xs)
         whereIfNonEmpty locals
             | null locals = ""
             | otherwise = nest 2 "where"
@@ -42,6 +51,7 @@ instance HasLoc (Declaration p) where
         Type loc _ _ _ -> loc
         Alias loc _ _ -> loc
         Signature loc _ _ -> loc
+        Fixity loc _ _ _ _ -> loc
 
 instance HasLoc (Constructor p) where
     getLoc (Constructor loc _ _) = loc
