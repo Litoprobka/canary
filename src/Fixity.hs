@@ -1,21 +1,23 @@
 {-# LANGUAGE DataKinds #-}
 {-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE MultiWayIf #-}
+{-# LANGUAGE OverloadedRecordDot #-}
 
-module Fixity (resolveFixity, testOpMap, testGraph, parse, Fixity (..)) where
+module Fixity (resolveFixity, testGraph, parse, Fixity (..)) where
 
-import Common (Fixity (..), Loc (..), Name, Pass (..), getLoc, mkNotes, zipLocOf)
+import Common (Fixity (..), Loc (..), Name, Pass (..), PriorityRelation' (..), getLoc, mkNotes, zipLocOf)
 import Control.Monad (foldM)
 import Data.HashMap.Strict qualified as HashMap
 import Data.HashSet qualified as HashSet
 import Data.List.NonEmpty qualified as NE
 import Diagnostic (Diagnose, dummy, fatal)
 import Effectful (Eff, (:>))
-import Effectful.Reader.Static (Reader, ask, runReader)
+import Effectful.Reader.Static (Reader, asks, runReader)
+import Effectful.State.Static.Local (execState, gets, modify, modifyM)
 import Error.Diagnose (Marker (This), Report (..))
 import LensyUniplate
 import Prettyprinter (Pretty, pretty, (<+>))
-import Relude hiding (Op, Reader, ask, runReader)
+import Relude hiding (Op, Reader, ask, asks, cycle, execState, get, gets, modify, runReader)
 import Syntax
 import Syntax.Declaration qualified as D
 import Syntax.Expression (DoStatement)
@@ -23,20 +25,26 @@ import Syntax.Expression qualified as E
 
 newtype EqClass = EqClass Int deriving (Show, Eq, Hashable, Pretty)
 
-type PriorityGraph = HashMap EqClass (HashSet EqClass)
+type PG = PriorityGraph -- a synonym for type application
+data PriorityGraph = PriorityGraph
+    { graph :: HashMap EqClass (HashSet EqClass)
+    , nextClass :: EqClass
+    , opMap :: HashMap Op (Fixity, EqClass)
+    }
 type Op = Maybe Name
-type OpMap = HashMap Op (Fixity, EqClass)
 
 data Priority = Left' | Right' deriving (Show)
 
-type Ctx es = (Reader OpMap :> es, Reader PriorityGraph :> es, Diagnose :> es)
+type Ctx es = (Reader PriorityGraph :> es, Diagnose :> es)
 
 data OpError
     = IncompatibleFixity Op Op
     | UndefinedOrdering Op Op
     | MissingOperator Op
+    | SelfRelation Op
+    | PriorityCycle Op Op
 
-opError :: Ctx es => OpError -> Eff es a
+opError :: Diagnose :> es => OpError -> Eff es a
 opError =
     fatal . one . \case
         IncompatibleFixity prev next ->
@@ -57,6 +65,18 @@ opError =
                 ("missing operator" <+> pretty op)
                 (mkNotes [(getLocMb op, This "is lacking a fixity declaration")])
                 []
+        SelfRelation op ->
+            Err
+                Nothing
+                ("self-reference in fixity declaration" <+> pretty op)
+                (mkNotes [(getLocMb op, This "is referenced in its own fixity declaration")])
+                []
+        PriorityCycle op op2 ->
+            Err
+                Nothing
+                ("priority cycle between" <+> pretty op <+> "and" <+> pretty op2)
+                (mkNotes [(getLocMb op, This "occured at this declaration")])
+                []
   where
     getLocMb = maybe Blank getLoc
 
@@ -65,10 +85,13 @@ lookup' key hmap = case HashMap.lookup key hmap of
     Nothing -> fatal . one . dummy $ "missing operator" <+> pretty key
     Just v -> pure v
 
+{- | figure out which of the two operators has a higher priority
+throws an error on incompatible fixities
+-}
 priority :: Ctx es => Op -> Op -> Eff es Priority
 priority prev next = do
-    graph <- ask @PriorityGraph
-    opMap <- ask @OpMap
+    graph <- asks @PG (.graph)
+    opMap <- asks @PG (.opMap)
     (prevFixity, prevEq) <- lookup' prev opMap
     prevHigherThan <- lookup' prevEq graph
     (nextFixity, nextEq) <- lookup' next opMap
@@ -82,8 +105,78 @@ priority prev next = do
         | HashSet.member nextEq prevHigherThan -> pure Left'
         | HashSet.member prevEq nextHigherThan -> pure Right'
         | otherwise -> opError $ UndefinedOrdering prev next
-resolveFixity :: Diagnose :> es => OpMap -> PriorityGraph -> [Declaration 'NameRes] -> Eff es [Declaration 'Fixity]
-resolveFixity opMap graph = runReader opMap . runReader graph . traverse parseDeclaration
+
+-- traverse all fixity declarations and construct a new priority graph
+collectOperators :: Diagnose :> es => PriorityGraph -> [Declaration 'NameRes] -> Eff es PriorityGraph
+collectOperators initGraph = execState @PG initGraph . traverse_ go
+  where
+    go = \case
+        (D.Fixity _ fixity op rels) -> do
+            traverse_ (addRelation fixity op GT) rels.above
+            traverse_ (addRelation fixity op LT) rels.below
+            traverse_ (addRelation fixity op EQ) rels.equal
+        _nonFixity -> pass
+
+    addRelation _ op_ _ op2_
+        | op_ == op2_ = opError $ SelfRelation $ Just op_
+    addRelation fixity op_ rel op2_ = do
+        let op = Just op_
+        let op2 = Just op2_
+        opMap <- gets @PG (.opMap)
+        lhsEqClass <- case HashMap.lookup op opMap of
+            Nothing -> newEqClass op fixity
+            Just (_, eqClass) -> do
+                modify @PG \pg -> pg{opMap = HashMap.insert op (fixity, eqClass) pg.opMap}
+                pure eqClass
+        rhsEqClass <- maybe (newEqClass op2 Infix) (pure . snd) (HashMap.lookup op2 opMap)
+        modifyM case rel of
+            GT -> addHigherThanRel (op, lhsEqClass) (op2, rhsEqClass)
+            LT -> addHigherThanRel (op2, rhsEqClass) (op, lhsEqClass)
+            EQ -> mergeClasses (op, lhsEqClass) (op2, rhsEqClass)
+
+    newEqClass op fixity = do
+        eqClass <- gets @PG (.nextClass)
+        modify \pg ->
+            pg
+                { nextClass = inc pg.nextClass
+                , opMap = HashMap.insert op (fixity, pg.nextClass) pg.opMap
+                , graph = HashMap.insert pg.nextClass HashSet.empty pg.graph
+                }
+        pure eqClass
+    inc (EqClass n) = EqClass $ succ n
+
+    mergeClasses (op, lhs) (op2, rhs) PriorityGraph{opMap, graph, nextClass} = do
+        lhsHigherThan <- lookup' lhs graph
+        rhsHigherThan <- lookup' rhs graph
+        let cycle = HashSet.member lhs rhsHigherThan || HashSet.member rhs lhsHigherThan
+        when cycle do
+            opError $ PriorityCycle op op2
+
+        let replaceOldClass hset
+                | HashSet.member lhs hset = HashSet.insert rhs $ HashSet.delete lhs hset
+                | otherwise = hset
+
+        let lhsClassElems = HashMap.filter ((== lhs) . snd) opMap
+            newOpMap = fmap (second $ const rhs) lhsClassElems <> opMap
+            newGraph = fmap replaceOldClass graph
+        pure PriorityGraph{opMap = newOpMap, graph = newGraph, nextClass}
+
+    addHigherThanRel (op, higherClass) (op2, lowerClass) pg = do
+        lowerClassHigherThan <- lookup' lowerClass pg.graph
+        when (HashSet.member higherClass lowerClassHigherThan) do
+            opError $ PriorityCycle op op2
+
+        let addTransitiveRels hset
+                | HashSet.member higherClass hset = HashSet.insert lowerClass hset
+                | otherwise = hset
+
+        let graph = fmap addTransitiveRels pg.graph
+        pure pg{graph}
+
+resolveFixity :: Diagnose :> es => PriorityGraph -> [Declaration 'NameRes] -> Eff es [Declaration 'Fixity]
+resolveFixity graph decls = do
+    newGraph <- collectOperators graph decls
+    runReader newGraph $ traverse parseDeclaration decls
 
 parseDeclaration :: Ctx es => Declaration 'NameRes -> Eff es (Declaration 'Fixity)
 parseDeclaration = \case
@@ -94,7 +187,7 @@ parseDeclaration = \case
                 constrs & map \(D.Constructor cloc cname args) -> D.Constructor cloc cname (cast uniplateCast <$> args)
     D.Alias loc name ty -> pure $ D.Alias loc name (cast uniplateCast ty)
     D.Signature loc name ty -> pure $ D.Signature loc name (cast uniplateCast ty)
-    D.Fixity loc fixity op above below -> pure $ D.Fixity loc fixity op above below
+    D.Fixity loc fixity op PriorityRelation{above, below, equal} -> pure $ D.Fixity loc fixity op PriorityRelation{above, below, equal}
 
 parse :: Ctx es => Expression 'NameRes -> Eff es (Expression 'Fixity)
 parse = \case
@@ -145,7 +238,7 @@ parse = \case
 
     appOrMerge :: Ctx es => Op -> Expression 'Fixity -> Expression 'Fixity -> Eff es (Expression 'Fixity)
     appOrMerge mbOp lhs rhs = do
-        opMap <- ask @OpMap
+        opMap <- asks @PG (.opMap)
         (fixity, _) <- lookup' mbOp opMap
         let loc = zipLocOf lhs rhs
         pure case (mbOp, fixity, lhs) of
@@ -172,26 +265,28 @@ parseStmt = \case
 
 ---
 
-testOpMap :: OpMap
-testOpMap =
-    HashMap.fromList
-        [ (Nothing, (InfixL, EqClass 0))
-        -- , ("+", (InfixL, EqClass 0))
-        -- , ("*", (InfixL, EqClass 1))
-        -- , ("?", (InfixR, EqClass 2))
-        -- , ("^", (InfixR, EqClass 3))
-        -- , ("==", (InfixChain, EqClass 4))
-        ]
-
 testGraph :: PriorityGraph
 testGraph =
-    HashMap.fromList $
-        map
-            (second $ HashSet.fromList . map EqClass)
-            [ (EqClass 0, [])
-            -- , (EqClass 3, [0, 1, 2, 4])
-            -- , (EqClass 2, [0, 4])
-            -- , (EqClass 1, [0, 4])
-            -- , (EqClass 0, [4])
-            -- , (EqClass 4, [])
-            ]
+    PriorityGraph
+        { graph =
+            HashMap.fromList $
+                map
+                    (second $ HashSet.fromList . map EqClass)
+                    [ (EqClass 0, [])
+                    -- , (EqClass 3, [0, 1, 2, 4])
+                    -- , (EqClass 2, [0, 4])
+                    -- , (EqClass 1, [0, 4])
+                    -- , (EqClass 0, [4])
+                    -- , (EqClass 4, [])
+                    ]
+        , nextClass = EqClass 1
+        , opMap =
+            HashMap.fromList
+                [ (Nothing, (InfixL, EqClass 0))
+                -- , ("+", (InfixL, EqClass 0))
+                -- , ("*", (InfixL, EqClass 1))
+                -- , ("?", (InfixR, EqClass 2))
+                -- , ("^", (InfixR, EqClass 3))
+                -- , ("==", (InfixChain, EqClass 4))
+                ]
+        }

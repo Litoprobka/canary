@@ -17,7 +17,17 @@ import Syntax.Type qualified as T
 import Control.Monad.Combinators.Expr qualified as Expr
 import Control.Monad.Combinators.NonEmpty qualified as NE
 
-import Common (Fixity (..), Loc (..), Located (..), Pass (..), SimpleName, SimpleName_ (..), locFromSourcePos, zipLocOf)
+import Common (
+    Fixity (..),
+    Loc (..),
+    Located (..),
+    Pass (..),
+    PriorityRelation' (..),
+    SimpleName,
+    SimpleName_ (..),
+    locFromSourcePos,
+    zipLocOf,
+ )
 import Data.List.NonEmpty qualified as NE
 import Data.Sequence qualified as Seq
 import Diagnostic (Diagnose, fatal, reportsFromBundle)
@@ -36,7 +46,8 @@ code = topLevelBlock declaration
 declaration :: Parser (Declaration 'Parse)
 declaration = withLoc $ choice [typeDec, fixityDec, signature, valueDec]
   where
-    valueDec = flip3 D.Value <$> binding <*> whereBlock
+    valueDec = do
+        flip3 D.Value <$> binding <*> whereBlock
     whereBlock = option [] $ block "where" (withLoc valueDec)
 
     typeDec = keyword "type" *> (typeAliasDec <|> typeDec')
@@ -59,12 +70,11 @@ declaration = withLoc $ choice [typeDec, fixityDec, signature, valueDec]
         pure $ flip3 D.Constructor name args
 
     signature = do
-        name <- try $ termName <* specialSymbol ":"
+        name <- try $ (operatorInParens <|> termName) <* specialSymbol ":"
         flip3 D.Signature name <$> type'
 
     fixityDec = do
         keyword "infix"
-        traceM "fixity dec"
         fixity <-
             choice
                 [ InfixL <$ keyword "left"
@@ -73,14 +83,16 @@ declaration = withLoc $ choice [typeDec, fixityDec, signature, valueDec]
                 , pure Infix
                 ]
         op <- someOperator
-        aboveList <- option [] do
+        above <- option [] do
             keyword "above"
             commaSep someOperator
-        belowList <- option [] do
+        below <- option [] do
             keyword "below"
             commaSep someOperator
-        traceShowM aboveList
-        pure $ \loc -> D.Fixity loc fixity op aboveList belowList
+        equal <- option [] do
+            keyword "equals"
+            commaSep someOperator
+        pure $ \loc -> D.Fixity loc fixity op PriorityRelation{above, below, equal}
 
 type' :: ParserM m => m (Type' 'Parse)
 type' = Expr.makeExprParser typeParens [[typeApp], [function], [forall', exists]]
@@ -162,12 +174,16 @@ patternParens = do
 binding :: ParserM m => m (Binding 'Parse)
 binding = do
     f <-
-        -- it should probably be `try (E.FunctionBinding <$> termName) <*> NE.some patternParens
+        -- it should probably be `try (E.FunctionBinding <$> funcName) <*> NE.some patternParens
         -- for cleaner parse errors
-        try (E.FunctionBinding <$> termName <*> NE.some patternParens)
+        try (E.FunctionBinding <$> funcName <*> NE.some patternParens)
             <|> (E.ValueBinding <$> pattern')
     specialSymbol "="
     f <$> expression
+  where
+    -- we might want to support infix operator declarations in the future
+    -- > f $ x = f x
+    funcName = operatorInParens <|> termName
 
 expression :: ParserM m => m (Expression 'Parse)
 expression = expression' $ E.Name <$> termName
@@ -213,6 +229,7 @@ expression' termParser = do
         , doBlock
         , record
         , withWildcards $ withLoc $ flip E.List <$> brackets (commaSep newScopeExpr)
+        , E.Name <$> operatorInParens -- operators are never wildcards, so it's okay to sidestep termParser here
         , parens $ withWildcards newScopeExpr
         ]
       where
@@ -270,7 +287,7 @@ expression' termParser = do
 -- with precendence, it should be parsed as `3 + (\x -> x * 4)`
 -- but what you probably mean is `\x -> 3 + x * 4`
 --
--- in the end, I decided to go with the simples rules possible - that is, parens determine
+-- in the end, I decided to go with the simplest rules possible - that is, parens determine
 -- the scope of the implicit lambda
 --
 -- it's not clear whether I want to require parens around list and record literals
@@ -279,7 +296,7 @@ expression' termParser = do
 -- if you want it to mean `\y -> f {x = 3, y}`
 withWildcards :: ParserM m => StateT (Seq Loc) m (Expression 'Parse) -> m (Expression 'Parse)
 withWildcards p = do
-    -- todo: collect a list of var names along with the counter
+    -- todo: collect a list of wildcard names along with the counter
     ((expr, mbVarLocs), loc) <- withLoc $ (,) <$> runStateT p Seq.empty
     pure case NE.nonEmpty $ zip [1 ..] $ toList mbVarLocs of
         Just varLocs ->

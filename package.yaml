@@ -25,6 +25,8 @@ default-extensions:
   - OverloadedStrings
   - DataKinds
   - LambdaCase
+  - StrictData
+  - OverloadedRecordDot
 
 dependencies:
 - base >= 4.7 && < 5

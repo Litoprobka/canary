@@ -1,4 +1,6 @@
 {-# LANGUAGE LambdaCase #-}
+{-# OPTIONS_GHC -Wno-missing-signatures #-}
+{-# OPTIONS_GHC -Wno-unused-top-binds #-}
 
 module LensyUniplate (
     Traversal,
@@ -11,6 +13,7 @@ module LensyUniplate (
     transformInsideOut,
     cast,
     UniplateCast (..),
+    para,
 ) where
 
 import Relude
@@ -66,7 +69,7 @@ travTree f recur = \case
 travTree' :: SelfTraversal Tree a a
 travTree' = travTree id
 
-example = Branch (Branch (Leaf 15) (Leaf 20)) (Branch (Leaf 40) (Leaf 50))
+example = Branch (Branch (Leaf @Int 15) (Leaf 20)) (Branch (Leaf 40) (Leaf 50))
 
 -- >>> transform travTree' (mapLeaf (*2)) example
 -- Branch (Branch (Leaf 30) (Leaf 40)) (Branch (Leaf 80) (Leaf 100))

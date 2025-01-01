@@ -151,6 +151,7 @@ collectNames decls = for_ decls \case
     D.Type _ name _ _ -> void $ declare name
     D.Alias _ name _ -> void $ declare name
     D.Signature{} -> pass
+    D.Fixity{} -> pass
 
 -- | resolves names in a declaration. Adds type constructors to the current scope
 resolveDec :: EnvEffs es => Declaration 'Parse -> Eff es (Declaration 'NameRes)
@@ -176,6 +177,7 @@ resolveDec decl = case decl of
         pure $ D.Type loc name' vars' (snd <$> constrsToDeclare)
     D.Alias loc alias body -> D.Alias loc <$> resolve alias <*> resolveType body
     D.Signature loc name ty -> D.Signature loc <$> resolve name <*> resolveType ty
+    D.Fixity loc fixity name rels -> D.Fixity loc fixity <$> resolve name <*> traverse resolve rels
 
 {- | resolves names in a binding. Unlike the rest of the functions, it also
 takes local definitions as an argument, and uses them after resolving the name / pattern

@@ -30,6 +30,8 @@ module Common (
     Literal_ (..),
     Literal,
     Fixity (..),
+    PriorityRelation,
+    PriorityRelation' (..),
 ) where
 
 import Error.Diagnose (Position (..))
@@ -48,6 +50,14 @@ data Pass
     | DuringTypecheck -- an intermediate state for univars and skolems
 
 data Fixity = InfixL | InfixR | InfixChain | Infix deriving (Show, Eq)
+
+type PriorityRelation p = PriorityRelation' (NameAt p)
+data PriorityRelation' a = PriorityRelation
+    { above :: [a]
+    , below :: [a]
+    , equal :: [a]
+    }
+    deriving (Eq, Functor, Foldable, Traversable)
 
 type family NameAt (pass :: Pass) where
     NameAt 'Parse = SimpleName

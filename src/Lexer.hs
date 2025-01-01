@@ -38,6 +38,7 @@ module Lexer (
     constructorName,
     literal,
     located,
+    operatorInParens,
 ) where
 
 import Common (Literal, Literal_ (..), Loc (..), Located (..), SimpleName, SimpleName_ (..), locFromSourcePos)
@@ -123,20 +124,20 @@ keywords =
         , "infix"
         ]
 
--- | punctuation that has a special meaningng, like keywords
+-- | punctuation that has a special meaning, like keywords
 specialSymbols :: [Text]
-specialSymbols = ["=", "|", ":", ".", ",", "λ", "\\", "∀", "∃", "->", "=>", "<-", "(", ")", "{", "}"]
+specialSymbols = ["=", "|", ":", ".", "λ", "\\", "∀", "∃", "->", "=>", "<-"]
 
 -- lambda, forall and exists all have an ASCII and a unicode version
 
 lambda :: ParserM m => m ()
-lambda = void $ symbol "\\" <|> symbol "λ" -- should we allow `λx -> expr` without a space after λ?
+lambda = void $ specialSymbol "\\" <|> specialSymbol "λ" -- should we allow `λx -> expr` without a space after λ?
 
 forallKeyword :: ParserM m => m ()
-forallKeyword = keyword "forall" <|> void (symbol "∀")
+forallKeyword = keyword "forall" <|> void (specialSymbol "∀")
 
 existsKeyword :: ParserM m => m ()
-existsKeyword = keyword "exists" <|> void (symbol "∃")
+existsKeyword = keyword "exists" <|> void (specialSymbol "∃")
 
 -- | a helper for `block` and `block1`.
 block'
@@ -189,6 +190,10 @@ topLevelBlock p = optional newlines *> L.nonIndented spaceOrLineWrap (p `sepEndB
 -- | intended to be called with one of `specialSymbols`
 specialSymbol :: ParserM m => Text -> m ()
 specialSymbol sym = label (toString sym) $ try $ lexeme $ string sym *> notFollowedBy (satisfy isOperatorChar) -- note that `symbol` isn't used here, since the whitespace matters in this case
+
+-- | an alias for `symbol`. Intended to be used with commmas, parens, brackets and braces (i.e. punctuation that can't be used in operators)
+punctuation :: ParserM m => Text -> m ()
+punctuation = void . symbol
 
 {- | parses a keyword, i.e. a symbol not followed by an alphanum character
 it is assumed that `kw` appears in the `keywords` list
@@ -287,6 +292,10 @@ someOperator = lexeme $ mkName do
     guard (op `notElem` specialSymbols)
     pure op
 
+-- (+), (<$>), etc.
+operatorInParens :: ParserM m => m SimpleName
+operatorInParens = try $ parens someOperator
+
 isOperatorChar :: Char -> Bool
 isOperatorChar = (`elem` ("+-*/%^=><&.~!?|" :: String))
 
@@ -311,13 +320,13 @@ using anythinging indentation-sensitve, i.e. do notation, reintroduces strict ne
 > ]
 -}
 parens, brackets, braces :: ParserM m => m a -> m a
-parens = between (specialSymbol "(") (specialSymbol ")")
-brackets = between (specialSymbol "[") (specialSymbol "]")
-braces = between (specialSymbol "{") (specialSymbol "}")
+parens = between (punctuation "(") (punctuation ")")
+brackets = between (punctuation "[") (punctuation "]")
+braces = between (punctuation "{") (punctuation "}")
 
 -- leading commas, trailing commas, anything goes
 commaSep :: ParserM m => m a -> m [a]
-commaSep p = optional (specialSymbol ",") *> p `sepEndBy` specialSymbol ","
+commaSep p = optional (punctuation ",") *> p `sepEndBy` punctuation ","
 
 {- | parses an AST node with location info
 todo: don't include trailing whitespace where possible

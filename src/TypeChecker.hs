@@ -331,7 +331,6 @@ infer =
                 | otherwise -> IntName
             TextLiteral _ -> TextName
             CharLiteral _ -> TextName -- huh?
-        E.Infix witness _ _ -> E.noInfix witness
 
 inferApp :: InfEffs es => Type -> Expr -> Eff es Type
 inferApp fTy arg = do

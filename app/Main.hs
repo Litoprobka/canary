@@ -34,7 +34,7 @@ main = do
             let constrs = HashMap.empty
             pure (bindings, evalBuiltins, constrs)
 
-        fixityResolvedBindings <- resolveFixity testOpMap testGraph bindings
+        fixityResolvedBindings <- resolveFixity testGraph bindings
         putTextLn "resolved names:"
         prettyAST fixityResolvedBindings
 
