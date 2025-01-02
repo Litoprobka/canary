@@ -271,9 +271,9 @@ infer =
             rowVar <- freshUniVar loc
             -- #a -> [Name #a | #r]
             pure $ T.Function loc var (T.Variant loc $ ExtRow (fromList [(name, var)]) rowVar)
-        E.Application f x -> do
+        app@(E.Application f x) -> do
             fTy <- infer f
-            inferApp fTy x
+            inferApp (getLoc app) fTy x
         E.Lambda loc arg body -> do
             argTy <- inferPattern arg
             T.Function loc argTy <$> infer body
@@ -332,8 +332,8 @@ infer =
             TextLiteral _ -> TextName
             CharLiteral _ -> TextName -- huh?
 
-inferApp :: InfEffs es => Type -> Expr -> Eff es Type
-inferApp fTy arg = do
+inferApp :: InfEffs es => Loc -> Type -> Expr -> Eff es Type
+inferApp appLoc fTy arg = do
     monoLayer In fTy >>= \case
         MLUniVar loc uni -> do
             from <- infer arg
@@ -341,7 +341,7 @@ inferApp fTy arg = do
             to <$ subtype (T.UniVar loc uni) (T.Function loc from to)
         MLFn _ from to -> do
             to <$ check arg from
-        _ -> typeError $ NotAFunction fTy
+        _ -> typeError $ NotAFunction appLoc fTy
 
 -- infers the type of a function / variables in a pattern
 -- does not implicitly declare anything

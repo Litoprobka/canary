@@ -85,7 +85,7 @@ declaration = withLoc $ choice [typeDec, fixityDec, signature, valueDec]
         op <- someOperator
         above <- option [] do
             keyword "above"
-            commaSep someOperator
+            commaSep (Just <$> someOperator <|> Nothing <$ keyword "application")
         below <- option [] do
             keyword "below"
             commaSep someOperator

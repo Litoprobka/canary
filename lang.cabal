@@ -35,7 +35,6 @@ library
       NameResolution
       Parser
       Playground
-      Poset
       Syntax
       Syntax.Declaration
       Syntax.Expression

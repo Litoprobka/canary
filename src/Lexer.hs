@@ -122,11 +122,12 @@ keywords =
         , "do"
         , "with"
         , "infix"
+        -- 'above', 'below', 'equals' and 'application' are conditional keywords - that is, they are allowed to be used as identifiers
         ]
 
 -- | punctuation that has a special meaning, like keywords
-specialSymbols :: [Text]
-specialSymbols = ["=", "|", ":", ".", "λ", "\\", "∀", "∃", "->", "=>", "<-"]
+specialSymbols :: HashSet Text
+specialSymbols = Set.fromList ["=", "|", ":", ".", "λ", "\\", "∀", "∃", "->", "=>", "<-", "@", "~"]
 
 -- lambda, forall and exists all have an ASCII and a unicode version
 
@@ -289,7 +290,7 @@ operator sym = label "operator" $ lexeme $ withLoc' const $ string sym *> notFol
 someOperator :: ParserM m => m SimpleName
 someOperator = lexeme $ mkName do
     op <- takeWhile1P (Just "operator") isOperatorChar
-    guard (op `notElem` specialSymbols)
+    guard (not $ op `Set.member` specialSymbols)
     pure op
 
 -- (+), (<$>), etc.
@@ -297,7 +298,7 @@ operatorInParens :: ParserM m => m SimpleName
 operatorInParens = try $ parens someOperator
 
 isOperatorChar :: Char -> Bool
-isOperatorChar = (`elem` ("+-*/%^=><&.~!?|" :: String))
+isOperatorChar = (`elem` ("+-*/%^=><&.~!?|@#$:" :: String))
 
 isIdentifierChar :: Char -> Bool
 isIdentifierChar c = isAlphaNum c || c == '_' || c == '\''

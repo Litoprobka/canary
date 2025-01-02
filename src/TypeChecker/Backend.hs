@@ -132,7 +132,7 @@ data TypeError
     | EmptyMatch Loc -- empty match expression
     | ArgCountMismatch Loc -- "different amount of arguments in a match statement"
     | ArgCountMismatchPattern Pat Int Int
-    | NotAFunction Type -- pretty fTy <+> "is not a function type"
+    | NotAFunction Loc Type -- pretty fTy <+> "is not a function type"
     | SelfReferential Type
 
 typeError :: Diagnose :> es => TypeError -> Eff es a
@@ -190,11 +190,11 @@ typeError =
                 ("incorrect arg count (" <> pretty got <> ") in pattern" <+> pretty pat <> ". Expected" <+> pretty expected)
                 (mkNotes [(getLoc pat, M.This "")])
                 []
-        NotAFunction ty ->
+        NotAFunction loc ty ->
             Err
                 Nothing
                 (pretty ty <+> "is not a function type")
-                (mkNotes [(getLoc ty, M.This "type arising from")])
+                (mkNotes [(loc, M.This "arising from function application")])
                 []
         SelfReferential ty ->
             Err

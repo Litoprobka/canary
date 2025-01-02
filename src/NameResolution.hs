@@ -112,10 +112,10 @@ type EnvEffs es = (State Scope :> es, NameGen :> es, Diagnose :> es)
 
 -- | looks up a name in the current scope
 resolve :: EnvEffs es => SimpleName -> Eff es Name
-resolve name@(Located _ name_) = do
+resolve name@(Located loc name_) = do
     scope <- get @Scope
     case scope.table & Map.lookup name_ of
-        Just id' -> pure id'
+        Just (Located _ id') -> pure $ Located loc id'
         Nothing -> do
             error (UnboundVar name)
             -- this gives a unique id to every occurance of the same unbound name

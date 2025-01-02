@@ -33,7 +33,7 @@ map f = match
 Right away, you may notice some differences. Compared to Haskell,
 - type signatures use `:` instead of `::`.
 - type variables are denoted with a quotation mark. This way, type names don't have to be uppercase, and value-level identifiers may be used at the type level with no ambiguity (the plan is to have dependent type-esque facilities at compile time, if not outright dependent types).
-- functions may not multiple bodies. Instead, there's a `match` expression that behaves the same as `\cases` in Haskell.
+- functions may not have multiple bodies. Instead, there's a `match` expression that behaves the same as `\cases` in Haskell.
 - types have their own namespaces, and constructors have to be qualified by default
 
 ### Type system
@@ -121,7 +121,7 @@ There's a subtle quirk that makes this style possible - whenever a local binding
 plus3 = (_ + 3)
 ```
 
-In expression context, wildcards are desugared to a lambda. The scope is determined by parenthesis / brackets / braces. Multiple wildcards are desugared to multiple lambda parameters.
+In expression context, wildcards are desugared to a lambda. The scope is determined by parentheses / brackets / braces. Multiple wildcards are desugared to multiple lambda parameters.
 
 ```haskell
 expr x = (_ + 8 * _ |> (f _ x))
@@ -138,4 +138,67 @@ List and record expressions also act as scope delimiters
 someList = [_, 1, 2, _, _, 3]
 
 someRecord = {x = 0, y = _}
+```
+
+### User-defined operators
+
+Just like Haskell, *language* features user-defined operators
+
+```haskell
+infix %
+(%) : Int -> Int -> Int
+(%) = mod
+```
+
+Instead of a numeric precedence, you may specify a relation between two operators
+
+```haskell
+infix == equals !=
+infix !=
+infix left && below ==
+infix left || below ==
+infix left + above ==
+infix left - equals +
+infix left * above +
+```
+
+Relations are transitive, so the declarations above have the same meaning as
+
+```haskell
+infix ==, != above &&, || below +, -, *
+infix left && below ==, !=, +, -, *
+infix left || below ==, !=, +, -, *
+infix left +, - above ==, !=, &&, || below *
+infix left * above +, -, ==, !=, &&, ||
+```
+
+Note how there is no relation between `&&` and `||` specified - that means, whenever these two operators are used together, we must disambiguate the usage with parentheses
+
+```haskell
+someCondition n = (n > 5 && n < 10) || n == 42
+```
+
+If we introduce a cyclic relation - say, we add `infix & above + below ==` to the above - the cyclic part of the dependency graph becomes ambiguous and requires parentheses
+
+```haskell
+infix ==, != above &&, || below *
+infix left && below ==, !=, +, -, *
+infix left || below ==, !=, +, - *
+infix left +, - above &&, || below *
+infix left * above +, -, ==, !=, &&, ||
+infix &
+```
+
+#### Chainfix
+
+Another feature compared to Haskell is the `chain` fixity. Multiple chain operator applications in a row desugar to a single application to a list
+
+```haskell
+infix chain ==
+
+(==) : Eq a => a -> NonEmpty a -> Bool
+
+test = 1 == 1 == 1 == 2
+-- desugars to
+test2 = (==) 1 [1, 1, 2]
 ```

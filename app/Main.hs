@@ -28,11 +28,10 @@ main = do
         decls <- parseModule (fileName, input)
         prettyAST decls
         (scope, builtins, env) <- mkDefaults
-        (bindings, evalBuiltins, constrs) <- runNameResolution scope do
+        (bindings, evalBuiltins) <- runNameResolution scope do
             bindings <- resolveNames decls
             evalBuiltins <- traverse resolve InterpreterBuiltins{true = "True", cons = "Cons", nil = "Nil"}
-            let constrs = HashMap.empty
-            pure (bindings, evalBuiltins, constrs)
+            pure (bindings, evalBuiltins)
 
         fixityResolvedBindings <- resolveFixity testGraph bindings
         putTextLn "resolved names:"
@@ -41,10 +40,19 @@ main = do
         putTextLn "typechecking:"
         types <- typecheck env builtins fixityResolvedBindings
         liftIO . putDoc $ (<> line) $ vsep $ pretty . uncurry (D.Signature Blank) <$> HashMap.toList types
-        case fixityResolvedBindings of
-            (D.Value _ (E.ValueBinding _ body) _) : _ ->
-                liftIO . putDoc $ (<> line) $ pretty $ eval evalBuiltins constrs HashMap.empty body
-            _ -> putTextLn "Not a value"
+        -- the interpreter doesn't support multiple bindings yet, so we evaly the first encountered binding with no env
+        sequence_ $ flip firstJust fixityResolvedBindings \case
+            D.Value _ (E.ValueBinding _ body) _ ->
+                Just $
+                    liftIO . putDoc $
+                        (<> line) $
+                            pretty $
+                                eval evalBuiltins HashMap.empty HashMap.empty body
+            _ -> Nothing
+
+firstJust :: (t -> Maybe a) -> [t] -> Maybe a
+firstJust _ [] = Nothing
+firstJust f (x : xs) = f x <|> firstJust f xs
 
 prettyAST :: (Traversable t, Pretty a, MonadIO m) => t a -> m ()
 prettyAST = liftIO . traverse_ (putDoc . (<> line) . pretty)

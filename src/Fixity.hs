@@ -44,7 +44,7 @@ data OpError
     | MissingOperator Op
     | SelfRelation Op
 
-data OpWarning = PriorityCycle Op Op
+data OpWarning = PriorityCycle Loc Op Op
 
 opError :: Diagnose :> es => OpError -> Eff es a
 opError =
@@ -52,46 +52,51 @@ opError =
         IncompatibleFixity prev next ->
             Err
                 Nothing
-                ("incompatible fixity of" <+> pretty prev <+> "and" <+> pretty next)
+                ("incompatible fixity of" <+> mbPretty prev <+> "and" <+> mbPretty next)
                 (mkNotes [(getLocMb next, This "next operator"), (getLocMb prev, This "previous operator")])
                 []
         UndefinedOrdering prev next ->
             Err
                 Nothing
-                ("undefined ordering of" <+> pretty prev <+> "and" <+> pretty next)
+                ("undefined ordering of" <+> mbPretty prev <+> "and" <+> mbPretty next)
                 (mkNotes [(getLocMb next, This "next operator"), (getLocMb prev, This "previous operator")])
                 []
         AmbiguousOrdering prev next ->
             Err
                 Nothing
                 -- TODO: this error is very unclear
-                ("ambiguous ordering of" <+> pretty prev <+> "and" <+> pretty next <+> "- their priority relations are cyclic")
+                ("ambiguous ordering of" <+> mbPretty prev <+> "and" <+> mbPretty next <+> "- their priority relations are cyclic")
                 (mkNotes [(getLocMb next, This "next operator"), (getLocMb prev, This "previous operator")])
                 []
         MissingOperator op ->
             Err
                 Nothing
-                ("missing operator" <+> pretty op)
+                ("missing operator" <+> mbPretty op)
                 (mkNotes [(getLocMb op, This "is lacking a fixity declaration")])
                 []
         SelfRelation op ->
             Err
                 Nothing
-                ("self-reference in fixity declaration" <+> pretty op)
+                ("self-reference in fixity declaration" <+> mbPretty op)
                 (mkNotes [(getLocMb op, This "is referenced in its own fixity declaration")])
                 []
   where
     getLocMb = maybe Blank getLoc
+    mbPretty Nothing = "function application"
+    mbPretty (Just op) = pretty op
 
 opWarning :: Diagnose :> es => OpWarning -> Eff es ()
 opWarning =
     nonFatal . \case
-        PriorityCycle op op2 ->
-            Err
+        PriorityCycle loc op op2 ->
+            Warn
                 Nothing
-                ("priority cycle between" <+> pretty op <+> "and" <+> pretty op2)
-                (mkNotes [(maybe Blank getLoc op, This "occured at this declaration")])
+                ("priority cycle between" <+> mbPretty op <+> "and" <+> mbPretty op2)
+                (mkNotes [(loc, This "occured at this declaration")])
                 []
+  where
+    mbPretty Nothing = "function application"
+    mbPretty (Just op) = pretty op
 
 lookup' :: (Diagnose :> es, Hashable k, Pretty k) => k -> HashMap k v -> Eff es v
 lookup' key hmap = case HashMap.lookup key hmap of
@@ -128,17 +133,21 @@ collectOperators :: Diagnose :> es => PriorityGraph -> [Declaration 'NameRes] ->
 collectOperators initGraph = execState @PG initGraph . traverse_ go
   where
     go = \case
-        (D.Fixity _ fixity op rels) -> do
-            traverse_ (addRelation fixity op GT) rels.above
-            traverse_ (addRelation fixity op LT) rels.below
-            traverse_ (addRelation fixity op EQ) rels.equal
+        (D.Fixity loc fixity op rels) -> do
+            -- all operators implicitly have a lower precedence than function application, unless stated otherwise
+            let below
+                    | Nothing `notElem` rels.above = Nothing : map Just rels.below
+                    | otherwise = map Just rels.below
+
+            traverse_ (addRelation loc fixity op GT) rels.above
+            traverse_ (addRelation loc fixity op LT) below
+            traverse_ (addRelation loc fixity op EQ . Just) rels.equal
         _nonFixity -> pass
 
-    addRelation _ op_ _ op2_
-        | op_ == op2_ = opError $ SelfRelation $ Just op_
-    addRelation fixity op_ rel op2_ = do
+    addRelation _ _ op_ _ op2
+        | Just op_ == op2 = opError $ SelfRelation $ Just op_
+    addRelation loc fixity op_ rel op2 = do
         let op = Just op_
-        let op2 = Just op2_
         opMap <- gets @PG (.opMap)
         lhsEqClass <- case HashMap.lookup op opMap of
             Nothing -> newEqClass op fixity
@@ -146,28 +155,30 @@ collectOperators initGraph = execState @PG initGraph . traverse_ go
                 modify @PG \pg -> pg{opMap = HashMap.insert op (fixity, eqClass) pg.opMap}
                 pure eqClass
         rhsEqClass <- maybe (newEqClass op2 Infix) (pure . snd) (HashMap.lookup op2 opMap)
+        let lhs = (op, lhsEqClass)
+            rhs = (op2, rhsEqClass)
         modifyM case rel of
-            GT -> addHigherThanRel (op, lhsEqClass) (op2, rhsEqClass)
-            LT -> addHigherThanRel (op2, rhsEqClass) (op, lhsEqClass)
-            EQ -> mergeClasses (op, lhsEqClass) (op2, rhsEqClass)
+            GT -> addHigherThanRel loc lhs rhs
+            LT -> addHigherThanRel loc rhs lhs
+            EQ -> mergeClasses loc lhs rhs
 
     newEqClass op fixity = do
         eqClass <- gets @PG (.nextClass)
         modify \pg ->
             pg
                 { nextClass = inc pg.nextClass
-                , opMap = HashMap.insert op (fixity, pg.nextClass) pg.opMap
-                , graph = HashMap.insert pg.nextClass HashSet.empty pg.graph
+                , opMap = HashMap.insert op (fixity, eqClass) pg.opMap
+                , graph = HashMap.insert eqClass HashSet.empty pg.graph
                 }
         pure eqClass
     inc (EqClass n) = EqClass $ succ n
 
-    mergeClasses (op, lhs) (op2, rhs) PriorityGraph{opMap, graph, nextClass} = do
+    mergeClasses loc (op, lhs) (op2, rhs) PriorityGraph{opMap, graph, nextClass} = do
         lhsHigherThan <- lookup' lhs graph
         rhsHigherThan <- lookup' rhs graph
         let cycle = HashSet.member lhs rhsHigherThan || HashSet.member rhs lhsHigherThan
         when cycle do
-            opWarning $ PriorityCycle op op2
+            opWarning $ PriorityCycle loc op op2
 
         let replaceOldClass hset
                 | HashSet.member lhs hset = HashSet.insert rhs $ HashSet.delete lhs hset
@@ -178,16 +189,16 @@ collectOperators initGraph = execState @PG initGraph . traverse_ go
             newGraph = fmap replaceOldClass graph
         pure PriorityGraph{opMap = newOpMap, graph = newGraph, nextClass}
 
-    addHigherThanRel (op, higherClass) (op2, lowerClass) pg = do
+    addHigherThanRel loc (higherOp, higherClass) (lowerOp, lowerClass) pg = do
         lowerClassHigherThan <- lookup' lowerClass pg.graph
         when (HashSet.member higherClass lowerClassHigherThan) do
-            opWarning $ PriorityCycle op op2
+            opWarning $ PriorityCycle loc higherOp lowerOp
 
         let addTransitiveRels hset
                 | HashSet.member higherClass hset = HashSet.insert lowerClass hset
                 | otherwise = hset
 
-        let graph = fmap addTransitiveRels pg.graph
+        let graph = addTransitiveRels <$> HashMap.adjust (HashSet.insert lowerClass) higherClass pg.graph
         pure pg{graph}
 
 resolveFixity :: Diagnose :> es => PriorityGraph -> [Declaration 'NameRes] -> Eff es [Declaration 'Fixity]

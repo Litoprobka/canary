@@ -53,7 +53,7 @@ data Fixity = InfixL | InfixR | InfixChain | Infix deriving (Show, Eq)
 
 type PriorityRelation p = PriorityRelation' (NameAt p)
 data PriorityRelation' a = PriorityRelation
-    { above :: [a]
+    { above :: [Maybe a]
     , below :: [a]
     , equal :: [a]
     }
