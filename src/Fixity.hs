@@ -10,7 +10,7 @@ import Control.Monad (foldM)
 import Data.HashMap.Strict qualified as HashMap
 import Data.HashSet qualified as HashSet
 import Data.List.NonEmpty qualified as NE
-import Diagnostic (Diagnose, dummy, fatal)
+import Diagnostic (Diagnose, dummy, fatal, nonFatal)
 import Effectful (Eff, (:>))
 import Effectful.Reader.Static (Reader, asks, runReader)
 import Effectful.State.Static.Local (execState, gets, modify, modifyM)
@@ -40,9 +40,11 @@ type Ctx es = (Reader PriorityGraph :> es, Diagnose :> es)
 data OpError
     = IncompatibleFixity Op Op
     | UndefinedOrdering Op Op
+    | AmbiguousOrdering Op Op
     | MissingOperator Op
     | SelfRelation Op
-    | PriorityCycle Op Op
+
+data OpWarning = PriorityCycle Op Op
 
 opError :: Diagnose :> es => OpError -> Eff es a
 opError =
@@ -59,6 +61,13 @@ opError =
                 ("undefined ordering of" <+> pretty prev <+> "and" <+> pretty next)
                 (mkNotes [(getLocMb next, This "next operator"), (getLocMb prev, This "previous operator")])
                 []
+        AmbiguousOrdering prev next ->
+            Err
+                Nothing
+                -- TODO: this error is very unclear
+                ("ambiguous ordering of" <+> pretty prev <+> "and" <+> pretty next <+> "- their priority relations are cyclic")
+                (mkNotes [(getLocMb next, This "next operator"), (getLocMb prev, This "previous operator")])
+                []
         MissingOperator op ->
             Err
                 Nothing
@@ -71,14 +80,18 @@ opError =
                 ("self-reference in fixity declaration" <+> pretty op)
                 (mkNotes [(getLocMb op, This "is referenced in its own fixity declaration")])
                 []
+  where
+    getLocMb = maybe Blank getLoc
+
+opWarning :: Diagnose :> es => OpWarning -> Eff es ()
+opWarning =
+    nonFatal . \case
         PriorityCycle op op2 ->
             Err
                 Nothing
                 ("priority cycle between" <+> pretty op <+> "and" <+> pretty op2)
-                (mkNotes [(getLocMb op, This "occured at this declaration")])
+                (mkNotes [(maybe Blank getLoc op, This "occured at this declaration")])
                 []
-  where
-    getLocMb = maybe Blank getLoc
 
 lookup' :: (Diagnose :> es, Hashable k, Pretty k) => k -> HashMap k v -> Eff es v
 lookup' key hmap = case HashMap.lookup key hmap of
@@ -102,9 +115,13 @@ priority prev next = do
             (InfixL, InfixL) -> pure Left'
             (InfixR, InfixR) -> pure Right'
             _ -> opError $ IncompatibleFixity prev next
-        | HashSet.member nextEq prevHigherThan -> pure Left'
-        | HashSet.member prevEq nextHigherThan -> pure Right'
-        | otherwise -> opError $ UndefinedOrdering prev next
+        -- we don't error out on priority cycles when constructing the priority graph
+        -- instead, relations where A > B and B > A are considered borked and are treated as if A and B are not comparable
+        | otherwise -> case (HashSet.member nextEq prevHigherThan, HashSet.member prevEq nextHigherThan) of
+            (True, False) -> pure Left'
+            (False, True) -> pure Right'
+            (True, True) -> opError $ AmbiguousOrdering prev next
+            (False, False) -> opError $ UndefinedOrdering prev next
 
 -- traverse all fixity declarations and construct a new priority graph
 collectOperators :: Diagnose :> es => PriorityGraph -> [Declaration 'NameRes] -> Eff es PriorityGraph
@@ -150,7 +167,7 @@ collectOperators initGraph = execState @PG initGraph . traverse_ go
         rhsHigherThan <- lookup' rhs graph
         let cycle = HashSet.member lhs rhsHigherThan || HashSet.member rhs lhsHigherThan
         when cycle do
-            opError $ PriorityCycle op op2
+            opWarning $ PriorityCycle op op2
 
         let replaceOldClass hset
                 | HashSet.member lhs hset = HashSet.insert rhs $ HashSet.delete lhs hset
@@ -164,7 +181,7 @@ collectOperators initGraph = execState @PG initGraph . traverse_ go
     addHigherThanRel (op, higherClass) (op2, lowerClass) pg = do
         lowerClassHigherThan <- lookup' lowerClass pg.graph
         when (HashSet.member higherClass lowerClassHigherThan) do
-            opError $ PriorityCycle op op2
+            opWarning $ PriorityCycle op op2
 
         let addTransitiveRels hset
                 | HashSet.member higherClass hset = HashSet.insert lowerClass hset

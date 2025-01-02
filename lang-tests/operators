@@ -14,7 +14,4 @@ infix right <| below <<
 infix left >> above |>, <|
 infix right << above |>, <|
 
-id : forall 'a. 'a -> 'a
-id x = x
-
 thrice = id >> id >> id
