@@ -222,6 +222,7 @@ expression' termParser = do
     keywordBased =
         [ -- note that we don't use `sameScopeExpression` here, since interleaving explicit and implicit lambdas, i.e. `(\f -> f _)`, is way too confusing
           lambdaLike E.Lambda lambda pattern' "->" <*> expression
+        , letRec
         , let'
         , case'
         , match'
@@ -233,6 +234,7 @@ expression' termParser = do
         , parens $ withWildcards newScopeExpr
         ]
       where
+        letRec = withLoc $ letRecBlock (try $ keyword "let" *> keyword "rec") (flip3 E.LetRec) binding expression
         let' =
             withLoc $
                 letBlock "let" (flip3 E.Let) binding expression -- wildcards do not propagate through let bindings. Use an explicit lambda instead!

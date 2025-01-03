@@ -41,7 +41,6 @@ dependencies:
 - prettyprinter >=1.7 && <2
 - prettyprinter-ansi-terminal
 - template-haskell
-- uniplate
 
 ghc-options:
 - -Wall

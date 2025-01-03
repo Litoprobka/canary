@@ -39,6 +39,7 @@ module Lexer (
     literal,
     located,
     operatorInParens,
+    letRecBlock,
 ) where
 
 import Common (Literal, Literal_ (..), Loc (..), Located (..), SimpleName, SimpleName_ (..), locFromSourcePos)
@@ -113,6 +114,7 @@ keywords =
         , "case"
         , "where"
         , "let"
+        , "rec"
         , "match"
         , "of"
         , "forall"
@@ -184,6 +186,17 @@ letBlock kw f declaration expression = do
     local (const blockIndent) do
         newline
         f dec <$> expression
+
+letRecBlock :: ParserM m => m () -> (NonEmpty a -> b -> c) -> m a -> m b -> m c
+letRecBlock kw f declaration expression = do
+    outerIndent <- L.indentLevel
+    kw
+    innerIndent <- L.indentLevel
+    decls <- local (const innerIndent) do
+        declaration `NE.sepBy1` newline
+    local (const outerIndent) do
+        newline
+        f decls <$> expression
 
 topLevelBlock :: Parser a -> Parser [a]
 topLevelBlock p = optional newlines *> L.nonIndented spaceOrLineWrap (p `sepEndBy` newline <* eof)

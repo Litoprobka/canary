@@ -1,0 +1,5 @@
+test = let rec
+         a = b
+         b = c
+         c = 123
+       b

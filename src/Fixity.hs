@@ -192,6 +192,7 @@ parse = \case
     E.WildcardLambda loc args body -> E.WildcardLambda loc args <$> parse body
     E.Application lhs rhs -> E.Application <$> parse lhs <*> parse rhs
     E.Let loc binding expr -> E.Let loc <$> parseBinding binding <*> parse expr
+    E.LetRec loc bindings expr -> E.LetRec loc <$> traverse parseBinding bindings <*> parse expr
     E.Case loc arg cases -> E.Case loc <$> parse arg <*> traverse (bitraverse (pure . cast uniplateCast) parse) cases
     -- \| Haskell's \cases
     E.Match loc cases -> E.Match loc <$> traverse (bitraverse (pure . map (cast uniplateCast)) parse) cases

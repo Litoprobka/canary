@@ -70,7 +70,6 @@ library
     , prettyprinter-ansi-terminal
     , relude >=1.2.1.0 && <2
     , template-haskell
-    , uniplate
   default-language: GHC2021
 
 executable lang-exe
@@ -102,7 +101,6 @@ executable lang-exe
     , prettyprinter-ansi-terminal
     , relude >=1.2.1.0 && <2
     , template-haskell
-    , uniplate
   default-language: GHC2021
 
 test-suite lang-test
@@ -139,6 +137,5 @@ test-suite lang-test
     , prettyprinter-ansi-terminal
     , relude >=1.2.1.0 && <2
     , template-haskell
-    , uniplate
   default-language: GHC2021
   build-tool-depends: hspec-discover:hspec-discover == 2.*

@@ -77,6 +77,7 @@ eval builtins constrs = go
             E.ValueBinding pat bindingBody -> go (forceMatch builtins env pat $ go env bindingBody) body
             E.FunctionBinding name args bindingBody ->
                 go (HashMap.insert name (go env $ foldr (E.Lambda $ getLoc binding) bindingBody args) env) body
+        E.LetRec _ _bindings _body -> error "letrecs are not supported yet. tough luck"
         E.Case _ arg matches ->
             let val = go env arg
              in fromMaybe (error "pattern mismatch") $

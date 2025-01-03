@@ -24,6 +24,7 @@ import Relude hiding (State, error, evalState, get, modify, put, runState)
 import Common hiding (Scope)
 import Data.HashMap.Strict qualified as Map
 import Data.List (partition)
+import Data.List.NonEmpty qualified as NE
 import Data.Traversable (for)
 import Diagnostic
 import Effectful (Eff, Effect, (:>))
@@ -255,6 +256,11 @@ resolveExpr e = scoped case e of
         binding' <- declareBinding binding
         expr' <- resolveExpr expr
         pure $ E.Let loc binding' expr'
+    E.LetRec loc bindings expr -> do
+        collectNames $ map (\b -> D.Value loc b []) $ NE.toList bindings
+        bindings' <- traverse (resolveBinding []) bindings
+        expr' <- resolveExpr expr
+        pure $ E.LetRec loc bindings' expr'
     E.Case loc arg matches ->
         E.Case loc <$> resolveExpr arg <*> for matches \(pat, expr) -> scoped do
             pat' <- declarePat pat

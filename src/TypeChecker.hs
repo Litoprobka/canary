@@ -27,6 +27,7 @@ import Common
 import Data.Foldable1 (foldr1)
 import Data.HashMap.Strict qualified as HashMap
 import Data.HashSet qualified as HashSet
+import Data.List.NonEmpty qualified as NE
 import Data.Traversable (for)
 import Diagnostic (Diagnose)
 import Effectful
@@ -282,6 +283,9 @@ infer =
         E.WildcardLambda loc args body -> infer $ foldr (E.Lambda loc . P.Var) body args
         E.Let _ binding body -> do
             declareAll =<< inferBinding binding
+            infer body
+        E.LetRec loc bindings body -> do
+            declareAll =<< (inferDecls . map (\b -> D.Value loc b []) . NE.toList) bindings
             infer body
         E.Annotation expr ty -> cast uniplateCast ty <$ check expr (cast uniplateCast ty)
         E.If loc cond true false -> do
