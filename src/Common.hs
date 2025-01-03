@@ -180,7 +180,7 @@ class HasLoc a where
 zipLoc :: Loc -> Loc -> Loc
 zipLoc loc Blank = loc
 zipLoc Blank loc = loc
-zipLoc (Loc lhs) (Loc rhs) = Loc $ lhs{end = rhs.end}
+zipLoc (Loc lhs) (Loc rhs) = Loc $ lhs{begin = min lhs.begin rhs.begin, end = max rhs.begin rhs.end}
 
 zipLocOf :: (HasLoc a, HasLoc b) => a -> b -> Loc
 zipLocOf lhs rhs = zipLoc (getLoc lhs) (getLoc rhs)

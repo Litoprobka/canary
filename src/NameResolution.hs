@@ -66,7 +66,7 @@ warn =
             Warn
                 Nothing
                 ("The binding" <+> pretty name <+> "shadows an earlier binding")
-                (mkNotes [(getLoc name, M.This ""), (loc, M.Where "previously bound at")])
+                (mkNotes [(getLoc name, M.This "new binding"), (loc, M.Where "previously bound at")])
                 []
         UnusedVar name ->
             Warn
@@ -196,18 +196,33 @@ resolveBinding locals =
             collectNames locals
             body' <- resolveExpr body
             pure $ E.ValueBinding pat' body'
-  where
-    -- this could have been a Traversable instance
-    resolvePat :: EnvEffs es => Pattern 'Parse -> Eff es (Pattern 'NameRes)
-    resolvePat = \case
-        P.Constructor con pats -> P.Constructor <$> resolve con <*> traverse resolvePat pats
-        P.Annotation pat ty -> P.Annotation <$> resolvePat pat <*> resolveType ty
-        P.Record loc row -> P.Record loc <$> traverse resolvePat row
-        P.Variant openName arg -> P.Variant openName <$> resolvePat arg
-        P.Var name -> P.Var <$> resolve name
-        P.List loc pats -> P.List loc <$> traverse resolvePat pats
-        P.Wildcard loc name -> pure $ P.Wildcard loc name
-        P.Literal lit -> pure $ P.Literal lit
+
+-- resolves / declares names in a binding. The intended use case is let bindings
+declareBinding :: (EnvEffs es, Declare :> es) => Binding 'Parse -> Eff es (Binding 'NameRes)
+declareBinding = \case
+    E.FunctionBinding name args body -> do
+        name' <- declare name
+        scoped do
+            args' <- traverse declarePat args
+            body' <- resolveExpr body
+            pure $ E.FunctionBinding name' args' body'
+    E.ValueBinding pat body -> do
+        pat' <- declarePat pat
+        body' <- resolveExpr body
+        pure $ E.ValueBinding pat' body'
+
+-- this could have been a Traversable instance
+-- resolves names in a pattern, assuming that all new bindings have already been declared
+resolvePat :: EnvEffs es => Pattern 'Parse -> Eff es (Pattern 'NameRes)
+resolvePat = \case
+    P.Constructor con pats -> P.Constructor <$> resolve con <*> traverse resolvePat pats
+    P.Annotation pat ty -> P.Annotation <$> resolvePat pat <*> resolveType ty
+    P.Record loc row -> P.Record loc <$> traverse resolvePat row
+    P.Variant openName arg -> P.Variant openName <$> resolvePat arg
+    P.Var name -> P.Var <$> resolve name
+    P.List loc pats -> P.List loc <$> traverse resolvePat pats
+    P.Wildcard loc name -> pure $ P.Wildcard loc name
+    P.Literal lit -> pure $ P.Literal lit
 
 -- | resolves names in a pattern. Adds all new names to the current scope
 declarePat :: (EnvEffs es, Declare :> es) => Pattern 'Parse -> Eff es (Pattern 'NameRes)
@@ -237,12 +252,7 @@ resolveExpr e = scoped case e of
         pure $ E.WildcardLambda loc args' body'
     E.Application f arg -> E.Application <$> resolveExpr f <*> resolveExpr arg
     E.Let loc binding expr -> do
-        -- resolveBinding is intended for top-level bindings and where clauses,
-        -- so we have to declare the new vars with `collectNames`
-        --
-        -- yes, this is hacky
-        collectNames [D.Value loc binding []] -- should we use `loc` from `binding` here?
-        binding' <- resolveBinding [] binding
+        binding' <- declareBinding binding
         expr' <- resolveExpr expr
         pure $ E.Let loc binding' expr'
     E.Case loc arg matches ->
@@ -280,7 +290,7 @@ resolveStmt = \case
         body' <- resolveExpr body
         pat' <- declarePat pat
         pure $ E.With loc pat' body'
-    E.DoLet loc binding -> E.DoLet loc <$> resolveBinding [] binding
+    E.DoLet loc binding -> E.DoLet loc <$> declareBinding binding
     E.Action expr -> E.Action <$> resolveExpr expr
 
 -- | resolves names in a type. Doesn't change the current scope

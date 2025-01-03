@@ -148,7 +148,7 @@ typeError =
             Err
                 Nothing
                 ("cannot unify" <+> pretty lhs <+> "with" <+> pretty rhs)
-                (mkNotes [(getLoc lhs, M.This "lhs"), (getLoc rhs, M.This "rhs")])
+                (mkNotes [(getLoc lhs, M.This $ pretty lhs <+> "originates from"), (getLoc rhs, M.This $ pretty rhs <+> "originates from")])
                 []
         NotASubtype lhs rhs mbField ->
             Err

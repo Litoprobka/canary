@@ -21,38 +21,46 @@ import TypeChecker (typecheck)
 main :: IO ()
 main = do
     args <- liftIO getArgs
-    (fileName, input) <- case args of
+    let (debug, otherArgs) = case args of
+            ("debug" : rest) -> (True, rest)
+            other -> (False, other)
+    (fileName, input) <- case otherArgs of
         [] -> ("cli",) <$> getLine
         (path : _) -> (path,) . decodeUtf8 <$> readFileBS path
-    void . runEff . runDiagnose (fileName, input) $ runNameGen do
+    eval' <- runEff . runDiagnose (fileName, input) $ runNameGen do
         decls <- parseModule (fileName, input)
-        prettyAST decls
+        prettyAST debug decls
         (scope, builtins, env) <- mkDefaults
         (bindings, evalBuiltins) <- runNameResolution scope do
             bindings <- resolveNames decls
             evalBuiltins <- traverse resolve InterpreterBuiltins{true = "True", cons = "Cons", nil = "Nil"}
             pure (bindings, evalBuiltins)
 
-        fixityResolvedBindings <- resolveFixity testGraph bindings
-        putTextLn "resolved names:"
-        prettyAST fixityResolvedBindings
+        fixityResolvedBindings <- resolveFixity bindings
+        printDebug debug "resolved names:"
+        prettyAST debug fixityResolvedBindings
 
-        putTextLn "typechecking:"
+        printDebug debug "typechecking:"
         types <- typecheck env builtins fixityResolvedBindings
-        liftIO . putDoc $ (<> line) $ vsep $ pretty . uncurry (D.Signature Blank) <$> HashMap.toList types
+        when debug do
+            liftIO . putDoc $ (<> line) $ vsep $ pretty . uncurry (D.Signature Blank) <$> HashMap.toList types
         -- the interpreter doesn't support multiple bindings yet, so we evaly the first encountered binding with no env
-        sequence_ $ flip firstJust fixityResolvedBindings \case
+        pure $ sequence_ $ flip firstJust fixityResolvedBindings \case
             D.Value _ (E.ValueBinding _ body) _ ->
                 Just $
-                    liftIO . putDoc $
+                    putDoc $
                         (<> line) $
                             pretty $
                                 eval evalBuiltins HashMap.empty HashMap.empty body
             _ -> Nothing
+    sequence_ eval'
 
 firstJust :: (t -> Maybe a) -> [t] -> Maybe a
 firstJust _ [] = Nothing
 firstJust f (x : xs) = f x <|> firstJust f xs
 
-prettyAST :: (Traversable t, Pretty a, MonadIO m) => t a -> m ()
-prettyAST = liftIO . traverse_ (putDoc . (<> line) . pretty)
+printDebug :: MonadIO m => Bool -> Text -> m ()
+printDebug debug = when debug . putTextLn
+
+prettyAST :: (Traversable t, Pretty a, MonadIO m) => Bool -> t a -> m ()
+prettyAST debug = when debug . liftIO . traverse_ (putDoc . (<> line) . pretty)

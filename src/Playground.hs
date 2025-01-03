@@ -24,7 +24,7 @@ import Effectful.Error.Static (Error)
 import Effectful.Reader.Static (Reader, runReader)
 import Effectful.State.Static.Local (State, runState)
 import Error.Diagnose (Diagnostic)
-import Fixity (resolveFixity, testGraph)
+import Fixity (resolveFixity)
 import Fixity qualified (parse)
 import LensyUniplate (UniplateCast (uniplateCast), cast)
 import NameGen (NameGen, freshName, runNameGen)
@@ -120,7 +120,7 @@ parseInfer input = void . runEff . runDiagnose ("cli", input) $ runNameGen
         Left err -> putStrLn $ errorBundlePretty err
         Right decls -> do
             (scope, builtins, defaultEnv) <- mkDefaults
-            resolvedDecls <- resolveFixity testGraph =<< runNameResolution scope (resolveNames decls)
+            resolvedDecls <- resolveFixity =<< runNameResolution scope (resolveNames decls)
             types <- typecheck defaultEnv builtins resolvedDecls
             liftIO $ for_ types \ty -> putDoc $ pretty ty <> line
 
@@ -136,8 +136,10 @@ testCheck toResolve action = fst $ runPureEff $ runNameGen $ runDiagnose' ("<non
     resolved <- runNameResolution scope toResolve
     run (Right <$> env) builtins $ action resolved
 
+{-
 dummyFixity :: Diagnose :> es => Expression 'NameRes -> Eff es (Expression 'Fixity)
 dummyFixity expr = runReader testGraph $ Fixity.parse expr
+-}
 
 -- convenient definitions for testing
 

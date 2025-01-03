@@ -1,0 +1,8 @@
+infix ++ above +
+infix +++ above ++
+infix !!! above +++ below +
+
+(++) x = x
+(+) = (++)
+(+++) = (+)
+(!!!) = (+)

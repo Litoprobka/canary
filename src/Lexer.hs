@@ -288,7 +288,7 @@ operator :: ParserM m => Text -> m Loc
 operator sym = label "operator" $ lexeme $ withLoc' const $ string sym *> notFollowedBy (satisfy isOperatorChar)
 
 someOperator :: ParserM m => m SimpleName
-someOperator = lexeme $ mkName do
+someOperator = lexeme $ mkName $ try do
     op <- takeWhile1P (Just "operator") isOperatorChar
     guard (not $ op `Set.member` specialSymbols)
     pure op
