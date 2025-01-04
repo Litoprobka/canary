@@ -194,13 +194,10 @@ parse = \case
     E.Let loc binding expr -> E.Let loc <$> parseBinding binding <*> parse expr
     E.LetRec loc bindings expr -> E.LetRec loc <$> traverse parseBinding bindings <*> parse expr
     E.Case loc arg cases -> E.Case loc <$> parse arg <*> traverse (bitraverse (pure . cast uniplateCast) parse) cases
-    -- \| Haskell's \cases
     E.Match loc cases -> E.Match loc <$> traverse (bitraverse (pure . map (cast uniplateCast)) parse) cases
     E.If loc cond true false -> E.If loc <$> parse cond <*> parse true <*> parse false
-    -- \| value : Type
     E.Annotation e ty -> E.Annotation <$> parse e <*> pure (cast uniplateCast ty)
     E.Name name -> pure $ E.Name name
-    -- \| .field.otherField.thirdField
     E.RecordLens loc row -> pure $ E.RecordLens loc row
     E.Constructor name -> pure $ E.Constructor name
     E.Variant name -> pure $ E.Variant name
@@ -208,7 +205,6 @@ parse = \case
     E.List loc exprs -> E.List loc <$> traverse parse exprs
     E.Do loc stmts lastAction -> E.Do loc <$> traverse parseStmt stmts <*> parse lastAction
     E.Literal lit -> pure $ E.Literal lit
-    -- \| an unresolved expression with infix / prefix operators
     E.Infix _ pairs last' -> join $ go' <$> traverse (bitraverse parse pure) pairs <*> parse last'
   where
     go' :: Ctx es => [(Expression 'Fixity, Op)] -> Expression 'Fixity -> Eff es (Expression 'Fixity)
