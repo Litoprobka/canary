@@ -5,17 +5,7 @@
 
 module Parser (code, declaration, type', pattern', expression, parseModule) where
 
-import Relude hiding (many, some)
-
-import Lexer
-import Syntax
-import Syntax.Declaration qualified as D
-import Syntax.Expression qualified as E
-import Syntax.Pattern qualified as P
-import Syntax.Type qualified as T
-
-import Control.Monad.Combinators.Expr qualified as Expr
-import Control.Monad.Combinators.NonEmpty qualified as NE
+import LangPrelude
 
 import Common (
     Fixity (..),
@@ -28,12 +18,20 @@ import Common (
     locFromSourcePos,
     zipLocOf,
  )
+import Control.Monad.Combinators.Expr qualified as Expr
+import Control.Monad.Combinators.NonEmpty qualified as NE
 import Data.List.NonEmpty qualified as NE
 import Data.Sequence qualified as Seq
 import Diagnostic (Diagnose, fatal, reportsFromBundle)
-import Effectful (Eff, (:>))
+import Lexer
+import Relude.Monad (gets, modify)
+import Syntax
+import Syntax.Declaration qualified as D
+import Syntax.Expression qualified as E
+import Syntax.Pattern qualified as P
 import Syntax.Row
 import Syntax.Row qualified as Row
+import Syntax.Type qualified as T
 import Text.Megaparsec
 import Text.Megaparsec.Char (string)
 

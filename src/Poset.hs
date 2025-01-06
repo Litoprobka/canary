@@ -7,11 +7,9 @@ module Poset where
 import Data.HashMap.Strict qualified as HashMap
 import Data.HashSet qualified as HashSet
 import Data.Sequence qualified as Seq
-import Effectful (Eff, (:>))
 import Effectful.Error.Static (Error, throwError)
 import Effectful.Writer.Static.Local (Writer, tell)
-import Prettyprinter (Pretty)
-import Relude hiding (cycle)
+import LangPrelude hiding (cycle)
 import Relude.Extra (traverseToSnd)
 
 -- a partially ordered set implementation with an emphasis on equality

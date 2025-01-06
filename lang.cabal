@@ -29,6 +29,7 @@ library
       Fixity
       IL
       Interpreter
+      LangPrelude
       LensyUniplate
       Lexer
       NameGen

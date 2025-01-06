@@ -19,22 +19,18 @@ module NameResolution (
     Declare,
 ) where
 
-import Relude hiding (State, error, evalState, get, modify, put, runState)
-
 import Common hiding (Scope)
 import Data.HashMap.Strict qualified as Map
 import Data.List (partition)
 import Data.List.NonEmpty qualified as NE
 import Data.Traversable (for)
 import Diagnostic
-import Effectful (Eff, Effect, (:>))
 import Effectful.Dispatch.Dynamic (interpret)
 import Effectful.State.Static.Local (State, evalState, get, modify, put)
-import Effectful.TH (makeEffect)
 import Error.Diagnose (Report (..))
 import Error.Diagnose qualified as M
+import LangPrelude hiding (error)
 import NameGen
-import Prettyprinter (pretty, (<+>))
 import Syntax
 import Syntax.Declaration qualified as D
 import Syntax.Expression (DoStatement)

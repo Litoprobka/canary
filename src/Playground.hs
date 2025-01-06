@@ -12,20 +12,18 @@ module Playground where
 
 -- :load this module into a repl
 
-import Relude hiding (Reader, State, bool, runReader, runState)
-
 import Common hiding (Scope)
 import Data.Char (isUpperCase)
 import Data.HashMap.Strict qualified as HashMap
 import Data.HashSet qualified as HashSet
 import Diagnostic (Diagnose, runDiagnose, runDiagnose')
-import Effectful
 import Effectful.Error.Static (Error)
 import Effectful.Reader.Static (Reader, runReader)
 import Effectful.State.Static.Local (State, runState)
 import Error.Diagnose (Diagnostic)
 import Fixity (resolveFixity)
 import Fixity qualified (parse)
+import LangPrelude
 import LensyUniplate (UniplateCast (uniplateCast), cast)
 import NameGen (NameGen, freshName, runNameGen)
 import NameResolution (Scope (..), declare, resolveNames, resolveType, runDeclare, runNameResolution)

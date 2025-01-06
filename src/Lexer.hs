@@ -47,11 +47,12 @@ import Control.Monad.Combinators.NonEmpty qualified as NE
 import Data.Char (isAlphaNum, isSpace, isUpperCase)
 import Data.HashSet qualified as Set
 import Data.Text qualified as Text
-import Relude hiding (many, some)
+import LangPrelude
 import Text.Megaparsec hiding (Token, token)
 import Text.Megaparsec.Char hiding (newline, space)
 import Text.Megaparsec.Char qualified as C (newline, space1)
 import Text.Megaparsec.Char.Lexer qualified as L
+import Relude.Monad (ask, local)
 
 type Parser = ReaderT Pos (Parsec Void Text)
 type ParserM m = (MonadParsec Void Text m, MonadReader Pos m, MonadFail m)

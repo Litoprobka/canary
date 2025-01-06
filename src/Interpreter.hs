@@ -7,8 +7,8 @@ module Interpreter (InterpreterBuiltins (..), eval) where
 import Common (Literal_ (..), Located (..), Name, Pass (..), getLoc)
 import Data.HashMap.Lazy qualified as HashMap -- note that we use the lazy functions here
 import GHC.IsList qualified as IsList
-import Prettyprinter (Pretty, braces, comma, parens, pretty, punctuate, sep, (<+>))
-import Relude
+import Prettyprinter (braces, comma, parens, punctuate, sep)
+import LangPrelude
 import Syntax
 import Syntax.Expression qualified as E
 import Syntax.Pattern qualified as P

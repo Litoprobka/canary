@@ -37,7 +37,7 @@ module Common (
 import Error.Diagnose (Position (..))
 import Error.Diagnose qualified as M
 import Prettyprinter
-import Relude
+import LangPrelude
 import Text.Megaparsec (SourcePos (..), unPos)
 
 -- this file is a bit of a crutch. Perhaps it's better to move the definitions to Type or TypeChecker

@@ -9,7 +9,6 @@ import Control.Monad (foldM)
 import Data.HashMap.Strict qualified as HashMap
 import Data.List.NonEmpty qualified as NE
 import Diagnostic (Diagnose, dummy, fatal, nonFatal)
-import Effectful (Eff, (:>))
 import Effectful.Error.Static (Error, runErrorNoCallStack)
 import Effectful.Reader.Static (Reader, ask, runReader)
 import Effectful.State.Static.Local (State, execState, get, modify, modifyM, runState, state)
@@ -18,8 +17,8 @@ import Error.Diagnose (Marker (This), Report (..))
 import LensyUniplate
 import Poset (Poset, PosetError)
 import Poset qualified
-import Prettyprinter (Pretty, comma, hsep, pretty, punctuate, (<+>))
-import Relude hiding (Op, Reader, State, ask, asks, cycle, execState, get, gets, modify, runReader, runState, state)
+import Prettyprinter (comma, hsep, punctuate)
+import LangPrelude hiding (cycle)
 import Syntax
 import Syntax.Declaration qualified as D
 import Syntax.Expression (DoStatement)

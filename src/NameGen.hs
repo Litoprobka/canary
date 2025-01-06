@@ -5,10 +5,8 @@
 {-# LANGUAGE DeriveAnyClass #-}
 module NameGen (runNameGen, freshId, freshName, freshName_, NameGen) where
 
-import Relude hiding (evalState, get, modify)
+import LangPrelude
 import Common (Id (..), inc, Name, SimpleName, SimpleName_(..), Located (..), Name_ (..))
-import Effectful
-import Effectful.TH
 import Effectful.State.Static.Local (evalState, get, modify)
 import Effectful.Dispatch.Dynamic (reinterpret)
 

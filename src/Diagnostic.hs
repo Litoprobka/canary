@@ -16,9 +16,8 @@ import Effectful.Error.Static (runErrorNoCallStack, throwError)
 import Effectful.TH
 import Effectful.Writer.Static.Shared (runWriter, tell)
 import Error.Diagnose
-import Prettyprinter (Doc, pretty)
 import Prettyprinter.Render.Terminal (AnsiStyle)
-import Relude hiding (modify, runState)
+import LangPrelude
 import Text.Megaparsec qualified as MP
 
 -- I'm not sure why fourmolu decided to use 2-space idents for this file

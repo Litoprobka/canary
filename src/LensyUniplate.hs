@@ -16,7 +16,8 @@ module LensyUniplate (
     para,
 ) where
 
-import Relude
+import LangPrelude
+import Relude.Monad (State, modify, get)
 
 -- long story short, `uniplate` has a shitty interface and `lens` is too heavyweight
 
