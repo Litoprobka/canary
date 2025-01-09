@@ -178,6 +178,10 @@ relation :: (Ctx es, Pretty a, Hashable a) => a -> a -> Poset a -> Eff es PosetO
 relation lhs rhs poset = do
     lhsClass <- lookup' lhs poset.classes
     rhsClass <- lookup' rhs poset.classes
+    classRelation lhsClass rhsClass poset
+
+classRelation :: Ctx es => EqClass a -> EqClass a -> Poset a -> Eff es PosetOrdering
+classRelation lhsClass rhsClass poset = do
     lhsGreaterThan <- lookup' lhsClass poset.relations
     rhsGreaterThan <- lookup' rhsClass poset.relations
     pure case (HashSet.member rhsClass lhsGreaterThan, HashSet.member lhsClass rhsGreaterThan) of
@@ -187,7 +191,16 @@ relation lhs rhs poset = do
         (True, True) -> AmbiguousOrder
         (False, False) -> NoOrder
 
--- poset indexing errors should not ever happend unless you misuse keys from one poset for the other
+-- convert a poset to a list of equivalence classes, lowest to highest
+-- the order of uncomparable elements is not guaranteed
+ordered :: Poset a -> [[a]]
+ordered p@Poset{relations} = map (`items` p) $ sortBy cmp (HashMap.keys relations)
+  where
+    cmp l r = case runPureEff $ runErrorNoCallStack @PosetError $ classRelation l r p of
+        Right (DefinedOrder order) -> order
+        _ -> EQ
+
+-- poset indexing errors should not ever happen, unless you misuse keys from one poset for the other
 -- so throwing an internal error is good enough in most cases
 reportError :: Diagnose :> es => Eff (Error PosetError : es) a -> Eff es a
 reportError = runErrorNoCallStack @PosetError >=> either asDiagnoseError pure

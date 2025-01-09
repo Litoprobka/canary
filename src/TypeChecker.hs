@@ -372,7 +372,7 @@ inferBinding =
             withUniVar uni (subtype ty . unMono)
             pure $ HashMap.singleton name ty
 
--- \| collects all to-be-declared names in a pattern
+-- | collects all to-be-declared names in a pattern
 collectNames :: Pattern p -> [NameAt p]
 collectNames = \case
     P.Var name -> [name]

@@ -15,11 +15,13 @@ import Prettyprinter (comma, hsep, punctuate)
 import Syntax
 import Syntax.Declaration qualified as D
 import LensyUniplate (uniplateCast, cast)
+import Syntax.Expression qualified as E
+import Syntax.Pattern qualified as P
 
 -- once we've done name resolution, all sorts of useful information may be collected into tables
 -- this pass gets rid of the old [Declaration] shape of the AST and transforms it into something more structured
 
-newtype DeclId = DeclId Id
+newtype DeclId = DeclId Id deriving (Eq, Hashable)
 
 data Output = Output
     { fixityMap :: FixityMap
@@ -37,22 +39,13 @@ data Output = Output
 type Decl = Declaration 'DependencyRes
 type Op = Maybe Name
 type FixityMap = HashMap Op Fixity
-type DeclSet = Poset Decl
+type DeclSet = Poset DeclId
 type NameOrigins = HashMap Name DeclId
 type Declarations = HashMap DeclId Decl
-type Signatures = HashMap Name Type
+type Signatures = HashMap Name (Type' 'DependencyRes)
 
-danglingSigError :: Diagnose :> es => Type -> Eff es ()
-danglingSigError ty = nonFatal $
-    Err
-    Nothing
-    "Signature lacks an accompanying binding"
-    (mkNotes [(getLoc ty, This "this")])
-    []
-
-resolveDependencies :: [Declaration 'NameRes] -> Eff es Output
+resolveDependencies :: forall es. Diagnose :> es => [Declaration 'NameRes] -> Eff es Output
 resolveDependencies decls = do
-    --(declDeps, (operatorPriorities, (fixityMap, (nameOrigins, (declarations, signatures))))) 
     (((((signatures, declarations), nameOrigins), fixityMap), operatorPriorities), declDeps)
       <- runNameGen
         . runState @DeclSet Poset.empty
@@ -64,52 +57,57 @@ resolveDependencies decls = do
         $ traverse_ go decls
     let danglingSigs = HashMap.difference signatures $ HashMap.compose declarations nameOrigins
     for_ danglingSigs danglingSigError
-    pure Output{dependencyOrder = todo, ..}
+    pure Output{dependencyOrder = Poset.ordered declDeps, ..}
   where
-    go :: Declaration 'NameRes -> Eff es ()
+    -- go :: Declaration 'NameRes -> Eff es ()
     go = \case
         D.Fixity loc fixity op rels -> do
             modify @FixityMap $ HashMap.insert (Just op) fixity
             modifyM @(Poset Op) $ updatePrecedence loc op rels
         D.Value loc binding locals -> do
-            declId <- addDecl (D.Value loc binding locals)
-            linkNamesToDecl declId $ collectNames binding
+            -- I'm not sure how to handle locals here, since they may contain mutual recursion
+            -- and all of the same complications
+            -- seems like we have to run dependency resolution on these bindings locally
+            declId <- addDecl (D.Value loc (cast uniplateCast binding) _locals)
+            -- traverse the binding body and add a dependency between declarations
+            linkNamesToDecl declId $ collectNamesInBinding binding
         D.Type loc name vars constrs -> do
-            declId <- addDecl (D.Type loc name vars constrs)
+            declId <- addDecl (D.Type loc name vars $ map castCon constrs)
             linkNamesToDecl declId $ name : map (.name) constrs
+            -- traverse all constructor arguments and add dependencies
+            -- these dependencies are only needed for kind checking
         D.Signature _ name ty -> do
             modify @Signatures $ HashMap.insert name $ cast uniplateCast ty
 
-    addDecl :: Declaration 'DependencyRes -> Eff es DeclId
+    -- addDecl :: Declaration 'DependencyRes -> Eff es DeclId
     addDecl decl = do
         declId <- DeclId <$> freshId
         modify @Declarations $ HashMap.insert declId decl
         pure declId
-    linkNamesToDecl :: DeclId -> [Name] -> Eff es ()
+    -- linkNamesToDecl :: DeclId -> [Name] -> Eff es ()
     linkNamesToDecl declId names =
         modify @NameOrigins \origs -> foldl' (\acc n -> HashMap.insert n declId acc) origs names
 
-cycleWarning :: Diagnose :> es => Loc -> [Op] -> [Op] -> Eff es ()
-cycleWarning loc ops ops2 =
-    nonFatal $
-        Warn
-            Nothing
-            ( "priority cycle between" <+> hsep (punctuate comma $ map mbPretty ops) <+> "and" <+> hsep (punctuate comma $ map mbPretty ops2)
-            )
-            (mkNotes [(loc, This "occured at this declaration")])
-            []
-  where
-    mbPretty Nothing = "function application"
-    mbPretty (Just op) = pretty op
+    castCon :: Constructor 'NameRes -> Constructor 'DependencyRes
+    castCon D.Constructor{loc, name, args} =
+        D.Constructor loc (coerce name) $ map (cast uniplateCast) args
 
-selfRelationError :: Diagnose :> es => Name -> Eff es ()
-selfRelationError op =
-    fatal . one $
-        Err
-            Nothing
-            ("self-reference in fixity declaration" <+> pretty op)
-            (mkNotes [(getLoc op, This "is referenced in its own fixity declaration")])
-            []
+-- | collects all to-be-declared names in a pattern
+collectNames :: Pattern p -> [NameAt p]
+collectNames = \case
+    P.Var name -> [name]
+    P.Wildcard{} -> []
+    P.Annotation pat _ -> collectNames pat
+    P.Variant _ pat -> collectNames pat
+    P.Constructor _ pats -> foldMap collectNames pats
+    P.List _ pats -> foldMap collectNames pats
+    P.Record _ row -> foldMap collectNames $ toList row
+    P.Literal _ -> []
+
+collectNamesInBinding :: Binding p -> [NameAt p]
+collectNamesInBinding = \case
+    E.FunctionBinding name _ _ -> [name]
+    E.ValueBinding pat _ -> collectNames pat
 
 reportCycleWarnings :: (State (Poset Op) :> es, Diagnose :> es) => Loc -> Eff (Writer (Seq (Poset.Cycle Op)) : es) a -> Eff es a
 reportCycleWarnings loc action = do
@@ -137,3 +135,34 @@ updatePrecedence loc op rels poset = execState poset $ Poset.reportError $ repor
         rhsClass <- state $ Poset.eqClass op2
         modifyM @(Poset Op) $ Poset.addRelationLenient lhsClass rhsClass rel
 
+-- errors
+
+danglingSigError :: Diagnose :> es => Type' 'DependencyRes -> Eff es ()
+danglingSigError ty = nonFatal $
+    Err
+    Nothing
+    "Signature lacks an accompanying binding"
+    (mkNotes [(getLoc ty, This "this")])
+    []
+
+cycleWarning :: Diagnose :> es => Loc -> [Op] -> [Op] -> Eff es ()
+cycleWarning loc ops ops2 =
+    nonFatal $
+        Warn
+            Nothing
+            ( "priority cycle between" <+> hsep (punctuate comma $ map mbPretty ops) <+> "and" <+> hsep (punctuate comma $ map mbPretty ops2)
+            )
+            (mkNotes [(loc, This "occured at this declaration")])
+            []
+  where
+    mbPretty Nothing = "function application"
+    mbPretty (Just op) = pretty op
+
+selfRelationError :: Diagnose :> es => Name -> Eff es ()
+selfRelationError op =
+    fatal . one $
+        Err
+            Nothing
+            ("self-reference in fixity declaration" <+> pretty op)
+            (mkNotes [(getLoc op, This "is referenced in its own fixity declaration")])
+            []
