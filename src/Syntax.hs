@@ -4,8 +4,8 @@ module Syntax (module Export) where
 
 import Prelude ()
 
-import Syntax.Declaration as Export (Declaration, Constructor)
+import Syntax.Declaration as Export (Constructor, Declaration)
+import Syntax.Expression as Export (Binding, Expression)
 import Syntax.Pattern as Export (Pattern)
-import Syntax.Expression as Export (Expression, Binding)
-import Syntax.Type as Export (Type')
 import Syntax.Row as Export (Row)
+import Syntax.Type as Export (Type')

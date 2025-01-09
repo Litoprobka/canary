@@ -1,21 +1,22 @@
+{-# LANGUAGE DataKinds #-}
+{-# LANGUAGE DeriveAnyClass #-}
+{-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE TemplateHaskell #-}
 {-# LANGUAGE TypeFamilies #-}
-{-# LANGUAGE DataKinds #-}
-{-# LANGUAGE LambdaCase #-}
-{-# LANGUAGE DeriveAnyClass #-}
+
 module NameGen (runNameGen, freshId, freshName, freshName_, NameGen) where
 
-import LangPrelude
-import Common (Id (..), inc, Name, SimpleName, SimpleName_(..), Located (..), Name_ (..))
-import Effectful.State.Static.Local (evalState, get, modify)
+import Common (Id (..), Located (..), Name, Name_ (..), SimpleName, SimpleName_ (..), inc)
 import Effectful.Dispatch.Dynamic (reinterpret)
+import Effectful.State.Static.Local (evalState, get, modify)
+import LangPrelude
 
 data NameGen :: Effect where
     FreshId :: NameGen m Id
 
 makeEffect ''NameGen
 
-freshName :: (NameGen :> es) => SimpleName -> Eff es Name
+freshName :: NameGen :> es => SimpleName -> Eff es Name
 freshName (Located loc name) = Located loc <$> freshName_ name
 
 freshName_ :: NameGen :> es => SimpleName_ -> Eff es Name_

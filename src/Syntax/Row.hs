@@ -14,13 +14,13 @@ import Relude hiding (empty)
 type OpenName = SimpleName
 
 newtype Row a
-  = Row (HashMap OpenName (NESeq a))
-  deriving (Show, Eq, Functor, Foldable, Traversable)
+    = Row (HashMap OpenName (NESeq a))
+    deriving (Show, Eq, Functor, Foldable, Traversable)
 
 data ExtRow a
-  = ExtRow {row :: Row a, _ext :: a}
-  | NoExtRow {row :: Row a}
-  deriving (Show, Eq, Functor, Foldable, Traversable)
+    = ExtRow {row :: Row a, _ext :: a}
+    | NoExtRow {row :: Row a}
+    deriving (Show, Eq, Functor, Foldable, Traversable)
 
 empty :: Row a
 empty = Row HashMap.empty
@@ -40,16 +40,16 @@ extend row ext = ext{row = row <> ext.row}
 -- -> { a : Double }
 diff :: Row a -> Row a -> Row a
 diff (Row lhs) (Row rhs) = Row $ HashMap.differenceWith dropMatching lhs rhs
- where
-  dropMatching lhsSeq rhsSeq = NESeq.nonEmptySeq $ NESeq.drop (NESeq.length rhsSeq) lhsSeq
+  where
+    dropMatching lhsSeq rhsSeq = NESeq.nonEmptySeq $ NESeq.drop (NESeq.length rhsSeq) lhsSeq
 
 unionWithM :: Monad m => (a -> a -> m a) -> Row a -> Row a -> m (Row a)
 unionWithM f (Row lhs) (Row rhs) = Row <$> sequence (HashMap.unionWith unionSeq (pure <$> lhs) (pure <$> rhs))
- where
-  unionSeq pureLhs pureRhs = do
-    lhsSeq <- pureLhs
-    rhsSeq <- pureRhs
-    sequence $ NESeq.zipWith f lhsSeq rhsSeq
+  where
+    unionSeq pureLhs pureRhs = do
+        lhsSeq <- pureLhs
+        rhsSeq <- pureRhs
+        sequence $ NESeq.zipWith f lhsSeq rhsSeq
 
 extension :: ExtRow a -> Maybe a
 extension (ExtRow _ ext) = Just ext
@@ -62,20 +62,20 @@ sortedRow :: Row a -> [(OpenName, a)]
 sortedRow (Row fields) = fields & HashMap.toList & sortOn fst & concatMap \(k, vs) -> (k,) <$> toList vs
 
 instance One (Row a) where
-  type OneItem (Row a) = (OpenName, a)
-  one = fromList . one
+    type OneItem (Row a) = (OpenName, a)
+    one = fromList . one
 
 instance IsList (Row a) where
-  type Item (Row a) = (OpenName, a)
-  fromList = Row . foldl' addField HashMap.empty
-   where
-    addField fields (k, v) = fields & HashMap.insertWith (flip (<>)) k (NESeq.singleton v)
-  toList (Row fields) = fields & HashMap.toList & concatMap \(k, vs) -> (k,) <$> toList vs
+    type Item (Row a) = (OpenName, a)
+    fromList = Row . foldl' addField HashMap.empty
+      where
+        addField fields (k, v) = fields & HashMap.insertWith (flip (<>)) k (NESeq.singleton v)
+    toList (Row fields) = fields & HashMap.toList & concatMap \(k, vs) -> (k,) <$> toList vs
 
 -- >>> fromList @(Row Int) [("a", 1), ("a", 2), ("b", 1)] <> fromList @(Row Int) [("b", 4), ("a", 7)]
 -- Row (fromList [("a",fromList (1 :| [2,7])),("b",fromList (1 :| [4]))])
 instance Semigroup (Row a) where
-  Row lhs <> Row rhs = Row $ HashMap.unionWith (<>) lhs rhs
+    Row lhs <> Row rhs = Row $ HashMap.unionWith (<>) lhs rhs
 
 {-
 data PlatePair k v = PlatePair k v

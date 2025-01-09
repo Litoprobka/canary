@@ -2,10 +2,29 @@ module LangPrelude (module Reexport, (.>)) where
 
 -- Relude becomes inconvenient the moment I want to use effectful over mtl
 
-import Relude as Reexport hiding (State, get, gets, put, modify, modify', state, Op, runState, evalState, execState, Reader, ask, asks, local, runReader, some, many)
 import Effectful as Reexport
 import Effectful.TH as Reexport
-import Prettyprinter as Reexport (Doc, Pretty(..), (<+>))
+import Prettyprinter as Reexport (Doc, Pretty (..), (<+>))
+import Relude as Reexport hiding (
+    Op,
+    Reader,
+    State,
+    ask,
+    asks,
+    evalState,
+    execState,
+    get,
+    gets,
+    local,
+    many,
+    modify,
+    modify',
+    put,
+    runReader,
+    runState,
+    some,
+    state,
+ )
 
 infixl 9 .>
 

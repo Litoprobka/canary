@@ -4,15 +4,15 @@
 
 module Poset where
 
+import Common (Loc (Blank))
 import Data.HashMap.Strict qualified as HashMap
 import Data.HashSet qualified as HashSet
 import Data.Sequence qualified as Seq
-import Effectful.Error.Static (Error, throwError, runErrorNoCallStack)
+import Diagnostic (Diagnose, internalError)
+import Effectful.Error.Static (Error, runErrorNoCallStack, throwError)
 import Effectful.Writer.Static.Local (Writer, tell)
 import LangPrelude hiding (cycle)
 import Relude.Extra (traverseToSnd)
-import Diagnostic (Diagnose, internalError)
-import Common (Loc(Blank))
 
 -- a partially ordered set implementation with an emphasis on equality
 -- items are stored as equivalence classes and strict > relations between them

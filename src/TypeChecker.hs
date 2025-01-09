@@ -33,9 +33,9 @@ import Diagnostic (Diagnose, internalError)
 import Effectful
 import Effectful.State.Static.Local (State, gets, modify, runState)
 import GHC.IsList qualified as IsList
+import LangPrelude hiding (Type, bool)
 import LensyUniplate
 import NameGen
-import LangPrelude hiding (Type, bool)
 import Syntax
 import Syntax.Declaration qualified as D
 import Syntax.Expression qualified as E

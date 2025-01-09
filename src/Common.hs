@@ -5,9 +5,9 @@
 {-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE OverloadedRecordDot #-}
 {-# LANGUAGE TypeFamilies #-}
+{-# LANGUAGE UndecidableInstances #-}
 {-# LANGUAGE NoFieldSelectors #-}
 {-# OPTIONS_GHC -Wno-partial-fields #-}
-{-# LANGUAGE UndecidableInstances #-}
 
 module Common (
     Name,
@@ -35,12 +35,12 @@ module Common (
     PriorityRelation' (..),
 ) where
 
+import Data.Type.Ord (Compare)
 import Error.Diagnose (Position (..))
 import Error.Diagnose qualified as M
-import Prettyprinter
 import LangPrelude
+import Prettyprinter
 import Text.Megaparsec (SourcePos (..), unPos)
-import Data.Type.Ord (Compare)
 
 -- this file is a bit of a crutch. Perhaps it's better to move the definitions to Type or TypeChecker
 -- however, they don't really belong to Type, and moving them to TypeChecker introduces a cyclic dependency (which may or may not be fine)

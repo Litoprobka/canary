@@ -190,7 +190,7 @@ expression' termParser = do
             [] -> firstExpr
             [(Nothing, secondExpr)] -> firstExpr `E.Application` secondExpr
             [(Just op, secondExpr)] -> E.Name op `E.Application` firstExpr `E.Application` secondExpr
-            (_ : _ : _) -> uncurry (E.Infix E.Yes) $ shift firstExpr pairs
+            (_ : _ : _) -> uncurry E.Infix $ shift firstExpr pairs
     option expr do
         specialSymbol ":"
         E.Annotation expr <$> type'

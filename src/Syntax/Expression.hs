@@ -11,6 +11,7 @@ import Relude hiding (show)
 
 import Common (HasLoc (..), Literal, Loc, NameAt, Pass (..), zipLocOf)
 import Data.List.NonEmpty qualified as NE
+import Data.Type.Ord (type (<))
 import LensyUniplate
 import Prettyprinter (
     Pretty,
@@ -31,7 +32,6 @@ import Syntax.Pattern (Pattern)
 import Syntax.Row
 import Syntax.Type (Type')
 import Prelude (show)
-import Data.Type.Ord (type (<))
 
 data Binding (p :: Pass)
     = ValueBinding (Pattern p) (Expression p)

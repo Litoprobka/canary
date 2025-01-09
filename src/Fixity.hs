@@ -9,10 +9,10 @@ import Data.List.NonEmpty qualified as NE
 import Diagnostic (Diagnose, dummy, fatal)
 import Effectful.Reader.Static (Reader, ask, runReader)
 import Error.Diagnose (Marker (This), Report (..))
+import LangPrelude hiding (cycle)
 import LensyUniplate
 import Poset (Poset)
 import Poset qualified
-import LangPrelude hiding (cycle)
 import Syntax
 import Syntax.Declaration qualified as D
 import Syntax.Expression (DoStatement)

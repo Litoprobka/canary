@@ -1,4 +1,5 @@
 {-# LANGUAGE RecordWildCards #-}
+
 module DependencyResolution where
 
 import Common
@@ -8,13 +9,13 @@ import Effectful.State.Static.Local
 import Effectful.Writer.Static.Local (Writer, runWriter)
 import Error.Diagnose (Marker (..), Report (..))
 import LangPrelude
-import NameGen (runNameGen, freshId)
+import LensyUniplate (cast, uniplateCast)
+import NameGen (freshId, runNameGen)
 import Poset (Poset)
 import Poset qualified
 import Prettyprinter (comma, hsep, punctuate)
 import Syntax
 import Syntax.Declaration qualified as D
-import LensyUniplate (uniplateCast, cast)
 import Syntax.Expression qualified as E
 import Syntax.Pattern qualified as P
 
@@ -46,16 +47,17 @@ type Signatures = HashMap Name (Type' 'DependencyRes)
 
 resolveDependencies :: forall es. Diagnose :> es => [Declaration 'NameRes] -> Eff es Output
 resolveDependencies decls = do
-    (((((signatures, declarations), nameOrigins), fixityMap), operatorPriorities), declDeps)
-      <- runNameGen
-        . runState @DeclSet Poset.empty
-        . runState @(Poset Op) Poset.empty
-        . runState @FixityMap HashMap.empty
-        . runState @NameOrigins HashMap.empty
-        . runState @Declarations HashMap.empty
-        . execState @Signatures HashMap.empty
-        $ traverse_ go decls
+    (((((signatures, declarations), nameOrigins), fixityMap), operatorPriorities), declDeps) <-
+        runNameGen
+            . runState @DeclSet Poset.empty
+            . runState @(Poset Op) Poset.empty
+            . runState @FixityMap HashMap.empty
+            . runState @NameOrigins HashMap.empty
+            . runState @Declarations HashMap.empty
+            . execState @Signatures HashMap.empty
+            $ traverse_ go decls
     let danglingSigs = HashMap.difference signatures $ HashMap.compose declarations nameOrigins
+
     for_ danglingSigs danglingSigError
     pure Output{dependencyOrder = Poset.ordered declDeps, ..}
   where
@@ -74,8 +76,8 @@ resolveDependencies decls = do
         D.Type loc name vars constrs -> do
             declId <- addDecl (D.Type loc name vars $ map castCon constrs)
             linkNamesToDecl declId $ name : map (.name) constrs
-            -- traverse all constructor arguments and add dependencies
-            -- these dependencies are only needed for kind checking
+        -- traverse all constructor arguments and add dependencies
+        -- these dependencies are only needed for kind checking
         D.Signature _ name ty -> do
             modify @Signatures $ HashMap.insert name $ cast uniplateCast ty
 
@@ -138,12 +140,13 @@ updatePrecedence loc op rels poset = execState poset $ Poset.reportError $ repor
 -- errors
 
 danglingSigError :: Diagnose :> es => Type' 'DependencyRes -> Eff es ()
-danglingSigError ty = nonFatal $
-    Err
-    Nothing
-    "Signature lacks an accompanying binding"
-    (mkNotes [(getLoc ty, This "this")])
-    []
+danglingSigError ty =
+    nonFatal $
+        Err
+            Nothing
+            "Signature lacks an accompanying binding"
+            (mkNotes [(getLoc ty, This "this")])
+            []
 
 cycleWarning :: Diagnose :> es => Loc -> [Op] -> [Op] -> Eff es ()
 cycleWarning loc ops ops2 =

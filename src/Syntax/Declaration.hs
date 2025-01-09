@@ -1,16 +1,16 @@
+{-# LANGUAGE ExplicitNamespaces #-}
 {-# LANGUAGE OverloadedRecordDot #-}
 {-# LANGUAGE UndecidableInstances #-}
-{-# LANGUAGE ExplicitNamespaces #-}
 
 module Syntax.Declaration (Declaration (..), Constructor (..)) where
 
-import Common (Fixity (..), HasLoc (..), Loc, NameAt, Pass (Parse, DependencyRes), PriorityRelation, PriorityRelation' (..))
-import Prettyprinter (Pretty (pretty), comma, encloseSep, line, nest, punctuate, sep, space, vsep, (<+>), Doc)
+import Common (Fixity (..), HasLoc (..), Loc, NameAt, Pass (DependencyRes, Parse), PriorityRelation, PriorityRelation' (..))
+import Data.Type.Ord (type (<))
+import Prettyprinter (Doc, Pretty (pretty), comma, encloseSep, line, nest, punctuate, sep, space, vsep, (<+>))
 import Relude hiding (show)
 import Syntax.Expression (Binding)
 import Syntax.Type (Type')
 import Prelude (show)
-import Data.Type.Ord (type (<))
 
 data Declaration (p :: Pass)
     = Value Loc (Binding p) [Declaration p]
@@ -20,7 +20,7 @@ data Declaration (p :: Pass)
 
 deriving instance Eq (Declaration 'Parse)
 
-data Constructor p = Constructor { loc :: Loc, name :: NameAt p, args :: [Type' p] }
+data Constructor p = Constructor {loc :: Loc, name :: NameAt p, args :: [Type' p]}
 deriving instance Eq (Constructor 'Parse)
 instance Pretty (NameAt p) => Pretty (Declaration p) where
     pretty = \case

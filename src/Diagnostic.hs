@@ -8,6 +8,7 @@
 
 module Diagnostic (Diagnose, runDiagnose, runDiagnose', dummy, nonFatal, fatal, reportsFromBundle, internalError) where
 
+import Common (Loc, mkNotes)
 import Data.DList (DList)
 import Data.DList qualified as DList
 import Effectful
@@ -19,35 +20,34 @@ import Error.Diagnose
 import LangPrelude
 import Prettyprinter.Render.Terminal (AnsiStyle)
 import Text.Megaparsec qualified as MP
-import Common (Loc, mkNotes)
 
 -- I'm not sure why fourmolu decided to use 2-space idents for this file
 
 data Diagnose :: Effect where
-  NonFatal :: Report (Doc AnsiStyle) -> Diagnose m ()
-  Fatal :: NonEmpty (Report (Doc AnsiStyle)) -> Diagnose m a
+    NonFatal :: Report (Doc AnsiStyle) -> Diagnose m ()
+    Fatal :: NonEmpty (Report (Doc AnsiStyle)) -> Diagnose m a
 
 makeEffect ''Diagnose
 
 runDiagnose :: IOE :> es => (FilePath, Text) -> Eff (Diagnose : es) a -> Eff es (Maybe a)
 runDiagnose file action = do
-  (mbVal, diagnostic) <- runDiagnose' file action
-  printDiagnostic' stdout WithUnicode (TabSize 4) defaultStyle diagnostic
-  pure mbVal
+    (mbVal, diagnostic) <- runDiagnose' file action
+    printDiagnostic' stdout WithUnicode (TabSize 4) defaultStyle diagnostic
+    pure mbVal
 
 runDiagnose' :: (FilePath, Text) -> Eff (Diagnose : es) a -> Eff es (Maybe a, Diagnostic (Doc AnsiStyle))
 runDiagnose' (filePath, fileContents) = reinterpret
-  (fmap (joinReports . second diagnosticFromReports) . runWriter . runErrorNoCallStack)
-  -- (addFile mempty filePath $ toString fileContents)
-  \_ -> \case
-    NonFatal report -> tell $ DList.singleton report
-    Fatal reports -> throwError reports
- where
-  baseDiagnostic = addFile mempty filePath $ toString fileContents
-  diagnosticFromReports = foldl' @DList addReport baseDiagnostic
-  joinReports = \case
-    (Left fatalErrors, diagnostic) -> (Nothing, foldl' @NonEmpty addReport diagnostic fatalErrors)
-    (Right val, diagnostic) -> (Just val, diagnostic)
+    (fmap (joinReports . second diagnosticFromReports) . runWriter . runErrorNoCallStack)
+    -- (addFile mempty filePath $ toString fileContents)
+    \_ -> \case
+        NonFatal report -> tell $ DList.singleton report
+        Fatal reports -> throwError reports
+  where
+    baseDiagnostic = addFile mempty filePath $ toString fileContents
+    diagnosticFromReports = foldl' @DList addReport baseDiagnostic
+    joinReports = \case
+        (Left fatalErrors, diagnostic) -> (Nothing, foldl' @NonEmpty addReport diagnostic fatalErrors)
+        (Right val, diagnostic) -> (Just val, diagnostic)
 
 dummy :: Doc style -> Report (Doc style)
 dummy msg = Err Nothing msg [] []
@@ -60,28 +60,28 @@ internalError loc msg = fatal . one $ Err Nothing ("Internal error:" <+> msg) (m
 -- hangs the compiler for some reason
 
 reportsFromBundle
-  :: forall s e
-   . (MP.ShowErrorComponent e, MP.VisualStream s, MP.TraversableStream s)
-  => MP.ParseErrorBundle s e
-  -> NonEmpty (Report (Doc AnsiStyle))
+    :: forall s e
+     . (MP.ShowErrorComponent e, MP.VisualStream s, MP.TraversableStream s)
+    => MP.ParseErrorBundle s e
+    -> NonEmpty (Report (Doc AnsiStyle))
 reportsFromBundle MP.ParseErrorBundle{..} =
-  toLabeledPosition <$> bundleErrors
- where
-  toLabeledPosition :: MP.ParseError s e -> Report (Doc AnsiStyle)
-  toLabeledPosition parseError =
-    let (_, pos) = MP.reachOffset (MP.errorOffset parseError) bundlePosState
-        source = fromSourcePos (MP.pstateSourcePos pos)
-        msgs = fmap (pretty @_ @AnsiStyle . toString) $ lines $ toText (MP.parseErrorTextPretty parseError)
-     in flip
-          (Err Nothing "Parse error")
-          []
-          case msgs of
-            [m] -> [(source, This m)]
-            [m1, m2] -> [(source, This m1), (source, Where m2)]
-            _ -> [(source, This "<<Unknown error>>")]
+    toLabeledPosition <$> bundleErrors
+  where
+    toLabeledPosition :: MP.ParseError s e -> Report (Doc AnsiStyle)
+    toLabeledPosition parseError =
+        let (_, pos) = MP.reachOffset (MP.errorOffset parseError) bundlePosState
+            source = fromSourcePos (MP.pstateSourcePos pos)
+            msgs = fmap (pretty @_ @AnsiStyle . toString) $ lines $ toText (MP.parseErrorTextPretty parseError)
+         in flip
+                (Err Nothing "Parse error")
+                []
+                case msgs of
+                    [m] -> [(source, This m)]
+                    [m1, m2] -> [(source, This m1), (source, Where m2)]
+                    _ -> [(source, This "<<Unknown error>>")]
 
-  fromSourcePos :: MP.SourcePos -> Position
-  fromSourcePos MP.SourcePos{..} =
-    let start = bimap MP.unPos MP.unPos (sourceLine, sourceColumn)
-        end = second (+ 1) start
-     in Position start end sourceName
+    fromSourcePos :: MP.SourcePos -> Position
+    fromSourcePos MP.SourcePos{..} =
+        let start = bimap MP.unPos MP.unPos (sourceLine, sourceColumn)
+            end = second (+ 1) start
+         in Position start end sourceName

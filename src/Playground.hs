@@ -1,4 +1,5 @@
 {-# LANGUAGE DataKinds #-}
+{-# LANGUAGE ExplicitNamespaces #-}
 {-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE MonoLocalBinds #-}
 {-# LANGUAGE OverloadedRecordDot #-}
@@ -7,7 +8,6 @@
 {-# OPTIONS_GHC -Wno-missing-methods #-}
 {-# OPTIONS_GHC -Wno-orphans #-}
 {-# OPTIONS_GHC -Wno-unused-imports #-}
-{-# LANGUAGE ExplicitNamespaces #-}
 
 module Playground where
 
@@ -17,6 +17,7 @@ import Common hiding (Scope)
 import Data.Char (isUpperCase)
 import Data.HashMap.Strict qualified as HashMap
 import Data.HashSet qualified as HashSet
+import Data.Type.Ord (type (<))
 import Diagnostic (Diagnose, runDiagnose, runDiagnose')
 import Effectful.Error.Static (Error)
 import Effectful.Reader.Static (Reader, runReader)
@@ -41,7 +42,6 @@ import Syntax.Row
 import Syntax.Type qualified as T
 import Text.Megaparsec (errorBundlePretty, parse, pos1)
 import TypeChecker
-import Data.Type.Ord (type (<))
 
 -- a lot of what is used here is only reasonable for interactive use
 
