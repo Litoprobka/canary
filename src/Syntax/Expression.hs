@@ -5,7 +5,7 @@
 
 -- {-# OPTIONS_GHC -freduction-depth=0 #-}
 
-module Syntax.Expression (Expression (..), DoStatement (..), Binding (..), HasInfix (..), noInfix, uniplate) where
+module Syntax.Expression (Expression (..), DoStatement (..), Binding (..), uniplate) where
 
 import Relude hiding (show)
 
@@ -31,6 +31,7 @@ import Syntax.Pattern (Pattern)
 import Syntax.Row
 import Syntax.Type (Type')
 import Prelude (show)
+import Data.Type.Ord (type (<))
 
 data Binding (p :: Pass)
     = ValueBinding (Pattern p) (Expression p)
@@ -64,7 +65,7 @@ data Expression (p :: Pass)
     | Do Loc [DoStatement p] (Expression p)
     | Literal Literal
     | -- | an unresolved expression with infix / prefix operators
-      Infix (HasInfix p) [(Expression p, Maybe (NameAt p))] (Expression p)
+      p < Fixity => Infix [(Expression p, Maybe (NameAt p))] (Expression p)
 
 deriving instance Eq (Expression 'Parse)
 
@@ -75,15 +76,6 @@ data DoStatement (p :: Pass)
     | Action (Expression p)
 
 deriving instance Eq (DoStatement 'Parse)
-
--- unresolved infix operators may only appear before the fixity resolution pass
-data HasInfix (pass :: Pass) where
-    Yes :: HasInfix 'Parse
-    Yup :: HasInfix 'NameRes
-deriving instance Eq (HasInfix p)
-
-noInfix :: HasInfix 'Fixity -> a
-noInfix = \case {}
 
 instance Pretty (NameAt p) => Pretty (Binding p) where
     pretty = \case
@@ -113,7 +105,7 @@ instance Pretty (NameAt p) => Pretty (Expression p) where
             List _ xs -> brackets . sep . punctuate comma $ pretty <$> xs
             Do _ stmts lastAction -> nest 2 $ vsep ("do" : fmap pretty stmts <> [pretty lastAction])
             Literal lit -> pretty lit
-            Infix _ pairs last' -> "?(" <> sep (concatMap (\(lhs, op) -> pretty lhs : maybe [] (pure . pretty) op) pairs <> [pretty last']) <> ")"
+            Infix pairs last' -> "?(" <> sep (concatMap (\(lhs, op) -> pretty lhs : maybe [] (pure . pretty) op) pairs <> [pretty last']) <> ")"
           where
             parensWhen minPrec
                 | n >= minPrec = parens
@@ -149,8 +141,8 @@ instance HasLoc (NameAt p) => HasLoc (Expression p) where
         List loc _ -> loc
         Do loc _ _ -> loc
         Literal lit -> getLoc lit
-        Infix _ ((e, _) : _) l -> zipLocOf e l
-        Infix _ [] l -> getLoc l
+        Infix ((e, _) : _) l -> zipLocOf e l
+        Infix [] l -> getLoc l
 
 instance HasLoc (NameAt p) => HasLoc (DoStatement p) where
     getLoc = \case
@@ -178,7 +170,7 @@ uniplate f = \case
     Record loc row -> Record loc <$> traverse f row
     List loc exprs -> List loc <$> traverse f exprs
     Do loc stmts ret -> Do loc <$> traverse (plateStmt f) stmts <*> f ret
-    Infix loc pairs l -> Infix loc <$> traverse (\(e, op) -> (,op) <$> f e) pairs <*> pure l
+    Infix pairs l -> Infix <$> traverse (\(e, op) -> (,op) <$> f e) pairs <*> pure l
     Constructor name -> pure $ Constructor name
     n@Name{} -> pure n
     r@RecordLens{} -> pure r

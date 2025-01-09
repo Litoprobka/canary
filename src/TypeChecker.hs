@@ -29,7 +29,7 @@ import Data.HashMap.Strict qualified as HashMap
 import Data.HashSet qualified as HashSet
 import Data.List.NonEmpty qualified as NE
 import Data.Traversable (for)
-import Diagnostic (Diagnose)
+import Diagnostic (Diagnose, internalError)
 import Effectful
 import Effectful.State.Static.Local (State, gets, modify, runState)
 import GHC.IsList qualified as IsList
@@ -94,7 +94,6 @@ inferDecls decls = do
         D.Type _ name vars constrs ->
             for_ (mkConstrSigs name vars constrs) \(con, sig) ->
                 modify \s -> s{topLevel = HashMap.insert con (Right sig) s.topLevel}
-        D.Alias{} -> pass
         D.Fixity{} -> pass
 
     insertBinding name binding locals =
@@ -104,7 +103,7 @@ inferDecls decls = do
                 declareTopLevel nameTypePairs
                 case HashMap.lookup name nameTypePairs of
                     -- this can only happen if `inferBinding` returns an incorrect map of types
-                    Nothing -> typeError $ Internal (getLoc name) $ "type closure for" <+> pretty name <+> "didn't infer its type"
+                    Nothing -> internalError (getLoc name) $ "type closure for" <+> pretty name <+> "didn't infer its type"
                     Just ty -> pure ty
          in modify \s ->
                 s{topLevel = HashMap.insertWith (\_ x -> x) name (Left closure) s.topLevel}
@@ -113,7 +112,6 @@ inferDecls decls = do
         D.Value _ binding locals -> ((binding, locals) : values, sigs)
         D.Signature _ name sig -> (values, (name, sig) : sigs)
         D.Type _ name vars constrs -> (values, mkConstrSigs name vars constrs ++ sigs)
-        D.Alias{} -> (values, sigs)
         D.Fixity{} -> (values, sigs)
 
     mkConstrSigs :: Name -> [Name] -> [Constructor 'Fixity] -> [(Name, Type' 'Fixity)]
@@ -149,8 +147,8 @@ subtype lhs_ rhs_ = join $ match <$> monoLayer In lhs_ <*> monoLayer Out rhs_
             subtype rhs rhs'
         (MLVariant locL lhs) (MLVariant locR rhs) -> rowCase Variant (locL, lhs) (locR, rhs)
         (MLRecord locL lhs) (MLRecord locR rhs) -> rowCase Record (locL, lhs) (locR, rhs)
-        (MLVar var) _ -> typeError $ Internal (getLoc var) $ "dangling type variable" <+> pretty var
-        _ (MLVar var) -> typeError $ Internal (getLoc var) $ "dangling type variable" <+> pretty var
+        (MLVar var) _ -> internalError (getLoc var) $ "dangling type variable" <+> pretty var
+        _ (MLVar var) -> internalError (getLoc var) $ "dangling type variable" <+> pretty var
         lhs rhs -> typeError $ NotASubtype (unMonoLayer lhs) (unMonoLayer rhs) Nothing
 
     rowCase :: InfEffs es => RecordOrVariant -> (Loc, ExtRow Type) -> (Loc, ExtRow Type) -> Eff es ()
@@ -327,7 +325,7 @@ infer =
                     `T.Application` mkNestedRecord b
                     `T.Application` a
                     `T.Application` b
-        E.Do loc _ _ -> typeError $ Internal loc "do-notation is not supported yet"
+        E.Do loc _ _ -> internalError loc "do-notation is not supported yet"
         E.Literal (Located loc lit) -> pure $ T.Name . Located loc $ case lit of
             IntLiteral num
                 | num >= 0 -> NatName
@@ -432,7 +430,7 @@ inferPattern = \case
             -- i.e. types of value constructors have the shape `a -> b -> c -> d -> ConcreteType a b c d`
             --
             -- solved univars cannot appear here either, since `lookupSig` on a pattern returns a type with no univars
-            MLUniVar loc uni -> typeError $ Internal loc $ "unexpected univar" <+> pretty uni <+> "in a constructor type"
+            MLUniVar loc uni -> internalError loc $ "unexpected univar" <+> pretty uni <+> "in a constructor type"
             -- this kind of repetition is necwithUniVaressary to retain missing pattern warnings
             MLName name -> pure (T.Name name, [])
             MLApp lhs rhs -> pure (T.Application lhs rhs, [])
@@ -451,7 +449,7 @@ normaliseAll = generaliseAll {->=> skolemsToExists-} >=> traverse go
     go = transformM' (T.uniplate' coerce (error "univar in uniplate") (error "skolem in uniplate")) \case
         T.UniVar loc uni ->
             lookupUniVar uni >>= \case
-                Left _ -> typeError $ Internal loc $ "dangling univar " <> pretty uni
+                Left _ -> internalError loc $ "dangling univar " <> pretty uni
                 Right body -> Left <$> go (unMono body)
-        T.Skolem skolem -> typeError $ Internal (getLoc skolem) $ "skolem " <> pretty (T.Skolem skolem) <> " remains in code"
+        T.Skolem skolem -> internalError (getLoc skolem) $ "skolem " <> pretty (T.Skolem skolem) <> " remains in code"
         other -> pure $ Right other

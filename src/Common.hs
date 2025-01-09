@@ -7,6 +7,7 @@
 {-# LANGUAGE TypeFamilies #-}
 {-# LANGUAGE NoFieldSelectors #-}
 {-# OPTIONS_GHC -Wno-partial-fields #-}
+{-# LANGUAGE UndecidableInstances #-}
 
 module Common (
     Name,
@@ -39,6 +40,7 @@ import Error.Diagnose qualified as M
 import Prettyprinter
 import LangPrelude
 import Text.Megaparsec (SourcePos (..), unPos)
+import Data.Type.Ord (Compare)
 
 -- this file is a bit of a crutch. Perhaps it's better to move the definitions to Type or TypeChecker
 -- however, they don't really belong to Type, and moving them to TypeChecker introduces a cyclic dependency (which may or may not be fine)
@@ -46,8 +48,24 @@ import Text.Megaparsec (SourcePos (..), unPos)
 data Pass
     = Parse -- after parsing
     | NameRes -- etc
+    | DependencyRes -- not sure how to call this pass. it computes a dependency graph and collects all sorts of information
     | Fixity
     | DuringTypecheck -- an intermediate state for univars and skolems
+
+type instance Compare (a :: Pass) (b :: Pass) = ComparePass a b
+type family ComparePass a b where
+    ComparePass Parse Parse = EQ
+    ComparePass NameRes NameRes = EQ
+    ComparePass 'Fixity 'Fixity = EQ
+    ComparePass 'DuringTypecheck 'DuringTypecheck = EQ
+    ComparePass Parse _ = LT
+    ComparePass _ Parse = GT
+    ComparePass NameRes _ = LT
+    ComparePass _ NameRes = GT
+    ComparePass 'Fixity _ = LT
+    ComparePass _ 'Fixity = GT
+    ComparePass DuringTypecheck _ = LT
+    ComparePass _ DuringTypecheck = GT
 
 data Fixity = InfixL | InfixR | InfixChain | Infix deriving (Show, Eq)
 

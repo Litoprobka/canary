@@ -146,7 +146,6 @@ collectNames decls = for_ decls \case
     D.Value _ (E.FunctionBinding name _ _) _ -> void $ declare name
     D.Value _ (E.ValueBinding pat _) _ -> void $ declarePat pat
     D.Type _ name _ _ -> void $ declare name
-    D.Alias _ name _ -> void $ declare name
     D.Signature{} -> pass
     D.Fixity{} -> pass
 
@@ -172,7 +171,6 @@ resolveDec decl = case decl of
         for_ constrsToDeclare \(Located _ name_, D.Constructor _ conName _) ->
             modify \(Scope table) -> Scope (Map.insert name_ conName table)
         pure $ D.Type loc name' vars' (snd <$> constrsToDeclare)
-    D.Alias loc alias body -> D.Alias loc <$> resolve alias <*> resolveType body
     D.Signature loc name ty -> D.Signature loc <$> resolve name <*> resolveType ty
     D.Fixity loc fixity name rels -> D.Fixity loc fixity <$> resolve name <*> traverse resolve rels
 
@@ -272,8 +270,8 @@ resolveExpr e = scoped case e of
     E.Record loc row -> E.Record loc <$> traverse resolveExpr row
     E.List loc items -> E.List loc <$> traverse resolveExpr items
     E.Do loc stmts lastAction -> E.Do loc <$> traverse resolveStmt stmts <*> resolveExpr lastAction
-    E.Infix E.Yes pairs last' ->
-        E.Infix E.Yup
+    E.Infix pairs last' ->
+        E.Infix
             <$> traverse (bitraverse resolveExpr (traverse resolve)) pairs
             <*> resolveExpr last'
     E.Name name -> E.Name <$> resolve name

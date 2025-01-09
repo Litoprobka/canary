@@ -7,10 +7,12 @@ module Poset where
 import Data.HashMap.Strict qualified as HashMap
 import Data.HashSet qualified as HashSet
 import Data.Sequence qualified as Seq
-import Effectful.Error.Static (Error, throwError)
+import Effectful.Error.Static (Error, throwError, runErrorNoCallStack)
 import Effectful.Writer.Static.Local (Writer, tell)
 import LangPrelude hiding (cycle)
 import Relude.Extra (traverseToSnd)
+import Diagnostic (Diagnose, internalError)
+import Common (Loc(Blank))
 
 -- a partially ordered set implementation with an emphasis on equality
 -- items are stored as equivalence classes and strict > relations between them
@@ -184,3 +186,10 @@ relation lhs rhs poset = do
         (False, True) -> DefinedOrder LT
         (True, True) -> AmbiguousOrder
         (False, False) -> NoOrder
+
+-- poset indexing errors should not ever happend unless you misuse keys from one poset for the other
+-- so throwing an internal error is good enough in most cases
+reportError :: Diagnose :> es => Eff (Error PosetError : es) a -> Eff es a
+reportError = runErrorNoCallStack @PosetError >=> either asDiagnoseError pure
+  where
+    asDiagnoseError (Poset.LookupError key) = internalError Blank $ "invalid poset key" <+> pretty key

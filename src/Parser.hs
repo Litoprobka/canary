@@ -48,14 +48,8 @@ declaration = withLoc $ choice [typeDec, fixityDec, signature, valueDec]
         flip3 D.Value <$> binding <*> whereBlock
     whereBlock = option [] $ block "where" (withLoc valueDec)
 
-    typeDec = keyword "type" *> (typeAliasDec <|> typeDec')
-    typeAliasDec = do
-        keyword "alias"
-        name <- typeName
-        specialSymbol "="
-        flip3 D.Alias name <$> type'
-
-    typeDec' = do
+    typeDec = do
+        keyword "type"
         name <- typeName
         vars <- many typeVariable -- in the future, this should also support kind-annotated variables
         specialSymbol "="

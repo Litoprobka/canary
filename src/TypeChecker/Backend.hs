@@ -15,7 +15,7 @@ import Common
 import Data.HashMap.Strict qualified as HashMap
 import Data.HashSet qualified as HashSet
 import Data.List (nub)
-import Diagnostic (Diagnose, fatal)
+import Diagnostic (Diagnose, fatal, internalError)
 import Effectful
 import Effectful.Dispatch.Dynamic (interpret, reinterpret)
 import Effectful.Error.Static (runErrorNoCallStack, throwError)
@@ -26,8 +26,7 @@ import Error.Diagnose (Report (..))
 import Error.Diagnose qualified as M (Marker (..))
 import LensyUniplate
 import NameGen
-import Prettyprinter (Doc, Pretty, pretty, (<+>))
-import Prettyprinter.Render.Terminal (AnsiStyle)
+import Prettyprinter (Pretty, pretty, (<+>))
 import Relude hiding (
     Reader,
     State,
@@ -124,8 +123,7 @@ data InfState = InfState
     deriving (Show)
 
 data TypeError
-    = Internal Loc (Doc AnsiStyle)
-    | CannotUnify Name Name
+    = CannotUnify Name Name
     | NotASubtype Type Type (Maybe OpenName)
     | MissingField Type OpenName
     | MissingVariant Type OpenName
@@ -138,12 +136,6 @@ data TypeError
 typeError :: Diagnose :> es => TypeError -> Eff es a
 typeError =
     fatal . one . \case
-        Internal loc doc ->
-            Err
-                Nothing
-                ("Internal error:" <+> doc)
-                (mkNotes [(loc, M.This "arising from")])
-                []
         CannotUnify lhs rhs ->
             Err
                 Nothing
@@ -292,7 +284,7 @@ freshTypeVar loc = do
     cycleChar c = succ c
 
 lookupUniVar :: InfEffs es => UniVar -> Eff es (Either Scope Monotype)
-lookupUniVar uni = maybe (typeError $ Internal Blank $ "missing univar" <+> pretty uni) pure . HashMap.lookup uni =<< gets @InfState (.vars)
+lookupUniVar uni = maybe (internalError Blank $ "missing univar" <+> pretty uni) pure . HashMap.lookup uni =<< gets @InfState (.vars)
 
 withUniVar :: InfEffs es => UniVar -> (Monotype -> Eff es a) -> Eff es ()
 withUniVar uni f =
@@ -313,7 +305,7 @@ alterUniVar override uni ty = do
     lookupUniVar uni >>= \case
         Right _
             | not override ->
-                typeError $ Internal Blank $ "Internal error (probably a bug): attempted to solve a solved univar " <> pretty uni
+                internalError Blank $ "Internal error (probably a bug): attempted to solve a solved univar " <> pretty uni
         Right _ -> pass
         Left scope -> rescope scope ty
     cycle <- cycleCheck (Direct, HashSet.singleton uni) ty
@@ -352,7 +344,7 @@ foldUniVars action =
 
 skolemScope :: InfEffs es => Skolem -> Eff es Scope
 skolemScope skolem =
-    maybe (typeError $ Internal (getLoc skolem) $ "missing skolem" <+> pretty skolem) pure
+    maybe (internalError (getLoc skolem) $ "missing skolem" <+> pretty skolem) pure
         . HashMap.lookup skolem
         =<< gets @InfState (.skolems)
 
@@ -451,7 +443,7 @@ data Variance = In | Out | Inv
 -}
 mono :: InfEffs es => Variance -> Type -> Eff es Monotype
 mono variance = \case
-    T.Var var -> typeError $ Internal (getLoc var) $ "mono: dangling var" <+> pretty var -- pure $ MVar var
+    T.Var var -> internalError (getLoc var) $ "mono: dangling var" <+> pretty var -- pure $ MVar var
     T.Name name -> pure $ MName name
     T.Skolem skolem -> pure $ MSkolem skolem
     T.UniVar loc uni -> pure $ MUniVar loc uni
@@ -494,7 +486,7 @@ unMono = \case
 -}
 monoLayer :: InfEffs es => Variance -> Type -> Eff es MonoLayer
 monoLayer variance = \case
-    T.Var var -> typeError $ Internal (getLoc var) $ "monoLayer: dangling var" <+> pretty var -- pure $ MLVar var
+    T.Var var -> internalError (getLoc var) $ "monoLayer: dangling var" <+> pretty var -- pure $ MLVar var
     T.Name name -> pure $ MLName name
     T.Skolem skolem -> pure $ MLSkolem skolem
     T.UniVar loc uni -> pure $ MLUniVar loc uni

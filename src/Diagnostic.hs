@@ -6,7 +6,7 @@
 {-# LANGUAGE TypeFamilies #-}
 {-# LANGUAGE ViewPatterns #-}
 
-module Diagnostic (Diagnose, runDiagnose, runDiagnose', dummy, nonFatal, fatal, reportsFromBundle) where
+module Diagnostic (Diagnose, runDiagnose, runDiagnose', dummy, nonFatal, fatal, reportsFromBundle, internalError) where
 
 import Data.DList (DList)
 import Data.DList qualified as DList
@@ -16,9 +16,10 @@ import Effectful.Error.Static (runErrorNoCallStack, throwError)
 import Effectful.TH
 import Effectful.Writer.Static.Shared (runWriter, tell)
 import Error.Diagnose
-import Prettyprinter.Render.Terminal (AnsiStyle)
 import LangPrelude
+import Prettyprinter.Render.Terminal (AnsiStyle)
 import Text.Megaparsec qualified as MP
+import Common (Loc, mkNotes)
 
 -- I'm not sure why fourmolu decided to use 2-space idents for this file
 
@@ -50,6 +51,10 @@ runDiagnose' (filePath, fileContents) = reinterpret
 
 dummy :: Doc style -> Report (Doc style)
 dummy msg = Err Nothing msg [] []
+
+-- | An internal error. That is, something that may only be caused by a compiler bug
+internalError :: Diagnose :> es => Loc -> Doc AnsiStyle -> Eff es a
+internalError loc msg = fatal . one $ Err Nothing ("Internal error:" <+> msg) (mkNotes [(loc, This "arising from")]) []
 
 -- this is 90% copypasted from Error.Diagnose.Compat.Megaparsec, because enabling the feature flag
 -- hangs the compiler for some reason

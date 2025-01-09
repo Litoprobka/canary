@@ -1,6 +1,4 @@
 {-# LANGUAGE DataKinds #-}
-{-# LANGUAGE LambdaCase #-}
-{-# LANGUAGE OverloadedRecordDot #-}
 
 module Fixity (resolveFixity, parse, Fixity (..)) where
 
@@ -8,16 +6,12 @@ import Common (Fixity (..), Loc (..), Name, Pass (..), PriorityRelation' (..), g
 import Control.Monad (foldM)
 import Data.HashMap.Strict qualified as HashMap
 import Data.List.NonEmpty qualified as NE
-import Diagnostic (Diagnose, dummy, fatal, nonFatal)
-import Effectful.Error.Static (Error, runErrorNoCallStack)
+import Diagnostic (Diagnose, dummy, fatal)
 import Effectful.Reader.Static (Reader, ask, runReader)
-import Effectful.State.Static.Local (State, execState, get, modify, modifyM, runState, state)
-import Effectful.Writer.Static.Local (Writer, runWriter)
 import Error.Diagnose (Marker (This), Report (..))
 import LensyUniplate
-import Poset (Poset, PosetError)
+import Poset (Poset)
 import Poset qualified
-import Prettyprinter (comma, hsep, punctuate)
 import LangPrelude hiding (cycle)
 import Syntax
 import Syntax.Declaration qualified as D
@@ -36,9 +30,6 @@ data OpError
     | UndefinedOrdering Op Op
     | AmbiguousOrdering Op Op
     | MissingOperator Op
-    | SelfRelation Op
-
-data OpWarning = PriorityCycle Loc [Op] [Op]
 
 opError :: Diagnose :> es => OpError -> Eff es a
 opError =
@@ -68,46 +59,10 @@ opError =
                 ("missing operator" <+> mbPretty op)
                 (mkNotes [(getLocMb op, This "is lacking a fixity declaration")])
                 []
-        SelfRelation op ->
-            Err
-                Nothing
-                ("self-reference in fixity declaration" <+> mbPretty op)
-                (mkNotes [(getLocMb op, This "is referenced in its own fixity declaration")])
-                []
   where
     getLocMb = maybe Blank getLoc
     mbPretty Nothing = "function application"
     mbPretty (Just op) = pretty op
-
-opWarning :: Diagnose :> es => OpWarning -> Eff es ()
-opWarning =
-    nonFatal . \case
-        PriorityCycle loc ops ops2 ->
-            Warn
-                Nothing
-                ( "priority cycle between" <+> hsep (punctuate comma $ map mbPretty ops) <+> "and" <+> hsep (punctuate comma $ map mbPretty ops2)
-                )
-                (mkNotes [(loc, This "occured at this declaration")])
-                []
-  where
-    mbPretty Nothing = "function application"
-    mbPretty (Just op) = pretty op
-
-reportPosetError :: Diagnose :> es => Eff (Error PosetError : es) a -> Eff es a
-reportPosetError = runErrorNoCallStack @PosetError >=> either asDiagnoseError pure
-  where
-    asDiagnoseError (Poset.LookupError key) = fatal . one . dummy $ "missing operator" <+> pretty key
-
-reportCycleWarnings :: (State (Poset Op) :> es, Diagnose :> es) => Loc -> Eff (Writer (Seq (Poset.Cycle Op)) : es) a -> Eff es a
-reportCycleWarnings loc action = do
-    (x, warnings) <- runWriter action
-    poset <- get @(Poset Op)
-    for_ warnings \w -> do
-        opWarning . toOpWarning poset $ w
-    pure x
-  where
-    toOpWarning poset (Poset.Cycle lhsClass rhsClass) =
-        PriorityCycle loc (Poset.items lhsClass poset) (Poset.items rhsClass poset)
 
 lookup' :: (Diagnose :> es, Hashable k, Pretty k) => k -> HashMap k v -> Eff es v
 lookup' key hmap = case HashMap.lookup key hmap of
@@ -123,7 +78,7 @@ priority prev next = do
     fixities <- ask @FixityMap
     prevFixity <- lookup' prev fixities
     nextFixity <- lookup' next fixities
-    order <- reportPosetError $ Poset.relation prev next poset
+    order <- Poset.reportError $ Poset.relation prev next poset
     case order of
         _ | prev == next && prevFixity == InfixChain -> pure Left'
         Poset.DefinedOrder EQ -> case (prevFixity, nextFixity) of
@@ -137,32 +92,6 @@ priority prev next = do
         Poset.NoOrder -> opError $ UndefinedOrdering prev next
         Poset.AmbiguousOrder -> opError $ AmbiguousOrdering prev next
 
--- traverse all fixity declarations and construct a new priority graph
-collectOperators :: Diagnose :> es => FixityMap -> Poset Op -> [Declaration 'NameRes] -> Eff es (FixityMap, Poset Op)
-collectOperators fixityMap poset = runState @(Poset Op) poset . execState @FixityMap fixityMap . reportPosetError . traverse_ go
-  where
-    go = \case
-        (D.Fixity loc fixity op rels) -> reportCycleWarnings loc do
-            -- all operators implicitly have a lower precedence than function application, unless stated otherwise
-            let below
-                    | Nothing `notElem` rels.above = Nothing : map Just rels.below
-                    | otherwise = map Just rels.below
-
-            modify @FixityMap $ HashMap.insert (Just op) fixity
-
-            traverse_ (addRelation op GT) rels.above
-            traverse_ (addRelation op LT) below
-            traverse_ (addRelation op EQ . Just) rels.equal
-        _nonFixity -> pass
-
-    addRelation op_ _ op2
-        | Just op_ == op2 = opError $ SelfRelation $ Just op_
-    addRelation op_ rel op2 = do
-        let op = Just op_
-        lhsClass <- state $ Poset.eqClass op
-        rhsClass <- state $ Poset.eqClass op2
-        modifyM @(Poset Op) $ Poset.addRelationLenient lhsClass rhsClass rel
-
 resolveFixity :: Diagnose :> es => [Declaration 'NameRes] -> Eff es [Declaration 'Fixity]
 resolveFixity = resolveFixityWithEnv fixityMap poset
   where
@@ -170,9 +99,8 @@ resolveFixity = resolveFixityWithEnv fixityMap poset
     (_, poset) = Poset.eqClass Nothing Poset.empty
 
 resolveFixityWithEnv :: Diagnose :> es => FixityMap -> Poset Op -> [Declaration 'NameRes] -> Eff es [Declaration 'Fixity]
-resolveFixityWithEnv fixityMap poset decls = do
-    (newFixityMap, newPoset) <- collectOperators fixityMap poset decls
-    runReader newFixityMap $ runReader newPoset $ traverse parseDeclaration decls
+resolveFixityWithEnv fixityMap poset decls =
+    runReader fixityMap . runReader poset $ traverse parseDeclaration decls
 
 parseDeclaration :: Ctx es => Declaration 'NameRes -> Eff es (Declaration 'Fixity)
 parseDeclaration = \case
@@ -181,7 +109,6 @@ parseDeclaration = \case
         pure $
             D.Type loc name vars $
                 constrs & map \(D.Constructor cloc cname args) -> D.Constructor cloc cname (cast uniplateCast <$> args)
-    D.Alias loc name ty -> pure $ D.Alias loc name (cast uniplateCast ty)
     D.Signature loc name ty -> pure $ D.Signature loc name (cast uniplateCast ty)
     D.Fixity loc fixity op PriorityRelation{above, below, equal} -> pure $ D.Fixity loc fixity op PriorityRelation{above, below, equal}
 
@@ -204,7 +131,7 @@ parse = \case
     E.List loc exprs -> E.List loc <$> traverse parse exprs
     E.Do loc stmts lastAction -> E.Do loc <$> traverse parseStmt stmts <*> parse lastAction
     E.Literal lit -> pure $ E.Literal lit
-    E.Infix _ pairs last' -> join $ go' <$> traverse (bitraverse parse pure) pairs <*> parse last'
+    E.Infix pairs last' -> join $ go' <$> traverse (bitraverse parse pure) pairs <*> parse last'
   where
     go' :: Ctx es => [(Expression 'Fixity, Op)] -> Expression 'Fixity -> Eff es (Expression 'Fixity)
     go' pairs last' = go [] pairs

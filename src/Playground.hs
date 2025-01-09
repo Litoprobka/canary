@@ -7,6 +7,7 @@
 {-# OPTIONS_GHC -Wno-missing-methods #-}
 {-# OPTIONS_GHC -Wno-orphans #-}
 {-# OPTIONS_GHC -Wno-unused-imports #-}
+{-# LANGUAGE ExplicitNamespaces #-}
 
 module Playground where
 
@@ -40,6 +41,7 @@ import Syntax.Row
 import Syntax.Type qualified as T
 import Text.Megaparsec (errorBundlePretty, parse, pos1)
 import TypeChecker
+import Data.Type.Ord (type (<))
 
 -- a lot of what is used here is only reasonable for interactive use
 
@@ -268,10 +270,7 @@ typeDec typeName vars constrs = D.Type loc typeName vars constrs
         (x : _, []) -> zipLocOf typeName x
         (_, x : _) -> zipLocOf typeName x
 
-aliasDec :: HasLoc (NameAt p) => NameAt p -> Type' p -> Declaration p
-aliasDec name ty = D.Alias (zipLocOf name ty) name ty
-
-sigDec :: HasLoc (NameAt p) => NameAt p -> Type' p -> Declaration p
+sigDec :: (HasLoc (NameAt p), p < DependencyRes) => NameAt p -> Type' p -> Declaration p
 sigDec name ty = D.Signature (zipLocOf name ty) name ty
 
 conDec :: HasLoc (NameAt p) => NameAt p -> [Type' p] -> D.Constructor p

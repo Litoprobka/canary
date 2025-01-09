@@ -1,27 +1,27 @@
 {-# LANGUAGE OverloadedRecordDot #-}
 {-# LANGUAGE UndecidableInstances #-}
+{-# LANGUAGE ExplicitNamespaces #-}
 
 module Syntax.Declaration (Declaration (..), Constructor (..)) where
 
-import Common (Fixity (..), HasLoc (..), Loc, NameAt, Pass (Parse), PriorityRelation, PriorityRelation' (..))
-import Prettyprinter (Pretty (pretty), comma, encloseSep, line, nest, punctuate, sep, space, vsep, (<+>))
+import Common (Fixity (..), HasLoc (..), Loc, NameAt, Pass (Parse, DependencyRes), PriorityRelation, PriorityRelation' (..))
+import Prettyprinter (Pretty (pretty), comma, encloseSep, line, nest, punctuate, sep, space, vsep, (<+>), Doc)
 import Relude hiding (show)
 import Syntax.Expression (Binding)
 import Syntax.Type (Type')
 import Prelude (show)
+import Data.Type.Ord (type (<))
 
 data Declaration (p :: Pass)
-    = Value Loc (Binding p) [Declaration p] -- todo: forbid local type declarations?
+    = Value Loc (Binding p) [Declaration p]
     | Type Loc (NameAt p) [NameAt p] [Constructor p]
-    | Alias Loc (NameAt p) (Type' p)
-    | Signature Loc (NameAt p) (Type' p)
-    | Fixity Loc Fixity (NameAt p) (PriorityRelation p)
+    | p < DependencyRes => Signature Loc (NameAt p) (Type' p)
+    | p < DependencyRes => Fixity Loc Fixity (NameAt p) (PriorityRelation p)
 
 deriving instance Eq (Declaration 'Parse)
 
-data Constructor p = Constructor Loc (NameAt p) [Type' p]
+data Constructor p = Constructor { loc :: Loc, name :: NameAt p, args :: [Type' p] }
 deriving instance Eq (Constructor 'Parse)
-
 instance Pretty (NameAt p) => Pretty (Declaration p) where
     pretty = \case
         Value _ binding locals -> pretty binding <> line <> whereIfNonEmpty locals <> line <> nest 4 (vsep (pretty <$> locals))
@@ -29,7 +29,6 @@ instance Pretty (NameAt p) => Pretty (Declaration p) where
         Type _ name vars cons ->
             sep ("type" : pretty name : map pretty vars)
                 <+> encloseSep "= " "" (space <> "|" <> space) (cons <&> \(Constructor _ con args) -> sep (pretty con : map pretty args))
-        Alias _ name ty -> "type alias" <+> pretty name <+> "=" <+> pretty ty
         Fixity _ fixity op priority ->
             fixityKeyword fixity
                 <+> pretty op
@@ -37,6 +36,7 @@ instance Pretty (NameAt p) => Pretty (Declaration p) where
                     <> listIfNonEmpty "below" priority.below
                     <> listIfNonEmpty "equals" priority.equal
       where
+        fixityKeyword :: Fixity -> Doc ann
         fixityKeyword = \case
             InfixL -> "infix left"
             InfixR -> "infix right"
@@ -55,7 +55,6 @@ instance HasLoc (Declaration p) where
     getLoc = \case
         Value loc _ _ -> loc
         Type loc _ _ _ -> loc
-        Alias loc _ _ -> loc
         Signature loc _ _ -> loc
         Fixity loc _ _ _ -> loc
 
