@@ -2,7 +2,7 @@
 
 module Fixity (resolveFixity, parse, Fixity (..)) where
 
-import Common (Fixity (..), Loc (..), Name, Pass (..), PriorityRelation' (..), getLoc, mkNotes, zipLocOf)
+import Common (Fixity (..), Loc (..), Name, Pass (..), cast, getLoc, mkNotes, zipLocOf)
 import Control.Monad (foldM)
 import Data.HashMap.Strict qualified as HashMap
 import Data.List.NonEmpty qualified as NE
@@ -10,7 +10,7 @@ import Diagnostic (Diagnose, dummy, fatal)
 import Effectful.Reader.Static (Reader, ask, runReader)
 import Error.Diagnose (Marker (This), Report (..))
 import LangPrelude hiding (cycle)
-import LensyUniplate
+import LensyUniplate (unicast)
 import Poset (Poset)
 import Poset qualified
 import Syntax
@@ -92,37 +92,39 @@ priority prev next = do
         Poset.NoOrder -> opError $ UndefinedOrdering prev next
         Poset.AmbiguousOrder -> opError $ AmbiguousOrdering prev next
 
-resolveFixity :: Diagnose :> es => [Declaration 'NameRes] -> Eff es [Declaration 'Fixity]
+resolveFixity :: Diagnose :> es => [Declaration 'DependencyRes] -> Eff es [Declaration 'Fixity]
 resolveFixity = resolveFixityWithEnv fixityMap poset
   where
     fixityMap = HashMap.singleton Nothing InfixL
     (_, poset) = Poset.eqClass Nothing Poset.empty
 
-resolveFixityWithEnv :: Diagnose :> es => FixityMap -> Poset Op -> [Declaration 'NameRes] -> Eff es [Declaration 'Fixity]
+resolveFixityWithEnv :: Diagnose :> es => FixityMap -> Poset Op -> [Declaration 'DependencyRes] -> Eff es [Declaration 'Fixity]
 resolveFixityWithEnv fixityMap poset decls =
     runReader fixityMap . runReader poset $ traverse parseDeclaration decls
 
-parseDeclaration :: Ctx es => Declaration 'NameRes -> Eff es (Declaration 'Fixity)
+parseDeclaration :: Ctx es => Declaration 'DependencyRes -> Eff es (Declaration 'Fixity)
 parseDeclaration = \case
     D.Value loc binding locals -> D.Value loc <$> parseBinding binding <*> traverse parseDeclaration locals
-    D.Type loc name vars constrs ->
+    D.Type loc name binders constrs ->
         pure $
-            D.Type loc name vars $
-                constrs & map \(D.Constructor cloc cname args) -> D.Constructor cloc cname (cast uniplateCast <$> args)
-    D.Signature loc name ty -> pure $ D.Signature loc name (cast uniplateCast ty)
-    D.Fixity loc fixity op PriorityRelation{above, below, equal} -> pure $ D.Fixity loc fixity op PriorityRelation{above, below, equal}
+            D.Type loc name (map cast binders) $
+                constrs & map \(D.Constructor cloc cname args) -> D.Constructor cloc cname (unicast <$> args)
+    D.GADT loc name mbKind constrs ->
+        pure $ D.GADT loc name (fmap unicast mbKind) $ map cast constrs
+    D.Signature loc name ty -> pure $ D.Signature loc name (unicast ty)
 
-parse :: Ctx es => Expression 'NameRes -> Eff es (Expression 'Fixity)
+parse :: Ctx es => Expression 'DependencyRes -> Eff es (Expression 'Fixity)
 parse = \case
-    E.Lambda loc arg body -> E.Lambda loc (cast uniplateCast arg) <$> parse body
+    E.Lambda loc arg body -> E.Lambda loc (unicast arg) <$> parse body
     E.WildcardLambda loc args body -> E.WildcardLambda loc args <$> parse body
     E.Application lhs rhs -> E.Application <$> parse lhs <*> parse rhs
+    E.TypeApplication expr tyArg -> E.TypeApplication <$> parse expr <*> pure (unicast tyArg)
     E.Let loc binding expr -> E.Let loc <$> parseBinding binding <*> parse expr
     E.LetRec loc bindings expr -> E.LetRec loc <$> traverse parseBinding bindings <*> parse expr
-    E.Case loc arg cases -> E.Case loc <$> parse arg <*> traverse (bitraverse (pure . cast uniplateCast) parse) cases
-    E.Match loc cases -> E.Match loc <$> traverse (bitraverse (pure . map (cast uniplateCast)) parse) cases
+    E.Case loc arg cases -> E.Case loc <$> parse arg <*> traverse (bitraverse (pure . unicast) parse) cases
+    E.Match loc cases -> E.Match loc <$> traverse (bitraverse (pure . map unicast) parse) cases
     E.If loc cond true false -> E.If loc <$> parse cond <*> parse true <*> parse false
-    E.Annotation e ty -> E.Annotation <$> parse e <*> pure (cast uniplateCast ty)
+    E.Annotation e ty -> E.Annotation <$> parse e <*> pure (unicast ty)
     E.Name name -> pure $ E.Name name
     E.RecordLens loc row -> pure $ E.RecordLens loc row
     E.Constructor name -> pure $ E.Constructor name
@@ -170,14 +172,14 @@ parse = \case
 
 -- * Helpers
 
-parseBinding :: Ctx es => Binding 'NameRes -> Eff es (Binding 'Fixity)
+parseBinding :: Ctx es => Binding 'DependencyRes -> Eff es (Binding 'Fixity)
 parseBinding = \case
-    E.ValueBinding pat expr -> E.ValueBinding (cast uniplateCast pat) <$> parse expr
-    E.FunctionBinding name pats body -> E.FunctionBinding name (fmap (cast uniplateCast) pats) <$> parse body
+    E.ValueBinding pat expr -> E.ValueBinding (unicast pat) <$> parse expr
+    E.FunctionBinding name pats body -> E.FunctionBinding name (fmap unicast pats) <$> parse body
 
-parseStmt :: Ctx es => DoStatement 'NameRes -> Eff es (DoStatement 'Fixity)
+parseStmt :: Ctx es => DoStatement 'DependencyRes -> Eff es (DoStatement 'Fixity)
 parseStmt = \case
-    E.Bind pat body -> E.Bind (cast uniplateCast pat) <$> parse body
-    E.With loc pat body -> E.With loc (cast uniplateCast pat) <$> parse body
+    E.Bind pat body -> E.Bind (unicast pat) <$> parse body
+    E.With loc pat body -> E.With loc (unicast pat) <$> parse body
     E.DoLet loc binding -> E.DoLet loc <$> parseBinding binding
     E.Action expr -> E.Action <$> parse expr

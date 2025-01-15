@@ -27,6 +27,7 @@ default-extensions:
   - LambdaCase
   - StrictData
   - OverloadedRecordDot
+  - ExplicitNamespaces
 
 dependencies:
 - base >= 4.7 && < 5

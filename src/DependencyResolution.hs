@@ -4,12 +4,12 @@ module DependencyResolution where
 
 import Common
 import Data.HashMap.Strict qualified as HashMap
+import Data.HashSet qualified as HashSet
 import Diagnostic (Diagnose, fatal, nonFatal)
 import Effectful.State.Static.Local
 import Effectful.Writer.Static.Local (Writer, runWriter)
 import Error.Diagnose (Marker (..), Report (..))
 import LangPrelude
-import LensyUniplate (cast, uniplateCast)
 import NameGen (freshId, runNameGen)
 import Poset (Poset)
 import Poset qualified
@@ -29,8 +29,8 @@ data Output = Output
     -- ^ operator fixities extracted from Infix declarations
     , operatorPriorities :: Poset Op
     -- ^ operator priorities extracted from Infix declarations and converted to a Poset
-    , dependencyOrder :: [[DeclId]]
-    -- ^ the order in which declarations may be processed
+    , orderedDeclarations :: [[Decl]]
+    -- ^ mutually recursive groups of declarations in processing order
     , declarations :: HashMap DeclId Decl -- since a declaration may yield multiple names, direct name-to-declaration mapping is a no go
     -- given the many-to-one nature of declarations, we need some way to relate them to names
     , nameOrigins :: NameOrigins
@@ -57,9 +57,11 @@ resolveDependencies decls = do
             . execState @Signatures HashMap.empty
             $ traverse_ go decls
     let danglingSigs = HashMap.difference signatures $ HashMap.compose declarations nameOrigins
-
     for_ danglingSigs danglingSigError
-    pure Output{dependencyOrder = Poset.ordered declDeps, ..}
+
+    let orderedDeclarations = (map . mapMaybe) (`HashMap.lookup` declarations) $ Poset.ordered declDeps
+
+    pure Output{..}
   where
     -- go :: Declaration 'NameRes -> Eff es ()
     go = \case
@@ -70,16 +72,18 @@ resolveDependencies decls = do
             -- I'm not sure how to handle locals here, since they may contain mutual recursion
             -- and all of the same complications
             -- seems like we have to run dependency resolution on these bindings locally
-            declId <- addDecl (D.Value loc (cast uniplateCast binding) _locals)
+            let (binding', dependencies) = collectBindingDependencies binding
+            declId <- addDecl (D.Value loc (cast binding) _ProcessedLocals)
             -- traverse the binding body and add a dependency between declarations
             linkNamesToDecl declId $ collectNamesInBinding binding
         D.Type loc name vars constrs -> do
-            declId <- addDecl (D.Type loc name vars $ map castCon constrs)
+            declId <- addDecl (D.Type loc name (map cast vars) $ map castCon constrs)
             linkNamesToDecl declId $ name : map (.name) constrs
         -- traverse all constructor arguments and add dependencies
         -- these dependencies are only needed for kind checking
+        D.GADT{} -> _todo
         D.Signature _ name ty -> do
-            modify @Signatures $ HashMap.insert name $ cast uniplateCast ty
+            modify @Signatures $ HashMap.insert name $ cast ty
 
     -- addDecl :: Declaration 'DependencyRes -> Eff es DeclId
     addDecl decl = do
@@ -93,6 +97,11 @@ resolveDependencies decls = do
     castCon :: Constructor 'NameRes -> Constructor 'DependencyRes
     castCon D.Constructor{loc, name, args} =
         D.Constructor loc (coerce name) $ map (cast uniplateCast) args
+
+collectBindingDependencies :: Binding 'NameRes -> (Binding 'DependencyRes, HashSet Name)
+collectBindingDependencies = runPureEff . runState @(HashSet Name) HashSet.empty . go
+  where
+    go = todo
 
 -- | collects all to-be-declared names in a pattern
 collectNames :: Pattern p -> [NameAt p]

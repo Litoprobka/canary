@@ -83,7 +83,7 @@ error =
                 []
 
 -- | run a state action without changing the `Scope` part of the state
-scoped :: EnvEffs es => Eff (Declare : es) a -> Eff es a
+scoped :: NameResCtx es => Eff (Declare : es) a -> Eff es a
 scoped action' =
     runDeclare action' & \action -> do
         prevScope <- get @Scope
@@ -92,7 +92,7 @@ scoped action' =
         pure output
 
 -- todo: handle duplicate names (those that aren't just shadowing)
-runDeclare :: EnvEffs es => Eff (Declare : es) a -> Eff es a
+runDeclare :: NameResCtx es => Eff (Declare : es) a -> Eff es a
 runDeclare = interpret \_ -> \case
     -- each wildcard gets a unique id
     Declare w@(Located _ Wildcard'{}) -> freshName w
@@ -105,10 +105,13 @@ runDeclare = interpret \_ -> \case
         put $ Scope $ Map.insert name_ disambiguatedName scope.table
         pure disambiguatedName
 
-type EnvEffs es = (State Scope :> es, NameGen :> es, Diagnose :> es)
+type NameResCtx es = (State Scope :> es, NameGen :> es, Diagnose :> es)
 
--- | looks up a name in the current scope
-resolve :: EnvEffs es => SimpleName -> Eff es Name
+{- | looks up a name in the current scope
+if the name is unbound, gives it a new unique id and
+emits an UnboundVar error
+-}
+resolve :: NameResCtx es => SimpleName -> Eff es Name
 resolve name@(Located loc name_) = do
     scope <- get @Scope
     case scope.table & Map.lookup name_ of
@@ -122,7 +125,7 @@ runNameResolution
     :: (NameGen :> es, Diagnose :> es) => HashMap SimpleName_ Name -> Eff (Declare : State Scope : es) a -> Eff es a
 runNameResolution env = evalState (Scope env) . runDeclare
 
-resolveNames :: (EnvEffs es, Declare :> es) => [Declaration 'Parse] -> Eff es [Declaration 'NameRes]
+resolveNames :: (NameResCtx es, Declare :> es) => [Declaration 'Parse] -> Eff es [Declaration 'NameRes]
 resolveNames decls = do
     mkGlobalScope
     let (valueDecls, rest) = partition isValueDecl decls
@@ -131,7 +134,7 @@ resolveNames decls = do
     pure $ valueDecls' <> otherDecls
   where
     -- this is going to handle imports at some point
-    mkGlobalScope :: (EnvEffs es, Declare :> es) => Eff es ()
+    mkGlobalScope :: (NameResCtx es, Declare :> es) => Eff es ()
     mkGlobalScope = collectNames decls
 
     isValueDecl D.Value{} = True
@@ -141,43 +144,52 @@ resolveNames decls = do
 this function should be used very carefully, since it will
 generate different IDs when called twice on the same data
 -}
-collectNames :: (EnvEffs es, Declare :> es) => [Declaration 'Parse] -> Eff es ()
+collectNames :: (NameResCtx es, Declare :> es) => [Declaration 'Parse] -> Eff es ()
 collectNames decls = for_ decls \case
     D.Value _ (E.FunctionBinding name _ _) _ -> void $ declare name
     D.Value _ (E.ValueBinding pat _) _ -> void $ declarePat pat
     D.Type _ name _ _ -> void $ declare name
+    D.GADT _ name _ _ -> void $ declare name
     D.Signature{} -> pass
     D.Fixity{} -> pass
 
 -- | resolves names in a declaration. Adds type constructors to the current scope
-resolveDec :: EnvEffs es => Declaration 'Parse -> Eff es (Declaration 'NameRes)
+resolveDec :: NameResCtx es => Declaration 'Parse -> Eff es (Declaration 'NameRes)
 resolveDec decl = case decl of
     D.Value loc binding locals -> scoped do
         binding' <- resolveBinding locals binding
         locals' <- traverse resolveDec locals
         pure $ D.Value loc binding' locals'
     D.Type loc name vars constrs -> do
-        (name', vars', constrsToDeclare) <- scoped do
-            name' <- resolve name
-            vars' <- traverse declare vars
+        name' <- resolve name
+        (vars', constrsToDeclare) <- scoped do
+            vars' <- traverse resolveBinder vars
             constrsToDeclare <-
-                constrs & traverse \(D.Constructor conLoc con args) -> do
+                for constrs \(D.Constructor conLoc con args) -> do
                     con' <- declare con
                     args' <- traverse resolveType args
                     pure (con, D.Constructor conLoc con' args')
-            pure (name', vars', constrsToDeclare)
+            pure (vars', constrsToDeclare)
         -- this is a bit of a crutch, since we want name' and vars' to be scoped and constrs to be global
         -- NAMESPACES: constrs should be declared in a corresponding type namespace
         for_ constrsToDeclare \(Located _ name_, D.Constructor _ conName _) ->
             modify \(Scope table) -> Scope (Map.insert name_ conName table)
         pure $ D.Type loc name' vars' (snd <$> constrsToDeclare)
+    D.GADT loc name mbKind constrs -> do
+        name' <- resolve name
+        mbKind' <- traverse resolveType mbKind
+        constrs' <- for constrs \(D.GadtConstructor conLoc con sig) -> do
+            con' <- resolve con
+            sig' <- resolveType sig
+            pure $ D.GadtConstructor conLoc con' sig'
+        pure $ D.GADT loc name' mbKind' constrs'
     D.Signature loc name ty -> D.Signature loc <$> resolve name <*> resolveType ty
     D.Fixity loc fixity name rels -> D.Fixity loc fixity <$> resolve name <*> traverse resolve rels
 
 {- | resolves names in a binding. Unlike the rest of the functions, it also
 takes local definitions as an argument, and uses them after resolving the name / pattern
 -}
-resolveBinding :: EnvEffs es => [Declaration 'Parse] -> Binding 'Parse -> Eff es (Binding 'NameRes)
+resolveBinding :: NameResCtx es => [Declaration 'Parse] -> Binding 'Parse -> Eff es (Binding 'NameRes)
 resolveBinding locals =
     scoped . \case
         E.FunctionBinding name args body -> do
@@ -193,7 +205,7 @@ resolveBinding locals =
             pure $ E.ValueBinding pat' body'
 
 -- resolves / declares names in a binding. The intended use case is let bindings
-declareBinding :: (EnvEffs es, Declare :> es) => Binding 'Parse -> Eff es (Binding 'NameRes)
+declareBinding :: (NameResCtx es, Declare :> es) => Binding 'Parse -> Eff es (Binding 'NameRes)
 declareBinding = \case
     E.FunctionBinding name args body -> do
         name' <- declare name
@@ -208,7 +220,7 @@ declareBinding = \case
 
 -- this could have been a Traversable instance
 -- resolves names in a pattern, assuming that all new bindings have already been declared
-resolvePat :: EnvEffs es => Pattern 'Parse -> Eff es (Pattern 'NameRes)
+resolvePat :: NameResCtx es => Pattern 'Parse -> Eff es (Pattern 'NameRes)
 resolvePat = \case
     P.Constructor con pats -> P.Constructor <$> resolve con <*> traverse resolvePat pats
     P.Annotation pat ty -> P.Annotation <$> resolvePat pat <*> resolveType ty
@@ -220,7 +232,7 @@ resolvePat = \case
     P.Literal lit -> pure $ P.Literal lit
 
 -- | resolves names in a pattern. Adds all new names to the current scope
-declarePat :: (EnvEffs es, Declare :> es) => Pattern 'Parse -> Eff es (Pattern 'NameRes)
+declarePat :: (NameResCtx es, Declare :> es) => Pattern 'Parse -> Eff es (Pattern 'NameRes)
 declarePat = \case
     P.Constructor con pats -> P.Constructor <$> resolve con <*> traverse declarePat pats
     P.Annotation pat ty -> P.Annotation <$> declarePat pat <*> resolveType ty
@@ -231,11 +243,8 @@ declarePat = \case
     P.Wildcard loc name -> pure $ P.Wildcard loc name
     P.Literal lit -> pure $ P.Literal lit
 
-{- | resolves names in an expression. Doesn't change the current scope
-
-same story here. Most of the expressions use names, but a couple define them
--}
-resolveExpr :: EnvEffs es => Expression 'Parse -> Eff es (Expression 'NameRes)
+-- | resolves names in an expression. Doesn't change the current scope
+resolveExpr :: NameResCtx es => Expression 'Parse -> Eff es (Expression 'NameRes)
 resolveExpr e = scoped case e of
     E.Lambda loc arg body -> do
         arg' <- declarePat arg
@@ -246,6 +255,7 @@ resolveExpr e = scoped case e of
         body' <- resolveExpr body
         pure $ E.WildcardLambda loc args' body'
     E.Application f arg -> E.Application <$> resolveExpr f <*> resolveExpr arg
+    E.TypeApplication expr tyArg -> E.TypeApplication <$> resolveExpr expr <*> resolveType tyArg
     E.Let loc binding expr -> do
         binding' <- declareBinding binding
         expr' <- resolveExpr expr
@@ -280,7 +290,7 @@ resolveExpr e = scoped case e of
     E.Variant openName -> pure $ E.Variant openName
     E.Literal lit -> pure $ E.Literal lit
 
-resolveStmt :: (EnvEffs es, Declare :> es) => DoStatement 'Parse -> Eff es (DoStatement 'NameRes)
+resolveStmt :: (NameResCtx es, Declare :> es) => DoStatement 'Parse -> Eff es (DoStatement 'NameRes)
 resolveStmt = \case
     E.Bind pat body -> do
         body' <- resolveExpr body
@@ -294,14 +304,14 @@ resolveStmt = \case
     E.Action expr -> E.Action <$> resolveExpr expr
 
 -- | resolves names in a type. Doesn't change the current scope
-resolveType :: EnvEffs es => Type' 'Parse -> Eff es (Type' 'NameRes)
+resolveType :: NameResCtx es => Type' 'Parse -> Eff es (Type' 'NameRes)
 resolveType ty = scoped case ty of
-    T.Forall loc var body -> do
-        var' <- declare var
+    T.Forall loc binder body -> do
+        var' <- resolveBinder binder
         body' <- resolveType body
         pure $ T.Forall loc var' body'
-    T.Exists loc var body -> do
-        var' <- declare var
+    T.Exists loc binder body -> do
+        var' <- resolveBinder binder
         body' <- resolveType body
         pure $ T.Exists loc var' body'
     T.Application lhs rhs -> T.Application <$> resolveType lhs <*> resolveType rhs
@@ -310,3 +320,12 @@ resolveType ty = scoped case ty of
     T.Var var -> T.Var <$> resolve var
     T.Variant loc row -> T.Variant loc <$> traverse resolveType row
     T.Record loc row -> T.Record loc <$> traverse resolveType row
+
+{- | declares the var in a binder; resolves names in its kind annotation, if any
+the kind annotation may not reference the var
+-}
+resolveBinder :: (NameResCtx es, Declare :> es) => VarBinder 'Parse -> Eff es (VarBinder 'NameRes)
+resolveBinder (T.VarBinder var k) = do
+    k' <- traverse resolveType k
+    var' <- declare var
+    pure $ T.VarBinder var' k'

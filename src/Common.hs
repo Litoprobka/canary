@@ -33,12 +33,17 @@ module Common (
     Fixity (..),
     PriorityRelation,
     PriorityRelation' (..),
+    type (!=),
+    Cast (..),
 ) where
 
-import Data.Type.Ord (Compare)
+import Data.Type.Bool (type (||))
+import Data.Type.Ord (Compare, type (>?))
 import Error.Diagnose (Position (..))
 import Error.Diagnose qualified as M
+import GHC.TypeError (Assert, ErrorMessage (..), TypeError)
 import LangPrelude
+import LensyUniplate (UniplateCast, unicast)
 import Prettyprinter
 import Text.Megaparsec (SourcePos (..), unPos)
 
@@ -58,14 +63,22 @@ type family ComparePass a b where
     ComparePass NameRes NameRes = EQ
     ComparePass 'Fixity 'Fixity = EQ
     ComparePass 'DuringTypecheck 'DuringTypecheck = EQ
+    ComparePass 'DependencyRes 'DependencyRes = EQ
     ComparePass Parse _ = LT
     ComparePass _ Parse = GT
     ComparePass NameRes _ = LT
     ComparePass _ NameRes = GT
+    ComparePass 'DependencyRes _ = LT
+    ComparePass _ 'DependencyRes = GT
     ComparePass 'Fixity _ = LT
     ComparePass _ 'Fixity = GT
     ComparePass DuringTypecheck _ = LT
     ComparePass _ DuringTypecheck = GT
+
+type (!=) (a :: k) (b :: k) =
+    Assert
+        (a >? b || b >? a)
+        (TypeError ('Text "Cannot satisfy: " ':<>: 'ShowType a ':<>: 'Text " != " ':<>: 'ShowType b))
 
 data Fixity = InfixL | InfixR | InfixChain | Infix deriving (Show, Eq)
 
@@ -221,3 +234,10 @@ mkNotes :: [(Loc, M.Marker a)] -> [(Position, M.Marker a)]
 mkNotes = mapMaybe \case
     (Blank, _) -> Nothing
     (Loc pos, marker) -> Just (pos, marker)
+
+-- a class for AST nodes that can be losslessly cast to a different pass
+class Cast ty (p :: Pass) (q :: Pass) where
+    cast :: ty p -> ty q
+
+instance {-# OVERLAPPABLE #-} UniplateCast (ty p) (ty q) => Cast ty p q where
+    cast = unicast

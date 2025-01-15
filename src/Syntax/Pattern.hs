@@ -62,7 +62,7 @@ instance HasLoc (NameAt p) => HasLoc (Pattern p) where
         Literal lit -> getLoc lit
 
 instance (UniplateCast (Type' p) (Type' q), NameAt p ~ NameAt q) => UniplateCast (Pattern p) (Pattern q) where
-    uniplateCast = uniplate' (cast uniplateCast)
+    uniplateCast = uniplate' unicast
 
 uniplate :: SelfTraversal Pattern p p
 uniplate f = \case

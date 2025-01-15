@@ -51,9 +51,22 @@ declaration = withLoc $ choice [typeDec, fixityDec, signature, valueDec]
     typeDec = do
         keyword "type"
         name <- typeName
-        vars <- many typeVariable -- in the future, this should also support kind-annotated variables
+        simpleTypeDec name <|> gadtDec name
+
+    simpleTypeDec name = do
+        vars <- many varBinder
         specialSymbol "="
         flip4 D.Type name vars <$> typePattern `sepBy` specialSymbol "|"
+
+    gadtDec :: SimpleName -> Parser (Loc -> Declaration 'Parse)
+    gadtDec name = do
+        mbKind <- optional $ specialSymbol ":" *> type'
+        constrs <- block "where" $ withLoc do
+            con <- constructorName
+            specialSymbol ":"
+            sig <- type'
+            pure $ flip3 D.GadtConstructor con sig
+        pure $ flip4 D.GADT name mbKind constrs
 
     typePattern :: Parser (Constructor 'Parse)
     typePattern = withLoc do
@@ -86,11 +99,17 @@ declaration = withLoc $ choice [typeDec, fixityDec, signature, valueDec]
             commaSep someOperator
         pure $ \loc -> D.Fixity loc fixity op PriorityRelation{above, below, equal}
 
+varBinder :: ParserM m => m (VarBinder 'Parse)
+varBinder =
+    parens (T.VarBinder <$> typeVariable <* specialSymbol ":" <*> fmap Just type')
+        <|> flip T.VarBinder Nothing
+        <$> typeVariable
+
 type' :: ParserM m => m (Type' 'Parse)
 type' = Expr.makeExprParser typeParens [[typeApp], [function], [forall', exists]]
   where
-    forall' = Expr.Prefix $ lambdaLike T.Forall forallKeyword typeVariable "."
-    exists = Expr.Prefix $ lambdaLike T.Exists existsKeyword typeVariable "."
+    forall' = Expr.Prefix $ lambdaLike T.Forall forallKeyword varBinder "."
+    exists = Expr.Prefix $ lambdaLike T.Exists existsKeyword varBinder "."
 
     typeApp = Expr.InfixL $ pure T.Application
     function = Expr.InfixR $ appLoc T.Function <$ specialSymbol "->"
@@ -178,7 +197,13 @@ binding = do
     funcName = operatorInParens <|> termName
 
 expression :: ParserM m => m (Expression 'Parse)
-expression = expression' $ E.Name <$> termName
+expression = expression' do
+    expr <- E.Name <$> termName
+    -- type applications bind tighther than anything else
+    apps <- many do
+        void $ single '@'
+        typeParens
+    pure $ foldl' E.TypeApplication expr apps
 
 -- an expression with infix operators and unresolved priorities
 -- the `E.Infix` constructor is only used when there is more than one operator

@@ -3,6 +3,7 @@
 {-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE MonoLocalBinds #-}
 {-# LANGUAGE OverloadedRecordDot #-}
+{-# LANGUAGE UndecidableInstances #-}
 {-# OPTIONS_GHC -Wno-incomplete-patterns #-}
 {-# OPTIONS_GHC -Wno-missing-export-lists #-}
 {-# OPTIONS_GHC -Wno-missing-methods #-}
@@ -26,7 +27,7 @@ import Error.Diagnose (Diagnostic)
 import Fixity (resolveFixity)
 import Fixity qualified (parse)
 import LangPrelude
-import LensyUniplate (UniplateCast (uniplateCast), cast)
+import LensyUniplate (unicast)
 import NameGen (NameGen, freshName, runNameGen)
 import NameResolution (Scope (..), declare, resolveNames, resolveType, runDeclare, runNameResolution)
 import NameResolution qualified (Declare)
@@ -91,7 +92,7 @@ mkDefaults = do
                 , ("reverse", T.Forall Blank "'a" $ listT "'a" --> listT "'a")
                 ]
             )
-    pure (scope, builtins, cast uniplateCast <$> env)
+    pure (scope, builtins, cast <$> env)
   where
     listT var = "List" $: var
 
@@ -186,6 +187,9 @@ instance {-# OVERLAPPABLE #-} NameAt p ~ Name => IsString (Type' p) where
     fromString str =
         str & matchCase (T.Name . nameFromText) (error $ "type name " <> fromString str <> " shouldn't start with a lowercase letter")
 
+instance {-# OVERLAPPABLE #-} (NameAt p ~ name, IsString name) => IsString (VarBinder p) where
+    fromString = T.plainBinder . fromString @name
+
 -- Type
 
 infixr 2 -->
@@ -197,7 +201,7 @@ infixl 3 $:
 ($:) = T.Application
 
 (∃) :: HasLoc (NameAt p) => NameAt p -> Type' p -> Type' p
-(∃) var body = T.Exists (zipLocOf var body) var body
+(∃) var body = T.Exists (zipLocOf var body) (T.plainBinder var) body
 
 recordT :: ExtRow (Type' p) -> Type' p
 recordT = T.Record Blank
@@ -263,14 +267,14 @@ valueDec binding decls = D.Value loc binding decls
         (lastDecl : _) -> zipLocOf binding lastDecl
 
 typeDec :: HasLoc (NameAt p) => NameAt p -> [NameAt p] -> [D.Constructor p] -> Declaration p
-typeDec typeName vars constrs = D.Type loc typeName vars constrs
+typeDec typeName vars constrs = D.Type loc typeName (map T.plainBinder vars) constrs
   where
     loc = case (reverse vars, reverse constrs) of
         ([], []) -> getLoc typeName
         (x : _, []) -> zipLocOf typeName x
         (_, x : _) -> zipLocOf typeName x
 
-sigDec :: (HasLoc (NameAt p), p < DependencyRes) => NameAt p -> Type' p -> Declaration p
+sigDec :: HasLoc (NameAt p) => NameAt p -> Type' p -> Declaration p
 sigDec name ty = D.Signature (zipLocOf name ty) name ty
 
 conDec :: HasLoc (NameAt p) => NameAt p -> [Type' p] -> D.Constructor p

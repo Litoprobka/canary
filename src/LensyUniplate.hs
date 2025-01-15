@@ -13,6 +13,7 @@ module LensyUniplate (
     transformInsideOut,
     cast,
     UniplateCast (..),
+    unicast,
     para,
 ) where
 
@@ -55,8 +56,13 @@ para trav f x = f x (para trav f <$> toListOf trav x)
 toListOf :: Traversal' s a -> s -> [a]
 toListOf trav = getConst . trav \x -> Const [x]
 
+-- a type-changing self-traversal
 class UniplateCast from to where
     uniplateCast :: Traversal from to from to
+
+-- cast a value from one type to another using its UniplateCast instance
+unicast :: UniplateCast from to => from -> to
+unicast = cast uniplateCast
 
 -- usage examples
 

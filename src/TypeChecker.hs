@@ -34,7 +34,7 @@ import Effectful
 import Effectful.State.Static.Local (State, gets, modify, runState)
 import GHC.IsList qualified as IsList
 import LangPrelude hiding (Type, bool)
-import LensyUniplate
+import LensyUniplate hiding (cast)
 import NameGen
 import Syntax
 import Syntax.Declaration qualified as D
@@ -55,7 +55,9 @@ typecheck env builtins decls = run (Right <$> env) builtins $ normaliseAll $ inf
 
 -- finds all type parameters used in a type and creates corresponding forall clauses
 inferTypeVars :: Type' 'Fixity -> Type' 'Fixity
-inferTypeVars ty = uncurry (foldr (T.Forall $ getLoc ty)) . second snd . runPureEff . runState (HashSet.empty, HashSet.empty) . go $ ty
+inferTypeVars ty =
+    uncurry (foldr (T.Forall (getLoc ty) . T.plainBinder)) . second snd . runPureEff . runState (HashSet.empty, HashSet.empty) . go $
+        ty
   where
     go :: Type' 'Fixity -> Eff '[State (HashSet Name, HashSet Name)] (Type' 'Fixity)
     go = transformM T.uniplate \case
@@ -63,15 +65,15 @@ inferTypeVars ty = uncurry (foldr (T.Forall $ getLoc ty)) . second snd . runPure
             isNew <- not . HashSet.member var <$> gets @(HashSet Name, HashSet Name) snd
             when isNew $ modify @(HashSet Name, HashSet Name) (second $ HashSet.insert var)
             pure $ T.Var var
-        forall_@(T.Forall _ var _) -> forall_ <$ modify @(HashSet Name, HashSet Name) (first $ HashSet.insert var)
-        exists_@(T.Exists _ var _) -> exists_ <$ modify @(HashSet Name, HashSet Name) (first $ HashSet.insert var)
+        forall_@(T.Forall _ binder _) -> forall_ <$ modify @(HashSet Name, HashSet Name) (first $ HashSet.insert binder.var)
+        exists_@(T.Exists _ binder _) -> exists_ <$ modify @(HashSet Name, HashSet Name) (first $ HashSet.insert binder.var)
         other -> pure other
 
 -- | check / infer types of a list of declarations that may reference each other
 inferDecls :: InfEffs es => [Declaration 'Fixity] -> Eff es (HashMap Name Type)
 inferDecls decls = do
     traverse_ updateTopLevel decls
-    let (values, sigs) = second (fmap (cast uniplateCast) . HashMap.fromList) $ foldr getValueDecls ([], []) decls
+    let (values, sigs) = second (fmap unicast . HashMap.fromList) $ foldr getValueDecls ([], []) decls
     fold <$> for values \(binding, locals) ->
         binding & collectNamesInBinding & listToMaybe >>= (`HashMap.lookup` sigs) & \case
             Just ty -> do
@@ -83,7 +85,7 @@ inferDecls decls = do
             Nothing -> scoped do
                 declareAll =<< inferDecls locals
                 typeMap <- normaliseAll $ inferBinding binding -- todo: true top level should be separated from the parent scopes
-                fmap (cast uniplateCast) typeMap <$ declareTopLevel typeMap
+                fmap unicast typeMap <$ declareTopLevel typeMap
   where
     updateTopLevel = \case
         D.Signature _ name sig ->
@@ -91,9 +93,12 @@ inferDecls decls = do
         D.Value _ binding@(E.FunctionBinding name _ _) locals -> insertBinding name binding locals
         D.Value _ binding@(E.ValueBinding (P.Var name) _) locals -> insertBinding name binding locals
         D.Value _ E.ValueBinding{} _ -> pass -- todo
-        D.Type _ name vars constrs ->
-            for_ (mkConstrSigs name vars constrs) \(con, sig) ->
+        D.Type _ name binders constrs ->
+            for_ (mkConstrSigs name ((.var) <$> binders) constrs) \(con, sig) ->
                 modify \s -> s{topLevel = HashMap.insert con (Right sig) s.topLevel}
+        D.GADT _ _ _ constrs ->
+            for_ constrs \con ->
+                modify \s -> s{topLevel = HashMap.insert con.name (Right con.sig) s.topLevel}
         D.Fixity{} -> pass
 
     insertBinding name binding locals =
@@ -111,14 +116,15 @@ inferDecls decls = do
     getValueDecls decl (values, sigs) = case decl of
         D.Value _ binding locals -> ((binding, locals) : values, sigs)
         D.Signature _ name sig -> (values, (name, sig) : sigs)
-        D.Type _ name vars constrs -> (values, mkConstrSigs name vars constrs ++ sigs)
+        D.Type _ name vars constrs -> (values, mkConstrSigs name (vars <&> (.var)) constrs ++ sigs)
+        D.GADT _ _ _ constrs -> (values, (constrs <&> \con -> (con.name, con.sig)) ++ sigs)
         D.Fixity{} -> (values, sigs)
 
     mkConstrSigs :: Name -> [Name] -> [Constructor 'Fixity] -> [(Name, Type' 'Fixity)]
     mkConstrSigs name vars constrs =
         constrs <&> \(D.Constructor loc con params) ->
             ( con
-            , foldr (T.Forall loc) (foldr (T.Function loc) fullType params) vars
+            , foldr (T.Forall loc . T.plainBinder) (foldr (T.Function loc) fullType params) vars
             )
       where
         fullType = foldl' T.Application (T.Name name) (T.Var <$> vars)
@@ -176,8 +182,8 @@ check e type_ = scoped $ match e type_
             checkPattern arg from
             check body to
         (E.Annotation expr annTy) ty -> do
-            check expr $ cast uniplateCast annTy
-            subtype (cast uniplateCast annTy) ty
+            check expr $ cast annTy
+            subtype (cast annTy) ty
         (E.If _ cond true false) ty -> do
             check cond $ T.Name $ Located (getLoc cond) BoolName
             check true ty
@@ -221,8 +227,8 @@ check e type_ = scoped $ match e type_
                     lookupUniVar uni >>= \case
                         Left _ -> solveUniVar uni newTy
                         Right _ -> pass
-        expr (T.Forall _ var body) -> check expr =<< substitute Out var body
-        expr (T.Exists _ var body) -> check expr =<< substitute In var body
+        expr (T.Forall _ binder body) -> check expr =<< substitute Out binder.var body
+        expr (T.Exists _ binder body) -> check expr =<< substitute In binder.var body
         expr ty -> do
             inferredTy <- infer expr
             subtype inferredTy ty
@@ -272,6 +278,13 @@ infer =
         app@(E.Application f x) -> do
             fTy <- infer f
             inferApp (getLoc app) fTy x
+        E.TypeApplication expr tyArg -> do
+            infer expr >>= \case
+                T.Forall _ binder body -> do
+                    Subst{var, result} <- substitute' In binder.var body
+                    subtype var $ unicast tyArg
+                    pure result
+                ty -> typeError $ NoVisibleTypeArgument expr tyArg ty
         E.Lambda loc arg body -> do
             argTy <- inferPattern arg
             T.Function loc argTy <$> infer body
@@ -284,7 +297,7 @@ infer =
         E.LetRec loc bindings body -> do
             declareAll =<< (inferDecls . map (\b -> D.Value loc b []) . NE.toList) bindings
             infer body
-        E.Annotation expr ty -> cast uniplateCast ty <$ check expr (cast uniplateCast ty)
+        E.Annotation expr ty -> cast ty <$ check expr (cast ty)
         E.If loc cond true false -> do
             check cond $ T.Name $ Located loc BoolName
             result <- fmap unMono . mono In =<< infer true
@@ -396,7 +409,7 @@ inferPattern = \case
         updateSig name uni
         pure uni
     P.Wildcard loc _ -> freshUniVar loc
-    P.Annotation pat ty -> cast uniplateCast ty <$ checkPattern pat (cast uniplateCast ty)
+    P.Annotation pat ty -> cast ty <$ checkPattern pat (cast ty)
     p@(P.Constructor name args) -> do
         (resultType, argTypes) <- conArgTypes name
         unless (length argTypes == length args) $

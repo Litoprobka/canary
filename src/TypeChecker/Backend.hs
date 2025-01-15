@@ -24,7 +24,7 @@ import Effectful.State.Static.Local (State, get, gets, modify, runState)
 import Effectful.TH
 import Error.Diagnose (Report (..))
 import Error.Diagnose qualified as M (Marker (..))
-import LensyUniplate
+import LensyUniplate hiding (cast)
 import NameGen
 import Prettyprinter (Pretty, pretty, (<+>))
 import Relude hiding (
@@ -132,6 +132,7 @@ data TypeError
     | ArgCountMismatchPattern Pat Int Int
     | NotAFunction Loc Type -- pretty fTy <+> "is not a function type"
     | SelfReferential Type
+    | NoVisibleTypeArgument Expr (Type' 'Fixity) Type
 
 typeError :: Diagnose :> es => TypeError -> Eff es a
 typeError =
@@ -193,6 +194,17 @@ typeError =
                 Nothing
                 ("self-referential type" <+> pretty ty)
                 (mkNotes [(getLoc ty, M.This "arising from")])
+                []
+        NoVisibleTypeArgument expr tyArg ty ->
+            Err
+                Nothing
+                "no visible type argument"
+                ( mkNotes
+                    [ (getLoc expr, M.This "when applying this expression")
+                    , (getLoc tyArg, M.This "to this type")
+                    , (getLoc ty, M.Where $ "where the expression has type" <+> pretty ty)
+                    ]
+                )
                 []
 
 type InfEffs es = (NameGen :> es, State InfState :> es, Diagnose :> es, Reader (Builtins Name) :> es)
@@ -353,9 +365,9 @@ lookupSig :: (InfEffs es, Declare :> es) => Name -> Eff es Type
 lookupSig name = do
     InfState{topLevel, locals} <- get @InfState
     case (HashMap.lookup name topLevel, HashMap.lookup name locals) of
-        (Just (Right ty), _) -> pure $ cast (T.uniplate' id T.UniVar T.Skolem) ty
+        (Just (Right ty), _) -> pure $ cast ty
         (_, Just ty) -> pure ty
-        (Just (Left (UninferredType closure)), _) -> cast (T.uniplate' id T.UniVar T.Skolem) <$> closure
+        (Just (Left (UninferredType closure)), _) -> cast <$> closure
         (Nothing, Nothing) -> do
             -- assuming that type checking is performed after name resolution,
             -- all encountered names have to be in scope
@@ -386,7 +398,7 @@ generaliseAll action = do
     generaliseOne scope ty = do
         ((ty', vars), skolems) <- runState HashMap.empty $ runState HashMap.empty $ go scope ty
         let forallVars = nub . mapMaybe (getFreeVar skolems) $ toList vars
-        pure $ foldr (T.Forall (getLoc ty)) (foldr (T.Exists (getLoc ty)) ty' skolems) forallVars
+        pure $ foldr (T.Forall (getLoc ty) . T.plainBinder) (foldr (T.Exists (getLoc ty) . T.plainBinder) ty' skolems) forallVars
 
     -- get all univars that have been solved to unique type variables
     getFreeVar :: HashMap k Name -> Type -> Maybe Name
@@ -451,8 +463,8 @@ mono variance = \case
     T.Function loc from to -> MFn loc <$> mono (flipVariance variance) from <*> go to
     T.Variant loc row -> MVariant loc <$> traverse go row
     T.Record loc row -> MRecord loc <$> traverse go row
-    T.Forall _ var body -> go =<< substitute variance var body
-    T.Exists _ var body -> go =<< substitute (flipVariance variance) var body
+    T.Forall _ binder body -> go =<< substitute variance binder.var body
+    T.Exists _ binder body -> go =<< substitute (flipVariance variance) binder.var body
   where
     go = mono variance
 
@@ -494,8 +506,8 @@ monoLayer variance = \case
     T.Function loc from to -> pure $ MLFn loc from to
     T.Variant loc row -> pure $ MLVariant loc row
     T.Record loc row -> pure $ MLRecord loc row
-    T.Forall _ var body -> monoLayer variance =<< substitute variance var body
-    T.Exists _ var body -> monoLayer variance =<< substitute (flipVariance variance) var body
+    T.Forall _ binder body -> monoLayer variance =<< substitute variance binder.var body
+    T.Exists _ binder body -> monoLayer variance =<< substitute (flipVariance variance) binder.var body
 
 unMonoLayer :: MonoLayer -> Type
 unMonoLayer = \case
@@ -509,9 +521,16 @@ unMonoLayer = \case
     MLRecord loc row -> T.Record loc row
 
 substitute :: InfEffs es => Variance -> Name -> Type -> Eff es Type
-substitute variance var ty = do
+substitute variance var ty = (.result) <$> substitute' variance var ty
+
+data Subst = Subst {var :: Type, result :: Type}
+
+-- substitute a type vairable with a univar / skolem depedening on variance
+substitute' :: InfEffs es => Variance -> Name -> Type -> Eff es Subst
+substitute' variance var ty = do
     someVar <- freshSomething Blank var variance
-    go someVar ty
+    result <- go someVar ty
+    pure Subst{var = someVar, result}
   where
     go replacement = transformM' T.uniplate \case
         T.Var v | v == var -> pure $ Left replacement
@@ -521,12 +540,12 @@ substitute variance var ty = do
                 <$> ( T.UniVar loc uni
                         <$ withUniVar uni \body -> overrideUniVar uni =<< mono In =<< go replacement (unMono body)
                     )
-        T.Forall loc v body
-            | v /= var -> Left . T.Forall loc v <$> go replacement body
-            | otherwise -> pure $ Left $ T.Forall loc v body
-        T.Exists loc v body
-            | v /= var -> Left . T.Exists loc v <$> go replacement body
-            | otherwise -> pure $ Left $ T.Exists loc v body
+        T.Forall loc binder body
+            | binder.var /= var -> Left . T.Forall loc binder <$> go replacement body
+            | otherwise -> pure $ Left $ T.Forall loc binder body
+        T.Exists loc binder body
+            | binder.var /= var -> Left . T.Exists loc binder <$> go replacement body
+            | otherwise -> pure $ Left $ T.Exists loc binder body
         other -> pure $ Right other
 
     -- freshUniVar or freshSkolem, depending on variance
