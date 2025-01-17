@@ -28,7 +28,6 @@ library
       DependencyResolution
       Diagnostic
       Fixity
-      IL
       Interpreter
       LangPrelude
       LensyUniplate

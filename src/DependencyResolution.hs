@@ -73,7 +73,7 @@ resolveDependencies decls = do
             -- and all of the same complications
             -- seems like we have to run dependency resolution on these bindings locally
             let (binding', dependencies) = collectBindingDependencies binding
-            declId <- addDecl (D.Value loc (cast binding) _ProcessedLocals)
+            declId <- addDecl (D.Value loc (cast binding) _processedLocals)
             -- traverse the binding body and add a dependency between declarations
             linkNamesToDecl declId $ collectNamesInBinding binding
         D.Type loc name vars constrs -> do

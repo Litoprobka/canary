@@ -197,8 +197,12 @@ uniplate f = \case
 
 class FixityAgrees (p :: Pass) (q :: Pass) where
     castInfix :: p < Fixity => [(Expression q, Maybe (NameAt q))] -> Expression q -> Expression q
-instance q < Fixity => FixityAgrees p q where
+instance {-# OVERLAPPABLE #-} q < Fixity => FixityAgrees p q where
     castInfix = Infix
+instance FixityAgrees Fixity q where
+    castInfix = error "unsatisfiable"
+instance FixityAgrees DuringTypecheck q where
+    castInfix = error "unsatisfiable"
 
 instance (Cast Binding p q, Cast Pattern p q, Cast Type' p q, NameAt p ~ NameAt q, FixityAgrees p q) => Cast Expression p q where
     cast = \case
