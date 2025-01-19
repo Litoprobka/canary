@@ -2,18 +2,20 @@
 {-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE OverloadedRecordDot #-}
 
-module Interpreter (InterpreterBuiltins (..), eval) where
+module Interpreter (InterpreterBuiltins (..), eval, evalAll) where
 
-import Common (Literal_ (..), Located (..), Name, Pass (..), getLoc)
+import Common (Literal_ (..), Loc (..), Located (..), Name, Pass (..), getLoc)
 import Data.HashMap.Lazy qualified as HashMap -- note that we use the lazy functions here
 import GHC.IsList qualified as IsList
 import LangPrelude
 import Prettyprinter (braces, comma, parens, punctuate, sep)
 import Syntax
+import Syntax.Declaration qualified as D
 import Syntax.Expression qualified as E
 import Syntax.Pattern qualified as P
 import Syntax.Row (OpenName)
 import Syntax.Row qualified as Row
+import Syntax.Type qualified as T
 
 data Value
     = Constructor Name [Value] -- a fully-applied counstructor
@@ -38,10 +40,6 @@ instance Pretty Value where
       where
         recordField (name, body) = pretty name <+> "=" <+> pretty body
 
--- placeholder
-showValue :: Value -> Text
-showValue _ = "<value>"
-
 data InterpreterBuiltins a = InterpreterBuiltins
     { true :: a
     , cons :: a
@@ -49,20 +47,40 @@ data InterpreterBuiltins a = InterpreterBuiltins
     }
     deriving (Functor, Foldable, Traversable)
 
-{-
-eval :: InterpreterBuiltins Name -> [Declaration 'Fixity] -> Expression 'Fixity -> Value
-eval builtins decls = eval' builtins constrs env where
-    (constrs, env) = fold collectBindings decls
-    collectBindings = \case
-        D.Value _ (E.ValueBinding pats body) locals -> (mempty, _)
-        D.Value _ (E.FunctionBinding name args) locals
+evalAll :: InterpreterBuiltins Name -> [Declaration 'Fixity] -> HashMap Name Value
+evalAll builtins decls = bindings
+  where
+    (constrs, bindings) = bimap HashMap.fromList HashMap.fromList $ foldMap collectBindings decls
+    eval' = eval builtins constrs bindings
 
-evalBinding :: InterpreterBuiltins Name -> HashMap Name Value -> Binding Name -> HashMap Name Value
+    collectBindings :: Declaration 'Fixity -> ([(Name, Value)], [(Name, Value)])
+    collectBindings = \case
+        D.Value _ _ (_ : _) -> error "local bindings are not supported yet"
+        D.Value _ (E.ValueBinding (P.Var name) body) locals -> ([], [(name, eval' body)])
+        D.Value _ (E.ValueBinding _ body) locals -> error "whoops, destructuring bindings are not supported yet"
+        D.Value _ (E.FunctionBinding name args body) locals -> ([], [(name, eval' $ foldr (E.Lambda Blank) body args)])
+        D.Type _ _ _ newConstrs -> (map mkConstr newConstrs, [])
+        D.GADT _ _ _ newConstrs -> (map mkGadtConstr newConstrs, [])
+        D.Signature{} -> mempty
+
+    mkConstr con = (con.name, mkLambda (length con.args) (Constructor con.name))
+    mkGadtConstr con = (con.name, mkLambda (countArgs con.sig) (Constructor con.name))
+    countArgs = go 0
+      where
+        go acc = \case
+            T.Function _ _ rhs -> go (succ acc) rhs
+            T.Forall _ _ body -> go acc body
+            T.Exists _ _ body -> go acc body
+            _ -> acc
+
+{-
+evalBinding :: InterpreterBuiltins Name -> HashMap Name Value -> Binding 'Fixity -> HashMap Name Value
 evalBinding builtins env = \case
     E.ValueBinding pat bindingBody -> go (forceMatch builtins env pat $ go env bindingBody) body
     E.FunctionBinding name args bindingBody ->
         go (HashMap.insert name (go env $ foldr (E.Lambda $ getLoc binding) bindingBody args) env) body
 -}
+
 eval :: InterpreterBuiltins Name -> HashMap Name Value -> HashMap Name Value -> Expression 'Fixity -> Value
 eval builtins constrs = go
   where
@@ -71,7 +89,8 @@ eval builtins constrs = go
         E.WildcardLambda loc args body -> go env $ foldr (E.Lambda loc . P.Var) body args
         E.Application f arg -> case go env f of
             Lambda closure -> closure (go env arg)
-            other -> error $ "cannot apply " <> showValue other
+            other -> error . show $ "cannot apply" <+> pretty other
+        E.TypeApplication f _ -> go env f
         E.Annotation x _ -> go env x
         E.Let _ binding body -> case binding of
             E.ValueBinding pat bindingBody -> go (forceMatch builtins env pat $ go env bindingBody) body
