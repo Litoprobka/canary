@@ -1,4 +1,4 @@
-a = len (Cons 1 Nil)
+main = len (Cons 1 Nil)
 
 type Peano = S Peano | Z
 type Stack 'a = Cons 'a (Stack 'a) | Nil

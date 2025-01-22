@@ -8,7 +8,7 @@ import Common (Literal_ (..), Loc (..), Located (..), Name, Pass (..), getLoc)
 import Data.HashMap.Lazy qualified as HashMap -- note that we use the lazy functions here
 import GHC.IsList qualified as IsList
 import LangPrelude
-import Prettyprinter (braces, comma, parens, punctuate, sep)
+import Prettyprinter (braces, comma, line, parens, punctuate, sep, vsep)
 import Syntax
 import Syntax.Declaration qualified as D
 import Syntax.Expression qualified as E
@@ -29,6 +29,7 @@ data Value
 
 instance Pretty Value where
     pretty = \case
+        Constructor name [] -> pretty name
         Constructor name args -> parens $ pretty name <+> sep (pretty <$> args)
         Lambda _ -> "<lambda>"
         Record row -> braces . sep . punctuate comma . map recordField $ Row.sortedRow row
@@ -99,11 +100,12 @@ eval builtins constrs = go
         E.LetRec _ _bindings _body -> error "letrecs are not supported yet. tough luck"
         E.Case _ arg matches ->
             let val = go env arg
-             in fromMaybe (error "pattern mismatch") $
-                    asum $
-                        (\(pat, body) -> flip go body <$> match builtins env pat val) <$> matches
-        E.Match _ matches@(m : _) -> mkLambda (length m) \args ->
-            fromMaybe (error "no matches") $ asum $ uncurry (matchAllArgs env args) <$> matches
+             in fromMaybe
+                    (error $ show $ "pattern mismatch when matching " <+> pretty val <+> "with:" <> line <> vsep (map (pretty . fst) matches))
+                    . asum
+                    $ matches <&> \(pat, body) -> go <$> match builtins env pat val <*> pure body
+        E.Match _ matches@(m : _) -> mkLambda (length $ fst m) \args ->
+            fromMaybe (error "pattern mismatch") $ asum $ uncurry (matchAllArgs env args) <$> matches
         E.Match _ [] -> error "empty match" -- shouldn't this be caught by type checking?
         E.If _ cond true false -> case go env cond of
             Constructor name [] | name == builtins.true -> go env true
@@ -131,6 +133,7 @@ forceMatch builtins env pat arg = fromMaybe (error "pattern mismatch") $ match b
 match :: InterpreterBuiltins Name -> HashMap Name Value -> Pattern 'Fixity -> Value -> Maybe (HashMap Name Value)
 match builtins env = \cases
     (P.Var var) val -> Just $ HashMap.insert var val env
+    P.Wildcard{} _ -> Just env
     (P.Annotation pat _) val -> match builtins env pat val
     (P.Variant name argPat) (Variant name' arg)
         | name == name' -> match builtins env argPat arg
@@ -140,7 +143,7 @@ match builtins env = \cases
         fold <$> traverse (uncurry $ match builtins env) valPatPairs
     (P.Constructor name pats) (Constructor name' args) -> do
         guard (name == name')
-        guard (length pats == length args)
+        unless (length pats == length args) $ error "arg count mismatch"
         fold <$> zipWithM (match builtins env) pats args
     (P.List loc (pat : pats)) (Constructor name [h, t]) | name == builtins.cons -> do
         env' <- match builtins env pat h
@@ -155,4 +158,4 @@ match builtins env = \cases
 
 mkLambda :: Int -> ([Value] -> Value) -> Value
 mkLambda 0 f = f []
-mkLambda n f = mkLambda (pred n) \args -> Lambda \x -> f (x : args)
+mkLambda n f = Lambda \x -> mkLambda (pred n) \args -> f (x : args)

@@ -8,7 +8,7 @@ import DependencyResolution (SimpleOutput (..), resolveDependenciesSimplified)
 import Diagnostic
 import Effectful
 import Fixity
-import Interpreter (InterpreterBuiltins (..), eval)
+import Interpreter (InterpreterBuiltins (..), eval, evalAll)
 import NameGen (runNameGen)
 import NameResolution
 import Parser (parseModule)
@@ -32,10 +32,11 @@ main = do
         decls <- parseModule (fileName, input)
         prettyAST debug decls
         (scope, builtins, env) <- mkDefaults
-        (bindings, evalBuiltins) <- runNameResolution scope do
+        (bindings, evalBuiltins, nameOfMain) <- runNameResolution scope do
             bindings <- resolveNames decls
             evalBuiltins <- traverse resolve InterpreterBuiltins{true = "True", cons = "Cons", nil = "Nil"}
-            pure (bindings, evalBuiltins)
+            nameOfMain <- resolve $ Located Blank $ Name' "main"
+            pure (bindings, evalBuiltins, nameOfMain)
 
         SimpleOutput{fixityMap, operatorPriorities, declarations} <- resolveDependenciesSimplified bindings
         fixityResolvedBindings <- resolveFixity fixityMap operatorPriorities declarations
@@ -47,20 +48,10 @@ main = do
         types <- typecheck env builtins fixityResolvedBindings
         when debug do
             liftIO . putDoc $ (<> line) $ vsep $ pretty . uncurry (D.Signature Blank) <$> HashMap.toList types
-        -- the interpreter doesn't support multiple bindings yet, so we eval the first encountered binding with no env
-        pure $ sequence_ $ flip firstJust fixityResolvedBindings \case
-            D.Value _ (E.ValueBinding _ body) _ ->
-                Just $
-                    putDoc $
-                        (<> line) $
-                            pretty $
-                                eval evalBuiltins HashMap.empty HashMap.empty body
-            _ -> Nothing
+        pure case HashMap.lookup nameOfMain (evalAll evalBuiltins fixityResolvedBindings) of
+            Nothing -> putTextLn "there is no main function"
+            Just mainExpr -> putDoc $ (<> line) $ pretty mainExpr
     sequence_ eval'
-
-firstJust :: (t -> Maybe a) -> [t] -> Maybe a
-firstJust _ [] = Nothing
-firstJust f (x : xs) = f x <|> firstJust f xs
 
 printDebug :: MonadIO m => Bool -> Text -> m ()
 printDebug debug = when debug . putTextLn

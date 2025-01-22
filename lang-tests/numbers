@@ -1,4 +1,4 @@
-output = S (S (S Z)) + S (S Z) * S (S Z)
+main = S (S (S Z)) + S (S Z) * S (S Z)
 
 infix right <|
 infix left + above <|
