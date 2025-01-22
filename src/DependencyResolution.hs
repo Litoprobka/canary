@@ -1,28 +1,23 @@
+{-# LANGUAGE DuplicateRecordFields #-}
 {-# LANGUAGE RecordWildCards #-}
 
 module DependencyResolution where
 
 import Common
 import Data.HashMap.Strict qualified as HashMap
-import Data.HashSet qualified as HashSet
 import Diagnostic (Diagnose, fatal, nonFatal)
 import Effectful.State.Static.Local
 import Effectful.Writer.Static.Local (Writer, runWriter)
 import Error.Diagnose (Marker (..), Report (..))
 import LangPrelude
-import NameGen (freshId, runNameGen)
 import Poset (Poset)
 import Poset qualified
 import Prettyprinter (comma, hsep, punctuate)
 import Syntax
 import Syntax.Declaration qualified as D
-import Syntax.Expression qualified as E
-import Syntax.Pattern qualified as P
 
 -- once we've done name resolution, all sorts of useful information may be collected into tables
 -- this pass gets rid of the old [Declaration] shape of the AST and transforms it into something more structured
-
-newtype DeclId = DeclId Id deriving (Eq, Hashable)
 
 data Output = Output
     { fixityMap :: FixityMap
@@ -31,29 +26,40 @@ data Output = Output
     -- ^ operator priorities extracted from Infix declarations and converted to a Poset
     , orderedDeclarations :: [[Decl]]
     -- ^ mutually recursive groups of declarations in processing order
-    , declarations :: HashMap DeclId Decl -- since a declaration may yield multiple names, direct name-to-declaration mapping is a no go
-    -- given the many-to-one nature of declarations, we need some way to relate them to names
-    , nameOrigins :: NameOrigins
     , signatures :: Signatures
     }
 
 type Decl = Declaration 'DependencyRes
 type Op = Maybe Name
 type FixityMap = HashMap Op Fixity
-type DeclSet = Poset DeclId
-type NameOrigins = HashMap Name DeclId
-type Declarations = HashMap DeclId Decl
 type Signatures = HashMap Name (Type' 'DependencyRes)
+
+{-
+nameDependencies :: Diagnose :> es => [Declaration 'NameRes] -> Eff es (Poset Name)
+nameDependencies = execState Poset.empty . traverse_ resolve
+  where
+    resolve :: Diagnose :> es => Declaration 'NameRes -> Eff (State (Poset Name) : es) ()
+    resolve = \case
+        D.Value _ binding _ -> case binding of
+            ValueBinding pat body -> do
+                for_ (P.collectNames pat) \declName ->
+                    for_ (P.collectReferencedNames pat) \refName ->
+                        modifyM $ Poset.reportError . Poset.addGteRel refName declName
+            FunctionBinding name args body -> do
+                for_ (foldMap P.collectReferencedNames args) \refName ->
+                    modifyM $ Poset.reportError . Poset.addGteRel refName name
+        D.Type _ name vars constrs -> _
+        D.GADT{} -> _todo
+        D.Signature _ name ty -> _
+        _ -> pass
 
 resolveDependencies :: forall es. Diagnose :> es => [Declaration 'NameRes] -> Eff es Output
 resolveDependencies decls = do
     (((((signatures, declarations), nameOrigins), fixityMap), operatorPriorities), declDeps) <-
         runNameGen
-            . runState @DeclSet Poset.empty
+            . runState @(Poset Name) Poset.empty
             . runState @(Poset Op) Poset.empty
             . runState @FixityMap HashMap.empty
-            . runState @NameOrigins HashMap.empty
-            . runState @Declarations HashMap.empty
             . execState @Signatures HashMap.empty
             $ traverse_ go decls
     let danglingSigs = HashMap.difference signatures $ HashMap.compose declarations nameOrigins
@@ -85,40 +91,39 @@ resolveDependencies decls = do
         D.Signature _ name ty -> do
             modify @Signatures $ HashMap.insert name $ cast ty
 
-    -- addDecl :: Declaration 'DependencyRes -> Eff es DeclId
-    addDecl decl = do
-        declId <- DeclId <$> freshId
-        modify @Declarations $ HashMap.insert declId decl
-        pure declId
-    -- linkNamesToDecl :: DeclId -> [Name] -> Eff es ()
-    linkNamesToDecl declId names =
-        modify @NameOrigins \origs -> foldl' (\acc n -> HashMap.insert n declId acc) origs names
-
     castCon :: Constructor 'NameRes -> Constructor 'DependencyRes
     castCon D.Constructor{loc, name, args} =
-        D.Constructor loc (coerce name) $ map (cast uniplateCast) args
+        D.Constructor loc (coerce name) $ map cast args
 
 collectBindingDependencies :: Binding 'NameRes -> (Binding 'DependencyRes, HashSet Name)
 collectBindingDependencies = runPureEff . runState @(HashSet Name) HashSet.empty . go
   where
     go = todo
+-}
 
--- | collects all to-be-declared names in a pattern
-collectNames :: Pattern p -> [NameAt p]
-collectNames = \case
-    P.Var name -> [name]
-    P.Wildcard{} -> []
-    P.Annotation pat _ -> collectNames pat
-    P.Variant _ pat -> collectNames pat
-    P.Constructor _ pats -> foldMap collectNames pats
-    P.List _ pats -> foldMap collectNames pats
-    P.Record _ row -> foldMap collectNames $ toList row
-    P.Literal _ -> []
+data SimpleOutput = SimpleOutput
+    { fixityMap :: FixityMap
+    -- ^ operator fixities extracted from Infix declarations
+    , operatorPriorities :: Poset Op
+    , declarations :: [Declaration 'DependencyRes]
+    }
 
-collectNamesInBinding :: Binding p -> [NameAt p]
-collectNamesInBinding = \case
-    E.FunctionBinding name _ _ -> [name]
-    E.ValueBinding pat _ -> collectNames pat
+resolveDependenciesSimplified :: forall es. Diagnose :> es => [Declaration 'NameRes] -> Eff es SimpleOutput
+resolveDependenciesSimplified = fmap packOutput . runState @FixityMap initFixity . runState @(Poset Op) initPoset . mapMaybeM go
+  where
+    packOutput ((declarations, operatorPriorities), fixityMap) = SimpleOutput{..}
+    initFixity = HashMap.singleton Nothing InfixL
+    (_, initPoset) = Poset.eqClass Nothing Poset.empty
+    go :: Declaration 'NameRes -> Eff (State (Poset Op) : State FixityMap : es) (Maybe (Declaration 'DependencyRes))
+    go = \case
+        D.Fixity loc fixity op rels -> do
+            modify @FixityMap $ HashMap.insert (Just op) fixity
+            modifyM @(Poset Op) $ updatePrecedence loc op rels
+            pure Nothing
+        D.Value loc binding locals -> Just . D.Value loc (cast binding) <$> mapMaybeM go locals
+        D.Type loc name vars constrs -> pure . Just $ D.Type loc name (map cast vars) (map cast constrs)
+        D.GADT loc name sig constrs -> pure . Just $ D.GADT loc name (fmap cast sig) (map cast constrs)
+        D.Signature loc name ty -> pure . Just $ D.Signature loc name (cast ty)
 
 reportCycleWarnings :: (State (Poset Op) :> es, Diagnose :> es) => Loc -> Eff (Writer (Seq (Poset.Cycle Op)) : es) a -> Eff es a
 reportCycleWarnings loc action = do
@@ -142,9 +147,7 @@ updatePrecedence loc op rels poset = execState poset $ Poset.reportError $ repor
     addRelation _ op2
         | Just op == op2 = selfRelationError op
     addRelation rel op2 = do
-        lhsClass <- state $ Poset.eqClass (Just op)
-        rhsClass <- state $ Poset.eqClass op2
-        modifyM @(Poset Op) $ Poset.addRelationLenient lhsClass rhsClass rel
+        modifyM @(Poset Op) $ Poset.addRelationLenient (Just op) op2 rel
 
 -- errors
 

@@ -6,7 +6,7 @@ import Common (Fixity (..), Loc (..), Name, Pass (..), cast, getLoc, mkNotes, zi
 import Control.Monad (foldM)
 import Data.HashMap.Strict qualified as HashMap
 import Data.List.NonEmpty qualified as NE
-import Diagnostic (Diagnose, dummy, fatal)
+import Diagnostic (Diagnose, dummy, fatal, internalError)
 import Effectful.Reader.Static (Reader, ask, runReader)
 import Error.Diagnose (Marker (This), Report (..))
 import LangPrelude hiding (cycle)
@@ -66,7 +66,7 @@ opError =
 
 lookup' :: (Diagnose :> es, Hashable k, Pretty k) => k -> HashMap k v -> Eff es v
 lookup' key hmap = case HashMap.lookup key hmap of
-    Nothing -> fatal . one . dummy $ "missing operator" <+> pretty key
+    Nothing -> internalError Blank $ "missing operator" <+> pretty key
     Just v -> pure v
 
 {- | figure out which of the two operators has a higher priority
@@ -92,14 +92,8 @@ priority prev next = do
         Poset.NoOrder -> opError $ UndefinedOrdering prev next
         Poset.AmbiguousOrder -> opError $ AmbiguousOrdering prev next
 
-resolveFixity :: Diagnose :> es => [Declaration 'DependencyRes] -> Eff es [Declaration 'Fixity]
-resolveFixity = resolveFixityWithEnv fixityMap poset
-  where
-    fixityMap = HashMap.singleton Nothing InfixL
-    (_, poset) = Poset.eqClass Nothing Poset.empty
-
-resolveFixityWithEnv :: Diagnose :> es => FixityMap -> Poset Op -> [Declaration 'DependencyRes] -> Eff es [Declaration 'Fixity]
-resolveFixityWithEnv fixityMap poset decls =
+resolveFixity :: Diagnose :> es => FixityMap -> Poset Op -> [Declaration 'DependencyRes] -> Eff es [Declaration 'Fixity]
+resolveFixity fixityMap poset decls =
     runReader fixityMap . runReader poset $ traverse parseDeclaration decls
 
 parseDeclaration :: Ctx es => Declaration 'DependencyRes -> Eff es (Declaration 'Fixity)

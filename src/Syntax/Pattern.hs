@@ -3,7 +3,7 @@
 {-# LANGUAGE RoleAnnotations #-}
 {-# LANGUAGE UndecidableInstances #-}
 
-module Syntax.Pattern (Pattern (..), uniplate) where
+module Syntax.Pattern (Pattern (..), uniplate, collectNames, collectReferencedNames) where
 
 import Common (HasLoc, Literal, Loc, NameAt, Pass (..), getLoc, zipLocOf)
 import LensyUniplate
@@ -11,6 +11,7 @@ import Prettyprinter (Doc, Pretty, braces, brackets, comma, parens, pretty, punc
 import Relude hiding (show)
 import Syntax.Row
 import Syntax.Type (Type')
+import Syntax.Type qualified as T
 import Prelude (show)
 
 data Pattern (p :: Pass)
@@ -85,3 +86,28 @@ uniplate' castTy f = \case
     Record loc row -> Record loc <$> traverse f row
     List loc pats -> List loc <$> traverse f pats
     Literal lit -> pure $ Literal lit
+
+-- | collects all to-be-declared names in a pattern
+collectNames :: Pattern p -> [NameAt p]
+collectNames = \case
+    Var name -> [name]
+    Wildcard{} -> []
+    Annotation pat _ -> collectNames pat
+    Variant _ pat -> collectNames pat
+    Constructor _ pats -> foldMap collectNames pats
+    List _ pats -> foldMap collectNames pats
+    Record _ row -> foldMap collectNames $ toList row
+    Literal _ -> []
+
+collectReferencedNames :: Pattern p -> [NameAt p]
+collectReferencedNames = go
+  where
+    go = \case
+        Var _ -> []
+        Wildcard{} -> []
+        Annotation pat ty -> go pat <> T.collectReferencedNames ty
+        Variant _ pat -> go pat
+        Constructor con pats -> con : foldMap go pats
+        List _ pats -> foldMap go pats
+        Record _ row -> foldMap go $ toList row
+        Literal _ -> []

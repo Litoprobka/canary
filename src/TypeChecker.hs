@@ -75,13 +75,13 @@ inferDecls decls = do
     traverse_ updateTopLevel decls
     let (values, sigs) = second (fmap unicast . HashMap.fromList) $ foldr getValueDecls ([], []) decls
     fold <$> for values \(binding, locals) ->
-        binding & collectNamesInBinding & listToMaybe >>= (`HashMap.lookup` sigs) & \case
+        binding & E.collectNamesInBinding & listToMaybe >>= (`HashMap.lookup` sigs) & \case
             Just ty -> do
                 checkBinding binding ty
                 pure $
                     HashMap.mapMaybe (`HashMap.lookup` sigs) $
                         HashMap.fromList $
-                            (\x -> (x, x)) <$> collectNamesInBinding binding
+                            (\x -> (x, x)) <$> E.collectNamesInBinding binding
             Nothing -> scoped do
                 declareAll =<< inferDecls locals
                 typeMap <- normaliseAll $ inferBinding binding -- todo: true top level should be separated from the parent scopes
@@ -369,7 +369,7 @@ inferBinding =
                 pure (patTy, bodyTy)
             subtype patTy bodyTy
             checkPattern pat bodyTy
-            traverse lookupSig (HashMap.fromList $ (\x -> (x, x)) <$> collectNames pat)
+            traverse lookupSig (HashMap.fromList $ (\x -> (x, x)) <$> P.collectNames pat)
         binding@(E.FunctionBinding name args body) -> do
             -- note: we can only infer monotypes for recursive functions
             -- while checking the body, the function itself is assigned a univar
@@ -384,23 +384,6 @@ inferBinding =
             -- function contains any recursive calls at all
             withUniVar uni (subtype ty . unMono)
             pure $ HashMap.singleton name ty
-
--- | collects all to-be-declared names in a pattern
-collectNames :: Pattern p -> [NameAt p]
-collectNames = \case
-    P.Var name -> [name]
-    P.Wildcard{} -> []
-    P.Annotation pat _ -> collectNames pat
-    P.Variant _ pat -> collectNames pat
-    P.Constructor _ pats -> foldMap collectNames pats
-    P.List _ pats -> foldMap collectNames pats
-    P.Record _ row -> foldMap collectNames $ toList row
-    P.Literal _ -> []
-
-collectNamesInBinding :: Binding p -> [NameAt p]
-collectNamesInBinding = \case
-    E.FunctionBinding name _ _ -> [name]
-    E.ValueBinding pat _ -> collectNames pat
 
 inferPattern :: (InfEffs es, Declare :> es) => Pat -> Eff es Type
 inferPattern = \case

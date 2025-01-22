@@ -5,7 +5,7 @@
 {-# LANGUAGE OverloadedRecordDot #-}
 {-# LANGUAGE UndecidableInstances #-}
 
-module Syntax.Type (Type' (..), VarBinder (..), uniplate, uniplate', prettyType, plainBinder) where
+module Syntax.Type (Type' (..), VarBinder (..), uniplate, uniplate', prettyType, plainBinder, collectReferencedNames) where
 
 import Common (Cast (..), HasLoc, Loc, NameAt, Pass (..), getLoc, zipLocOf, type (!=))
 import Common qualified as CT
@@ -135,3 +135,18 @@ uniplate' castName castUni castSkolem recur = \case
 
 plainBinder :: NameAt p -> VarBinder p
 plainBinder = flip VarBinder Nothing
+
+collectReferencedNames :: Type' p -> [NameAt p]
+collectReferencedNames = go
+  where
+    go = \case
+        Name name -> [name]
+        Var _ -> [] -- I'm not sure whether type variables count
+        UniVar{} -> []
+        Skolem _ -> []
+        Application lhs rhs -> go lhs <> go rhs
+        Function _ fn args -> go fn <> go args
+        Forall _ _ body -> go body
+        Exists _ _ body -> go body
+        Variant _ row -> foldMap go $ toList row
+        Record _ row -> foldMap go $ toList row

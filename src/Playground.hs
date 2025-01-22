@@ -19,6 +19,7 @@ import Data.Char (isUpperCase)
 import Data.HashMap.Strict qualified as HashMap
 import Data.HashSet qualified as HashSet
 import Data.Type.Ord (type (<))
+import DependencyResolution (SimpleOutput (..), resolveDependenciesSimplified)
 import Diagnostic (Diagnose, runDiagnose, runDiagnose')
 import Effectful.Error.Static (Error)
 import Effectful.Reader.Static (Reader, runReader)
@@ -121,7 +122,9 @@ parseInfer input = void . runEff . runDiagnose ("cli", input) $ runNameGen
         Left err -> putStrLn $ errorBundlePretty err
         Right decls -> do
             (scope, builtins, defaultEnv) <- mkDefaults
-            resolvedDecls <- resolveFixity =<< runNameResolution scope (resolveNames decls)
+            nameResolved <- runNameResolution scope (resolveNames decls)
+            SimpleOutput{fixityMap, operatorPriorities, declarations} <- resolveDependenciesSimplified nameResolved
+            resolvedDecls <- resolveFixity fixityMap operatorPriorities declarations
             types <- typecheck defaultEnv builtins resolvedDecls
             liftIO $ for_ types \ty -> putDoc $ pretty ty <> line
 

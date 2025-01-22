@@ -52,7 +52,7 @@ mergeStrict l r = mergeWith (const $ throwError $ Cycle l r) l r
 mergeLenient :: (Ctx es, CycleWarnings a es, Hashable a) => EqClass a -> EqClass a -> Poset a -> Eff es (Poset a)
 mergeLenient l r poset =
     mergeWith
-        (const $ (addRelationLenient l r GT poset >>= addRelationLenient l r LT) <* tell (Seq.singleton $ Cycle l r))
+        (const $ (addRelationLenient' l r GT poset >>= addRelationLenient' l r LT) <* tell (Seq.singleton $ Cycle l r))
         l
         r
         poset
@@ -104,8 +104,14 @@ addGtRel :: (Ctx es, CycleErrors a es) => EqClass a -> EqClass a -> Poset a -> E
 addGtRel l r = addGreaterThanRel (const $ throwError $ Cycle l r) l r
 
 -- | add a relation between two classes; merge them if the relation causes a cycle (i.e. A > B and B > A)
-addGteRel :: (Ctx es, Hashable a) => EqClass a -> EqClass a -> Poset a -> Eff es (Poset a)
-addGteRel l r poset = addGreaterThanRel (const $ mergeRec l r poset) l r poset
+addGteRel :: (Ctx es, Hashable a) => a -> a -> Poset a -> Eff es (Poset a)
+addGteRel lhs rhs poset =
+    let (lhsClass, poset') = eqClass lhs poset
+        (rhsClass, poset'') = eqClass rhs poset'
+     in addGteRel' lhsClass rhsClass poset''
+
+addGteRel' :: (Ctx es, Hashable a) => EqClass a -> EqClass a -> Poset a -> Eff es (Poset a)
+addGteRel' l r poset = addGreaterThanRel (const $ mergeRec l r poset) l r poset
 
 {- | add a relation between two classes, preserving transitivity
 O(n) in class count
@@ -130,17 +136,34 @@ addGreaterThanRel onCycle greaterClass lesserClass poset = do
         | HashSet.member greaterClass hset = hset <> newRels
         | otherwise = hset
 
+-- | add a strict relation between the classes of two items - that is, classes may not be merged if they form a cycle
+addRelationStrict
+    :: (Ctx es, CycleErrors a es, Hashable a) => a -> a -> Ordering -> Poset a -> Eff es (Poset a)
+addRelationStrict lhs rhs order poset =
+    let (lhsClass, poset') = eqClass lhs poset
+        (rhsClass, poset'') = eqClass rhs poset'
+     in addRelationStrict' lhsClass rhsClass order poset''
+
 -- | add a strict relation between two classes - that is, classes may not be merged if they form a cycle
-addRelationStrict :: (Ctx es, CycleErrors a es, Hashable a) => EqClass a -> EqClass a -> Ordering -> Poset a -> Eff es (Poset a)
-addRelationStrict lhs rhs = \case
+addRelationStrict'
+    :: (Ctx es, CycleErrors a es, Hashable a) => EqClass a -> EqClass a -> Ordering -> Poset a -> Eff es (Poset a)
+addRelationStrict' lhs rhs = \case
     EQ -> mergeStrict lhs rhs
     GT -> addGtRel lhs rhs
     LT -> addGtRel rhs lhs
 
--- | add a GTE / LTE relation between two classes. Ignores class cycles
+-- | add a GTE / LTE relation between the classes of two items. Ignores class cycles
 addRelationLenient
-    :: (Ctx es, CycleWarnings a es) => Hashable a => EqClass a -> EqClass a -> Ordering -> Poset a -> Eff es (Poset a)
-addRelationLenient lhs rhs = \case
+    :: (Ctx es, CycleWarnings a es, Hashable a) => a -> a -> Ordering -> Poset a -> Eff es (Poset a)
+addRelationLenient lhs rhs order poset =
+    let (lhsClass, poset') = eqClass lhs poset
+        (rhsClass, poset'') = eqClass rhs poset'
+     in addRelationLenient' lhsClass rhsClass order poset''
+
+-- | add a GTE / LTE relation between two classes. Ignores class cycles
+addRelationLenient'
+    :: (Ctx es, CycleWarnings a es, Hashable a) => EqClass a -> EqClass a -> Ordering -> Poset a -> Eff es (Poset a)
+addRelationLenient' lhs rhs = \case
     EQ -> mergeLenient lhs rhs
     GT -> addGreaterThanRel warnOnCycle lhs rhs
     LT -> addGreaterThanRel warnOnCycle rhs lhs

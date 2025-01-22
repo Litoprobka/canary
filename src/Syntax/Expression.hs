@@ -6,7 +6,7 @@
 
 -- {-# OPTIONS_GHC -freduction-depth=0 #-}
 
-module Syntax.Expression (Expression (..), DoStatement (..), Binding (..), uniplate) where
+module Syntax.Expression (Expression (..), DoStatement (..), Binding (..), uniplate, collectNamesInBinding) where
 
 import Relude hiding (show)
 
@@ -31,6 +31,7 @@ import Prettyprinter (
     (<+>),
  )
 import Syntax.Pattern (Pattern)
+import Syntax.Pattern qualified as P
 import Syntax.Row
 import Syntax.Type (Type', prettyType)
 import Prelude (show)
@@ -236,3 +237,8 @@ instance (Cast Expression p q, Cast Pattern p q, Cast Binding p q) => Cast DoSta
         With loc pat expr -> With loc (cast pat) (cast expr)
         DoLet loc binding -> DoLet loc (cast binding)
         Action expr -> Action (cast expr)
+
+collectNamesInBinding :: Binding p -> [NameAt p]
+collectNamesInBinding = \case
+    FunctionBinding name _ _ -> [name]
+    ValueBinding pat _ -> P.collectNames pat

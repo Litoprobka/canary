@@ -4,6 +4,7 @@ import Relude
 
 import Common
 import Data.HashMap.Strict qualified as HashMap
+import DependencyResolution (SimpleOutput (..), resolveDependenciesSimplified)
 import Diagnostic
 import Effectful
 import Fixity
@@ -36,7 +37,9 @@ main = do
             evalBuiltins <- traverse resolve InterpreterBuiltins{true = "True", cons = "Cons", nil = "Nil"}
             pure (bindings, evalBuiltins)
 
-        fixityResolvedBindings <- resolveFixity bindings
+        SimpleOutput{fixityMap, operatorPriorities, declarations} <- resolveDependenciesSimplified bindings
+        fixityResolvedBindings <- resolveFixity fixityMap operatorPriorities declarations
+
         printDebug debug "resolved names:"
         prettyAST debug fixityResolvedBindings
 
@@ -44,7 +47,7 @@ main = do
         types <- typecheck env builtins fixityResolvedBindings
         when debug do
             liftIO . putDoc $ (<> line) $ vsep $ pretty . uncurry (D.Signature Blank) <$> HashMap.toList types
-        -- the interpreter doesn't support multiple bindings yet, so we evaly the first encountered binding with no env
+        -- the interpreter doesn't support multiple bindings yet, so we eval the first encountered binding with no env
         pure $ sequence_ $ flip firstJust fixityResolvedBindings \case
             D.Value _ (E.ValueBinding _ body) _ ->
                 Just $
