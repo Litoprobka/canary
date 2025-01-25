@@ -7,7 +7,7 @@
 {-# LANGUAGE TypeFamilies #-}
 
 module NameResolution (
-    runNameResolution,
+    run,
     runDeclare,
     resolveNames,
     resolveExpr,
@@ -17,7 +17,7 @@ module NameResolution (
     declarePat,
     Scope (..),
     Declare,
-    runNameResolutionWithEnv,
+    runWithEnv,
 ) where
 
 import Common hiding (Scope)
@@ -122,12 +122,11 @@ resolve name@(Located loc name_) = do
             -- this gives a unique id to every occurance of the same unbound name
             scoped $ declare name
 
-runNameResolutionWithEnv :: (NameGen :> es, Diagnose :> es) => Scope -> Eff (Declare : State Scope : es) a -> Eff es (a, Scope)
-runNameResolutionWithEnv env = runState env . runDeclare
+runWithEnv :: (NameGen :> es, Diagnose :> es) => Scope -> Eff (Declare : State Scope : es) a -> Eff es (a, Scope)
+runWithEnv env = runState env . runDeclare
 
-runNameResolution
-    :: (NameGen :> es, Diagnose :> es) => Scope -> Eff (Declare : State Scope : es) a -> Eff es a
-runNameResolution env = evalState env . runDeclare
+run :: (NameGen :> es, Diagnose :> es) => Scope -> Eff (Declare : State Scope : es) a -> Eff es a
+run env = evalState env . runDeclare
 
 resolveNames :: (NameResCtx es, Declare :> es) => [Declaration 'Parse] -> Eff es [Declaration 'NameRes]
 resolveNames decls = do

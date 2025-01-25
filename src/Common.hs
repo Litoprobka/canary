@@ -142,7 +142,7 @@ instance Pretty SimpleName_ where
     pretty (Name' name) = pretty name
     pretty (Wildcard' n) = "_" <> pretty n
 
--- univars use a different range of ids, so it's not clear they should use the same Id newtype
+-- univars use a different range of ids, so it's not clear whether they should use the same Id newtype
 newtype UniVar = UniVar Int
     deriving (Show, Eq)
     deriving newtype (Hashable)

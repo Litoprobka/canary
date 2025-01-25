@@ -1,6 +1,6 @@
 {-# LANGUAGE DataKinds #-}
 
-module Fixity (resolveFixity, runFixityRes, parse, Fixity (..)) where
+module Fixity (resolveFixity, run, parse, Fixity (..)) where
 
 import Common (Fixity (..), Loc (..), Name, Pass (..), cast, getLoc, mkNotes, zipLocOf)
 import Control.Monad (foldM)
@@ -92,12 +92,12 @@ priority prev next = do
         Poset.NoOrder -> opError $ UndefinedOrdering prev next
         Poset.AmbiguousOrder -> opError $ AmbiguousOrdering prev next
 
-runFixityRes :: FixityMap -> Poset Op -> Eff (Reader (Poset Op) : Reader FixityMap : es) a -> Eff es a
-runFixityRes fixityMap poset = runReader fixityMap . runReader poset
+run :: FixityMap -> Poset Op -> Eff (Reader (Poset Op) : Reader FixityMap : es) a -> Eff es a
+run fixityMap poset = runReader fixityMap . runReader poset
 
 resolveFixity :: Diagnose :> es => FixityMap -> Poset Op -> [Declaration 'DependencyRes] -> Eff es [Declaration 'Fixity]
 resolveFixity fixityMap poset decls =
-    runFixityRes fixityMap poset $ traverse parseDeclaration decls
+    run fixityMap poset $ traverse parseDeclaration decls
 
 parseDeclaration :: Ctx es => Declaration 'DependencyRes -> Eff es (Declaration 'Fixity)
 parseDeclaration = \case

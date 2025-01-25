@@ -2,7 +2,7 @@
 {-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE OverloadedRecordDot #-}
 
-module Interpreter (InterpreterBuiltins (..), eval, evalAll, modifyEnv, Value, Env (..)) where
+module Interpreter (InterpreterBuiltins (..), eval, evalAll, modifyEnv, Value) where
 
 import Common (Literal_ (..), Loc (..), Located (..), Name, Pass (..), getLoc)
 import Data.HashMap.Lazy qualified as HashMap -- note that we use the lazy functions here
@@ -48,29 +48,24 @@ data InterpreterBuiltins a = InterpreterBuiltins
     }
     deriving (Functor, Foldable, Traversable)
 
-data Env = Env
-    { constructors :: HashMap Name Value
-    , bindings :: HashMap Name Value
-    }
-
 evalAll :: InterpreterBuiltins Name -> [Declaration 'Fixity] -> HashMap Name Value
-evalAll builtins = (.bindings) . modifyEnv builtins (Env HashMap.empty HashMap.empty)
+evalAll builtins = modifyEnv builtins HashMap.empty
 
-modifyEnv :: InterpreterBuiltins Name -> Env -> [Declaration 'Fixity] -> Env
+modifyEnv :: InterpreterBuiltins Name -> HashMap Name Value -> [Declaration 'Fixity] -> HashMap Name Value
 modifyEnv builtins env decls = newEnv
   where
-    (newConstrs, newBindings) = bimap HashMap.fromList HashMap.fromList $ foldMap collectBindings decls
-    newEnv = Env{constructors = newConstrs <> env.constructors, bindings = newBindings <> env.bindings}
+    newEnv = (<> env) . HashMap.fromList $ foldMap collectBindings decls
+    -- nameOfZ = Located Blank $ Name "Z" (Id 23)
     eval' = eval builtins newEnv
 
-    collectBindings :: Declaration 'Fixity -> ([(Name, Value)], [(Name, Value)])
+    collectBindings :: Declaration 'Fixity -> [(Name, Value)]
     collectBindings = \case
         D.Value _ _ (_ : _) -> error "local bindings are not supported yet"
-        D.Value _ (E.ValueBinding (P.Var name) body) locals -> ([], [(name, eval' body)])
-        D.Value _ (E.ValueBinding _ body) locals -> error "whoops, destructuring bindings are not supported yet"
-        D.Value _ (E.FunctionBinding name args body) locals -> ([], [(name, eval' $ foldr (E.Lambda Blank) body args)])
-        D.Type _ _ _ constrs -> (map mkConstr constrs, [])
-        D.GADT _ _ _ constrs -> (map mkGadtConstr constrs, [])
+        D.Value _ (E.ValueBinding (P.Var name) body) [] -> [(name, eval' body)]
+        D.Value _ (E.ValueBinding _ _) _ -> error "whoops, destructuring bindings are not supported yet"
+        D.Value _ (E.FunctionBinding name args body) [] -> [(name, eval' $ foldr (E.Lambda Blank) body args)]
+        D.Type _ _ _ constrs -> map mkConstr constrs
+        D.GADT _ _ _ constrs -> map mkGadtConstr constrs
         D.Signature{} -> mempty
 
     mkConstr con = (con.name, mkLambda (length con.args) (Constructor con.name))
@@ -83,8 +78,8 @@ modifyEnv builtins env decls = newEnv
             T.Exists _ _ body -> go acc body
             _ -> acc
 
-eval :: InterpreterBuiltins Name -> Env -> Expression 'Fixity -> Value
-eval builtins Env{constructors, bindings} = go bindings
+eval :: InterpreterBuiltins Name -> HashMap Name Value -> Expression 'Fixity -> Value
+eval builtins = go
   where
     go env = \case
         E.Lambda _ pat body -> Lambda \arg -> go (forceMatch builtins env pat arg) body
@@ -112,7 +107,7 @@ eval builtins Env{constructors, bindings} = go bindings
             Constructor name [] | name == builtins.true -> go env true
             _ -> go env false
         E.Name name -> fromMaybe (error $ show $ pretty name <+> "not in scope") $ HashMap.lookup name env
-        E.Constructor name -> fromMaybe (error $ "unknown constructor " <> show name) $ HashMap.lookup name constructors
+        E.Constructor name -> fromMaybe (error $ "unknown constructor " <> show name) $ HashMap.lookup name env
         E.RecordLens _ path -> RecordLens path
         E.Variant name -> Lambda $ Variant name
         E.Record _ row -> Record $ fmap (go env) row
@@ -125,7 +120,7 @@ eval builtins Env{constructors, bindings} = go bindings
 
     matchAllArgs :: HashMap Name Value -> [Value] -> [Pattern 'Fixity] -> Expression 'Fixity -> Maybe Value
     matchAllArgs env args pats body = do
-        env' <- fold <$> zipWithM (match builtins env) pats args
+        env' <- foldr (<>) env <$> zipWithM (match builtins env) pats args
         pure $ go env' body
 
 forceMatch :: InterpreterBuiltins Name -> HashMap Name Value -> Pattern 'Fixity -> Value -> HashMap Name Value
@@ -141,11 +136,11 @@ match builtins env = \cases
         | otherwise -> Nothing
     (P.Record _ patRow) (Record valRow) -> do
         valPatPairs <- traverse (\(name, pat) -> (pat,) <$> Row.lookup name valRow) $ IsList.toList patRow
-        fold <$> traverse (uncurry $ match builtins env) valPatPairs
+        foldr (<>) env <$> traverse (uncurry $ match builtins env) valPatPairs
     (P.Constructor name pats) (Constructor name' args) -> do
         guard (name == name')
         unless (length pats == length args) $ error "arg count mismatch"
-        fold <$> zipWithM (match builtins env) pats args
+        foldr (<>) env <$> zipWithM (match builtins env) pats args
     (P.List loc (pat : pats)) (Constructor name [h, t]) | name == builtins.cons -> do
         env' <- match builtins env pat h
         match builtins env' (P.List loc pats) t

@@ -1,0 +1,8 @@
+main = length (Cons 1 (Cons 2 (Cons 3 Nil)))
+
+type Peano = S Peano | Z
+type Stack 'a = Cons 'a (Stack 'a) | Nil
+
+length xs = case xs of
+    Cons _ tail -> S (length tail)
+    Nil -> Z

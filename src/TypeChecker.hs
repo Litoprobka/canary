@@ -72,14 +72,15 @@ inferTypeVars ty =
 -- | check / infer types of a list of declarations that may reference each other
 inferDecls :: InfEffs es => [Declaration 'Fixity] -> Eff es (HashMap Name Type)
 inferDecls decls = do
+    -- ideally, all of this shuffling around should be moved to the dependency resolution pass
     traverse_ updateTopLevel decls
-    let (values, sigs) = second (fmap unicast . HashMap.fromList) $ foldr getValueDecls ([], []) decls
-    fold <$> for values \(binding, locals) ->
+    let (values, sigs) = second (fmap cast . HashMap.fromList) $ foldr getValueDecls ([], []) decls
+    (<> sigs) . fold <$> for values \(binding, locals) ->
         binding & E.collectNamesInBinding & listToMaybe >>= (`HashMap.lookup` sigs) & \case
             Just ty -> do
                 checkBinding binding ty
                 pure $
-                    HashMap.mapMaybe (`HashMap.lookup` sigs) $
+                    HashMap.compose sigs $
                         HashMap.fromList $
                             (\x -> (x, x)) <$> E.collectNamesInBinding binding
             Nothing -> scoped do
@@ -92,7 +93,7 @@ inferDecls decls = do
             modify \s -> s{topLevel = HashMap.insert name (Right $ inferTypeVars sig) s.topLevel}
         D.Value _ binding@(E.FunctionBinding name _ _) locals -> insertBinding name binding locals
         D.Value _ binding@(E.ValueBinding (P.Var name) _) locals -> insertBinding name binding locals
-        D.Value _ E.ValueBinding{} _ -> pass -- todo
+        D.Value loc E.ValueBinding{} _ -> internalError loc "destructuring bindings are not supported yet"
         D.Type _ name binders constrs ->
             for_ (mkConstrSigs name ((.var) <$> binders) constrs) \(con, sig) ->
                 modify \s -> s{topLevel = HashMap.insert con (Right sig) s.topLevel}

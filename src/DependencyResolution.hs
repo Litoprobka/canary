@@ -108,12 +108,21 @@ data SimpleOutput = SimpleOutput
     , declarations :: [Declaration 'DependencyRes]
     }
 
-resolveDependenciesSimplified :: forall es. Diagnose :> es => [Declaration 'NameRes] -> Eff es SimpleOutput
-resolveDependenciesSimplified = fmap packOutput . runState @FixityMap initFixity . runState @(Poset Op) initPoset . mapMaybeM go
+resolveDependenciesSimplified
+    :: forall es
+     . Diagnose :> es
+    => [Declaration 'NameRes]
+    -> Eff es SimpleOutput
+resolveDependenciesSimplified = resolveDependenciesSimplified' initFixity initPoset
   where
-    packOutput ((declarations, operatorPriorities), fixityMap) = SimpleOutput{..}
     initFixity = HashMap.singleton Nothing InfixL
     (_, initPoset) = Poset.eqClass Nothing Poset.empty
+
+resolveDependenciesSimplified'
+    :: forall es. Diagnose :> es => FixityMap -> Poset Op -> [Declaration 'NameRes] -> Eff es SimpleOutput
+resolveDependenciesSimplified' initFixity initPoset = fmap packOutput . runState @FixityMap initFixity . runState @(Poset Op) initPoset . mapMaybeM go
+  where
+    packOutput ((declarations, operatorPriorities), fixityMap) = SimpleOutput{..}
     go :: Declaration 'NameRes -> Eff (State (Poset Op) : State FixityMap : es) (Maybe (Declaration 'DependencyRes))
     go = \case
         D.Fixity loc fixity op rels -> do

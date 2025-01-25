@@ -6,10 +6,9 @@ import Common
 import Data.HashMap.Strict qualified as HashMap
 import DependencyResolution (SimpleOutput (..), resolveDependenciesSimplified)
 import Diagnostic
-import Effectful
 import Effectful.Reader.Static
 import Fixity
-import Interpreter (InterpreterBuiltins (..), eval, evalAll)
+import Interpreter (InterpreterBuiltins (..), evalAll)
 import NameGen (runNameGen)
 import NameResolution
 import Parser (parseModule)
@@ -36,7 +35,7 @@ runFile debug fileName input = do
         decls <- parseModule (fileName, input)
         prettyAST debug decls
         (scope, builtins, env) <- mkDefaults
-        (bindings, evalBuiltins, nameOfMain) <- runNameResolution scope do
+        (bindings, evalBuiltins, nameOfMain) <- NameResolution.run scope do
             bindings <- resolveNames decls
             evalBuiltins <- traverse resolve InterpreterBuiltins{true = "True", cons = "Cons", nil = "Nil"}
             nameOfMain <- resolve $ Located Blank $ Name' "main"
@@ -63,7 +62,7 @@ runRepl = void $ runEff $ runDiagnose ("", "") $ runNameGen do
     let replEnv = Repl.mkDefaultEnv
     let builtins = Builtins{subtypeRelations = [(noLoc NatName, noLoc IntName)]}
     evalBuiltins <-
-        runNameResolution replEnv.scope $
+        NameResolution.run replEnv.scope $
             traverse resolve InterpreterBuiltins{true = "True", cons = "Cons", nil = "Nil"}
     runReader evalBuiltins $ runReader builtins $ Repl.run replEnv
 

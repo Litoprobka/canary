@@ -191,7 +191,7 @@ spec = do
             let tcResult =
                     testCheck
                         (dummyFixity =<< resolveExpr expr)
-                        (\expr' ->  infer expr' & normalise >>= check expr' . cast uniplateCast)
+                        (\expr' -> infer expr' & normalise >>= check expr' . cast uniplateCast)
              in tcResult `shouldSatisfy` isJust
     describe "errors" $ for_ errorExprs \(txt, expr) ->
         it
@@ -218,7 +218,7 @@ spec = do
             (Text.unpack txt)
             let tcResult = fst $ runPureEff $ runDiagnose' ("<none>", "") $ runNameGen do
                     (scope, builtins, env) <- mkDefaults
-                    (expr', quickLookDefs') <- runNameResolution scope do
+                    (expr', quickLookDefs') <- NameResolution.run scope do
                         expr' <- dummyFixity =<< resolveExpr expr
                         quickLookDefs' <-
                             fromList <$> traverse (\(name, ty) -> liftA2 (,) (declare name) (cast uniplateCast <$> resolveType ty)) quickLookDefs
@@ -230,7 +230,7 @@ spec = do
             (Text.unpack txt)
             let tcResult = fst $ runPureEff $ runDiagnose' ("<none>", "") $ runNameGen do
                     (scope, builtins, env) <- mkDefaults
-                    (expr', dsDefs') <- runNameResolution scope do
+                    (expr', dsDefs') <- NameResolution.run scope do
                         expr' <- dummyFixity =<< resolveExpr expr
                         dsDefs' <- fromList <$> traverse (\(name, ty) -> liftA2 (,) (declare name) (cast uniplateCast <$> resolveType ty)) dsDefs
                         pure (expr', dsDefs')
@@ -249,7 +249,7 @@ spec = do
             (toString name)
             let tcResult = fst $ runPureEff $ runDiagnose' ("<none>", "") $ runNameGen do
                     (scope, builtins, env) <- mkDefaults
-                    resolvedDecls <- resolveFixity testOpMap testGraph =<< runNameResolution scope (resolveNames decls)
+                    resolvedDecls <- resolveFixity testOpMap testGraph =<< NameResolution.run scope (resolveNames decls)
                     typecheck env builtins resolvedDecls
              in do
                     {- case tcResult of

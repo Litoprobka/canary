@@ -30,8 +30,8 @@ import Fixity qualified (parse)
 import LangPrelude
 import LensyUniplate (unicast)
 import NameGen (NameGen, freshName, runNameGen)
-import NameResolution (Scope (..), declare, resolveNames, resolveType, runDeclare, runNameResolution)
-import NameResolution qualified (Declare)
+import NameResolution (Scope (..), declare, resolveNames, resolveType, runDeclare)
+import NameResolution qualified (Declare, run)
 import Parser hiding (run)
 import Prettyprinter hiding (list)
 import Prettyprinter.Render.Terminal (AnsiStyle)
@@ -122,7 +122,7 @@ parseInfer input = void . runEff . runDiagnose ("cli", input) $ runNameGen
         Left err -> putStrLn $ errorBundlePretty err
         Right decls -> do
             (scope, builtins, defaultEnv) <- mkDefaults
-            nameResolved <- runNameResolution scope (resolveNames decls)
+            nameResolved <- NameResolution.run scope (resolveNames decls)
             SimpleOutput{fixityMap, operatorPriorities, declarations} <- resolveDependenciesSimplified nameResolved
             resolvedDecls <- resolveFixity fixityMap operatorPriorities declarations
             types <- typecheck defaultEnv builtins resolvedDecls
@@ -137,7 +137,7 @@ testCheck
     -> Maybe a
 testCheck toResolve action = fst $ runPureEff $ runNameGen $ runDiagnose' ("<none>", "") do
     (scope, builtins, env) <- mkDefaults
-    resolved <- runNameResolution scope toResolve
+    resolved <- NameResolution.run scope toResolve
     run (Right <$> env) builtins $ action resolved
 
 {-
