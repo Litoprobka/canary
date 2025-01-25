@@ -3,7 +3,7 @@
 {-# LANGUAGE LambdaCase #-}
 {-# OPTIONS_GHC -Wno-unrecognised-pragmas #-}
 
-module Parser (code, declaration, type', pattern', expression, parseModule) where
+module Parser (code, declaration, type', pattern', expression, parseModule, run) where
 
 import LangPrelude
 
@@ -35,8 +35,13 @@ import Syntax.Type qualified as T
 import Text.Megaparsec
 import Text.Megaparsec.Char (string)
 
+run :: Diagnose :> es => (FilePath, Text) -> Parser a -> Eff es a
+run (fileName, fileContents) parser =
+    either (fatal . NE.toList . reportsFromBundle) pure $
+        parse (usingReaderT pos1 parser) fileName fileContents
+
 parseModule :: Diagnose :> es => (FilePath, Text) -> Eff es [Declaration 'Parse]
-parseModule (fileName, fileContents) = either (fatal . reportsFromBundle) pure $ parse (usingReaderT pos1 code) fileName fileContents
+parseModule input = run input code
 
 code :: Parser [Declaration 'Parse]
 code = topLevelBlock declaration

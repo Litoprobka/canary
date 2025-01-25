@@ -21,11 +21,9 @@ import LangPrelude
 import Prettyprinter.Render.Terminal (AnsiStyle)
 import Text.Megaparsec qualified as MP
 
--- I'm not sure why fourmolu decided to use 2-space idents for this file
-
 data Diagnose :: Effect where
     NonFatal :: Report (Doc AnsiStyle) -> Diagnose m ()
-    Fatal :: NonEmpty (Report (Doc AnsiStyle)) -> Diagnose m a
+    Fatal :: [Report (Doc AnsiStyle)] -> Diagnose m a
 
 makeEffect ''Diagnose
 
@@ -38,7 +36,6 @@ runDiagnose file action = do
 runDiagnose' :: (FilePath, Text) -> Eff (Diagnose : es) a -> Eff es (Maybe a, Diagnostic (Doc AnsiStyle))
 runDiagnose' (filePath, fileContents) = reinterpret
     (fmap (joinReports . second diagnosticFromReports) . runWriter . runErrorNoCallStack)
-    -- (addFile mempty filePath $ toString fileContents)
     \_ -> \case
         NonFatal report -> tell $ DList.singleton report
         Fatal reports -> throwError reports
@@ -46,7 +43,7 @@ runDiagnose' (filePath, fileContents) = reinterpret
     baseDiagnostic = addFile mempty filePath $ toString fileContents
     diagnosticFromReports = foldl' @DList addReport baseDiagnostic
     joinReports = \case
-        (Left fatalErrors, diagnostic) -> (Nothing, foldl' @NonEmpty addReport diagnostic fatalErrors)
+        (Left fatalErrors, diagnostic) -> (Nothing, foldl' @[] addReport diagnostic fatalErrors)
         (Right val, diagnostic) -> (Just val, diagnostic)
 
 dummy :: Doc style -> Report (Doc style)

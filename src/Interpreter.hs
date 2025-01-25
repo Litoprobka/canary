@@ -2,7 +2,7 @@
 {-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE OverloadedRecordDot #-}
 
-module Interpreter (InterpreterBuiltins (..), eval, evalAll) where
+module Interpreter (InterpreterBuiltins (..), eval, evalAll, modifyEnv, Value, Env (..)) where
 
 import Common (Literal_ (..), Loc (..), Located (..), Name, Pass (..), getLoc)
 import Data.HashMap.Lazy qualified as HashMap -- note that we use the lazy functions here
@@ -48,11 +48,20 @@ data InterpreterBuiltins a = InterpreterBuiltins
     }
     deriving (Functor, Foldable, Traversable)
 
+data Env = Env
+    { constructors :: HashMap Name Value
+    , bindings :: HashMap Name Value
+    }
+
 evalAll :: InterpreterBuiltins Name -> [Declaration 'Fixity] -> HashMap Name Value
-evalAll builtins decls = bindings
+evalAll builtins = (.bindings) . modifyEnv builtins (Env HashMap.empty HashMap.empty)
+
+modifyEnv :: InterpreterBuiltins Name -> Env -> [Declaration 'Fixity] -> Env
+modifyEnv builtins env decls = newEnv
   where
-    (constrs, bindings) = bimap HashMap.fromList HashMap.fromList $ foldMap collectBindings decls
-    eval' = eval builtins constrs bindings
+    (newConstrs, newBindings) = bimap HashMap.fromList HashMap.fromList $ foldMap collectBindings decls
+    newEnv = Env{constructors = newConstrs <> env.constructors, bindings = newBindings <> env.bindings}
+    eval' = eval builtins newEnv
 
     collectBindings :: Declaration 'Fixity -> ([(Name, Value)], [(Name, Value)])
     collectBindings = \case
@@ -60,8 +69,8 @@ evalAll builtins decls = bindings
         D.Value _ (E.ValueBinding (P.Var name) body) locals -> ([], [(name, eval' body)])
         D.Value _ (E.ValueBinding _ body) locals -> error "whoops, destructuring bindings are not supported yet"
         D.Value _ (E.FunctionBinding name args body) locals -> ([], [(name, eval' $ foldr (E.Lambda Blank) body args)])
-        D.Type _ _ _ newConstrs -> (map mkConstr newConstrs, [])
-        D.GADT _ _ _ newConstrs -> (map mkGadtConstr newConstrs, [])
+        D.Type _ _ _ constrs -> (map mkConstr constrs, [])
+        D.GADT _ _ _ constrs -> (map mkGadtConstr constrs, [])
         D.Signature{} -> mempty
 
     mkConstr con = (con.name, mkLambda (length con.args) (Constructor con.name))
@@ -74,16 +83,8 @@ evalAll builtins decls = bindings
             T.Exists _ _ body -> go acc body
             _ -> acc
 
-{-
-evalBinding :: InterpreterBuiltins Name -> HashMap Name Value -> Binding 'Fixity -> HashMap Name Value
-evalBinding builtins env = \case
-    E.ValueBinding pat bindingBody -> go (forceMatch builtins env pat $ go env bindingBody) body
-    E.FunctionBinding name args bindingBody ->
-        go (HashMap.insert name (go env $ foldr (E.Lambda $ getLoc binding) bindingBody args) env) body
--}
-
-eval :: InterpreterBuiltins Name -> HashMap Name Value -> HashMap Name Value -> Expression 'Fixity -> Value
-eval builtins constrs = go
+eval :: InterpreterBuiltins Name -> Env -> Expression 'Fixity -> Value
+eval builtins Env{constructors, bindings} = go bindings
   where
     go env = \case
         E.Lambda _ pat body -> Lambda \arg -> go (forceMatch builtins env pat arg) body
@@ -111,7 +112,7 @@ eval builtins constrs = go
             Constructor name [] | name == builtins.true -> go env true
             _ -> go env false
         E.Name name -> fromMaybe (error $ show $ pretty name <+> "not in scope") $ HashMap.lookup name env
-        E.Constructor name -> fromMaybe (error $ "unknown constructor " <> show name) $ HashMap.lookup name constrs
+        E.Constructor name -> fromMaybe (error $ "unknown constructor " <> show name) $ HashMap.lookup name constructors
         E.RecordLens _ path -> RecordLens path
         E.Variant name -> Lambda $ Variant name
         E.Record _ row -> Record $ fmap (go env) row

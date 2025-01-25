@@ -32,7 +32,7 @@ import LensyUniplate (unicast)
 import NameGen (NameGen, freshName, runNameGen)
 import NameResolution (Scope (..), declare, resolveNames, resolveType, runDeclare, runNameResolution)
 import NameResolution qualified (Declare)
-import Parser
+import Parser hiding (run)
 import Prettyprinter hiding (list)
 import Prettyprinter.Render.Terminal (AnsiStyle)
 import Prettyprinter.Render.Text (putDoc)
@@ -53,7 +53,7 @@ runDefault action = runPureEff . runDiagnose' ("<none>", "") $ runNameGen do
     (_, builtins, defaultEnv) <- mkDefaults
     run (Right <$> defaultEnv) builtins action
 
-mkDefaults :: (NameGen :> es, Diagnose :> es) => Eff es (HashMap SimpleName_ Name, Builtins Name, HashMap Name (Type' 'Fixity))
+mkDefaults :: (NameGen :> es, Diagnose :> es) => Eff es (Scope, Builtins Name, HashMap Name (Type' 'Fixity))
 mkDefaults = do
     let builtins = Builtins{subtypeRelations = [(noLoc NatName, noLoc IntName)]}
     types <-
@@ -93,7 +93,7 @@ mkDefaults = do
                 , ("reverse", T.Forall Blank "'a" $ listT "'a" --> listT "'a")
                 ]
             )
-    pure (scope, builtins, cast <$> env)
+    pure (Scope scope, builtins, cast <$> env)
   where
     listT var = "List" $: var
 

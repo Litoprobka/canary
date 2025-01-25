@@ -1,23 +1,24 @@
 module Main (main) where
 
-import Relude
+import LangPrelude
 
 import Common
 import Data.HashMap.Strict qualified as HashMap
 import DependencyResolution (SimpleOutput (..), resolveDependenciesSimplified)
 import Diagnostic
 import Effectful
+import Effectful.Reader.Static
 import Fixity
 import Interpreter (InterpreterBuiltins (..), eval, evalAll)
 import NameGen (runNameGen)
 import NameResolution
 import Parser (parseModule)
-import Playground (mkDefaults)
+import Playground (mkDefaults, noLoc)
 import Prettyprinter
 import Prettyprinter.Render.Text (putDoc)
+import Repl qualified
 import Syntax.Declaration qualified as D
-import Syntax.Expression qualified as E
-import TypeChecker (typecheck)
+import TypeChecker (Builtins (..), typecheck)
 
 main :: IO ()
 main = do
@@ -25,9 +26,12 @@ main = do
     let (debug, otherArgs) = case args of
             ("debug" : rest) -> (True, rest)
             other -> (False, other)
-    (fileName, input) <- case otherArgs of
-        [] -> ("cli",) <$> getLine
-        (path : _) -> (path,) . decodeUtf8 <$> readFileBS path
+    case otherArgs of
+        [] -> runRepl
+        (path : _) -> runFile debug path . decodeUtf8 =<< readFileBS path
+
+runFile :: Bool -> FilePath -> Text -> IO ()
+runFile debug fileName input = do
     eval' <- runEff . runDiagnose (fileName, input) $ runNameGen do
         decls <- parseModule (fileName, input)
         prettyAST debug decls
@@ -52,6 +56,16 @@ main = do
             Nothing -> putTextLn "there is no main function"
             Just mainExpr -> putDoc $ (<> line) $ pretty mainExpr
     sequence_ eval'
+
+runRepl :: IO ()
+runRepl = void $ runEff $ runDiagnose ("", "") $ runNameGen do
+    liftIO $ hSetBuffering stdout NoBuffering
+    let replEnv = Repl.mkDefaultEnv
+    let builtins = Builtins{subtypeRelations = [(noLoc NatName, noLoc IntName)]}
+    evalBuiltins <-
+        runNameResolution replEnv.scope $
+            traverse resolve InterpreterBuiltins{true = "True", cons = "Cons", nil = "Nil"}
+    runReader evalBuiltins $ runReader builtins $ Repl.run replEnv
 
 printDebug :: MonadIO m => Bool -> Text -> m ()
 printDebug debug = when debug . putTextLn

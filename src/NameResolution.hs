@@ -17,6 +17,7 @@ module NameResolution (
     declarePat,
     Scope (..),
     Declare,
+    runNameResolutionWithEnv,
 ) where
 
 import Common hiding (Scope)
@@ -26,7 +27,7 @@ import Data.List.NonEmpty qualified as NE
 import Data.Traversable (for)
 import Diagnostic
 import Effectful.Dispatch.Dynamic (interpret)
-import Effectful.State.Static.Local (State, evalState, get, modify, put)
+import Effectful.State.Static.Local (State, evalState, get, modify, put, runState)
 import Error.Diagnose (Report (..))
 import Error.Diagnose qualified as M
 import LangPrelude hiding (error)
@@ -121,9 +122,12 @@ resolve name@(Located loc name_) = do
             -- this gives a unique id to every occurance of the same unbound name
             scoped $ declare name
 
+runNameResolutionWithEnv :: (NameGen :> es, Diagnose :> es) => Scope -> Eff (Declare : State Scope : es) a -> Eff es (a, Scope)
+runNameResolutionWithEnv env = runState env . runDeclare
+
 runNameResolution
-    :: (NameGen :> es, Diagnose :> es) => HashMap SimpleName_ Name -> Eff (Declare : State Scope : es) a -> Eff es a
-runNameResolution env = evalState (Scope env) . runDeclare
+    :: (NameGen :> es, Diagnose :> es) => Scope -> Eff (Declare : State Scope : es) a -> Eff es a
+runNameResolution env = evalState env . runDeclare
 
 resolveNames :: (NameResCtx es, Declare :> es) => [Declaration 'Parse] -> Eff es [Declaration 'NameRes]
 resolveNames decls = do

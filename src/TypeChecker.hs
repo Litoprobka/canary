@@ -99,7 +99,6 @@ inferDecls decls = do
         D.GADT _ _ _ constrs ->
             for_ constrs \con ->
                 modify \s -> s{topLevel = HashMap.insert con.name (Right con.sig) s.topLevel}
-        D.Fixity{} -> pass
 
     insertBinding name binding locals =
         let closure = UninferredType $ scoped do
@@ -118,7 +117,6 @@ inferDecls decls = do
         D.Signature _ name sig -> (values, (name, sig) : sigs)
         D.Type _ name vars constrs -> (values, mkConstrSigs name (vars <&> (.var)) constrs ++ sigs)
         D.GADT _ _ _ constrs -> (values, (constrs <&> \con -> (con.name, con.sig)) ++ sigs)
-        D.Fixity{} -> (values, sigs)
 
     mkConstrSigs :: Name -> [Name] -> [Constructor 'Fixity] -> [(Name, Type' 'Fixity)]
     mkConstrSigs name vars constrs =
