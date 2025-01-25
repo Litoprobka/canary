@@ -61,6 +61,7 @@ runRepl = void $ runEff $ runDiagnose ("", "") $ runNameGen do
     liftIO $ hSetBuffering stdout NoBuffering
     let replEnv = Repl.mkDefaultEnv
     let builtins = Builtins{subtypeRelations = [(noLoc NatName, noLoc IntName)]}
+    -- there should be a nicer way to handle builtins
     evalBuiltins <-
         NameResolution.run replEnv.scope $
             traverse resolve InterpreterBuiltins{true = "True", cons = "Cons", nil = "Nil"}

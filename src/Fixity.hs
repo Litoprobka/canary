@@ -29,7 +29,6 @@ data OpError
     = IncompatibleFixity Op Op
     | UndefinedOrdering Op Op
     | AmbiguousOrdering Op Op
-    | MissingOperator Op
 
 opError :: Diagnose :> es => OpError -> Eff es a
 opError =
@@ -52,12 +51,6 @@ opError =
                 -- TODO: this error is very unclear
                 ("ambiguous ordering of" <+> mbPretty prev <+> "and" <+> mbPretty next <+> "- their priority relations are cyclic")
                 (mkNotes [(getLocMb next, This "next operator"), (getLocMb prev, This "previous operator")])
-                []
-        MissingOperator op ->
-            Err
-                Nothing
-                ("missing operator" <+> mbPretty op)
-                (mkNotes [(getLocMb op, This "is lacking a fixity declaration")])
                 []
   where
     getLocMb = maybe Blank getLoc

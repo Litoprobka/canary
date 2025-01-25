@@ -6,7 +6,7 @@
 {-# LANGUAGE TypeFamilies #-}
 {-# LANGUAGE ViewPatterns #-}
 
-module Diagnostic (Diagnose, runDiagnose, runDiagnose', dummy, nonFatal, fatal, reportsFromBundle, internalError) where
+module Diagnostic (Diagnose, runDiagnose, runDiagnose', dummy, nonFatal, fatal, noErrors, reportsFromBundle, internalError, guardNoErrors) where
 
 import Common (Loc, mkNotes)
 import Data.DList (DList)
@@ -14,8 +14,8 @@ import Data.DList qualified as DList
 import Effectful
 import Effectful.Dispatch.Dynamic
 import Effectful.Error.Static (runErrorNoCallStack, throwError)
+import Effectful.State.Static.Local (gets, modify, runState)
 import Effectful.TH
-import Effectful.Writer.Static.Shared (runWriter, tell)
 import Error.Diagnose
 import LangPrelude
 import Prettyprinter.Render.Terminal (AnsiStyle)
@@ -24,6 +24,7 @@ import Text.Megaparsec qualified as MP
 data Diagnose :: Effect where
     NonFatal :: Report (Doc AnsiStyle) -> Diagnose m ()
     Fatal :: [Report (Doc AnsiStyle)] -> Diagnose m a
+    NoErrors :: Diagnose m Bool
 
 makeEffect ''Diagnose
 
@@ -35,10 +36,16 @@ runDiagnose file action = do
 
 runDiagnose' :: (FilePath, Text) -> Eff (Diagnose : es) a -> Eff es (Maybe a, Diagnostic (Doc AnsiStyle))
 runDiagnose' (filePath, fileContents) = reinterpret
-    (fmap (joinReports . second diagnosticFromReports) . runWriter . runErrorNoCallStack)
+    (fmap (joinReports . second diagnosticFromReports) . runState DList.empty . runErrorNoCallStack)
     \_ -> \case
-        NonFatal report -> tell $ DList.singleton report
+        NonFatal report -> modify (`DList.snoc` report)
         Fatal reports -> throwError reports
+        NoErrors ->
+            gets @(DList (Report (Doc AnsiStyle)))
+                ( all \case
+                    Err{} -> False
+                    Warn{} -> True
+                )
   where
     baseDiagnostic = addFile mempty filePath $ toString fileContents
     diagnosticFromReports = foldl' @DList addReport baseDiagnostic
@@ -52,6 +59,12 @@ dummy msg = Err Nothing msg [] []
 -- | An internal error. That is, something that may only be caused by a compiler bug
 internalError :: Diagnose :> es => Loc -> Doc AnsiStyle -> Eff es a
 internalError loc msg = fatal . one $ Err Nothing ("Internal error:" <+> msg) (mkNotes [(loc, This "arising from")]) []
+
+-- | treat accumulated errors as fatal
+guardNoErrors :: Diagnose :> es => Eff es ()
+guardNoErrors = do
+    ok <- noErrors
+    unless ok $ fatal []
 
 -- this is 90% copypasted from Error.Diagnose.Compat.Megaparsec, because enabling the feature flag
 -- hangs the compiler for some reason
