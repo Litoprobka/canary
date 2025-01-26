@@ -23,7 +23,7 @@ import DependencyResolution (SimpleOutput (..), resolveDependenciesSimplified)
 import Diagnostic (Diagnose, runDiagnose, runDiagnose')
 import Effectful.Error.Static (Error)
 import Effectful.Reader.Static (Reader, runReader)
-import Effectful.State.Static.Local (State, runState)
+import Effectful.State.Static.Local (State, execState, runState)
 import Error.Diagnose (Diagnostic)
 import Fixity (resolveFixity)
 import Fixity qualified (parse)
@@ -53,7 +53,7 @@ runDefault action = runPureEff . runDiagnose' ("<none>", "") $ runNameGen do
     (_, builtins, defaultEnv) <- mkDefaults
     run (Right <$> defaultEnv) builtins action
 
-mkDefaults :: (NameGen :> es, Diagnose :> es) => Eff es (Scope, Builtins Name, HashMap Name (Type 'Fixity))
+mkDefaults :: NameGen :> es => Eff es (Scope, Builtins Name, HashMap Name (Type 'Fixity))
 mkDefaults = do
     let builtins = Builtins{subtypeRelations = [(noLoc NatName, noLoc IntName)]}
     types <-
@@ -64,7 +64,7 @@ mkDefaults = do
                         , "Maybe"
                         , "Tuple"
                         ]
-    let initScope =
+    let scope =
             types
                 <> HashMap.fromList
                     ( fmap
@@ -78,8 +78,9 @@ mkDefaults = do
                         , ("Lens", LensName)
                         ]
                     )
-    (env, Scope scope) <-
-        (runState (Scope initScope) . fmap HashMap.fromList . NameResolution.runDeclare)
+    -- this is a messy way to declare built-in stuff, I should do better
+    {-scope <-
+        (execState (Scope initScope) . fmap HashMap.fromList . NameResolution.runDeclare)
             ( traverse
                 (\(name, ty) -> liftA2 (,) (declare $ noLoc $ Name' name) (resolveTerm ty))
                 [ ("()", "Unit")
@@ -92,10 +93,11 @@ mkDefaults = do
                 , ("Nil", T.Forall Blank "'a" $ listT "'a")
                 , ("reverse", T.Forall Blank "'a" $ listT "'a" --> listT "'a")
                 ]
-            )
-    pure (Scope scope, builtins, _cast <$> env)
-  where
-    listT var = "List" $: var
+            )-}
+    pure (Scope scope, builtins, HashMap.empty)
+
+-- where
+-- listT var = "List" $: var
 
 inferIO :: Expr 'Fixity -> IO ()
 inferIO = inferIO' do

@@ -406,7 +406,7 @@ generaliseAll action = do
     getFreeVar _ _ = Nothing
 
     go :: InfEffs es => Scope -> TypeDT -> Eff (State (HashMap UniVar TypeDT) : State (HashMap Skolem Name) : es) TypeDT
-    go scope = transformM' _uniplate \case
+    go scope = transformM' T.uniplate \case
         T.UniVar loc uni -> fmap Left do
             whenNothingM (gets @(HashMap UniVar TypeDT) (HashMap.lookup uni)) do
                 lookupUniVar uni >>= \case
@@ -533,7 +533,7 @@ substitute' variance var ty = do
     result <- go someVar ty
     pure Subst{var = someVar, result}
   where
-    go replacement = transformM' _uniplate \case
+    go replacement = transformM' T.uniplate \case
         T.Var v | v == var -> pure $ Left replacement
         T.Var name -> pure $ Left $ T.Var name
         T.UniVar loc uni ->

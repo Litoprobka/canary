@@ -44,7 +44,7 @@ import Syntax.Row (ExtRow (..))
 import Syntax.Row qualified as Row
 import Syntax.Term hiding (Record, Variant)
 import Syntax.Term qualified as E (Term (Record, Variant))
-import Syntax.Term qualified as T (Term (Skolem, UniVar))
+import Syntax.Term qualified as T (Term (Skolem, UniVar), uniplate)
 import TypeChecker.Backend
 
 typecheck
@@ -62,7 +62,7 @@ inferTypeVars ty =
         ty
   where
     go :: Type 'Fixity -> Eff '[State (HashSet Name, HashSet Name)] (Type 'Fixity)
-    go = transformM _uniplate \case
+    go = transformM T.uniplate \case
         Var var -> do
             isNew <- not . HashSet.member var <$> gets @(HashSet Name, HashSet Name) snd
             when isNew $ modify @(HashSet Name, HashSet Name) (second $ HashSet.insert var)
@@ -311,15 +311,16 @@ infer =
                 check body result
             pure result
         Match loc [] -> typeError $ EmptyMatch loc
-        Match loc matches@((firstPats, firstBody) : rest) -> do
-            -- NOTE: this implementation is biased towards the first match
-            bodyType <- fmap unMono . mono In =<< infer firstBody
-            patTypes <- traverse inferPattern firstPats
-            whenNothing_ (getArgCount matches) $ typeError $ ArgCountMismatch loc
-            for_ rest \(pats, body) -> do
+        Match loc matches@(_ : _) -> do
+            argCount <- case getArgCount matches of
+                Just argCount -> pure argCount
+                Nothing -> typeError $ ArgCountMismatch loc
+            result <- freshUniVar loc
+            patTypes <- replicateM argCount (freshUniVar loc)
+            for_ matches \(pats, body) -> do
                 zipWithM_ checkPattern pats patTypes
-                check body bodyType
-            pure $ foldr (Function loc) bodyType patTypes
+                check body result
+            pure $ foldr (Function loc) result patTypes
         List loc items -> do
             itemTy <- freshUniVar loc
             traverse_ (`check` itemTy) items
@@ -448,10 +449,37 @@ normalise = fmap runIdentity . normaliseAll . fmap Identity
 normaliseAll :: (Traversable t, InfEffs es) => Eff es (t TypeDT) -> Eff es (t (Type 'Fixity))
 normaliseAll = generaliseAll {->=> skolemsToExists-} >=> traverse go
   where
-    go = transformM' (_uniplate' _coerce (error "univar in uniplate") (error "skolem in uniplate")) \case
+    go :: InfEffs es => TypeDT -> Eff es (Type 'Fixity)
+    go = \case
         T.UniVar loc uni ->
             lookupUniVar uni >>= \case
                 Left _ -> internalError loc $ "dangling univar " <> pretty uni
-                Right body -> Left <$> go (unMono body)
+                Right body -> go (unMono body)
         T.Skolem skolem -> internalError (getLoc skolem) $ "skolem " <> pretty (T.Skolem skolem) <> " remains in code"
-        other -> pure $ Right other
+        -- other cases could be eliminated by a type changing uniplate
+        Application lhs rhs -> Application <$> go lhs <*> go rhs
+        Function loc lhs rhs -> Function loc <$> go lhs <*> go rhs
+        Forall loc var body -> Forall loc <$> goBinder var <*> go body
+        Exists loc var body -> Exists loc <$> goBinder var <*> go body
+        VariantT loc row -> VariantT loc <$> traverse go row
+        RecordT loc row -> RecordT loc <$> traverse go row
+        -- expression-only constructors are unsupported for now
+        t@TypeApplication{} -> internalError (getLoc t) "type-level type applications are not supported yet"
+        l@Lambda{} -> internalError (getLoc l) "type-level lambdas are not supported yet"
+        w@WildcardLambda{} -> internalError (getLoc w) "type-level wildcard lambdas are not supported yet"
+        l@Let{} -> internalError (getLoc l) "type-level let bindings are not supported yet"
+        l@LetRec{} -> internalError (getLoc l) "type-level let rec bindings are not supported yet"
+        c@Case{} -> internalError (getLoc c) "type-level case is not supported yet"
+        m@Match{} -> internalError (getLoc m) "type-level match is not supported yet"
+        i@If{} -> internalError (getLoc i) "type-level lambdas if not supported yet"
+        a@Annotation{} -> internalError (getLoc a) "type-level annotations are not supported yet"
+        r@E.Record{} -> internalError (getLoc r) "type-level records are not supported yet"
+        l@List{} -> internalError (getLoc l) "type-level lists are not supported yet"
+        d@Do{} -> internalError (getLoc d) "type-level do blocks are not supported yet"
+        -- and these are just boilerplate
+        Name name -> pure $ Name name
+        RecordLens loc name -> pure $ RecordLens loc name
+        E.Variant name -> pure $ E.Variant name
+        Literal lit -> pure $ Literal lit
+        Var var -> pure $ Var var
+    goBinder binder = VarBinder binder.var <$> traverse go binder.kind

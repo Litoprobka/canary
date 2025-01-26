@@ -10,6 +10,7 @@ import Common hiding (Name, Skolem, UniVar)
 import Data.List.NonEmpty qualified as NE
 import Data.Type.Ord (type (<))
 import LangPrelude hiding (show)
+import LensyUniplate (SelfTraversal, Traversal')
 import Prettyprinter
 import Syntax.Row
 import Prelude (show)
@@ -390,41 +391,51 @@ collectNamesInBinding = \case
     FunctionB name _ _ -> [name]
     ValueB pat _ -> collectNamesInPat pat
 
-{-
-uniplate :: SelfTraversal Expression p p
+-- | at the moment, uniplate works properly only for types
+uniplate :: SelfTraversal Type p p
 uniplate f = \case
-    Lambda loc pat body -> Lambda loc pat <$> f body
-    WildcardLambda loc args body -> WildcardLambda loc args <$> f body
+    Lambda loc pat body -> Lambda loc pat <$> f body -- for now, we're ignoring the pattern arguments
+    WildcardLambda loc args body -> WildcardLambda loc args <$> f body -- same
     Application lhs rhs -> Application <$> f lhs <*> f rhs
-    TypeApplication func ty -> flip TypeApplication ty <$> f func
+    TypeApplication func ty -> TypeApplication <$> f func <*> f ty
     Let loc binding expr -> Let loc <$> plateBinding f binding <*> f expr
     LetRec loc bindings expr -> LetRec loc <$> traverse (plateBinding f) bindings <*> f expr
     Case loc arg matches -> Case loc <$> f arg <*> traverse (traverse f) matches
     Match loc matches -> Match loc <$> traverse (traverse f) matches
     If loc cond true false -> If loc <$> f cond <*> f true <*> f false
-    Annotation expr ty -> Annotation <$> f expr <*> pure ty
+    Annotation expr ty -> Annotation <$> f expr <*> f ty
     Record loc row -> Record loc <$> traverse f row
     List loc exprs -> List loc <$> traverse f exprs
     Do loc stmts ret -> Do loc <$> traverse (plateStmt f) stmts <*> f ret
-    Infix pairs l -> Infix <$> traverse (\(e, op) -> (,op) <$> f e) pairs <*> pure l
-    Constructor name -> pure $ Constructor name
+    InfixE pairs l -> InfixE <$> traverse (\(e, op) -> (,op) <$> f e) pairs <*> f l
+    Function loc lhs rhs -> Function loc <$> f lhs <*> f rhs
+    Forall loc var body -> Forall loc <$> plateBinder f var <*> f body
+    Exists loc var body -> Exists loc <$> plateBinder f var <*> f body
+    VariantT loc row -> VariantT loc <$> traverse f row
+    RecordT loc row -> RecordT loc <$> traverse f row
+    u@UniVar{} -> pure u
+    s@Skolem{} -> pure s
     n@Name{} -> pure n
     r@RecordLens{} -> pure r
     v@Variant{} -> pure v
     l@Literal{} -> pure l
+    v@Var{} -> pure v
   where
-    plateStmt :: Traversal' (DoStatement p) (Expression p)
+    plateStmt :: Traversal' (DoStatement p) (Term p)
     plateStmt f' = \case
         Bind pat expr -> Bind pat <$> uniplate f' expr
         With loc pat expr -> With loc pat <$> uniplate f' expr
         DoLet loc binding -> DoLet loc <$> plateBinding f' binding
         Action expr -> Action <$> uniplate f' expr
 
-    plateBinding :: Traversal' (Binding p) (Expression p)
+    plateBinding :: Traversal' (Binding p) (Term p)
     plateBinding f' = \case
-        ValueBinding pat body -> ValueBinding pat <$> uniplate f' body
-        FunctionBinding name args body -> FunctionBinding name args <$> uniplate f' body
--}
+        -- todo: once dependent types land, we wouldn't be able to ignore patterns-in-types
+        ValueB pat body -> ValueB pat <$> uniplate f' body
+        FunctionB name args body -> FunctionB name args <$> uniplate f' body
+
+    plateBinder :: Traversal' (VarBinder p) (Term p)
+    plateBinder f' binder = VarBinder binder.var <$> traverse (uniplate f') binder.kind
 
 {-
 -- >>> pretty $ Function (Var "a") (Record (fromList [("x", Name "Int"), ("x", Name "a")]) Nothing)
