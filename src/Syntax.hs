@@ -5,7 +5,5 @@ module Syntax (module Export) where
 import Prelude ()
 
 import Syntax.Declaration as Export (Constructor, Declaration, GadtConstructor)
-import Syntax.Expression as Export (Binding, Expression)
-import Syntax.Pattern as Export (Pattern)
 import Syntax.Row as Export (Row)
-import Syntax.Type as Export (Type', VarBinder)
+import Syntax.Term as Export (Binding, DoStatement, Expr, Pattern, Term, Type, VarBinder)

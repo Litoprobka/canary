@@ -18,26 +18,25 @@ import Common (
     PriorityRelation' (..),
  )
 import Data.Type.Ord (type (<))
-import Prettyprinter (Doc, Pretty (pretty), comma, encloseSep, line, nest, parens, punctuate, sep, space, vsep, (<+>))
-import Relude hiding (show)
-import Syntax.Expression (Binding)
-import Syntax.Type (Type', VarBinder)
+import LangPrelude hiding (show)
+import Prettyprinter
+import Syntax.Term (Binding, Type, VarBinder)
 import Prelude (show)
 
 data Declaration (p :: Pass)
     = Value Loc (Binding p) [Declaration p]
     | Type Loc (NameAt p) [VarBinder p] [Constructor p]
-    | GADT Loc (NameAt p) (Maybe (Type' p)) [GadtConstructor p]
-    | Signature Loc (NameAt p) (Type' p)
+    | GADT Loc (NameAt p) (Maybe (Type p)) [GadtConstructor p]
+    | Signature Loc (NameAt p) (Type p)
     | p < DependencyRes => Fixity Loc Fixity (NameAt p) (PriorityRelation p)
 
 deriving instance Eq (Declaration 'Parse)
 
-data Constructor p = Constructor {loc :: Loc, name :: NameAt p, args :: [Type' p]}
+data Constructor p = Constructor {loc :: Loc, name :: NameAt p, args :: [Type p]}
 deriving instance Eq (Constructor 'Parse)
 
-data GadtConstructor p = GadtConstructor {loc :: Loc, name :: NameAt p, sig :: Type' p}
-deriving instance (Eq (NameAt p), Eq (Type' p)) => Eq (GadtConstructor p)
+data GadtConstructor p = GadtConstructor {loc :: Loc, name :: NameAt p, sig :: Type p}
+deriving instance (Eq (NameAt p), Eq (Type p)) => Eq (GadtConstructor p)
 
 instance Pretty (NameAt p) => Pretty (Declaration p) where
     pretty = \case
@@ -50,9 +49,9 @@ instance Pretty (NameAt p) => Pretty (Declaration p) where
         Fixity _ fixity op priority ->
             fixityKeyword fixity
                 <+> pretty op
-                    <> listIfNonEmpty "above" priority.above
-                    <> listIfNonEmpty "below" priority.below
-                    <> listIfNonEmpty "equals" priority.equal
+                <> listIfNonEmpty "above" priority.above
+                <> listIfNonEmpty "below" priority.below
+                <> listIfNonEmpty "equals" priority.equal
       where
         fixityKeyword :: Fixity -> Doc ann
         fixityKeyword = \case
@@ -87,8 +86,8 @@ instance HasLoc (Declaration p) where
 instance HasLoc (Constructor p) where
     getLoc Constructor{loc} = loc
 
-instance (Cast Type' p q, NameAt p ~ NameAt q) => Cast Constructor p q where
+instance (Cast Type p q, NameAt p ~ NameAt q) => Cast Constructor p q where
     cast Constructor{loc, name, args} = Constructor{loc, name, args = fmap cast args}
 
-instance (Cast Type' p q, NameAt p ~ NameAt q) => Cast GadtConstructor p q where
+instance (Cast Type p q, NameAt p ~ NameAt q) => Cast GadtConstructor p q where
     cast GadtConstructor{loc, name, sig} = GadtConstructor{loc, name, sig = cast sig}

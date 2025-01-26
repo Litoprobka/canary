@@ -17,7 +17,7 @@ import Interpreter (InterpreterBuiltins (..), Value, eval, modifyEnv)
 import LangPrelude
 import Lexer (Parser, keyword)
 import NameGen (NameGen)
-import NameResolution (Scope (..), resolveExpr, resolveNames)
+import NameResolution (Scope (..), resolveNames, resolveTerm)
 import NameResolution qualified
 import Parser qualified
 import Poset (Poset)
@@ -29,8 +29,8 @@ import TypeChecker.Backend qualified as TC
 
 data ReplCommand
     = Decls [Declaration 'Parse]
-    | Expr (Expression 'Parse)
-    | Type_ (Expression 'Parse)
+    | Expr (Expr 'Parse)
+    | Type_ (Expr 'Parse)
     | Load FilePath
     | Quit
 
@@ -39,7 +39,7 @@ data ReplEnv = ReplEnv
     , fixityMap :: FixityMap
     , operatorPriorities :: Poset Op
     , scope :: Scope
-    , types :: HashMap Name (Type' 'Fixity)
+    , types :: HashMap Name (Type 'Fixity)
     }
 
 type ReplCtx es =
@@ -107,7 +107,7 @@ replStep env = do
 
     processExpr expr = do
         tcbuiltins <- ask
-        afterNameRes <- NameResolution.run env.scope $ resolveExpr expr
+        afterNameRes <- NameResolution.run env.scope $ resolveTerm expr
         afterFixityRes <- Fixity.run env.fixityMap env.operatorPriorities $ Fixity.parse $ cast afterNameRes
         fmap (afterFixityRes,) $ TC.run (Right <$> env.types) tcbuiltins $ normalise $ infer afterFixityRes
 

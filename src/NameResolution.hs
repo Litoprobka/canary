@@ -10,8 +10,7 @@ module NameResolution (
     run,
     runDeclare,
     resolveNames,
-    resolveExpr,
-    resolveType,
+    resolveTerm,
     resolve,
     declare,
     declarePat,
@@ -20,7 +19,8 @@ module NameResolution (
     runWithEnv,
 ) where
 
-import Common hiding (Scope)
+import Common (Name)
+import Common hiding (Name, Scope)
 import Data.HashMap.Strict qualified as Map
 import Data.List (partition)
 import Data.List.NonEmpty qualified as NE
@@ -34,10 +34,7 @@ import LangPrelude hiding (error)
 import NameGen
 import Syntax
 import Syntax.Declaration qualified as D
-import Syntax.Expression (DoStatement)
-import Syntax.Expression qualified as E
-import Syntax.Pattern qualified as P
-import Syntax.Type qualified as T
+import Syntax.Term
 
 {-
 The name resolution pass. Transforms 'Parse AST into 'NameRes AST. It doesn't short-circuit on errors
@@ -149,8 +146,8 @@ generate different IDs when called twice on the same data
 -}
 collectNames :: (NameResCtx es, Declare :> es) => [Declaration 'Parse] -> Eff es ()
 collectNames decls = for_ decls \case
-    D.Value _ (E.FunctionBinding name _ _) _ -> void $ declare name
-    D.Value _ (E.ValueBinding pat _) _ -> void $ declarePat pat
+    D.Value _ (FunctionB name _ _) _ -> void $ declare name
+    D.Value _ (ValueB pat _) _ -> void $ declarePat pat
     D.Type _ name _ _ -> void $ declare name
     D.GADT _ name _ _ -> void $ declare name
     D.Signature{} -> pass
@@ -170,7 +167,7 @@ resolveDec decl = case decl of
             constrsToDeclare <-
                 for constrs \(D.Constructor conLoc con args) -> do
                     con' <- declare con
-                    args' <- traverse resolveType args
+                    args' <- traverse resolveTerm args
                     pure (con, D.Constructor conLoc con' args')
             pure (vars', constrsToDeclare)
         -- this is a bit of a crutch, since we want name' and vars' to be scoped and constrs to be global
@@ -180,13 +177,13 @@ resolveDec decl = case decl of
         pure $ D.Type loc name' vars' (snd <$> constrsToDeclare)
     D.GADT loc name mbKind constrs -> do
         name' <- resolve name
-        mbKind' <- traverse resolveType mbKind
+        mbKind' <- traverse resolveTerm mbKind
         constrs' <- for constrs \(D.GadtConstructor conLoc con sig) -> do
             con' <- resolve con
-            sig' <- resolveType sig
+            sig' <- resolveTerm sig
             pure $ D.GadtConstructor conLoc con' sig'
         pure $ D.GADT loc name' mbKind' constrs'
-    D.Signature loc name ty -> D.Signature loc <$> resolve name <*> resolveType ty
+    D.Signature loc name ty -> D.Signature loc <$> resolve name <*> resolveTerm ty
     D.Fixity loc fixity name rels -> D.Fixity loc fixity <$> resolve name <*> traverse resolve rels
 
 {- | resolves names in a binding. Unlike the rest of the functions, it also
@@ -195,140 +192,134 @@ takes local definitions as an argument, and uses them after resolving the name /
 resolveBinding :: NameResCtx es => [Declaration 'Parse] -> Binding 'Parse -> Eff es (Binding 'NameRes)
 resolveBinding locals =
     scoped . \case
-        E.FunctionBinding name args body -> do
+        FunctionB name args body -> do
             name' <- resolve name
             args' <- traverse declarePat args
             collectNames locals
-            body' <- resolveExpr body
-            pure $ E.FunctionBinding name' args' body'
-        E.ValueBinding pat body -> do
+            body' <- resolveTerm body
+            pure $ FunctionB name' args' body'
+        ValueB pat body -> do
             pat' <- resolvePat pat
             collectNames locals
-            body' <- resolveExpr body
-            pure $ E.ValueBinding pat' body'
+            body' <- resolveTerm body
+            pure $ ValueB pat' body'
 
 -- resolves / declares names in a binding. The intended use case is let bindings
 declareBinding :: (NameResCtx es, Declare :> es) => Binding 'Parse -> Eff es (Binding 'NameRes)
 declareBinding = \case
-    E.FunctionBinding name args body -> do
+    FunctionB name args body -> do
         name' <- declare name
         scoped do
             args' <- traverse declarePat args
-            body' <- resolveExpr body
-            pure $ E.FunctionBinding name' args' body'
-    E.ValueBinding pat body -> do
+            body' <- resolveTerm body
+            pure $ FunctionB name' args' body'
+    ValueB pat body -> do
         pat' <- declarePat pat
-        body' <- resolveExpr body
-        pure $ E.ValueBinding pat' body'
+        body' <- resolveTerm body
+        pure $ ValueB pat' body'
 
 -- this could have been a Traversable instance
 -- resolves names in a pattern, assuming that all new bindings have already been declared
 resolvePat :: NameResCtx es => Pattern 'Parse -> Eff es (Pattern 'NameRes)
 resolvePat = \case
-    P.Constructor con pats -> P.Constructor <$> resolve con <*> traverse resolvePat pats
-    P.Annotation pat ty -> P.Annotation <$> resolvePat pat <*> resolveType ty
-    P.Record loc row -> P.Record loc <$> traverse resolvePat row
-    P.Variant openName arg -> P.Variant openName <$> resolvePat arg
-    P.Var name -> P.Var <$> resolve name
-    P.List loc pats -> P.List loc <$> traverse resolvePat pats
-    P.Wildcard loc name -> pure $ P.Wildcard loc name
-    P.Literal lit -> pure $ P.Literal lit
+    ConstructorP con pats -> ConstructorP <$> resolve con <*> traverse resolvePat pats
+    AnnotationP pat ty -> AnnotationP <$> resolvePat pat <*> resolveTerm ty
+    RecordP loc row -> RecordP loc <$> traverse resolvePat row
+    VariantP openName arg -> VariantP openName <$> resolvePat arg
+    VarP name -> VarP <$> resolve name
+    ListP loc pats -> ListP loc <$> traverse resolvePat pats
+    WildcardP loc name -> pure $ WildcardP loc name
+    LiteralP lit -> pure $ LiteralP lit
 
 -- | resolves names in a pattern. Adds all new names to the current scope
 declarePat :: (NameResCtx es, Declare :> es) => Pattern 'Parse -> Eff es (Pattern 'NameRes)
 declarePat = \case
-    P.Constructor con pats -> P.Constructor <$> resolve con <*> traverse declarePat pats
-    P.Annotation pat ty -> P.Annotation <$> declarePat pat <*> resolveType ty
-    P.Record loc row -> P.Record loc <$> traverse declarePat row
-    P.Variant openName arg -> P.Variant openName <$> declarePat arg
-    P.Var name -> P.Var <$> declare name
-    P.List loc pats -> P.List loc <$> traverse declarePat pats
-    P.Wildcard loc name -> pure $ P.Wildcard loc name
-    P.Literal lit -> pure $ P.Literal lit
+    ConstructorP con pats -> ConstructorP <$> resolve con <*> traverse declarePat pats
+    AnnotationP pat ty -> AnnotationP <$> declarePat pat <*> resolveTerm ty
+    RecordP loc row -> RecordP loc <$> traverse declarePat row
+    VariantP openName arg -> VariantP openName <$> declarePat arg
+    VarP name -> VarP <$> declare name
+    ListP loc pats -> ListP loc <$> traverse declarePat pats
+    WildcardP loc name -> pure $ WildcardP loc name
+    LiteralP lit -> pure $ LiteralP lit
 
--- | resolves names in an expression. Doesn't change the current scope
-resolveExpr :: NameResCtx es => Expression 'Parse -> Eff es (Expression 'NameRes)
-resolveExpr e = scoped case e of
-    E.Lambda loc arg body -> do
+-- | resolves names in a term. Doesn't change the current scope
+resolveTerm :: NameResCtx es => Term 'Parse -> Eff es (Term 'NameRes)
+resolveTerm e = scoped case e of
+    Lambda loc arg body -> do
         arg' <- declarePat arg
-        body' <- resolveExpr body
-        pure $ E.Lambda loc arg' body'
-    E.WildcardLambda loc args body -> do
+        body' <- resolveTerm body
+        pure $ Lambda loc arg' body'
+    WildcardLambda loc args body -> do
         args' <- traverse declare args
-        body' <- resolveExpr body
-        pure $ E.WildcardLambda loc args' body'
-    E.Application f arg -> E.Application <$> resolveExpr f <*> resolveExpr arg
-    E.TypeApplication expr tyArg -> E.TypeApplication <$> resolveExpr expr <*> resolveType tyArg
-    E.Let loc binding expr -> do
+        body' <- resolveTerm body
+        pure $ WildcardLambda loc args' body'
+    Application f arg -> Application <$> resolveTerm f <*> resolveTerm arg
+    TypeApplication expr tyArg -> TypeApplication <$> resolveTerm expr <*> resolveTerm tyArg
+    Let loc binding expr -> do
         binding' <- declareBinding binding
-        expr' <- resolveExpr expr
-        pure $ E.Let loc binding' expr'
-    E.LetRec loc bindings expr -> do
+        expr' <- resolveTerm expr
+        pure $ Let loc binding' expr'
+    LetRec loc bindings expr -> do
         collectNames $ map (\b -> D.Value loc b []) $ NE.toList bindings
         bindings' <- traverse (resolveBinding []) bindings
-        expr' <- resolveExpr expr
-        pure $ E.LetRec loc bindings' expr'
-    E.Case loc arg matches ->
-        E.Case loc <$> resolveExpr arg <*> for matches \(pat, expr) -> scoped do
+        expr' <- resolveTerm expr
+        pure $ LetRec loc bindings' expr'
+    Case loc arg matches ->
+        Case loc <$> resolveTerm arg <*> for matches \(pat, expr) -> scoped do
             pat' <- declarePat pat
-            expr' <- resolveExpr expr
+            expr' <- resolveTerm expr
             pure (pat', expr')
-    E.Match loc matches ->
-        E.Match loc <$> for matches \(pats, expr) -> scoped do
+    Match loc matches ->
+        Match loc <$> for matches \(pats, expr) -> scoped do
             pats' <- traverse declarePat pats
-            expr' <- resolveExpr expr
+            expr' <- resolveTerm expr
             pure (pats', expr')
-    E.Annotation body ty -> E.Annotation <$> resolveExpr body <*> resolveType ty
-    E.If loc cond true false -> E.If loc <$> resolveExpr cond <*> resolveExpr true <*> resolveExpr false
-    E.Record loc row -> E.Record loc <$> traverse resolveExpr row
-    E.List loc items -> E.List loc <$> traverse resolveExpr items
-    E.Do loc stmts lastAction -> E.Do loc <$> traverse resolveStmt stmts <*> resolveExpr lastAction
-    E.Infix pairs last' ->
-        E.Infix
-            <$> traverse (bitraverse resolveExpr (traverse resolve)) pairs
-            <*> resolveExpr last'
-    E.Name name -> E.Name <$> resolve name
-    E.Constructor name -> E.Constructor <$> resolve name
-    E.RecordLens loc lens -> pure $ E.RecordLens loc lens
-    E.Variant openName -> pure $ E.Variant openName
-    E.Literal lit -> pure $ E.Literal lit
+    Annotation body ty -> Annotation <$> resolveTerm body <*> resolveTerm ty
+    If loc cond true false -> If loc <$> resolveTerm cond <*> resolveTerm true <*> resolveTerm false
+    Record loc row -> Record loc <$> traverse resolveTerm row
+    List loc items -> List loc <$> traverse resolveTerm items
+    Do loc stmts lastAction -> Do loc <$> traverse resolveStmt stmts <*> resolveTerm lastAction
+    InfixE pairs last' ->
+        InfixE
+            <$> traverse (bitraverse resolveTerm (traverse resolve)) pairs
+            <*> resolveTerm last'
+    Name name -> Name <$> resolve name
+    Constructor name -> Constructor <$> resolve name
+    RecordLens loc lens -> pure $ RecordLens loc lens
+    Variant openName -> pure $ Variant openName
+    Literal lit -> pure $ Literal lit
+    Forall loc binder body -> do
+        var' <- resolveBinder binder
+        body' <- resolveTerm body
+        pure $ Forall loc var' body'
+    Exists loc binder body -> do
+        var' <- resolveBinder binder
+        body' <- resolveTerm body
+        pure $ Exists loc var' body'
+    Function loc from to -> Function loc <$> resolveTerm from <*> resolveTerm to
+    Var var -> Var <$> resolve var
+    VariantT loc row -> VariantT loc <$> traverse resolveTerm row
+    RecordT loc row -> RecordT loc <$> traverse resolveTerm row
 
 resolveStmt :: (NameResCtx es, Declare :> es) => DoStatement 'Parse -> Eff es (DoStatement 'NameRes)
 resolveStmt = \case
-    E.Bind pat body -> do
-        body' <- resolveExpr body
+    Bind pat body -> do
+        body' <- resolveTerm body
         pat' <- declarePat pat
-        pure $ E.Bind pat' body'
-    E.With loc pat body -> do
-        body' <- resolveExpr body
+        pure $ Bind pat' body'
+    With loc pat body -> do
+        body' <- resolveTerm body
         pat' <- declarePat pat
-        pure $ E.With loc pat' body'
-    E.DoLet loc binding -> E.DoLet loc <$> declareBinding binding
-    E.Action expr -> E.Action <$> resolveExpr expr
-
--- | resolves names in a type. Doesn't change the current scope
-resolveType :: NameResCtx es => Type' 'Parse -> Eff es (Type' 'NameRes)
-resolveType ty = scoped case ty of
-    T.Forall loc binder body -> do
-        var' <- resolveBinder binder
-        body' <- resolveType body
-        pure $ T.Forall loc var' body'
-    T.Exists loc binder body -> do
-        var' <- resolveBinder binder
-        body' <- resolveType body
-        pure $ T.Exists loc var' body'
-    T.Application lhs rhs -> T.Application <$> resolveType lhs <*> resolveType rhs
-    T.Function loc from to -> T.Function loc <$> resolveType from <*> resolveType to
-    T.Name name -> T.Name <$> resolve name
-    T.Var var -> T.Var <$> resolve var
-    T.Variant loc row -> T.Variant loc <$> traverse resolveType row
-    T.Record loc row -> T.Record loc <$> traverse resolveType row
+        pure $ With loc pat' body'
+    DoLet loc binding -> DoLet loc <$> declareBinding binding
+    Action expr -> Action <$> resolveTerm expr
 
 {- | declares the var in a binder; resolves names in its kind annotation, if any
 the kind annotation may not reference the var
 -}
 resolveBinder :: (NameResCtx es, Declare :> es) => VarBinder 'Parse -> Eff es (VarBinder 'NameRes)
-resolveBinder (T.VarBinder var k) = do
-    k' <- traverse resolveType k
+resolveBinder (VarBinder var k) = do
+    k' <- traverse resolveTerm k
     var' <- declare var
-    pure $ T.VarBinder var' k'
+    pure $ VarBinder var' k'

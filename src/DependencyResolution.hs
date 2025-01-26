@@ -32,7 +32,7 @@ data Output = Output
 type Decl = Declaration 'DependencyRes
 type Op = Maybe Name
 type FixityMap = HashMap Op Fixity
-type Signatures = HashMap Name (Type' 'DependencyRes)
+type Signatures = HashMap Name (Type 'DependencyRes)
 
 {-
 nameDependencies :: Diagnose :> es => [Declaration 'NameRes] -> Eff es (Poset Name)
@@ -160,7 +160,7 @@ updatePrecedence loc op rels poset = execState poset $ Poset.reportError $ repor
 
 -- errors
 
-danglingSigError :: Diagnose :> es => Type' 'DependencyRes -> Eff es ()
+danglingSigError :: Diagnose :> es => Type 'DependencyRes -> Eff es ()
 danglingSigError ty =
     nonFatal $
         Err

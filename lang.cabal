@@ -40,10 +40,8 @@ library
       Repl
       Syntax
       Syntax.Declaration
-      Syntax.Expression
-      Syntax.Pattern
       Syntax.Row
-      Syntax.Type
+      Syntax.Term
       TypeChecker
       TypeChecker.Backend
   other-modules:

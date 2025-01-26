@@ -47,13 +47,12 @@ import Relude hiding (
 import Syntax
 import Syntax.Row
 import Syntax.Row qualified as Row
-import Syntax.Type qualified as T
+import Syntax.Term (plainBinder)
+import Syntax.Term qualified as T
 import Prelude (show)
 
-type Expr = Expression 'Fixity
 type Pat = Pattern 'Fixity
-
-type Type = Type' 'DuringTypecheck
+type TypeDT = Type 'DuringTypecheck
 
 data Monotype
     = MName Name
@@ -80,10 +79,10 @@ data MonoLayer
     | MLSkolem Skolem
     | MLUniVar Loc UniVar
     | MLVar Name
-    | MLApp Type Type
-    | MLFn Loc Type Type
-    | MLVariant Loc (ExtRow Type)
-    | MLRecord Loc (ExtRow Type)
+    | MLApp TypeDT TypeDT
+    | MLFn Loc TypeDT TypeDT
+    | MLVariant Loc (ExtRow TypeDT)
+    | MLRecord Loc (ExtRow TypeDT)
     deriving (Show, Eq)
 
 instance HasLoc MonoLayer where
@@ -104,11 +103,11 @@ newtype Builtins a = Builtins
 
 -- calling an uninferred type closure should introduce all of the inferred bindings
 -- into the global scope
-newtype UninferredType = UninferredType (forall es. InfEffs es => Eff es (Type' 'Fixity))
+newtype UninferredType = UninferredType (forall es. InfEffs es => Eff es (Type 'Fixity))
 instance Show UninferredType where
     show _ = "<closure>"
 
-type TopLevelBindings = HashMap Name (Either UninferredType (Type' 'Fixity))
+type TopLevelBindings = HashMap Name (Either UninferredType (Type 'Fixity))
 
 data InfState = InfState
     { nextUniVarId :: Int
@@ -116,7 +115,7 @@ data InfState = InfState
     , currentScope :: Scope
     , topLevel :: TopLevelBindings
     -- ^ top level bindings that may or may not have a type signature
-    , locals :: HashMap Name Type -- local variables
+    , locals :: HashMap Name TypeDT -- local variables
     , vars :: HashMap UniVar (Either Scope Monotype) -- contains either the scope of an unsolved var or a type
     , skolems :: HashMap Skolem Scope -- skolem scopes
     }
@@ -124,15 +123,15 @@ data InfState = InfState
 
 data TypeError
     = CannotUnify Name Name
-    | NotASubtype Type Type (Maybe OpenName)
-    | MissingField Type OpenName
-    | MissingVariant Type OpenName
+    | NotASubtype TypeDT TypeDT (Maybe OpenName)
+    | MissingField TypeDT OpenName
+    | MissingVariant TypeDT OpenName
     | EmptyMatch Loc -- empty match expression
     | ArgCountMismatch Loc -- "different amount of arguments in a match statement"
     | ArgCountMismatchPattern Pat Int Int
-    | NotAFunction Loc Type -- pretty fTy <+> "is not a function type"
-    | SelfReferential Type
-    | NoVisibleTypeArgument Expr (Type' 'Fixity) Type
+    | NotAFunction Loc TypeDT -- pretty fTy <+> "is not a function type"
+    | SelfReferential TypeDT
+    | NoVisibleTypeArgument (Expr 'Fixity) (Type 'Fixity) TypeDT
 
 typeError :: Diagnose :> es => TypeError -> Eff es a
 typeError =
@@ -210,7 +209,7 @@ typeError =
 type InfEffs es = (NameGen :> es, State InfState :> es, Diagnose :> es, Reader (Builtins Name) :> es)
 
 data Declare :: Effect where
-    UpdateSig :: Name -> Type -> Declare m ()
+    UpdateSig :: Name -> TypeDT -> Declare m ()
 
 makeEffect ''Declare
 
@@ -265,7 +264,7 @@ runWithFinalEnv env builtins = do
         . runReader builtins
         . runDeclare
 
-freshUniVar :: InfEffs es => Loc -> Eff es Type
+freshUniVar :: InfEffs es => Loc -> Eff es TypeDT
 freshUniVar loc = T.UniVar loc <$> freshUniVar'
 
 freshUniVar' :: InfEffs es => Eff es UniVar
@@ -276,7 +275,7 @@ freshUniVar' = do
     modify \s -> s{vars = HashMap.insert var (Left scope) s.vars}
     pure var
 
-freshSkolem :: InfEffs es => Name -> Eff es Type
+freshSkolem :: InfEffs es => Name -> Eff es TypeDT
 freshSkolem name = do
     skolem <- Skolem <$> mkName name
     scope <- gets @InfState (.currentScope)
@@ -361,7 +360,7 @@ skolemScope skolem =
         =<< gets @InfState (.skolems)
 
 -- looks up a type of a binding. Local binding take precedence over uninferred globals, but not over inferred ones
-lookupSig :: (InfEffs es, Declare :> es) => Name -> Eff es Type
+lookupSig :: (InfEffs es, Declare :> es) => Name -> Eff es TypeDT
 lookupSig name = do
     InfState{topLevel, locals} <- get @InfState
     case (HashMap.lookup name topLevel, HashMap.lookup name locals) of
@@ -374,20 +373,20 @@ lookupSig name = do
             uni <- freshUniVar (getLoc name)
             uni <$ updateSig name uni
 
-declareAll :: Declare :> es => HashMap Name Type -> Eff es ()
+declareAll :: Declare :> es => HashMap Name TypeDT -> Eff es ()
 declareAll = traverse_ (uncurry updateSig) . HashMap.toList
 
-declareTopLevel :: InfEffs es => HashMap Name (Type' 'Fixity) -> Eff es ()
+declareTopLevel :: InfEffs es => HashMap Name (Type 'Fixity) -> Eff es ()
 declareTopLevel types = modify \s -> s{topLevel = fmap Right types <> s.topLevel}
 
 builtin :: Reader (Builtins Name) :> es => (Builtins Name -> a) -> Eff es a
 builtin = asks @(Builtins Name)
 
-generalise :: InfEffs es => Eff es Type -> Eff es Type
+generalise :: InfEffs es => Eff es TypeDT -> Eff es TypeDT
 generalise = fmap runIdentity . generaliseAll . fmap Identity
 
 -- TODO: this function should also handle the generalisation of skolems
-generaliseAll :: (Traversable t, InfEffs es) => Eff es (t Type) -> Eff es (t Type)
+generaliseAll :: (Traversable t, InfEffs es) => Eff es (t TypeDT) -> Eff es (t TypeDT)
 generaliseAll action = do
     modify \s@InfState{currentScope = Scope n} -> s{currentScope = Scope $ succ n}
     types <- action
@@ -398,24 +397,24 @@ generaliseAll action = do
     generaliseOne scope ty = do
         ((ty', vars), skolems) <- runState HashMap.empty $ runState HashMap.empty $ go scope ty
         let forallVars = nub . mapMaybe (getFreeVar skolems) $ toList vars
-        pure $ foldr (T.Forall (getLoc ty) . T.plainBinder) (foldr (T.Exists (getLoc ty) . T.plainBinder) ty' skolems) forallVars
+        pure $ foldr (T.Forall (getLoc ty) . plainBinder) (foldr (T.Exists (getLoc ty) . plainBinder) ty' skolems) forallVars
 
     -- get all univars that have been solved to unique type variables
-    getFreeVar :: HashMap k Name -> Type -> Maybe Name
+    getFreeVar :: HashMap k Name -> TypeDT -> Maybe Name
     getFreeVar skolems (T.Var name)
         | name `notElem` skolems = Just name
     getFreeVar _ _ = Nothing
 
-    go :: InfEffs es => Scope -> Type -> Eff (State (HashMap UniVar Type) : State (HashMap Skolem Name) : es) Type
-    go scope = transformM' T.uniplate \case
+    go :: InfEffs es => Scope -> TypeDT -> Eff (State (HashMap UniVar TypeDT) : State (HashMap Skolem Name) : es) TypeDT
+    go scope = transformM' _uniplate \case
         T.UniVar loc uni -> fmap Left do
-            whenNothingM (gets @(HashMap UniVar Type) (HashMap.lookup uni)) do
+            whenNothingM (gets @(HashMap UniVar TypeDT) (HashMap.lookup uni)) do
                 lookupUniVar uni >>= \case
                     -- don't generalise outer-scoped vars
                     Left varScope | varScope <= scope -> pure $ T.UniVar loc uni
                     innerScoped -> do
                         newTy <- either (const $ T.Var <$> freshTypeVar loc) (go scope . unMono) innerScoped
-                        modify @(HashMap UniVar Type) $ HashMap.insert uni newTy
+                        modify @(HashMap UniVar TypeDT) $ HashMap.insert uni newTy
                         pure newTy
         T.Skolem skolem -> fmap Left do
             whenNothingM (gets @(HashMap Skolem Name) (fmap T.Var . HashMap.lookup skolem)) do
@@ -453,7 +452,7 @@ data Variance = In | Out | Inv
 > mono Out (forall a. (forall b. b -> a) -> a)
 > -- (#b -> ?a) -> ?a
 -}
-mono :: InfEffs es => Variance -> Type -> Eff es Monotype
+mono :: InfEffs es => Variance -> TypeDT -> Eff es Monotype
 mono variance = \case
     T.Var var -> internalError (getLoc var) $ "mono: dangling var" <+> pretty var -- pure $ MVar var
     T.Name name -> pure $ MName name
@@ -461,10 +460,11 @@ mono variance = \case
     T.UniVar loc uni -> pure $ MUniVar loc uni
     T.Application lhs rhs -> MApp <$> go lhs <*> go rhs
     T.Function loc from to -> MFn loc <$> mono (flipVariance variance) from <*> go to
-    T.Variant loc row -> MVariant loc <$> traverse go row
-    T.Record loc row -> MRecord loc <$> traverse go row
+    T.VariantT loc row -> MVariant loc <$> traverse go row
+    T.RecordT loc row -> MRecord loc <$> traverse go row
     T.Forall _ binder body -> go =<< substitute variance binder.var body
     T.Exists _ binder body -> go =<< substitute (flipVariance variance) binder.var body
+    other -> internalError (getLoc other) "type-level expressions are not supported yet"
   where
     go = mono variance
 
@@ -474,7 +474,7 @@ flipVariance = \case
     Out -> In
     Inv -> Inv
 
-unMono :: Monotype -> Type
+unMono :: Monotype -> TypeDT
 unMono = \case
     MName name -> T.Name name
     MSkolem skolem -> T.Skolem skolem
@@ -482,8 +482,8 @@ unMono = \case
     MVar var -> T.Var var
     MApp lhs rhs -> T.Application (unMono lhs) (unMono rhs)
     MFn loc from to -> T.Function loc (unMono from) (unMono to)
-    MVariant loc row -> T.Variant loc $ fmap unMono row
-    MRecord loc row -> T.Record loc $ fmap unMono row
+    MVariant loc row -> T.VariantT loc $ fmap unMono row
+    MRecord loc row -> T.RecordT loc $ fmap unMono row
 
 {- unwraps forall/exists clauses in a type until a monomorphic constructor is encountered
 
@@ -496,7 +496,7 @@ unMono = \case
 > monoLayer Out (forall a. (forall b. b -> a) -> a)
 > -- (forall b. b -> ?a) -> ?a
 -}
-monoLayer :: InfEffs es => Variance -> Type -> Eff es MonoLayer
+monoLayer :: InfEffs es => Variance -> TypeDT -> Eff es MonoLayer
 monoLayer variance = \case
     T.Var var -> internalError (getLoc var) $ "monoLayer: dangling var" <+> pretty var -- pure $ MLVar var
     T.Name name -> pure $ MLName name
@@ -504,12 +504,13 @@ monoLayer variance = \case
     T.UniVar loc uni -> pure $ MLUniVar loc uni
     T.Application lhs rhs -> pure $ MLApp lhs rhs
     T.Function loc from to -> pure $ MLFn loc from to
-    T.Variant loc row -> pure $ MLVariant loc row
-    T.Record loc row -> pure $ MLRecord loc row
+    T.VariantT loc row -> pure $ MLVariant loc row
+    T.RecordT loc row -> pure $ MLRecord loc row
     T.Forall _ binder body -> monoLayer variance =<< substitute variance binder.var body
     T.Exists _ binder body -> monoLayer variance =<< substitute (flipVariance variance) binder.var body
+    other -> internalError (getLoc other) "type-level expressions are not supported yet"
 
-unMonoLayer :: MonoLayer -> Type
+unMonoLayer :: MonoLayer -> TypeDT
 unMonoLayer = \case
     MLName name -> T.Name name
     MLSkolem skolem -> T.Skolem skolem
@@ -517,22 +518,22 @@ unMonoLayer = \case
     MLVar name -> T.Var name
     MLApp lhs rhs -> T.Application lhs rhs
     MLFn loc lhs rhs -> T.Function loc lhs rhs
-    MLVariant loc row -> T.Variant loc row
-    MLRecord loc row -> T.Record loc row
+    MLVariant loc row -> T.VariantT loc row
+    MLRecord loc row -> T.RecordT loc row
 
-substitute :: InfEffs es => Variance -> Name -> Type -> Eff es Type
+substitute :: InfEffs es => Variance -> Name -> TypeDT -> Eff es TypeDT
 substitute variance var ty = (.result) <$> substitute' variance var ty
 
-data Subst = Subst {var :: Type, result :: Type}
+data Subst = Subst {var :: TypeDT, result :: TypeDT}
 
 -- substitute a type vairable with a univar / skolem depedening on variance
-substitute' :: InfEffs es => Variance -> Name -> Type -> Eff es Subst
+substitute' :: InfEffs es => Variance -> Name -> TypeDT -> Eff es Subst
 substitute' variance var ty = do
     someVar <- freshSomething Blank var variance
     result <- go someVar ty
     pure Subst{var = someVar, result}
   where
-    go replacement = transformM' T.uniplate \case
+    go replacement = transformM' _uniplate \case
         T.Var v | v == var -> pure $ Left replacement
         T.Var name -> pure $ Left $ T.Var name
         T.UniVar loc uni ->
@@ -560,9 +561,9 @@ substitute' variance var ty = do
 
 -- what to match
 data RecordOrVariant = Record | Variant deriving (Eq)
-conOf :: RecordOrVariant -> Loc -> ExtRow Type -> Type
-conOf Record = T.Record
-conOf Variant = T.Variant
+conOf :: RecordOrVariant -> Loc -> ExtRow TypeDT -> TypeDT
+conOf Record = T.RecordT
+conOf Variant = T.VariantT
 
 -- lookup a field in a type, assuming that the type is a row type
 -- if a univar is encountered, it's solved to a row type
@@ -572,7 +573,7 @@ conOf Variant = T.Variant
 --
 -- Note: repetitive calls of deepLookup on an open row turn it into a chain of singular extensions
 -- you should probably call `compress` after that
-deepLookup :: InfEffs es => RecordOrVariant -> Row.OpenName -> Type -> Eff es (Maybe Type)
+deepLookup :: InfEffs es => RecordOrVariant -> Row.OpenName -> TypeDT -> Eff es (Maybe TypeDT)
 deepLookup whatToMatch k = mono In >=> go >=> pure . fmap unMono -- todo: monoLayer instead of mono
   where
     go :: InfEffs es => Monotype -> Eff es (Maybe Monotype)
@@ -615,17 +616,17 @@ deepLookup whatToMatch k = mono In >=> go >=> pure . fmap unMono -- todo: monoLa
 
 @{ x : Int | y : Double | z : Char | r } -> { x : Int, y : Double, z : Char | r }@
 -}
-compress :: InfEffs es => RecordOrVariant -> ExtRow Type -> Eff es (ExtRow Type)
+compress :: InfEffs es => RecordOrVariant -> ExtRow TypeDT -> Eff es (ExtRow TypeDT)
 compress _ row@NoExtRow{} = pure row
 compress whatToMatch r@(ExtRow row ext) = go ext
   where
     go =
         mono In >=> \case
             MRecord loc nextRow
-                | whatToMatch == Record -> Row.extend row <$> go (T.Record loc $ unMono <$> nextRow)
+                | whatToMatch == Record -> Row.extend row <$> go (T.RecordT loc $ unMono <$> nextRow)
                 | otherwise -> pure r
             MVariant loc nextRow
-                | whatToMatch == Variant -> Row.extend row <$> go (T.Variant loc $ unMono <$> nextRow)
+                | whatToMatch == Variant -> Row.extend row <$> go (T.VariantT loc $ unMono <$> nextRow)
                 | otherwise -> pure r
             MUniVar _ uni ->
                 lookupUniVar uni >>= \case
@@ -641,7 +642,7 @@ compress whatToMatch r@(ExtRow row ext) = go ext
             MVar{} -> pure r
 
 -- first record minus fields that match with the second one
-diff :: InfEffs es => RecordOrVariant -> ExtRow Type -> Row Type -> Eff es (ExtRow Type)
+diff :: InfEffs es => RecordOrVariant -> ExtRow TypeDT -> Row TypeDT -> Eff es (ExtRow TypeDT)
 diff whatToMatch lhsUncompressed rhs = do
     lhs <- compress whatToMatch lhsUncompressed
     pure $ lhs{row = Row.diff lhs.row rhs}

@@ -30,7 +30,7 @@ import Fixity qualified (parse)
 import LangPrelude
 import LensyUniplate (unicast)
 import NameGen (NameGen, freshName, runNameGen)
-import NameResolution (Scope (..), declare, resolveNames, resolveType, runDeclare)
+import NameResolution (Scope (..), declare, resolveNames, resolveTerm, runDeclare)
 import NameResolution qualified (Declare, run)
 import Parser hiding (run)
 import Prettyprinter hiding (list)
@@ -38,10 +38,10 @@ import Prettyprinter.Render.Terminal (AnsiStyle)
 import Prettyprinter.Render.Text (putDoc)
 import Syntax
 import Syntax.Declaration qualified as D
-import Syntax.Expression qualified as E
-import Syntax.Pattern qualified as P
 import Syntax.Row
-import Syntax.Type qualified as T
+import Syntax.Term (Pattern (..))
+import Syntax.Term qualified as E
+import Syntax.Term qualified as T
 import Text.Megaparsec (errorBundlePretty, parse, pos1)
 import TypeChecker
 
@@ -53,7 +53,7 @@ runDefault action = runPureEff . runDiagnose' ("<none>", "") $ runNameGen do
     (_, builtins, defaultEnv) <- mkDefaults
     run (Right <$> defaultEnv) builtins action
 
-mkDefaults :: (NameGen :> es, Diagnose :> es) => Eff es (Scope, Builtins Name, HashMap Name (Type' 'Fixity))
+mkDefaults :: (NameGen :> es, Diagnose :> es) => Eff es (Scope, Builtins Name, HashMap Name (Type 'Fixity))
 mkDefaults = do
     let builtins = Builtins{subtypeRelations = [(noLoc NatName, noLoc IntName)]}
     types <-
@@ -81,7 +81,7 @@ mkDefaults = do
     (env, Scope scope) <-
         (runState (Scope initScope) . fmap HashMap.fromList . NameResolution.runDeclare)
             ( traverse
-                (\(name, ty) -> liftA2 (,) (declare $ noLoc $ Name' name) (resolveType ty))
+                (\(name, ty) -> liftA2 (,) (declare $ noLoc $ Name' name) (resolveTerm ty))
                 [ ("()", "Unit")
                 , ("Nothing", T.Forall Blank "'a" $ "Maybe" $: "'a")
                 , ("Just", T.Forall Blank "'a" $ "'a" --> "Maybe" $: "'a")
@@ -93,16 +93,16 @@ mkDefaults = do
                 , ("reverse", T.Forall Blank "'a" $ listT "'a" --> listT "'a")
                 ]
             )
-    pure (Scope scope, builtins, cast <$> env)
+    pure (Scope scope, builtins, _cast <$> env)
   where
     listT var = "List" $: var
 
-inferIO :: Expression 'Fixity -> IO ()
+inferIO :: Expr 'Fixity -> IO ()
 inferIO = inferIO' do
     (_, builtins, env) <- mkDefaults
     pure (env, builtins)
 
-inferIO' :: Eff '[NameGen, Diagnose, IOE] (HashMap Name (Type' 'Fixity), Builtins Name) -> Expression 'Fixity -> IO ()
+inferIO' :: Eff '[NameGen, Diagnose, IOE] (HashMap Name (Type 'Fixity), Builtins Name) -> Expr 'Fixity -> IO ()
 inferIO' mkEnv expr = do
     getTy >>= \case
         Nothing -> pass
@@ -141,7 +141,7 @@ testCheck toResolve action = fst $ runPureEff $ runNameGen $ runDiagnose' ("<non
     run (Right <$> env) builtins $ action resolved
 
 {-
-dummyFixity :: Diagnose :> es => Expression 'NameRes -> Eff es (Expression 'Fixity)
+dummyFixity :: Diagnose :> es => Expr 'NameRes -> Eff es (Expr 'Fixity)
 dummyFixity expr = runReader testGraph $ Fixity.parse expr
 -}
 
@@ -158,16 +158,12 @@ mkName = noLoc . Name'
 noLoc :: a -> Located a
 noLoc = Located Blank
 
-instance IsString (Expression 'Parse) where
-    fromString ('\'' : rest) = rest & matchCase (E.Variant . mkName . ("'" <>)) (error $ "type variable " <> fromString rest <> " at value level")
-    fromString str = str & matchCase (E.Constructor . mkName) (E.Name . mkName)
-
 instance IsString (Pattern 'Parse) where
-    fromString = matchCase (\name -> P.Constructor (mkName name) []) (P.Var . mkName)
+    fromString = matchCase (\name -> ConstructorP (mkName name) []) (VarP . mkName)
 
-instance IsString (Type' 'Parse) where
-    fromString str@('\'' : _) = T.Var . mkName $ fromString str
-    fromString str = str & matchCase (T.Name . mkName) (error $ "type name " <> fromString str <> " shouldn't start with a lowercase letter")
+instance IsString (Term 'Parse) where
+    fromString ('\'' : rest) = rest & matchCase (E.Variant . mkName . ("'" <>)) (T.Var . mkName . ("'" <>))
+    fromString str = str & matchCase (E.Constructor . mkName) (E.Name . mkName)
 
 instance IsString SimpleName where
     fromString = mkName . fromString
@@ -178,17 +174,12 @@ instance IsString Name where
 nameFromText :: Text -> Name
 nameFromText txt = noLoc $ Name txt (Id $ hashWithSalt 0 txt)
 
-instance {-# OVERLAPPABLE #-} NameAt p ~ Name => IsString (Expression p) where
-    fromString ('\'' : rest) = rest & matchCase (E.Variant . mkName . ("'" <>)) (error $ "type variable " <> fromString rest <> " at value level")
-    fromString str = str & matchCase (E.Constructor . nameFromText) (E.Name . nameFromText)
-
 instance {-# OVERLAPPABLE #-} NameAt p ~ Name => IsString (Pattern p) where
-    fromString = matchCase (\txt -> P.Constructor (nameFromText txt) []) (P.Var . nameFromText)
+    fromString = matchCase (\txt -> ConstructorP (nameFromText txt) []) (VarP . nameFromText)
 
-instance {-# OVERLAPPABLE #-} NameAt p ~ Name => IsString (Type' p) where
-    fromString str@('\'' : _) = T.Var $ nameFromText $ fromString str
-    fromString str =
-        str & matchCase (T.Name . nameFromText) (error $ "type name " <> fromString str <> " shouldn't start with a lowercase letter")
+instance {-# OVERLAPPABLE #-} NameAt p ~ Name => IsString (Term p) where
+    fromString ('\'' : rest) = rest & matchCase (E.Variant . mkName . ("'" <>)) (T.Var . nameFromText . ("'" <>))
+    fromString str = str & matchCase (E.Constructor . nameFromText) (E.Name . nameFromText)
 
 instance {-# OVERLAPPABLE #-} (NameAt p ~ name, IsString name) => IsString (VarBinder p) where
     fromString = T.plainBinder . fromString @name
@@ -196,68 +187,68 @@ instance {-# OVERLAPPABLE #-} (NameAt p ~ name, IsString name) => IsString (VarB
 -- Type
 
 infixr 2 -->
-(-->) :: HasLoc (NameAt p) => Type' p -> Type' p -> Type' p
+(-->) :: HasLoc (NameAt p) => Type p -> Type p -> Type p
 from --> to = T.Function (zipLocOf from to) from to
 
 infixl 3 $:
-($:) :: Type' p -> Type' p -> Type' p
+($:) :: Type p -> Type p -> Type p
 ($:) = T.Application
 
-(∃) :: HasLoc (NameAt p) => NameAt p -> Type' p -> Type' p
+(∃) :: HasLoc (NameAt p) => NameAt p -> Type p -> Type p
 (∃) var body = T.Exists (zipLocOf var body) (T.plainBinder var) body
 
-recordT :: ExtRow (Type' p) -> Type' p
-recordT = T.Record Blank
+recordT :: ExtRow (Type p) -> Type p
+recordT = T.RecordT Blank
 
-variantT :: ExtRow (Type' p) -> Type' p
-variantT = T.Variant Blank
+variantT :: ExtRow (Type p) -> Type p
+variantT = T.VariantT Blank
 
 -- Pattern
 
 recordP :: Row (Pattern p) -> Pattern p
-recordP = P.Record Blank
+recordP = RecordP Blank
 
 listP :: [Pattern p] -> Pattern p
-listP = P.List Blank
+listP = ListP Blank
 
 con :: NameAt p -> [Pattern p] -> Pattern p
-con = P.Constructor
+con = ConstructorP
 
 -- Expression
 
 infixl 1 #
-(#) :: Expression p -> Expression p -> Expression p
+(#) :: Expr p -> Expr p -> Expr p
 (#) = E.Application
 
-binApp :: Expression 'Parse -> Expression 'Parse -> Expression 'Parse -> Expression 'Parse
+binApp :: Expr 'Parse -> Expr 'Parse -> Expr 'Parse -> Expr 'Parse
 binApp f arg1 arg2 = f # arg1 # arg2
 
-λ :: HasLoc (NameAt p) => Pattern p -> Expression p -> Expression p
+λ :: HasLoc (NameAt p) => Pattern p -> Expr p -> Expr p
 λ pat expr = E.Lambda (zipLocOf pat expr) pat expr
 
-lam :: HasLoc (NameAt p) => Pattern p -> Expression p -> Expression p
+lam :: HasLoc (NameAt p) => Pattern p -> Expr p -> Expr p
 lam = λ
 
-let_ :: HasLoc (NameAt p) => Binding p -> Expression p -> Expression p
+let_ :: HasLoc (NameAt p) => Binding p -> Expr p -> Expr p
 let_ binding body = E.Let (zipLocOf binding body) binding body
 
-recordExpr :: Row (Expression p) -> Expression p
+recordExpr :: Row (Expr p) -> Expr p
 recordExpr = E.Record Blank
 
-list :: HasLoc (NameAt p) => [Expression p] -> Expression p
+list :: HasLoc (NameAt p) => [Expr p] -> Expr p
 list xs = E.List loc xs
   where
     loc = case (xs, reverse xs) of
         (first' : _, last' : _) -> zipLocOf first' last'
         _ -> Blank
 
-match :: [([Pattern p], Expression p)] -> Expression p
+match :: [([Pattern p], Expr p)] -> Expr p
 match = E.Match Blank
 
-case_ :: Expression p -> [(Pattern p, Expression p)] -> Expression p
+case_ :: Expr p -> [(Pattern p, Expr p)] -> Expr p
 case_ = E.Case Blank
 
-if_ :: Expression p -> Expression p -> Expression p -> Expression p
+if_ :: Expr p -> Expr p -> Expr p -> Expr p
 if_ = E.If Blank
 
 -- Declaration
@@ -277,10 +268,10 @@ typeDec typeName vars constrs = D.Type loc typeName (map T.plainBinder vars) con
         (x : _, []) -> zipLocOf typeName x
         (_, x : _) -> zipLocOf typeName x
 
-sigDec :: HasLoc (NameAt p) => NameAt p -> Type' p -> Declaration p
+sigDec :: HasLoc (NameAt p) => NameAt p -> Type p -> Declaration p
 sigDec name ty = D.Signature (zipLocOf name ty) name ty
 
-conDec :: HasLoc (NameAt p) => NameAt p -> [Type' p] -> D.Constructor p
+conDec :: HasLoc (NameAt p) => NameAt p -> [Type p] -> D.Constructor p
 conDec name args = D.Constructor loc name args
   where
     loc = case reverse args of

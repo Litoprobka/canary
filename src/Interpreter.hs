@@ -11,11 +11,10 @@ import LangPrelude
 import Prettyprinter (braces, comma, line, parens, punctuate, sep, vsep)
 import Syntax
 import Syntax.Declaration qualified as D
-import Syntax.Expression qualified as E
-import Syntax.Pattern qualified as P
 import Syntax.Row (OpenName)
 import Syntax.Row qualified as Row
-import Syntax.Type qualified as T
+import Syntax.Term (Pattern (..))
+import Syntax.Term qualified as T
 
 data Value
     = Constructor Name [Value] -- a fully-applied counstructor
@@ -61,9 +60,9 @@ modifyEnv builtins env decls = newEnv
     collectBindings :: Declaration 'Fixity -> [(Name, Value)]
     collectBindings = \case
         D.Value _ _ (_ : _) -> error "local bindings are not supported yet"
-        D.Value _ (E.ValueBinding (P.Var name) body) [] -> [(name, eval' body)]
-        D.Value _ (E.ValueBinding _ _) _ -> error "whoops, destructuring bindings are not supported yet"
-        D.Value _ (E.FunctionBinding name args body) [] -> [(name, eval' $ foldr (E.Lambda Blank) body args)]
+        D.Value _ (T.ValueB (VarP name) body) [] -> [(name, eval' body)]
+        D.Value _ (T.ValueB _ _) _ -> error "whoops, destructuring bindings are not supported yet"
+        D.Value _ (T.FunctionB name args body) [] -> [(name, eval' $ foldr (T.Lambda Blank) body args)]
         D.Type _ _ _ constrs -> map mkConstr constrs
         D.GADT _ _ _ constrs -> map mkGadtConstr constrs
         D.Signature{} -> mempty
@@ -78,47 +77,53 @@ modifyEnv builtins env decls = newEnv
             T.Exists _ _ body -> go acc body
             _ -> acc
 
-eval :: InterpreterBuiltins Name -> HashMap Name Value -> Expression 'Fixity -> Value
+eval :: InterpreterBuiltins Name -> HashMap Name Value -> Expr 'Fixity -> Value
 eval builtins = go
   where
     go env = \case
-        E.Lambda _ pat body -> Lambda \arg -> go (forceMatch builtins env pat arg) body
-        E.WildcardLambda loc args body -> go env $ foldr (E.Lambda loc . P.Var) body args
-        E.Application f arg -> case go env f of
+        T.Lambda _ pat body -> Lambda \arg -> go (forceMatch builtins env pat arg) body
+        T.WildcardLambda loc args body -> go env $ foldr (T.Lambda loc . VarP) body args
+        T.Application f arg -> case go env f of
             Lambda closure -> closure (go env arg)
             other -> error . show $ "cannot apply" <+> pretty other
-        E.TypeApplication f _ -> go env f
-        E.Annotation x _ -> go env x
-        E.Let _ binding body -> case binding of
-            E.ValueBinding pat bindingBody -> go (forceMatch builtins env pat $ go env bindingBody) body
-            E.FunctionBinding name args bindingBody ->
-                go (HashMap.insert name (go env $ foldr (E.Lambda $ getLoc binding) bindingBody args) env) body
-        E.LetRec _ _bindings _body -> error "letrecs are not supported yet. tough luck"
-        E.Case _ arg matches ->
+        T.TypeApplication f _ -> go env f
+        T.Annotation x _ -> go env x
+        T.Let _ binding body -> case binding of
+            T.ValueB pat bindingBody -> go (forceMatch builtins env pat $ go env bindingBody) body
+            T.FunctionB name args bindingBody ->
+                go (HashMap.insert name (go env $ foldr (T.Lambda $ getLoc binding) bindingBody args) env) body
+        T.LetRec _ _bindings _body -> error "letrecs are not supported yet. tough luck"
+        T.Case _ arg matches ->
             let val = go env arg
              in fromMaybe
                     (error $ show $ "pattern mismatch when matching " <+> pretty val <+> "with:" <> line <> vsep (map (pretty . fst) matches))
                     . asum
                     $ matches <&> \(pat, body) -> go <$> match builtins env pat val <*> pure body
-        E.Match _ matches@(m : _) -> mkLambda (length $ fst m) \args ->
+        T.Match _ matches@(m : _) -> mkLambda (length $ fst m) \args ->
             fromMaybe (error "pattern mismatch") $ asum $ uncurry (matchAllArgs env args) <$> matches
-        E.Match _ [] -> error "empty match" -- shouldn't this be caught by type checking?
-        E.If _ cond true false -> case go env cond of
+        T.Match _ [] -> error "empty match" -- shouldn't this be caught by type checking?
+        T.If _ cond true false -> case go env cond of
             Constructor name [] | name == builtins.true -> go env true
             _ -> go env false
-        E.Name name -> fromMaybe (error $ show $ pretty name <+> "not in scope") $ HashMap.lookup name env
-        E.Constructor name -> fromMaybe (error $ "unknown constructor " <> show name) $ HashMap.lookup name env
-        E.RecordLens _ path -> RecordLens path
-        E.Variant name -> Lambda $ Variant name
-        E.Record _ row -> Record $ fmap (go env) row
-        E.List _ xs -> foldr (\h t -> Constructor builtins.cons [go env h, t]) (Constructor builtins.nil []) xs
-        E.Literal (Located _ lit) -> case lit of
+        T.Name name -> fromMaybe (error $ show $ pretty name <+> "not in scope") $ HashMap.lookup name env
+        T.Constructor name -> fromMaybe (error $ "unknown constructor " <> show name) $ HashMap.lookup name env
+        T.RecordLens _ path -> RecordLens path
+        T.Variant name -> Lambda $ Variant name
+        T.Record _ row -> Record $ fmap (go env) row
+        T.List _ xs -> foldr (\h t -> Constructor builtins.cons [go env h, t]) (Constructor builtins.nil []) xs
+        T.Literal (Located _ lit) -> case lit of
             IntLiteral n -> Int n
             TextLiteral txt -> Text txt
             CharLiteral c -> Char c
-        E.Do{} -> error "do notation is not supported yet"
+        T.Do{} -> error "do notation is not supported yet"
+        T.Var{} -> error "type var in an expression"
+        T.Function{} -> error "function type in an expression"
+        T.Forall{} -> error "forall type in an expression"
+        T.Exists{} -> error "exists type in an expression"
+        T.VariantT{} -> error "variant type in an expression"
+        T.RecordT{} -> error "record type in an expression"
 
-    matchAllArgs :: HashMap Name Value -> [Value] -> [Pattern 'Fixity] -> Expression 'Fixity -> Maybe Value
+    matchAllArgs :: HashMap Name Value -> [Value] -> [Pattern 'Fixity] -> Expr 'Fixity -> Maybe Value
     matchAllArgs env args pats body = do
         env' <- foldr (<>) env <$> zipWithM (match builtins env) pats args
         pure $ go env' body
@@ -128,24 +133,24 @@ forceMatch builtins env pat arg = fromMaybe (error "pattern mismatch") $ match b
 
 match :: InterpreterBuiltins Name -> HashMap Name Value -> Pattern 'Fixity -> Value -> Maybe (HashMap Name Value)
 match builtins env = \cases
-    (P.Var var) val -> Just $ HashMap.insert var val env
-    P.Wildcard{} _ -> Just env
-    (P.Annotation pat _) val -> match builtins env pat val
-    (P.Variant name argPat) (Variant name' arg)
+    (VarP var) val -> Just $ HashMap.insert var val env
+    WildcardP{} _ -> Just env
+    (AnnotationP pat _) val -> match builtins env pat val
+    (VariantP name argPat) (Variant name' arg)
         | name == name' -> match builtins env argPat arg
         | otherwise -> Nothing
-    (P.Record _ patRow) (Record valRow) -> do
+    (RecordP _ patRow) (Record valRow) -> do
         valPatPairs <- traverse (\(name, pat) -> (pat,) <$> Row.lookup name valRow) $ IsList.toList patRow
         foldr (<>) env <$> traverse (uncurry $ match builtins env) valPatPairs
-    (P.Constructor name pats) (Constructor name' args) -> do
+    (ConstructorP name pats) (Constructor name' args) -> do
         guard (name == name')
         unless (length pats == length args) $ error "arg count mismatch"
         foldr (<>) env <$> zipWithM (match builtins env) pats args
-    (P.List loc (pat : pats)) (Constructor name [h, t]) | name == builtins.cons -> do
+    (ListP loc (pat : pats)) (Constructor name [h, t]) | name == builtins.cons -> do
         env' <- match builtins env pat h
-        match builtins env' (P.List loc pats) t
-    (P.List _ []) (Constructor name []) | name == builtins.nil -> Just env
-    (P.Literal (Located _ lit)) value -> case (lit, value) of
+        match builtins env' (ListP loc pats) t
+    (ListP _ []) (Constructor name []) | name == builtins.nil -> Just env
+    (LiteralP (Located _ lit)) value -> case (lit, value) of
         (IntLiteral n, Int m) -> env <$ guard (n == m)
         (TextLiteral txt, Text txt') -> env <$ guard (txt == txt')
         (CharLiteral c, Char c') -> env <$ guard (c == c')

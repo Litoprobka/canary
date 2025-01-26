@@ -9,6 +9,7 @@ import Relude as Reexport hiding (
     Op,
     Reader,
     State,
+    Type,
     ask,
     asks,
     evalState,

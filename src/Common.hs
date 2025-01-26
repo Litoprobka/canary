@@ -111,6 +111,7 @@ data Name_
     | TextName
     | CharName
     | LensName
+    | TypeName
     deriving (Show, Eq, Generic, Hashable)
 
 type Name = Located Name_
