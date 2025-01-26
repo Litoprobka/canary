@@ -65,7 +65,7 @@ declaration = withLoc $ choice [typeDec, fixityDec, signature, valueDec]
     gadtDec name = do
         mbKind <- optional $ specialSymbol ":" *> type'
         constrs <- block "where" $ withLoc do
-            con <- constructorName
+            con <- typeName
             specialSymbol ":"
             sig <- type'
             pure $ flip3 D.GadtConstructor con sig

@@ -27,7 +27,7 @@ import Data.List.NonEmpty qualified as NE
 import Data.Traversable (for)
 import Diagnostic
 import Effectful.Dispatch.Dynamic (interpret)
-import Effectful.State.Static.Local (State, evalState, get, modify, put, runState)
+import Effectful.State.Static.Local (State, evalState, get, put, runState)
 import Error.Diagnose (Report (..))
 import Error.Diagnose qualified as M
 import LangPrelude hiding (error)
@@ -154,32 +154,28 @@ collectNames decls = for_ decls \case
     D.Fixity{} -> pass
 
 -- | resolves names in a declaration. Adds type constructors to the current scope
-resolveDec :: NameResCtx es => Declaration 'Parse -> Eff es (Declaration 'NameRes)
+resolveDec :: (NameResCtx es, Declare :> es) => Declaration 'Parse -> Eff es (Declaration 'NameRes)
 resolveDec decl = case decl of
     D.Value loc binding locals -> scoped do
         binding' <- resolveBinding locals binding
         locals' <- traverse resolveDec locals
         pure $ D.Value loc binding' locals'
     D.Type loc name vars constrs -> do
+        -- TODO: NAMESPACES: constrs should be declared in a corresponding type namespace
         name' <- resolve name
-        (vars', constrsToDeclare) <- scoped do
+        for_ constrs \con -> declare con.name
+        scoped do
             vars' <- traverse resolveBinder vars
-            constrsToDeclare <-
-                for constrs \(D.Constructor conLoc con args) -> do
-                    con' <- declare con
-                    args' <- traverse resolveTerm args
-                    pure (con, D.Constructor conLoc con' args')
-            pure (vars', constrsToDeclare)
-        -- this is a bit of a crutch, since we want name' and vars' to be scoped and constrs to be global
-        -- NAMESPACES: constrs should be declared in a corresponding type namespace
-        for_ constrsToDeclare \(Located _ name_, D.Constructor _ conName _) ->
-            modify \(Scope table) -> Scope (Map.insert name_ conName table)
-        pure $ D.Type loc name' vars' (snd <$> constrsToDeclare)
+            constrs' <- for constrs \(D.Constructor conLoc con args) -> do
+                con' <- resolve con
+                args' <- traverse resolveTerm args
+                pure $ D.Constructor conLoc con' args'
+            pure $ D.Type loc name' vars' constrs'
     D.GADT loc name mbKind constrs -> do
         name' <- resolve name
         mbKind' <- traverse resolveTerm mbKind
         constrs' <- for constrs \(D.GadtConstructor conLoc con sig) -> do
-            con' <- resolve con
+            con' <- declare con
             sig' <- resolveTerm sig
             pure $ D.GadtConstructor conLoc con' sig'
         pure $ D.GADT loc name' mbKind' constrs'

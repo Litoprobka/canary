@@ -230,6 +230,7 @@ check e type_ = scoped $ match e type_
                         Right _ -> pass
         expr (Forall _ binder body) -> check expr =<< substitute Out binder.var body
         expr (Exists _ binder body) -> check expr =<< substitute In binder.var body
+        -- todo: a case for do-notation
         expr ty -> do
             inferredTy <- infer expr
             subtype inferredTy ty
@@ -250,7 +251,7 @@ checkPattern :: (InfEffs es, Declare :> es) => Pat -> TypeDT -> Eff es ()
 checkPattern = \cases
     -- we need this case, since inferPattern only infers monotypes for var patterns
     (VarP name) ty -> updateSig name ty
-    -- we probably do need a case for P.Constructor for the same reason
+    -- we probably do need a case for ConstructorP for the same reason
     (VariantP name arg) ty ->
         deepLookup Variant name ty >>= \case
             Nothing -> typeError $ MissingVariant ty name
@@ -260,7 +261,6 @@ checkPattern = \cases
             deepLookup Record name ty >>= \case
                 Nothing -> typeError $ MissingField ty name
                 Just fieldTy -> checkPattern pat fieldTy
-    -- todo: a case for do-notation
     pat ty -> do
         inferredTy <- inferPattern pat
         subtype inferredTy ty

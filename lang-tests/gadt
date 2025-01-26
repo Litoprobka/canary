@@ -1,0 +1,7 @@
+type GadtPeano where
+    S : GadtPeano -> GadtPeano
+    Z : GadtPeano
+
+add = match
+    Z m -> m
+    (S n) m -> S (add n m)
