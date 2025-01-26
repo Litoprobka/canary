@@ -176,8 +176,8 @@ check :: InfEffs es => Expr 'Fixity -> TypeDT -> Eff es ()
 check e type_ = scoped $ match e type_
   where
     match = \cases
-        -- the cases for E.Name and E.Constructor are redundant, since
-        -- `infer` just looks up their types anyway
+        -- the case for E.Name is redundant, since
+        -- `infer` just looks up its type anyway
         (Lambda _ arg body) (Function _ from to) -> scoped do
             -- `checkPattern` updates signatures of all mentioned variables
             checkPattern arg from
@@ -269,7 +269,6 @@ infer :: InfEffs es => Expr 'Fixity -> Eff es TypeDT
 infer =
     scoped . \case
         Name name -> lookupSig name
-        Constructor name -> lookupSig name
         E.Variant name -> do
             let loc = getLoc name
             var <- freshUniVar loc

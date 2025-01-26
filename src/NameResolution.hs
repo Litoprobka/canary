@@ -285,7 +285,6 @@ resolveTerm e = scoped case e of
             <$> traverse (bitraverse resolveTerm (traverse resolve)) pairs
             <*> resolveTerm last'
     Name name -> Name <$> resolve name
-    Constructor name -> Constructor <$> resolve name
     RecordLens loc lens -> pure $ RecordLens loc lens
     Variant openName -> pure $ Variant openName
     Literal lit -> pure $ Literal lit

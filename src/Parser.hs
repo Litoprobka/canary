@@ -301,8 +301,8 @@ expression' termParser = do
     constructor = lexeme do
         name <- constructorName
         optional record <&> \case
-            Nothing -> Constructor name
-            Just arg -> Constructor name `Application` arg
+            Nothing -> Name name
+            Just arg -> Name name `Application` arg
 
 -- turns out that respecting operator precedence makes for confusing code
 -- i.e. consider, say, `3 + _ * 4`

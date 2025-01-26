@@ -43,7 +43,6 @@ data Term (p :: Pass) where
     If :: Loc -> Expr p -> Expr p -> Expr p -> Expr p
     -- | .field.otherField.thirdField
     RecordLens :: Loc -> NonEmpty OpenName -> Expr p
-    Constructor :: NameAt p -> Expr p
     -- | 'Constructor
     -- unlike the rest of the cases, variant tags and record fields
     -- don't need any kind of name resolution
@@ -126,7 +125,6 @@ instance Pretty (NameAt p) => Pretty (Expr p) where
             Annotation expr ty -> parensWhen 1 $ pretty expr <+> ":" <+> pretty ty
             Name name -> pretty name
             RecordLens _ fields -> encloseSep "." "" "." $ toList $ pretty <$> fields
-            Constructor name -> pretty name
             Variant name -> pretty name
             Record _ row -> braces . sep . punctuate comma . map recordField $ sortedRow row
             List _ xs -> brackets . sep . punctuate comma $ pretty <$> xs
@@ -183,7 +181,6 @@ instance HasLoc (NameAt p) => HasLoc (Expr p) where
         Annotation expr ty -> zipLocOf expr ty
         Name name -> getLoc name
         RecordLens loc _ -> loc
-        Constructor name -> getLoc name
         Variant name -> getLoc name
         Record loc _ -> loc
         List loc _ -> loc
@@ -290,7 +287,6 @@ instance
         List loc exprs -> List loc (fmap cast exprs)
         Do loc stmts ret -> Do loc (fmap cast stmts) (cast ret)
         InfixE pairs l -> castInfix @p (fmap (first cast) pairs) (cast l)
-        Constructor name -> Constructor name
         Name name -> Name name
         RecordLens loc oname -> RecordLens loc oname
         Variant oname -> Variant oname
@@ -338,7 +334,6 @@ collectReferencedNames = go
   where
     go = \case
         Name name -> [name]
-        Constructor name -> [name]
         Var _ -> [] -- I'm not sure whether type variables count
         UniVar{} -> []
         Skolem _ -> []

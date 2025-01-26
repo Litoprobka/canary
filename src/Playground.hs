@@ -163,7 +163,7 @@ instance IsString (Pattern 'Parse) where
 
 instance IsString (Term 'Parse) where
     fromString ('\'' : rest) = rest & matchCase (E.Variant . mkName . ("'" <>)) (T.Var . mkName . ("'" <>))
-    fromString str = str & matchCase (E.Constructor . mkName) (E.Name . mkName)
+    fromString str = E.Name . mkName $ fromString str
 
 instance IsString SimpleName where
     fromString = mkName . fromString
@@ -179,7 +179,7 @@ instance {-# OVERLAPPABLE #-} NameAt p ~ Name => IsString (Pattern p) where
 
 instance {-# OVERLAPPABLE #-} NameAt p ~ Name => IsString (Term p) where
     fromString ('\'' : rest) = rest & matchCase (E.Variant . mkName . ("'" <>)) (T.Var . nameFromText . ("'" <>))
-    fromString str = str & matchCase (E.Constructor . nameFromText) (E.Name . nameFromText)
+    fromString str = E.Name . nameFromText $ fromString str
 
 instance {-# OVERLAPPABLE #-} (NameAt p ~ name, IsString name) => IsString (VarBinder p) where
     fromString = T.plainBinder . fromString @name

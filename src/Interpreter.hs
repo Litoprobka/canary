@@ -106,7 +106,6 @@ eval builtins = go
             Constructor name [] | name == builtins.true -> go env true
             _ -> go env false
         T.Name name -> fromMaybe (error $ show $ pretty name <+> "not in scope") $ HashMap.lookup name env
-        T.Constructor name -> fromMaybe (error $ "unknown constructor " <> show name) $ HashMap.lookup name env
         T.RecordLens _ path -> RecordLens path
         T.Variant name -> Lambda $ Variant name
         T.Record _ row -> Record $ fmap (go env) row

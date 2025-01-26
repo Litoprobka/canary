@@ -120,7 +120,6 @@ parse = \case
     Annotation e ty -> Annotation <$> parse e <*> parse ty
     Name name -> pure $ Name name
     RecordLens loc row -> pure $ RecordLens loc row
-    Constructor name -> pure $ Constructor name
     Variant name -> pure $ Variant name
     Record loc row -> Record loc <$> traverse parse row
     List loc exprs -> List loc <$> traverse parse exprs
