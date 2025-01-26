@@ -76,7 +76,10 @@ inferDecls :: InfEffs es => [Declaration 'Fixity] -> Eff es (HashMap Name TypeDT
 inferDecls decls = do
     -- ideally, all of this shuffling around should be moved to the dependency resolution pass
     traverse_ updateTopLevel decls
-    let (values, sigs) = second (fmap cast . HashMap.fromList) $ foldr getValueDecls ([], []) decls
+    let (values, sigs') = second HashMap.fromList $ foldr getValueDecls ([], []) decls
+    -- kind-checking all signatures
+    traverse_ (`check` type_ Blank) sigs'
+    let sigs = fmap cast sigs'
     (<> sigs) . fold <$> for values \(binding, locals) ->
         binding & collectNamesInBinding & listToMaybe >>= (`HashMap.lookup` sigs) & \case
             Just ty -> do
@@ -96,12 +99,19 @@ inferDecls decls = do
         D.Value _ binding@(FunctionB name _ _) locals -> insertBinding name binding locals
         D.Value _ binding@(ValueB (VarP name) _) locals -> insertBinding name binding locals
         D.Value loc ValueB{} _ -> internalError loc "destructuring bindings are not supported yet"
-        D.Type _ name binders constrs ->
-            for_ (mkConstrSigs name ((.var) <$> binders) constrs) \(con, sig) ->
-                modify \s -> s{topLevel = HashMap.insert con (Right sig) s.topLevel}
-        D.GADT _ _ _ constrs ->
+        D.Type loc name binders constrs ->
+            for_ (mkConstrSigs name binders constrs) \(con, sig) ->
+                modify \s -> s{topLevel = HashMap.insert name (Right $ typeKind loc binders) $ HashMap.insert con (Right sig) s.topLevel}
+        D.GADT loc name mbKind constrs ->
             for_ constrs \con ->
-                modify \s -> s{topLevel = HashMap.insert con.name (Right con.sig) s.topLevel}
+                modify \s -> s{topLevel = HashMap.insert name (Right $ getKind loc mbKind) $ HashMap.insert con.name (Right con.sig) s.topLevel}
+    typeKind loc = go
+      where
+        go [] = type_ loc
+        go (binder : rest) = Function loc (getKind (getLoc binder) binder.kind) (go rest)
+    getKind loc = fromMaybe (type_ loc)
+    type_ :: NameAt p ~ Name => Loc -> Type p
+    type_ loc = Name $ Located loc TypeName
 
     insertBinding name binding locals =
         let closure = UninferredType $ scoped do
@@ -118,17 +128,17 @@ inferDecls decls = do
     getValueDecls decl (values, sigs) = case decl of
         D.Value _ binding locals -> ((binding, locals) : values, sigs)
         D.Signature _ name sig -> (values, (name, sig) : sigs)
-        D.Type _ name vars constrs -> (values, mkConstrSigs name (vars <&> (.var)) constrs ++ sigs)
+        D.Type _ name vars constrs -> (values, mkConstrSigs name vars constrs ++ sigs)
         D.GADT _ _ _ constrs -> (values, (constrs <&> \con -> (con.name, con.sig)) ++ sigs)
 
-    mkConstrSigs :: Name -> [Name] -> [Constructor 'Fixity] -> [(Name, Type 'Fixity)]
-    mkConstrSigs name vars constrs =
+    mkConstrSigs :: Name -> [VarBinder 'Fixity] -> [Constructor 'Fixity] -> [(Name, Type 'Fixity)]
+    mkConstrSigs name binders constrs =
         constrs <&> \(D.Constructor loc con params) ->
             ( con
-            , foldr (Forall loc . plainBinder) (foldr (Function loc) fullType params) vars
+            , foldr (Forall loc) (foldr (Function loc) fullType params) binders
             )
       where
-        fullType = foldl' Application (Name name) (Var <$> vars)
+        fullType = foldl' Application (Name name) (Var . (.var) <$> binders)
 
 subtype :: InfEffs es => TypeDT -> TypeDT -> Eff es ()
 subtype lhs_ rhs_ = join $ match <$> monoLayer In lhs_ <*> monoLayer Out rhs_
@@ -145,7 +155,7 @@ subtype lhs_ rhs_ = join $ match <$> monoLayer In lhs_ <*> monoLayer Out rhs_
             subtype outl outr
         (MLApp lhs rhs) (MLApp lhs' rhs') -> do
             -- note that we assume the same variance for all type parameters
-            -- some kind of kind system is needed to track variance and prevent stuff like `Maybe a b`
+            -- seems like we need to track variance in kinds for this to work properly
             -- higher-kinded types are also problematic when it comes to variance, i.e.
             -- is `f a` a subtype of `f b` when a is `a` subtype of `b` or the other way around?
             --

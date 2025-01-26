@@ -175,6 +175,7 @@ instance Pretty Name_ where
         TextName -> "Text"
         CharName -> "Char"
         LensName -> "Lens"
+        TypeName -> "Type"
 instance Pretty UniVar where
     pretty (UniVar n) = "#" <> pretty n
 instance Pretty Skolem where
