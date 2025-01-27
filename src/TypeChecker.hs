@@ -33,7 +33,7 @@ import Data.List.NonEmpty qualified as NE
 import Data.Traversable (for)
 import Diagnostic (Diagnose, internalError)
 import Effectful
-import Effectful.State.Static.Local (State, gets, modify, runState)
+import Effectful.State.Static.Local (State, modify, runState)
 import GHC.IsList qualified as IsList
 import LangPrelude hiding (bool)
 import LensyUniplate hiding (cast)
@@ -56,6 +56,8 @@ typecheck
 typecheck env builtins decls = run (Right <$> env) builtins $ normaliseAll $ inferDecls decls
 
 -- finds all type parameters used in a type and creates corresponding forall clauses
+-- note: this doesn't really work at the moment, because name resolution treats vars
+-- without a forall as unbound
 inferTypeVars :: Type 'Fixity -> Type 'Fixity
 inferTypeVars ty =
     uncurry (foldr (Forall (getLoc ty) . plainBinder)) . second snd . runPureEff . runState (HashSet.empty, HashSet.empty) . go $
@@ -63,10 +65,10 @@ inferTypeVars ty =
   where
     go :: Type 'Fixity -> Eff '[State (HashSet Name, HashSet Name)] (Type 'Fixity)
     go = transformM T.uniplate \case
-        Var var -> do
+        {- Var var -> do
             isNew <- not . HashSet.member var <$> gets @(HashSet Name, HashSet Name) snd
             when isNew $ modify @(HashSet Name, HashSet Name) (second $ HashSet.insert var)
-            pure $ Var var
+            pure $ Var var -}
         forall_@(Forall _ binder _) -> forall_ <$ modify @(HashSet Name, HashSet Name) (first $ HashSet.insert binder.var)
         exists_@(Exists _ binder _) -> exists_ <$ modify @(HashSet Name, HashSet Name) (first $ HashSet.insert binder.var)
         other -> pure other
@@ -138,7 +140,7 @@ inferDecls decls = do
             , foldr (Forall loc) (foldr (Function loc) fullType params) binders
             )
       where
-        fullType = foldl' Application (Name name) (Var . (.var) <$> binders)
+        fullType = foldl' Application (Name name) (Name . (.var) <$> binders)
 
 subtype :: InfEffs es => TypeDT -> TypeDT -> Eff es ()
 subtype lhs_ rhs_ = join $ match <$> monoLayer In lhs_ <*> monoLayer Out rhs_
@@ -164,8 +166,8 @@ subtype lhs_ rhs_ = join $ match <$> monoLayer In lhs_ <*> monoLayer Out rhs_
             subtype rhs rhs'
         (MLVariant locL lhs) (MLVariant locR rhs) -> rowCase Variant (locL, lhs) (locR, rhs)
         (MLRecord locL lhs) (MLRecord locR rhs) -> rowCase Record (locL, lhs) (locR, rhs)
-        (MLVar var) _ -> internalError (getLoc var) $ "dangling type variable" <+> pretty var
-        _ (MLVar var) -> internalError (getLoc var) $ "dangling type variable" <+> pretty var
+        -- (MLVar var) _ -> internalError (getLoc var) $ "dangling type variable" <+> pretty var
+        -- _ (MLVar var) -> internalError (getLoc var) $ "dangling type variable" <+> pretty var
         lhs rhs -> typeError $ NotASubtype (unMonoLayer lhs) (unMonoLayer rhs) Nothing
 
     rowCase :: InfEffs es => RecordOrVariant -> (Loc, ExtRow TypeDT) -> (Loc, ExtRow TypeDT) -> Eff es ()
@@ -192,7 +194,8 @@ check e type_ = scoped $ match e type_
             -- `checkPattern` updates signatures of all mentioned variables
             checkPattern arg from
             check body to
-        (Annotation expr annTy) ty -> do
+        ann@(Annotation expr annTy) ty -> do
+            check annTy (Name $ Located (getLoc ann) TypeName)
             check expr $ cast annTy
             subtype (cast annTy) ty
         (If _ cond true false) ty -> do
@@ -307,7 +310,9 @@ infer =
         LetRec loc bindings body -> do
             declareAll =<< (inferDecls . map (\b -> D.Value loc b []) . NE.toList) bindings
             infer body
-        Annotation expr ty -> cast ty <$ check expr (cast ty)
+        ann@(Annotation expr ty) -> do
+            check ty (Name $ Located (getLoc ann) TypeName)
+            cast ty <$ check expr (cast ty)
         If loc cond true false -> do
             check cond $ Name $ Located loc BoolName
             result <- fmap unMono . mono In =<< infer true
@@ -356,12 +361,29 @@ infer =
                 | otherwise -> IntName
             TextLiteral _ -> TextName
             CharLiteral _ -> TextName -- huh?
-        v@Var{} -> pure . Name $ Located (getLoc v) TypeName
-        f@Function{} -> pure . Name $ Located (getLoc f) TypeName
-        f@Forall{} -> pure . Name $ Located (getLoc f) TypeName
-        e@Exists{} -> pure . Name $ Located (getLoc e) TypeName
-        v@VariantT{} -> pure . Name $ Located (getLoc v) TypeName
-        r@RecordT{} -> pure . Name $ Located (getLoc r) TypeName
+            -- v@Var{} -> pure . Name $ Located (getLoc v) TypeName
+        Function loc lhs rhs -> do
+            check lhs (type_ loc)
+            check rhs (type_ loc)
+            pure $ type_ loc
+        VariantT loc row -> do
+            traverse_ (`check` type_ loc) row
+            pure $ type_ loc
+        RecordT loc row -> do
+            traverse_ (`check` type_ loc) row
+            pure $ type_ loc
+        Forall loc binder body -> scoped do
+            kind <- maybe (freshUniVar loc) (pure . cast) binder.kind
+            updateSig binder.var kind
+            check body (type_ loc)
+            pure $ type_ loc
+        Exists loc binder body -> scoped do
+            kind <- maybe (freshUniVar loc) (pure . cast) binder.kind
+            updateSig binder.var kind
+            check body (type_ loc)
+            pure $ type_ loc
+  where
+    type_ loc = Name $ Located loc TypeName
 
 inferApp :: InfEffs es => Loc -> TypeDT -> Expr 'Fixity -> Eff es TypeDT
 inferApp appLoc fTy arg = do
@@ -409,7 +431,9 @@ inferPattern = \case
         updateSig name uni
         pure uni
     WildcardP loc _ -> freshUniVar loc
-    AnnotationP pat ty -> cast ty <$ checkPattern pat (cast ty)
+    ann@(AnnotationP pat ty) -> do
+        check ty (Name $ Located (getLoc ann) TypeName)
+        cast ty <$ checkPattern pat (cast ty)
     p@(ConstructorP name args) -> do
         (resultType, argTypes) <- conArgTypes name
         unless (length argTypes == length args) $
@@ -450,7 +474,8 @@ inferPattern = \case
             MLVariant loc row -> pure (VariantT loc row, [])
             MLRecord loc row -> pure (RecordT loc row, [])
             MLSkolem skolem -> pure (T.Skolem skolem, [])
-            MLVar var -> pure (Var var, [])
+
+-- MLVar var -> pure (Var var, [])
 
 normalise :: InfEffs es => Eff es TypeDT -> Eff es (Type 'Fixity)
 normalise = fmap runIdentity . normaliseAll . fmap Identity
@@ -491,5 +516,5 @@ normaliseAll = generaliseAll {->=> skolemsToExists-} >=> traverse go
         RecordLens loc name -> pure $ RecordLens loc name
         E.Variant name -> pure $ E.Variant name
         Literal lit -> pure $ Literal lit
-        Var var -> pure $ Var var
+    -- Var var -> pure $ Var var
     goBinder binder = VarBinder binder.var <$> traverse go binder.kind

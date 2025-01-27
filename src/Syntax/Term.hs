@@ -21,7 +21,7 @@ type Expr = Term
 data Term (p :: Pass) where
     -- terminal constructors
     Name :: NameAt p -> Term p
-    Var :: NameAt p -> Term p -- type variables. I should probably get rid of the AST-level separation
+    -- Var :: NameAt p -> Term p -- type variables. I should probably get rid of the AST-level separation
     UniVar :: Loc -> UniVar -> Type 'DuringTypecheck
     Skolem :: Skolem -> Type 'DuringTypecheck
     Literal :: Literal -> Expr p
@@ -132,7 +132,7 @@ instance Pretty (NameAt p) => Pretty (Expr p) where
             Do _ stmts lastAction -> nest 2 $ vsep ("do" : fmap pretty stmts <> [pretty lastAction])
             Literal lit -> pretty lit
             InfixE pairs last' -> "?(" <> sep (concatMap (\(lhs, op) -> pretty lhs : maybe [] (pure . pretty) op) pairs <> [pretty last']) <> ")"
-            Var name -> pretty name
+            -- Var name -> pretty name
             Skolem skolem -> pretty skolem
             UniVar _ uni -> pretty uni
             Function _ from to -> parensWhen 2 $ go 2 from <+> "->" <+> pretty to
@@ -189,7 +189,7 @@ instance HasLoc (NameAt p) => HasLoc (Expr p) where
         Literal lit -> getLoc lit
         InfixE ((e, _) : _) l -> zipLocOf e l
         InfixE [] l -> getLoc l
-        Var name -> getLoc name
+        -- Var name -> getLoc name
         Skolem skolem -> getLoc skolem
         UniVar loc _ -> loc
         Function loc _ _ -> loc
@@ -297,7 +297,7 @@ instance
         Exists loc var body -> Exists loc (cast var) (cast body)
         VariantT loc row -> VariantT loc (fmap cast row)
         RecordT loc row -> RecordT loc (fmap cast row)
-        Var name -> Var name
+        -- Var name -> Var name
         UniVar loc uni -> castUni loc uni
         Skolem skolem -> castSkolem skolem
 
@@ -335,7 +335,7 @@ collectReferencedNames = go
   where
     go = \case
         Name name -> [name]
-        Var _ -> [] -- I'm not sure whether type variables count
+        -- Var _ -> [] -- I'm not sure whether type variables count
         UniVar{} -> []
         Skolem _ -> []
         Literal _ -> []
@@ -419,8 +419,9 @@ uniplate f = \case
     r@RecordLens{} -> pure r
     v@Variant{} -> pure v
     l@Literal{} -> pure l
-    v@Var{} -> pure v
   where
+    -- v@Var{} -> pure v
+
     plateStmt :: Traversal' (DoStatement p) (Term p)
     plateStmt f' = \case
         Bind pat expr -> Bind pat <$> uniplate f' expr

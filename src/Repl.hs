@@ -3,7 +3,7 @@
 
 module Repl where
 
-import Common (Fixity (..), Name, Pass (..), cast)
+import Common (Fixity (..), Loc (..), Located (..), Name, Name_ (TypeName), Pass (..), SimpleName_ (Name'), cast)
 import Control.Monad.Combinators (choice)
 import Data.HashMap.Strict qualified as HashMap
 import Data.Text qualified as Text
@@ -23,6 +23,7 @@ import Parser qualified
 import Poset (Poset)
 import Poset qualified
 import Syntax
+import Syntax.Term
 import Text.Megaparsec (takeRest, try)
 import TypeChecker (infer, normalise, typecheck)
 import TypeChecker.Backend qualified as TC
@@ -54,8 +55,8 @@ mkDefaultEnv = ReplEnv{..}
   where
     values = HashMap.empty
     fixityMap = HashMap.singleton Nothing InfixL
-    types = HashMap.empty
-    scope = Scope HashMap.empty
+    types = HashMap.singleton (Located Blank TypeName) (Name $ Located Blank TypeName)
+    scope = Scope $ HashMap.singleton (Name' "Type") (Located Blank TypeName)
     (_, operatorPriorities) = Poset.eqClass Nothing Poset.empty
 
 run :: ReplCtx es => ReplEnv -> Eff es ()

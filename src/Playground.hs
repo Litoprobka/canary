@@ -76,6 +76,7 @@ mkDefaults = do
                         , ("Text", TextName)
                         , ("Char", CharName)
                         , ("Lens", LensName)
+                        , ("Type", TypeName)
                         ]
                     )
     -- this is a messy way to declare built-in stuff, I should do better
@@ -164,7 +165,7 @@ instance IsString (Pattern 'Parse) where
     fromString = matchCase (\name -> ConstructorP (mkName name) []) (VarP . mkName)
 
 instance IsString (Term 'Parse) where
-    fromString ('\'' : rest) = rest & matchCase (E.Variant . mkName . ("'" <>)) (T.Var . mkName . ("'" <>))
+    fromString ('\'' : rest) = rest & matchCase (E.Variant . mkName . ("'" <>)) (T.Name . mkName . ("'" <>))
     fromString str = E.Name . mkName $ fromString str
 
 instance IsString SimpleName where
@@ -180,7 +181,7 @@ instance {-# OVERLAPPABLE #-} NameAt p ~ Name => IsString (Pattern p) where
     fromString = matchCase (\txt -> ConstructorP (nameFromText txt) []) (VarP . nameFromText)
 
 instance {-# OVERLAPPABLE #-} NameAt p ~ Name => IsString (Term p) where
-    fromString ('\'' : rest) = rest & matchCase (E.Variant . mkName . ("'" <>)) (T.Var . nameFromText . ("'" <>))
+    fromString ('\'' : rest) = rest & matchCase (E.Variant . mkName . ("'" <>)) (T.Name . nameFromText . ("'" <>))
     fromString str = E.Name . nameFromText $ fromString str
 
 instance {-# OVERLAPPABLE #-} (NameAt p ~ name, IsString name) => IsString (VarBinder p) where

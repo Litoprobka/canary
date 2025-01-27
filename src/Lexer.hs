@@ -223,7 +223,7 @@ termName' = do
     void $ lookAhead (anySingleBut '_') <|> fail "unexpected wildcard"
     lexeme identifier
 
--- | an identifier that doesn't start with a lowercase letter or a parenthesised operator
+-- | an identifier that doesn't start with an uppercase letter or a parenthesised operator
 termName :: ParserM m => m SimpleName
 termName = try (parens someOperator) <|> mkName termName'
 

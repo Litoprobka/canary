@@ -125,7 +125,7 @@ typeParens =
     label "type" $
         choice
             [ Name <$> typeName
-            , Var <$> typeVariable
+            , Name <$> typeVariable -- this used to be a case for variables
             , parens type'
             , withLoc' RecordT $ NoExtRow <$> someRecord ":" type' Nothing
             , withLoc' VariantT $ NoExtRow <$> brackets (fromList <$> commaSep variantItem)

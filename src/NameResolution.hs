@@ -293,7 +293,7 @@ resolveTerm e = scoped case e of
         body' <- resolveTerm body
         pure $ Exists loc var' body'
     Function loc from to -> Function loc <$> resolveTerm from <*> resolveTerm to
-    Var var -> Var <$> resolve var
+    -- Var var -> Var <$> resolve var
     VariantT loc row -> VariantT loc <$> traverse resolveTerm row
     RecordT loc row -> RecordT loc <$> traverse resolveTerm row
 

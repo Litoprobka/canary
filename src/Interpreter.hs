@@ -115,7 +115,7 @@ eval builtins = go
             TextLiteral txt -> Text txt
             CharLiteral c -> Char c
         T.Do{} -> error "do notation is not supported yet"
-        T.Var{} -> error "type var in an expression"
+        -- T.Var{} -> error "type var in an expression"
         T.Function{} -> error "function type in an expression"
         T.Forall{} -> error "forall type in an expression"
         T.Exists{} -> error "exists type in an expression"

@@ -126,7 +126,7 @@ parse = \case
     Do loc stmts lastAction -> Do loc <$> traverse parseStmt stmts <*> parse lastAction
     Literal lit -> pure $ Literal lit
     InfixE pairs last' -> join $ go' <$> traverse (bitraverse parse pure) pairs <*> parse last'
-    Var name -> pure $ Var name
+    -- Var name -> pure $ Var name
     Forall loc binder body -> Forall loc <$> parseBinder binder <*> parse body
     Exists loc binder body -> Exists loc <$> parseBinder binder <*> parse body
     Function loc lhs rhs -> Function loc <$> parse lhs <*> parse rhs
