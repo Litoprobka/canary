@@ -25,6 +25,7 @@ module TypeChecker (
 
 import Common (Name)
 import Common hiding (Name)
+import Data.DList qualified as DList
 import Data.Foldable1 (foldr1)
 import Data.HashMap.Strict qualified as HashMap
 import Data.List.NonEmpty qualified as NE
@@ -56,12 +57,13 @@ typecheck env builtins decls = run (Right <$> env) builtins $ normaliseAll $ inf
 inferDecls :: InfEffs es => [Declaration 'Fixity] -> Eff es (HashMap Name TypeDT)
 inferDecls decls = do
     -- ideally, all of this shuffling around should be moved to the dependency resolution pass
-    traverse_ updateTopLevel decls
+    typeNames <- DList.toList . fold <$> traverse updateTopLevel decls
     let (values, sigs') = second HashMap.fromList $ foldr getValueDecls ([], []) decls
     -- kind-checking all signatures
     traverse_ (\sig -> check sig $ type_ (getLoc sig)) sigs'
     let sigs = fmap cast sigs'
-    (<> sigs) . fold <$> for values \(binding, locals) ->
+        types = HashMap.fromList $ map (\name -> (name, type_ (getLoc name))) typeNames
+    (types <>) . (<> sigs) . fold <$> for values \(binding, locals) ->
         binding & collectNamesInBinding & listToMaybe >>= (`HashMap.lookup` sigs) & \case
             Just ty -> do
                 checkBinding binding ty
@@ -75,18 +77,21 @@ inferDecls decls = do
                 fmap cast typeMap <$ declareTopLevel typeMap
   where
     updateTopLevel = \case
-        D.Signature _ name sig ->
+        D.Signature _ name sig -> do
             modify \s -> s{topLevel = HashMap.insert name (Right sig) s.topLevel}
-        D.Value _ binding@(FunctionB name _ _) locals -> insertBinding name binding locals
-        D.Value _ binding@(ValueB (VarP name) _) locals -> insertBinding name binding locals
+            pure DList.empty
+        D.Value _ binding@(FunctionB name _ _) locals -> DList.empty <$ insertBinding name binding locals
+        D.Value _ binding@(ValueB (VarP name) _) locals -> DList.empty <$ insertBinding name binding locals
         D.Value loc ValueB{} _ -> internalError loc "destructuring bindings are not supported yet"
-        D.Type loc name binders constrs ->
+        D.Type loc name binders constrs -> do
             for_ (mkConstrSigs name binders constrs) \(con, sig) ->
                 modify \s -> s{topLevel = HashMap.insert name (Right $ typeKind loc binders) $ HashMap.insert con (Right sig) s.topLevel}
-        D.GADT loc name mbKind constrs ->
+            pure $ DList.singleton name
+        D.GADT loc name mbKind constrs -> do
             for_ constrs \con ->
                 modify \s ->
                     s{topLevel = HashMap.insert name (Right $ fromMaybe (type_ loc) mbKind) $ HashMap.insert con.name (Right con.sig) s.topLevel}
+            pure $ DList.singleton name
     typeKind loc = go
       where
         go [] = type_ loc
