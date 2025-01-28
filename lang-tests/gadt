@@ -1,17 +1,17 @@
 type Peano = S Peano | Z
 
 type Vec : Peano -> Type -> Type where
-    Cons : forall 'n 'a. 'a -> Vec 'n 'a -> Vec (S 'n) 'a
-    Nil : forall 'a. Vec Z 'a
+    Cons : forall n a. a -> Vec n a -> Vec (S n) a
+    Nil : forall a. Vec Z a
 
 type Piano = Succ Piano | Zzz
 
 type Vocc : Peano -> Type -> Type where
-    Snoc : forall 'n 'a. Vocc 'n 'a -> 'a -> Vocc (Succ 'n) 'a
-    Null : forall 'a. Vocc Zzz 'a
+    Snoc : forall n a. Vocc n a -> a -> Vocc (Succ n) a
+    Null : forall a. Vocc Zzz a
 
--- may : forall 'n. Peano -> Vec 'n Peano -> Vec S Peano
+-- may : forall n. Peano -> Vec n Peano -> Vec S Peano
 -- may = may
 
-cons : forall 'n. Peano -> Vec 'n Peano -> Vec (S 'n) Peano
+cons : forall n. Peano -> Vec n Peano -> Vec (S n) Peano
 cons x xs = Cons x xs

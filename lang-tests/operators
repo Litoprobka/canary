@@ -1,12 +1,12 @@
 infix left |> above <|
 infix right <| below <<
 
-(<|) : forall 'a 'b. ('a -> 'b) -> 'a -> 'b
+(<|) : forall a b. (a -> b) -> a -> b
 (<|) f x = f x
 
 (|>) x f = f x
 
-(>>) : forall 'a 'b 'c. ('a -> 'b) -> ('b -> 'c) -> 'a -> 'c
+(>>) : forall a b c. (a -> b) -> (b -> c) -> a -> c
 (>>) f g x = g (f x)
 
 (<<) f g x = f (g x)
@@ -14,4 +14,4 @@ infix right <| below <<
 infix left >> above |>, <|
 infix right << above |>, <|
 
-thrice = id >> id >> id
+thrice f = f >> f >> f

@@ -7,6 +7,7 @@ module Syntax.Term where
 
 import Common (Skolem, UniVar)
 import Common hiding (Name, Skolem, UniVar)
+import Common qualified as C
 import Data.List.NonEmpty qualified as NE
 import Data.Type.Ord (type (<))
 import LangPrelude hiding (show)
@@ -21,7 +22,9 @@ type Expr = Term
 data Term (p :: Pass) where
     -- terminal constructors
     Name :: NameAt p -> Term p
-    -- Var :: NameAt p -> Term p -- type variables. I should probably get rid of the AST-level separation
+    -- | 'a
+    -- | type variables with an inferred forall binder
+    ImplicitVar :: NameAt p ~ SimpleName => NameAt p -> Term p
     UniVar :: Loc -> UniVar -> Type 'DuringTypecheck
     Skolem :: Skolem -> Type 'DuringTypecheck
     Literal :: Literal -> Expr p
@@ -68,6 +71,9 @@ data VarBinder p = VarBinder {var :: NameAt p, kind :: Maybe (Type p)}
 
 plainBinder :: NameAt p -> VarBinder p
 plainBinder = flip VarBinder Nothing
+
+binderKind :: NameAt p ~ C.Name => VarBinder p -> Type p
+binderKind binder = fromMaybe (Name $ Located (getLoc binder) TypeName) binder.kind
 
 data DoStatement (p :: Pass)
     = Bind (Pattern p) (Expr p)
@@ -125,6 +131,7 @@ instance Pretty (NameAt p) => Pretty (Expr p) where
             If _ cond true false -> "if" <+> pretty cond <+> "then" <+> pretty true <+> "else" <+> pretty false
             Annotation expr ty -> parensWhen 1 $ pretty expr <+> ":" <+> pretty ty
             Name name -> pretty name
+            ImplicitVar var -> pretty var
             RecordLens _ fields -> encloseSep "." "" "." $ toList $ pretty <$> fields
             Variant name -> pretty name
             Record _ row -> braces . sep . punctuate comma . map recordField $ sortedRow row
@@ -181,6 +188,7 @@ instance HasLoc (NameAt p) => HasLoc (Expr p) where
         If loc _ _ _ -> loc
         Annotation expr ty -> zipLocOf expr ty
         Name name -> getLoc name
+        ImplicitVar var -> getLoc var
         RecordLens loc _ -> loc
         Variant name -> getLoc name
         Record loc _ -> loc
@@ -297,7 +305,7 @@ instance
         Exists loc var body -> Exists loc (cast var) (cast body)
         VariantT loc row -> VariantT loc (fmap cast row)
         RecordT loc row -> RecordT loc (fmap cast row)
-        -- Var name -> Var name
+        ImplicitVar var -> ImplicitVar var
         UniVar loc uni -> castUni loc uni
         Skolem skolem -> castSkolem skolem
 
@@ -335,7 +343,7 @@ collectReferencedNames = go
   where
     go = \case
         Name name -> [name]
-        -- Var _ -> [] -- I'm not sure whether type variables count
+        ImplicitVar var -> [var]
         UniVar{} -> []
         Skolem _ -> []
         Literal _ -> []
@@ -416,6 +424,7 @@ uniplate f = \case
     u@UniVar{} -> pure u
     s@Skolem{} -> pure s
     n@Name{} -> pure n
+    i@ImplicitVar{} -> pure i
     r@RecordLens{} -> pure r
     v@Variant{} -> pure v
     l@Literal{} -> pure l

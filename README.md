@@ -22,19 +22,19 @@ The syntax is heavily inspired by the ML-family, notably Haskell.
 Whether the language is going to be strict or lazy is to be decided
 
 ```haskell
-type List 'a = Cons 'a (List 'a) | Nil
+type List a = Cons a (List a) | Nil
 
-map : ('a -> 'b) -> List 'a -> 'b
+map : forall a b. (a -> b) -> List a -> b
 map f = match
-    (L.st.Cons x xs) -> List.Cons (f x) (map f xs)
+    (List.Cons x xs) -> List.Cons (f x) (map f xs)
     List.Nil -> List.Nil
 ```
 
 Right away, you may notice some differences. Compared to Haskell,
 - type signatures use `:` instead of `::`.
-- type variables are denoted with a quotation mark. This way, type names don't have to be uppercase, and value-level identifiers may be used at the type level with no ambiguity (the plan is to have dependent type-esque facilities at compile time, if not outright dependent types).
+- Forall clauses are required. This way, type names don't have to be uppercase, and value-level identifiers may be used at the type level with no ambiguity (the plan is to have dependent type-esque facilities at compile time, if not outright dependent types).
 - functions may not have multiple bodies. Instead, there's a `match` expression that behaves the same as `\cases` in Haskell.
-- types have their own namespaces, and constructors have to be qualified by default
+- (currently unimplemented) types have their own namespaces, and constructors have to be qualified by default
 
 ### Type system
 
@@ -47,7 +47,7 @@ It can infer anything that HM can, but for higher-rank types, explicit annotatio
 The language supports existential quantification as well as universal quantification. Type variables are treated as universally quantified by default, so existentials require an explicit `exists` clause.
 
 ```haskell
-listOfSomething : exists 'a. List 'a
+listOfSomething : exists a. List a
 listOfSomething = ["'a", "is", "Text,", "actually"]
 ```
 In simple cases like this, existentials don't make much sense - we could have just annotated `listOfSomething` with `List Text` instead!
@@ -76,31 +76,31 @@ Some other use cases:
 type Relativity = Abs | Rel
 type Path ('a : Relativity) = ...
 
-readSymlink : Path 'any -> IO (exists 'rel. Path 'rel)
+readSymlink : forall any. Path any -> IO (exists rel. Path rel)
 
 -- todo: a concatenative DSL example
 ```
 
 Existentials are good at types-that-cannot-be-named. Here's how the Haskell library justified-containers would look like
 ```haskell
-type JMap 'ph 'k 'v
-type Key 'ph 'k
+type JMap ph k v
+type Key ph k
 
-justify : Map 'k 'v -> exists 'ph. JMap 'ph 'k 'v
-fromJustified : JMap 'ph 'k 'v -> Map 'k 'v
+justify : forall k v. Map k v -> exists ph. JMap ph k v
+fromJustified : forall ph k v. JMap ph k v -> Map k v
 
-member : 'k -> JMap 'ph 'k 'v -> Maybe (Key 'ph 'k)
-lookup : Key 'ph 'k -> JMap 'ph 'k 'v -> 'v
-update : ('v -> 'v) -> Key 'ph 'k -> JMap 'ph 'k 'v -> JMap 'ph 'k 'v
+member : forall ph k v. k -> JMap ph k v -> Maybe (Key ph k)
+lookup : forall ph k v. Key ph k -> JMap ph k v -> v
+update : forall ph k v. (v -> v) -> Key ph k -> JMap ph k v -> JMap ph k v
 
-insert : 'k -> 'v -> JMap 'ph 'k 'v -> exists 'ph2. JMap 'ph2 'k 'v
-delete : Key 'ph 'k -> JMap 'ph 'k 'v -> exists 'ph2. JMap 'ph2 'k 'v
+insert : forall ph k v. k -> v -> JMap ph k v -> exists ph2. JMap ph2 k v
+delete : forall ph k v. Key ph k -> JMap ph k v -> exists ph2. JMap ph2 k v
 ```
 
 The API is almost exactly the same, except that we don't need an ad-hoc continuation to introduce a scope, we can use the justified map directly
 
 ```haskell
-example : List ('k, 'v) -> Map 'k 'v -> Map 'k 'v
+example : forall k v. List (k, v) -> Map k v -> Map k v
 example kvPairs map' = fromJustified <| foldr (uncurry insert) jmap matchingKeys where
     jmap = justify map
     matchingKeys = keys |> mapMaybe \(k, v) -> map (_, v) (lookup _ jmap)

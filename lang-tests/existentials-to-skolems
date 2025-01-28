@@ -1,11 +1,11 @@
-type BasicallyST 's 'a = MkST 'a
-type STRef 's 'a = MkSTRef 'a
+type BasicallyST s a = MkST a
+type STRef s a = MkSTRef a
 
-runST : forall 'a. (forall 's. BasicallyST 's 'a) -> 'a
+runST : forall a. (forall s. BasicallyST s a) -> a
 runST (MkST x) = x
 
-newSTRef : forall 's 'a. 'a -> BasicallyST 's (STRef 's 'a)
+newSTRef : forall s a. a -> BasicallyST s (STRef s a)
 newSTRef x = MkST (MkSTRef x)
 
--- exmaple : exists 's. STRef 's Int
+exmaple : exists s. STRef s Int
 exmaple = runST (newSTRef 111)

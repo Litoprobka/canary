@@ -47,8 +47,7 @@ code = topLevelBlock declaration
 declaration :: Parser (Declaration 'Parse)
 declaration = withLoc $ choice [typeDec, fixityDec, signature, valueDec]
   where
-    valueDec = do
-        flip3 D.Value <$> binding <*> whereBlock
+    valueDec = flip3 D.Value <$> binding <*> whereBlock
     whereBlock = option [] $ block "where" (withLoc valueDec)
 
     typeDec = do
@@ -104,9 +103,12 @@ declaration = withLoc $ choice [typeDec, fixityDec, signature, valueDec]
 
 varBinder :: ParserM m => m (VarBinder 'Parse)
 varBinder =
-    parens (VarBinder <$> typeVariable <* specialSymbol ":" <*> fmap Just type')
+    parens (VarBinder <$> termName <* specialSymbol ":" <*> fmap Just type')
         <|> flip VarBinder Nothing
-        <$> typeVariable
+        <$> termName
+
+typeVariable :: ParserM m => m (Type 'Parse)
+typeVariable = Name <$> termName <|> ImplicitVar <$> implicitVariable
 
 type' :: ParserM m => m (Type 'Parse)
 type' = Expr.makeExprParser typeParens [[typeApp], [function], [forall', exists]]
@@ -125,7 +127,7 @@ typeParens =
     label "type" $
         choice
             [ Name <$> typeName
-            , Name <$> typeVariable -- this used to be a case for variables
+            , typeVariable
             , parens type'
             , withLoc' RecordT $ NoExtRow <$> someRecord ":" type' Nothing
             , withLoc' VariantT $ NoExtRow <$> brackets (fromList <$> commaSep variantItem)

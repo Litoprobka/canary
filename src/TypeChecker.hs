@@ -15,7 +15,6 @@ module TypeChecker (
     check,
     checkPattern,
     subtype,
-    inferTypeVars,
     normalise,
     Builtins (..),
     InfState (..),
@@ -28,15 +27,13 @@ import Common (Name)
 import Common hiding (Name)
 import Data.Foldable1 (foldr1)
 import Data.HashMap.Strict qualified as HashMap
-import Data.HashSet qualified as HashSet
 import Data.List.NonEmpty qualified as NE
 import Data.Traversable (for)
 import Diagnostic (Diagnose, internalError)
 import Effectful
-import Effectful.State.Static.Local (State, modify, runState)
+import Effectful.State.Static.Local (modify)
 import GHC.IsList qualified as IsList
 import LangPrelude hiding (bool)
-import LensyUniplate hiding (cast)
 import NameGen
 import Syntax
 import Syntax.Declaration qualified as D
@@ -44,7 +41,7 @@ import Syntax.Row (ExtRow (..))
 import Syntax.Row qualified as Row
 import Syntax.Term hiding (Record, Variant)
 import Syntax.Term qualified as E (Term (Record, Variant))
-import Syntax.Term qualified as T (Term (Skolem, UniVar), uniplate)
+import Syntax.Term qualified as T (Term (Skolem, UniVar))
 import TypeChecker.Backend
 
 typecheck
@@ -55,24 +52,6 @@ typecheck
     -> Eff es (HashMap Name (Type 'Fixity)) -- type checking doesn't add anything new to the AST, so we reuse 'Fixity for simplicity
 typecheck env builtins decls = run (Right <$> env) builtins $ normaliseAll $ inferDecls decls
 
--- finds all type parameters used in a type and creates corresponding forall clauses
--- note: this doesn't really work at the moment, because name resolution treats vars
--- without a forall as unbound
-inferTypeVars :: Type 'Fixity -> Type 'Fixity
-inferTypeVars ty =
-    uncurry (foldr (Forall (getLoc ty) . plainBinder)) . second snd . runPureEff . runState (HashSet.empty, HashSet.empty) . go $
-        ty
-  where
-    go :: Type 'Fixity -> Eff '[State (HashSet Name, HashSet Name)] (Type 'Fixity)
-    go = transformM T.uniplate \case
-        {- Var var -> do
-            isNew <- not . HashSet.member var <$> gets @(HashSet Name, HashSet Name) snd
-            when isNew $ modify @(HashSet Name, HashSet Name) (second $ HashSet.insert var)
-            pure $ Var var -}
-        forall_@(Forall _ binder _) -> forall_ <$ modify @(HashSet Name, HashSet Name) (first $ HashSet.insert binder.var)
-        exists_@(Exists _ binder _) -> exists_ <$ modify @(HashSet Name, HashSet Name) (first $ HashSet.insert binder.var)
-        other -> pure other
-
 -- | check / infer types of a list of declarations that may reference each other
 inferDecls :: InfEffs es => [Declaration 'Fixity] -> Eff es (HashMap Name TypeDT)
 inferDecls decls = do
@@ -80,7 +59,7 @@ inferDecls decls = do
     traverse_ updateTopLevel decls
     let (values, sigs') = second HashMap.fromList $ foldr getValueDecls ([], []) decls
     -- kind-checking all signatures
-    traverse_ (`check` type_ Blank) sigs'
+    traverse_ (\sig -> check sig $ type_ (getLoc sig)) sigs'
     let sigs = fmap cast sigs'
     (<> sigs) . fold <$> for values \(binding, locals) ->
         binding & collectNamesInBinding & listToMaybe >>= (`HashMap.lookup` sigs) & \case
@@ -97,7 +76,7 @@ inferDecls decls = do
   where
     updateTopLevel = \case
         D.Signature _ name sig ->
-            modify \s -> s{topLevel = HashMap.insert name (Right $ inferTypeVars sig) s.topLevel}
+            modify \s -> s{topLevel = HashMap.insert name (Right sig) s.topLevel}
         D.Value _ binding@(FunctionB name _ _) locals -> insertBinding name binding locals
         D.Value _ binding@(ValueB (VarP name) _) locals -> insertBinding name binding locals
         D.Value loc ValueB{} _ -> internalError loc "destructuring bindings are not supported yet"
@@ -106,12 +85,12 @@ inferDecls decls = do
                 modify \s -> s{topLevel = HashMap.insert name (Right $ typeKind loc binders) $ HashMap.insert con (Right sig) s.topLevel}
         D.GADT loc name mbKind constrs ->
             for_ constrs \con ->
-                modify \s -> s{topLevel = HashMap.insert name (Right $ getKind loc mbKind) $ HashMap.insert con.name (Right con.sig) s.topLevel}
+                modify \s ->
+                    s{topLevel = HashMap.insert name (Right $ fromMaybe (type_ loc) mbKind) $ HashMap.insert con.name (Right con.sig) s.topLevel}
     typeKind loc = go
       where
         go [] = type_ loc
-        go (binder : rest) = Function loc (getKind (getLoc binder) binder.kind) (go rest)
-    getKind loc = fromMaybe (type_ loc)
+        go (binder : rest) = Function loc (binderKind binder) (go rest)
     type_ :: NameAt p ~ Name => Loc -> Type p
     type_ loc = Name $ Located loc TypeName
 

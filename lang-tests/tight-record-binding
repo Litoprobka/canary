@@ -4,7 +4,7 @@ type Vec = MkVec { x : Int, y : Int, z : Int }
 add : Int -> Int -> Int
 add = letsPretendItsBuiltin
 
-id' : forall 'a . 'a -> 'a
+id' : forall a . a -> a
 id' x = x
 
 addVec MkVec{x, y, z} MkVec{x = x2, y = y2, z = z2} =

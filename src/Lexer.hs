@@ -21,7 +21,7 @@ module Lexer (
     termName,
     termName',
     typeName,
-    typeVariable,
+    implicitVariable,
     variantConstructor,
     recordLens,
     parens,
@@ -254,8 +254,8 @@ constructorName :: ParserM m => m SimpleName
 constructorName = mkName typeName'
 
 -- | an identifier that starts with a ' and a lowercase letter, i.e. 'acc
-typeVariable :: ParserM m => m SimpleName
-typeVariable = try $ mkName $ liftA2 Text.cons (single '\'') termName'
+implicitVariable :: ParserM m => m SimpleName
+implicitVariable = try $ mkName $ liftA2 Text.cons (single '\'') termName'
 
 {- | an identifier that starts with a ' and an uppercase letter, i.e. 'Some
 this is not a lexeme
