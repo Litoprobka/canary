@@ -73,7 +73,7 @@ mergeRec l r poset = mergeWith handleCycle l r poset
             <&> map fst
             <&> HashSet.fromList
 
-{- | merge two equvalence classes by moving all items to the right one
+{- | merge two equivalence classes by moving all items to the right one
 O(n) in class count
 -}
 mergeWith
@@ -86,18 +86,21 @@ mergeWith
 mergeWith onCycle classL classR Poset{classes, relations, nextClass} = do
     lhsGreaterThan <- lookup' classL relations
     rhsGreaterThan <- lookup' classR relations
-    let cycle = HashSet.member classR rhsGreaterThan || HashSet.member classL lhsGreaterThan
+    let cycle = HashSet.member classL rhsGreaterThan || HashSet.member classR lhsGreaterThan
+        newPoset = Poset{classes = newClasses, relations = newRelations, nextClass}
+        newClasses = (classR <$ lhsClassElems) <> classes
+        newRelations = preserveTransitivity . replaceOldClass <$> HashMap.delete classL relations
+        replaceOldClass hset
+            | HashSet.member classL hset = HashSet.delete classL $ (rhsGreaterThan <>) $ HashSet.insert classR hset
+            | HashSet.member classR hset = lhsGreaterThan <> hset
+            | otherwise = hset
+        preserveTransitivity hset
+            | HashSet.member classR hset = lhsGreaterThan <> rhsGreaterThan <> hset
+            | otherwise = hset
+        lhsClassElems = HashMap.filter (== classL) classes
     if cycle
         then onCycle newPoset
         else pure newPoset
-  where
-    newPoset = Poset{classes = newClasses, relations = newRelations, nextClass}
-    newClasses = (classR <$ lhsClassElems) <> classes
-    newRelations = HashMap.delete classL $ fmap replaceOldClass relations
-    replaceOldClass hset
-        | HashSet.member classL hset = HashSet.insert classR $ HashSet.delete classL hset
-        | otherwise = hset
-    lhsClassElems = HashMap.filter (== classR) classes
 
 -- | add a relation between two classes, erroring out in case of a cycle
 addGtRel :: (Ctx es, CycleErrors a es) => EqClass a -> EqClass a -> Poset a -> Eff es (Poset a)

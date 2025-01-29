@@ -129,7 +129,7 @@ data TypeError
     | ArgCountMismatch Loc -- "different amount of arguments in a match statement"
     | ArgCountMismatchPattern Pat Int Int
     | NotAFunction Loc TypeDT -- pretty fTy <+> "is not a function type"
-    | SelfReferential TypeDT
+    | SelfReferential Loc UniVar TypeDT
     | NoVisibleTypeArgument (Expr 'Fixity) (Type 'Fixity) TypeDT
 
 typeError :: Diagnose :> es => TypeError -> Eff es a
@@ -187,11 +187,11 @@ typeError =
                 (pretty ty <+> "is not a function type")
                 (mkNotes [(loc, M.This "arising from function application")])
                 []
-        SelfReferential ty ->
+        SelfReferential loc var ty ->
             Err
                 Nothing
-                ("self-referential type" <+> pretty ty)
-                (mkNotes [(getLoc ty, M.This "arising from")])
+                ("self-referential type" <+> pretty var <+> "~" <+> pretty ty)
+                (mkNotes [(loc, M.This "arising from"), (getLoc ty, M.Where "and from")])
                 []
         NoVisibleTypeArgument expr tyArg ty ->
             Err
@@ -327,7 +327,9 @@ alterUniVar override uni ty = do
     cycleCheck (selfRefType, acc) = \case
         MUniVar _ uni2 | HashSet.member uni2 acc -> case selfRefType of
             Direct -> pure DirectCycle
-            Indirect -> typeError $ SelfReferential (unMono ty)
+            Indirect -> do
+                unwrappedTy <- unMono <$> unwrap ty
+                typeError $ SelfReferential (getLoc $ unMono ty) uni unwrappedTy
         MUniVar _ uni2 ->
             lookupUniVar uni2 >>= \case
                 Left _ -> pure NoCycle
@@ -341,6 +343,13 @@ alterUniVar override uni ty = do
 
     rescope scope = foldUniVars \v -> lookupUniVar v >>= either (rescopeVar v scope) (const pass)
     rescopeVar v scope oldScope = modify \s -> s{vars = HashMap.insert v (Left $ min oldScope scope) s.vars}
+
+    unwrap = \case
+        uni2@(MUniVar _ var) ->
+            lookupUniVar var >>= \case
+                Right refTy -> unwrap refTy
+                Left{} -> pure uni2
+        other -> pure other
 
 foldUniVars :: InfEffs es => (UniVar -> Eff es ()) -> Monotype -> Eff es ()
 foldUniVars action =
