@@ -80,7 +80,8 @@ modifyEnv builtins env decls = newEnv
 eval :: InterpreterBuiltins Name -> HashMap Name Value -> Expr 'Fixity -> Value
 eval builtins = go
   where
-    go env = \case
+    -- note that env is a lazy hashmap, so we only force the outer structure here
+    go !env = \case
         T.Lambda _ pat body -> Lambda \arg -> go (forceMatch builtins env pat arg) body
         T.WildcardLambda loc args body -> go env $ foldr (T.Lambda loc . VarP) body args
         T.Application f arg -> case go env f of
