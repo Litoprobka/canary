@@ -16,7 +16,6 @@ module TypeChecker (
     checkPattern,
     subtype,
     normalise,
-    Builtins (..),
     InfState (..),
     InfEffs,
     Declare,
@@ -48,10 +47,9 @@ import TypeChecker.Backend
 typecheck
     :: (NameGen :> es, Diagnose :> es)
     => HashMap Name (Type 'Fixity) -- imports; note that the types may not be incomplete
-    -> Builtins Name
     -> [Declaration 'Fixity]
     -> Eff es (HashMap Name (Type 'Fixity)) -- type checking doesn't add anything new to the AST, so we reuse 'Fixity for simplicity
-typecheck env builtins decls = run (Right <$> env) builtins $ normaliseAll $ inferDecls decls
+typecheck env decls = run (Right <$> env) $ normaliseAll $ inferDecls decls
 
 -- | check / infer types of a list of declarations that may reference each other
 inferDecls :: InfEffs es => [Declaration 'Fixity] -> Eff es (HashMap Name TypeDT)
@@ -133,9 +131,7 @@ subtype lhs_ rhs_ = join $ match <$> monoLayer In lhs_ <*> monoLayer Out rhs_
         lhs rhs | lhs == rhs -> pass -- simple cases, i.e. two type constructors, two univars or two exvars
         lhs (MLUniVar _ uni) -> solveOr (mono In $ unMonoLayer lhs) (subtype (unMonoLayer lhs) . unMono) uni
         (MLUniVar _ uni) rhs -> solveOr (mono Out $ unMonoLayer rhs) ((`subtype` unMonoLayer rhs) . unMono) uni
-        (MLName lhs) (MLName rhs) ->
-            unlessM (elem (lhs, rhs) <$> builtin (.subtypeRelations)) do
-                typeError $ CannotUnify lhs rhs
+        (MLName lhs) (MLName rhs) -> typeError $ CannotUnify lhs rhs
         (MLFn _ inl outl) (MLFn _ inr outr) -> do
             subtype inr inl
             subtype outl outr

@@ -2,7 +2,7 @@
 {-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE OverloadedRecordDot #-}
 
-module Interpreter (InterpreterBuiltins (..), eval, evalAll, modifyEnv, Value) where
+module Interpreter (InterpreterBuiltins (..), eval, evalAll, modifyEnv, Value (..)) where
 
 import Common (Literal_ (..), Loc (..), Located (..), Name, Pass (..), getLoc)
 import Data.HashMap.Lazy qualified as HashMap -- note that we use the lazy functions here

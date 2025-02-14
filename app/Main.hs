@@ -30,8 +30,8 @@ runFile debug fileName input = do
     eval' <- fmap join . runEff . runDiagnose (fileName, input) $ runNameGen do
         decls <- parseModule (fileName, input)
         prettyAST debug decls
-        (evalBuiltins, builtins, env) <- Repl.mkDefaultEnv
-        mbNewEnv <- runReader evalBuiltins $ runReader builtins $ Repl.replStep env $ Repl.Decls decls
+        (evalBuiltins, env) <- Repl.mkDefaultEnv
+        mbNewEnv <- runReader evalBuiltins $ Repl.replStep env $ Repl.Decls decls
         for mbNewEnv \newEnv -> do
             nameOfMain <- NameResolution.run newEnv.scope $ resolve $ Located Blank $ Name' "main"
             pure case HashMap.lookup nameOfMain newEnv.values of
@@ -42,8 +42,8 @@ runFile debug fileName input = do
 runRepl :: IO ()
 runRepl = void $ runEff $ runDiagnose ("", "") $ runNameGen do
     liftIO $ hSetBuffering stdout NoBuffering
-    (evalBuiltins, builtins, replEnv) <- Repl.mkDefaultEnv
-    runReader evalBuiltins $ runReader builtins $ Repl.run replEnv
+    (evalBuiltins, replEnv) <- Repl.mkDefaultEnv
+    runReader evalBuiltins $ Repl.run replEnv
 
 prettyAST :: (Traversable t, Pretty a, MonadIO m) => Bool -> t a -> m ()
 prettyAST debug = when debug . liftIO . traverse_ (putDoc . (<> line) . pretty)

@@ -48,14 +48,13 @@ import TypeChecker
 -- a lot of what is used here is only reasonable for interactive use
 
 runDefault
-    :: Eff '[Declare, Reader (Builtins Name), State InfState, NameGen, Diagnose] a -> (Maybe a, Diagnostic (Doc AnsiStyle))
+    :: Eff '[Declare, State InfState, NameGen, Diagnose] a -> (Maybe a, Diagnostic (Doc AnsiStyle))
 runDefault action = runPureEff . runDiagnose' ("<none>", "") $ runNameGen do
-    (_, builtins, defaultEnv) <- mkDefaults
-    run (Right <$> defaultEnv) builtins action
+    (_, defaultEnv) <- mkDefaults
+    run (Right <$> defaultEnv) action
 
-mkDefaults :: NameGen :> es => Eff es (Scope, Builtins Name, HashMap Name (Type 'Fixity))
+mkDefaults :: NameGen :> es => Eff es (Scope, HashMap Name (Type 'Fixity))
 mkDefaults = do
-    let builtins = Builtins{subtypeRelations = [(noLoc NatName, noLoc IntName)]}
     types <-
         traverse (freshName . noLoc . Name') $
             HashMap.fromList $
@@ -95,17 +94,15 @@ mkDefaults = do
                 , ("reverse", T.Forall Blank "'a" $ listT "'a" --> listT "'a")
                 ]
             )-}
-    pure (Scope scope, builtins, HashMap.empty)
+    pure (Scope scope, HashMap.empty)
 
 -- where
 -- listT var = "List" $: var
 
 inferIO :: Expr 'Fixity -> IO ()
-inferIO = inferIO' do
-    (_, builtins, env) <- mkDefaults
-    pure (env, builtins)
+inferIO = inferIO' $ snd <$> mkDefaults
 
-inferIO' :: Eff '[NameGen, Diagnose, IOE] (HashMap Name (Type 'Fixity), Builtins Name) -> Expr 'Fixity -> IO ()
+inferIO' :: Eff '[NameGen, Diagnose, IOE] (HashMap Name (Type 'Fixity)) -> Expr 'Fixity -> IO ()
 inferIO' mkEnv expr = do
     getTy >>= \case
         Nothing -> pass
@@ -116,19 +113,19 @@ inferIO' mkEnv expr = do
                 (name, Right ty') -> putDoc $ pretty name <> ":" <+> pretty ty' <> line
   where
     getTy = runEff $ runDiagnose ("<none>", "") $ runNameGen do
-        (env, builtins) <- mkEnv
-        runWithFinalEnv (Right <$> env) builtins $ normalise $ infer expr
+        env <- mkEnv
+        runWithFinalEnv (Right <$> env) $ normalise $ infer expr
 
 parseInfer :: Text -> IO ()
 parseInfer input = void . runEff . runDiagnose ("cli", input) $ runNameGen
     case input & parse (usingReaderT pos1 code) "cli" of
         Left err -> putStrLn $ errorBundlePretty err
         Right decls -> do
-            (scope, builtins, defaultEnv) <- mkDefaults
+            (scope, defaultEnv) <- mkDefaults
             nameResolved <- NameResolution.run scope (resolveNames decls)
             SimpleOutput{fixityMap, operatorPriorities, declarations} <- resolveDependenciesSimplified nameResolved
             resolvedDecls <- resolveFixity fixityMap operatorPriorities declarations
-            types <- typecheck defaultEnv builtins resolvedDecls
+            types <- typecheck defaultEnv resolvedDecls
             liftIO $ for_ types \ty -> putDoc $ pretty ty <> line
 
 parseInferIO :: IO ()
@@ -136,12 +133,12 @@ parseInferIO = getLine >>= parseInfer
 
 testCheck
     :: Eff [NameResolution.Declare, State Scope, Diagnose, NameGen] resolved
-    -> (resolved -> Eff '[Declare, Reader (Builtins Name), State InfState, Diagnose, NameGen] a)
+    -> (resolved -> Eff '[Declare, State InfState, Diagnose, NameGen] a)
     -> Maybe a
 testCheck toResolve action = fst $ runPureEff $ runNameGen $ runDiagnose' ("<none>", "") do
-    (scope, builtins, env) <- mkDefaults
+    (scope, env) <- mkDefaults
     resolved <- NameResolution.run scope toResolve
-    run (Right <$> env) builtins $ action resolved
+    run (Right <$> env) $ action resolved
 
 {-
 dummyFixity :: Diagnose :> es => Expr 'NameRes -> Eff es (Expr 'Fixity)

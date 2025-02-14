@@ -72,6 +72,8 @@ library
     , relude >=1.2.1.0 && <2
     , template-haskell
     , text
+    , vector
+    , vector-sized
   default-language: GHC2021
 
 executable lang-exe
@@ -105,6 +107,8 @@ executable lang-exe
     , relude >=1.2.1.0 && <2
     , template-haskell
     , text
+    , vector
+    , vector-sized
   default-language: GHC2021
 
 test-suite lang-test
@@ -143,5 +147,7 @@ test-suite lang-test
     , relude >=1.2.1.0 && <2
     , template-haskell
     , text
+    , vector
+    , vector-sized
   default-language: GHC2021
   build-tool-depends: hspec-discover:hspec-discover == 2.*

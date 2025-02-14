@@ -49,7 +49,6 @@ data ReplEnv = ReplEnv
 
 type ReplCtx es =
     ( Reader (InterpreterBuiltins Name) :> es
-    , Reader (TC.Builtins Name) :> es
     , NameGen :> es
     , IOE :> es
     )
@@ -63,18 +62,17 @@ emptyEnv = ReplEnv{..}
     scope = Scope $ HashMap.singleton (Name' "Type") (noLoc TypeName)
     (_, operatorPriorities) = Poset.eqClass Nothing Poset.empty
 
-mkDefaultEnv :: (Diagnose :> es, NameGen :> es) => Eff es (InterpreterBuiltins Name, TC.Builtins Name, ReplEnv)
+mkDefaultEnv :: (Diagnose :> es, NameGen :> es) => Eff es (InterpreterBuiltins Name, ReplEnv)
 mkDefaultEnv = do
     (preDecls, scope) <- mkPreprelude
-    ((afterNameRes, builtins, tcbuiltins), newScope) <- NameResolution.runWithEnv scope do
+    ((afterNameRes, builtins), newScope) <- NameResolution.runWithEnv scope do
         decls' <- resolveNames prelude
         builtins <- traverse NameResolution.resolve InterpreterBuiltins{true = "True", cons = "Cons", nil = "Nil"}
-        let tcbuiltins = TC.Builtins{subtypeRelations = [(noLoc C.NatName, noLoc C.IntName)]}
-        pure (decls', builtins, tcbuiltins)
+        pure (decls', builtins)
     depResOutput@SimpleOutput{fixityMap, operatorPriorities} <-
         resolveDependenciesSimplified' emptyEnv.fixityMap emptyEnv.operatorPriorities $ preDecls <> afterNameRes
     fixityDecls <- Fixity.resolveFixity fixityMap operatorPriorities depResOutput.declarations
-    newTypes <- typecheck emptyEnv.types tcbuiltins fixityDecls
+    newTypes <- typecheck emptyEnv.types fixityDecls
     let newValEnv = modifyEnv builtins emptyEnv.values fixityDecls
     guardNoErrors
     let finalEnv =
@@ -85,7 +83,7 @@ mkDefaultEnv = do
                 , scope = newScope
                 , types = newTypes
                 }
-    pure (builtins, tcbuiltins, finalEnv)
+    pure (builtins, finalEnv)
   where
     mkPreprelude :: NameGen :> es => Eff es ([Declaration 'NameRes], Scope)
     mkPreprelude = do
@@ -180,10 +178,9 @@ replStep env command = do
         Quit -> pure Nothing
   where
     processExpr expr = do
-        tcbuiltins <- ask
         afterNameRes <- NameResolution.run env.scope $ resolveTerm expr
         afterFixityRes <- Fixity.run env.fixityMap env.operatorPriorities $ Fixity.parse $ cast afterNameRes
-        fmap (afterFixityRes,) $ TC.run (Right <$> env.types) tcbuiltins $ normalise $ infer afterFixityRes
+        fmap (afterFixityRes,) $ TC.run (Right <$> env.types) $ normalise $ infer afterFixityRes
 
 localDiagnose :: IOE :> es => a -> (FilePath, Text) -> Eff (Diagnose : es) (Maybe a) -> Eff es (Maybe a)
 localDiagnose env file action =
@@ -194,12 +191,11 @@ localDiagnose env file action =
 processDecls :: (Diagnose :> es, ReplCtx es) => ReplEnv -> [Declaration 'Parse] -> Eff es (Maybe ReplEnv)
 processDecls env decls = do
     builtins <- ask
-    tcbuiltins <- ask
     (afterNameRes, newScope) <- NameResolution.runWithEnv env.scope $ resolveNames decls
     depResOutput@SimpleOutput{fixityMap, operatorPriorities} <-
         resolveDependenciesSimplified' env.fixityMap env.operatorPriorities afterNameRes
     fixityDecls <- Fixity.resolveFixity fixityMap operatorPriorities depResOutput.declarations
-    newTypes <- typecheck env.types tcbuiltins fixityDecls
+    newTypes <- typecheck env.types fixityDecls
     let newValEnv = modifyEnv builtins env.values fixityDecls
     guardNoErrors
     pure . Just $

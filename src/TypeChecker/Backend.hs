@@ -19,7 +19,6 @@ import Diagnostic (Diagnose, fatal, internalError)
 import Effectful
 import Effectful.Dispatch.Dynamic (interpret, reinterpret)
 import Effectful.Error.Static (runErrorNoCallStack, throwError)
-import Effectful.Reader.Static (Reader, asks, runReader)
 import Effectful.State.Static.Local (State, get, gets, modify, runState)
 import Effectful.TH
 import Error.Diagnose (Report (..))
@@ -94,11 +93,6 @@ instance HasLoc MonoLayer where
         MLFn loc _ _ -> loc
         MLVariant loc _ -> loc
         MLRecord loc _ -> loc
-
-newtype Builtins a = Builtins
-    { subtypeRelations :: [(a, a)]
-    }
-    deriving (Show, Functor, Foldable, Traversable)
 
 -- calling an uninferred type closure should introduce all of the inferred bindings
 -- into the global scope
@@ -205,7 +199,7 @@ typeError =
                 )
                 []
 
-type InfEffs es = (NameGen :> es, State InfState :> es, Diagnose :> es, Reader (Builtins Name) :> es)
+type InfEffs es = (NameGen :> es, State InfState :> es, Diagnose :> es)
 
 data Declare :: Effect where
     UpdateSig :: Name -> TypeDT -> Declare m ()
@@ -239,17 +233,15 @@ instance Pretty MonoLayer where
 
 run
     :: TopLevelBindings
-    -> Builtins Name
-    -> Eff (Declare : Reader (Builtins Name) : State InfState : es) a
+    -> Eff (Declare : State InfState : es) a
     -> Eff es a
-run env builtins = fmap fst . runWithFinalEnv env builtins
+run env = fmap fst . runWithFinalEnv env
 
 runWithFinalEnv
     :: TopLevelBindings
-    -> Builtins Name
-    -> Eff (Declare : Reader (Builtins Name) : State InfState : es) a
+    -> Eff (Declare : State InfState : es) a
     -> Eff es (a, InfState)
-runWithFinalEnv env builtins = do
+runWithFinalEnv env = do
     runState
         InfState
             { nextUniVarId = 0
@@ -260,7 +252,6 @@ runWithFinalEnv env builtins = do
             , vars = HashMap.empty
             , skolems = HashMap.empty
             }
-        . runReader builtins
         . runDeclare
 
 freshUniVar :: InfEffs es => Loc -> Eff es TypeDT
@@ -385,9 +376,6 @@ declareAll = traverse_ (uncurry updateSig) . HashMap.toList
 
 declareTopLevel :: InfEffs es => HashMap Name (Type 'Fixity) -> Eff es ()
 declareTopLevel types = modify \s -> s{topLevel = fmap Right types <> s.topLevel}
-
-builtin :: Reader (Builtins Name) :> es => (Builtins Name -> a) -> Eff es a
-builtin = asks @(Builtins Name)
 
 generalise :: InfEffs es => Eff es TypeDT -> Eff es TypeDT
 generalise = fmap runIdentity . generaliseAll . fmap Identity
