@@ -131,6 +131,7 @@ subtype lhs_ rhs_ = join $ match <$> monoLayer In lhs_ <*> monoLayer Out rhs_
         lhs rhs | lhs == rhs -> pass -- simple cases, i.e. two type constructors, two univars or two exvars
         lhs (MLUniVar _ uni) -> solveOr (mono In $ unMonoLayer lhs) (subtype (unMonoLayer lhs) . unMono) uni
         (MLUniVar _ uni) rhs -> solveOr (mono Out $ unMonoLayer rhs) ((`subtype` unMonoLayer rhs) . unMono) uni
+        (MLName (Located _ NatName)) (MLName (Located _ IntName)) -> pass
         (MLName lhs) (MLName rhs) -> typeError $ CannotUnify lhs rhs
         (MLFn _ inl outl) (MLFn _ inr outr) -> do
             subtype inr inl
