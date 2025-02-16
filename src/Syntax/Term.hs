@@ -123,7 +123,7 @@ instance Pretty (NameAt p) => Pretty (Expr p) where
             WildcardLambda _ _ r@Record{} -> pretty r
             WildcardLambda _ _ body -> "(" <> pretty body <> ")"
             Application lhs rhs -> parensWhen 3 $ go 2 lhs <+> go 3 rhs
-            TypeApplication f ty -> pretty f <+> "@" <> go 3 ty
+            TypeApplication f ty -> parensWhen 3 $ go 2 f <+> "@" <> go 3 ty
             Let _ binding body -> "let" <+> pretty binding <> ";" <+> pretty body
             LetRec _ bindings body -> "let rec" <+> sep ((<> ";") . pretty <$> NE.toList bindings) <+> pretty body
             Case _ arg matches -> nest 4 (vsep $ ("case" <+> pretty arg <+> "of" :) $ matches <&> \(pat, body) -> pretty pat <+> "->" <+> pretty body)

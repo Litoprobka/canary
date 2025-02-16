@@ -73,7 +73,7 @@ mkDefaultEnv = do
         resolveDependenciesSimplified' emptyEnv.fixityMap emptyEnv.operatorPriorities $ preDecls <> afterNameRes
     fixityDecls <- Fixity.resolveFixity fixityMap operatorPriorities depResOutput.declarations
     newTypes <- typecheck emptyEnv.types fixityDecls
-    let newValEnv = modifyEnv builtins emptyEnv.values fixityDecls
+    newValEnv <- modifyEnv builtins emptyEnv.values fixityDecls
     guardNoErrors
     let finalEnv =
             ReplEnv
@@ -164,7 +164,7 @@ replStep env command = do
         Expr expr -> do
             (checkedExpr, _) <- processExpr expr
             guardNoErrors
-            print $ pretty $ eval builtins env.values checkedExpr
+            print . pretty =<< eval builtins env.values checkedExpr
             pure $ Just env
         Type_ expr -> do
             (_, ty) <- processExpr expr
@@ -196,7 +196,7 @@ processDecls env decls = do
         resolveDependenciesSimplified' env.fixityMap env.operatorPriorities afterNameRes
     fixityDecls <- Fixity.resolveFixity fixityMap operatorPriorities depResOutput.declarations
     newTypes <- typecheck env.types fixityDecls
-    let newValEnv = modifyEnv builtins env.values fixityDecls
+    newValEnv <- modifyEnv builtins env.values fixityDecls
     guardNoErrors
     pure . Just $
         ReplEnv

@@ -35,6 +35,7 @@ module Common (
     PriorityRelation' (..),
     type (!=),
     Cast (..),
+    toSimpleName,
 ) where
 
 import Data.Type.Bool (type (||))
@@ -231,6 +232,19 @@ instance Pretty Loc where
     pretty = \case
         Blank -> "<blank>"
         Loc pos -> pretty pos
+
+toSimpleName :: Name -> SimpleName
+toSimpleName (Located loc name) = Located loc case name of
+    Name txt _ -> Name' txt
+    Wildcard n _ -> Wildcard' n
+    BoolName -> Name' "Bool"
+    ListName -> Name' "List"
+    IntName -> Name' "Int"
+    NatName -> Name' "Nat"
+    TextName -> Name' "Text"
+    CharName -> Name' "Char"
+    LensName -> Name' "Lens"
+    TypeName -> Name' "Type"
 
 mkNotes :: [(Loc, M.Marker a)] -> [(Position, M.Marker a)]
 mkNotes = mapMaybe \case

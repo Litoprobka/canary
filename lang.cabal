@@ -39,6 +39,7 @@ library
       Poset
       Repl
       Syntax
+      Syntax.Core
       Syntax.Declaration
       Syntax.Row
       Syntax.Term
