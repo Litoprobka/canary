@@ -250,8 +250,8 @@ resolveTerm e = scoped case e of
         args' <- traverse declare args
         body' <- resolveTerm body
         pure $ WildcardLambda loc args' body'
-    Application f arg -> Application <$> resolveTerm f <*> resolveTerm arg
-    TypeApplication expr tyArg -> TypeApplication <$> resolveTerm expr <*> resolveTerm tyArg
+    App f arg -> App <$> resolveTerm f <*> resolveTerm arg
+    TypeApp expr tyArg -> TypeApp <$> resolveTerm expr <*> resolveTerm tyArg
     Let loc binding expr -> do
         binding' <- declareBinding binding
         expr' <- resolveTerm expr

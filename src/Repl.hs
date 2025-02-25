@@ -13,9 +13,10 @@ import Data.Text.Encoding (strictBuilderToText, textToStrictBuilder)
 import DependencyResolution (FixityMap, Op, SimpleOutput (..), resolveDependenciesSimplified')
 import Diagnostic (Diagnose, guardNoErrors, runDiagnose)
 import Effectful
-import Effectful.Reader.Static
+import Effectful.State.Static.Local (runState)
 import Fixity qualified (parse, resolveFixity, run)
-import Interpreter (InterpreterBuiltins (..), Value, eval, modifyEnv)
+import Interpreter (ValueEnv, eval, modifyEnv)
+import Interpreter qualified as V
 import LangPrelude
 import Lexer (Parser, keyword)
 import NameGen (NameGen, freshName)
@@ -40,40 +41,37 @@ data ReplCommand
     | Quit
 
 data ReplEnv = ReplEnv
-    { values :: HashMap Name Value
+    { values :: ValueEnv
     , fixityMap :: FixityMap
     , operatorPriorities :: Poset Op
     , scope :: Scope
-    , types :: HashMap Name (Type 'Fixity)
+    , types :: HashMap Name TC.Type'
     }
 
 type ReplCtx es =
-    ( Reader (InterpreterBuiltins Name) :> es
-    , NameGen :> es
+    ( NameGen :> es
     , IOE :> es
     )
 
 emptyEnv :: ReplEnv
 emptyEnv = ReplEnv{..}
   where
-    values = HashMap.empty
+    values = HashMap.singleton (noLoc TypeName) (V.TyCon (noLoc TypeName))
     fixityMap = HashMap.singleton Nothing InfixL
-    types = HashMap.singleton (noLoc TypeName) (Name $ noLoc TypeName)
+    types = HashMap.singleton (noLoc TypeName) (V.TyCon (noLoc TypeName))
     scope = Scope $ HashMap.singleton (Name' "Type") (noLoc TypeName)
     (_, operatorPriorities) = Poset.eqClass Nothing Poset.empty
 
-mkDefaultEnv :: (Diagnose :> es, NameGen :> es) => Eff es (InterpreterBuiltins Name, ReplEnv)
+mkDefaultEnv :: (Diagnose :> es, NameGen :> es) => Eff es ReplEnv
 mkDefaultEnv = do
     (preDecls, scope) <- mkPreprelude
-    ((afterNameRes, builtins), newScope) <- NameResolution.runWithEnv scope do
-        decls' <- resolveNames prelude
-        builtins <- traverse NameResolution.resolve InterpreterBuiltins{true = "True", cons = "Cons", nil = "Nil"}
-        pure (decls', builtins)
+    (afterNameRes, newScope) <- NameResolution.runWithEnv scope do
+        resolveNames prelude
     depResOutput@SimpleOutput{fixityMap, operatorPriorities} <-
         resolveDependenciesSimplified' emptyEnv.fixityMap emptyEnv.operatorPriorities $ preDecls <> afterNameRes
     fixityDecls <- Fixity.resolveFixity fixityMap operatorPriorities depResOutput.declarations
-    newTypes <- typecheck emptyEnv.types fixityDecls
-    newValEnv <- modifyEnv builtins emptyEnv.values fixityDecls
+    (newTypes, envWithTypes) <- runState @ValueEnv emptyEnv.values $ typecheck emptyEnv.types fixityDecls
+    newValEnv <- modifyEnv envWithTypes fixityDecls
     guardNoErrors
     let finalEnv =
             ReplEnv
@@ -83,7 +81,7 @@ mkDefaultEnv = do
                 , scope = newScope
                 , types = newTypes
                 }
-    pure (builtins, finalEnv)
+    pure finalEnv
   where
     mkPreprelude :: NameGen :> es => Eff es ([Declaration 'NameRes], Scope)
     mkPreprelude = do
@@ -99,7 +97,7 @@ mkDefaultEnv = do
                     Blank
                     (noLoc C.ListName)
                     [plainBinder a]
-                    [D.Constructor Blank cons [Name a, Name (noLoc C.ListName) `Application` Name a], D.Constructor Blank nil []]
+                    [D.Constructor Blank cons [Name a, Name (noLoc C.ListName) `App` Name a], D.Constructor Blank nil []]
                 ]
                     <> map (\name -> D.Type Blank (noLoc name) [] []) builtinTypes
             scope =
@@ -126,10 +124,10 @@ mkDefaultEnv = do
         , D.Fixity Blank C.InfixR "<|" (C.PriorityRelation [] ["|>"] [])
         , D.Fixity Blank C.InfixR "<<" (C.PriorityRelation [] [] [">>"]) -- this is bugged atm
         , D.Fixity Blank C.InfixL ">>" (C.PriorityRelation [Just "|>"] [] [])
-        , D.Value Blank (FunctionB "|>" [VarP "x", VarP "f"] (Name "f" `Application` Name "x")) []
-        , D.Value Blank (FunctionB "<|" [VarP "f", VarP "x"] (Name "f" `Application` Name "x")) []
-        , D.Value Blank (FunctionB ">>" [VarP "f", VarP "g", VarP "x"] (Name "g" `Application` (Name "f" `Application` Name "x"))) []
-        , D.Value Blank (FunctionB "<<" [VarP "f", VarP "g", VarP "x"] (Name "f" `Application` (Name "g" `Application` Name "x"))) []
+        , D.Value Blank (FunctionB "|>" [VarP "x", VarP "f"] (Name "f" `App` Name "x")) []
+        , D.Value Blank (FunctionB "<|" [VarP "f", VarP "x"] (Name "f" `App` Name "x")) []
+        , D.Value Blank (FunctionB ">>" [VarP "f", VarP "g", VarP "x"] (Name "g" `App` (Name "f" `App` Name "x"))) []
+        , D.Value Blank (FunctionB "<<" [VarP "f", VarP "g", VarP "x"] (Name "f" `App` (Name "g" `App` Name "x"))) []
         , D.Value
             Blank
             ( FunctionB
@@ -146,7 +144,7 @@ mkDefaultEnv = do
             []
         ]
     app :: Term p -> [Term p] -> Term p
-    app = foldl' Application
+    app = foldl' App
 
 run :: ReplCtx es => ReplEnv -> Eff es ()
 run env = do
@@ -158,18 +156,17 @@ run env = do
 
 replStep :: (ReplCtx es, Diagnose :> es) => ReplEnv -> ReplCommand -> Eff es (Maybe ReplEnv)
 replStep env command = do
-    builtins <- ask
     case command of
         Decls decls -> processDecls env decls
         Expr expr -> do
-            (checkedExpr, _) <- processExpr expr
+            ((checkedExpr, _), values) <- runState @ValueEnv env.values $ processExpr expr
             guardNoErrors
-            print . pretty =<< eval builtins env.values checkedExpr
-            pure $ Just env
+            print . pretty =<< eval values checkedExpr
+            pure $ Just env{values}
         Type_ expr -> do
-            (_, ty) <- processExpr expr
+            ((_, ty), values) <- runState @ValueEnv env.values $ processExpr expr
             print ty
-            pure $ Just env
+            pure $ Just env{values}
         Load path -> do
             fileContents <- decodeUtf8 <$> readFileBS path
             localDiagnose env (path, fileContents) do
@@ -190,13 +187,12 @@ localDiagnose env file action =
 
 processDecls :: (Diagnose :> es, ReplCtx es) => ReplEnv -> [Declaration 'Parse] -> Eff es (Maybe ReplEnv)
 processDecls env decls = do
-    builtins <- ask
     (afterNameRes, newScope) <- NameResolution.runWithEnv env.scope $ resolveNames decls
     depResOutput@SimpleOutput{fixityMap, operatorPriorities} <-
         resolveDependenciesSimplified' env.fixityMap env.operatorPriorities afterNameRes
     fixityDecls <- Fixity.resolveFixity fixityMap operatorPriorities depResOutput.declarations
-    newTypes <- typecheck env.types fixityDecls
-    newValEnv <- modifyEnv builtins env.values fixityDecls
+    (newTypes, envWithTypes) <- runState @ValueEnv env.values $ typecheck env.types fixityDecls
+    newValEnv <- modifyEnv envWithTypes fixityDecls
     guardNoErrors
     pure . Just $
         ReplEnv

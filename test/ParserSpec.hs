@@ -112,7 +112,7 @@ spec = do
                 `shouldBe` Right [con "Cons" ["x", "xs"], "y", P.Variant "'Hmmm" "z"]
         it "annotation pattern" do
             parsePretty pattern' "(Cons x xs : List Int)"
-                `shouldBe` Right (P.Annotation (con "Cons" ["x", "xs"]) (T.Application (T.Name "List") (T.Name "Int")))
+                `shouldBe` Right (P.Annotation (con "Cons" ["x", "xs"]) (T.App (T.Name "List") (T.Name "Int")))
         it "record" do
             parsePretty pattern' "{ x = x, y = y, z = z }" `shouldBe` Right (recordP [("x", "x"), ("y", "y"), ("z", "z")])
         it "record with implicit names" do
@@ -258,13 +258,13 @@ spec = do
             parsePretty type' "ThisIsAType" `shouldBe` Right "ThisIsAType"
         it "type application" do
             parsePretty type' "Either (List Int) Text"
-                `shouldBe` Right (T.Application (T.Application "Either" (T.Application "List" "Int")) "Text")
+                `shouldBe` Right (T.App (T.App "Either" (T.App "List" "Int")) "Text")
         it "function type" do
             parsePretty type' "'b -> ('a -> 'b) -> Maybe 'a -> 'b"
                 `shouldBe` Right
                     ( T.Function Blank (T.Var "'b") $
                         T.Function Blank (T.Function Blank (T.Var "'a") (T.Var "'b")) $
-                            T.Function Blank (T.Application "Maybe" $ T.Var "'a") $
+                            T.Function Blank (T.App "Maybe" $ T.Var "'a") $
                                 T.Var "'b"
                     )
         it "record" do
@@ -279,7 +279,7 @@ spec = do
         it "type variable" do
             parsePretty type' "'var" `shouldBe` Right (T.Var "'var")
         it "forall" do
-            parsePretty type' "forall 'a. Maybe 'a" `shouldBe` Right (T.Forall Blank "'a" $ T.Application "Maybe" $ T.Var "'a")
+            parsePretty type' "forall 'a. Maybe 'a" `shouldBe` Right (T.Forall Blank "'a" $ T.App "Maybe" $ T.Var "'a")
             parsePretty type' "∀ 'a. 'a -> 'a" `shouldBe` Right (T.Forall Blank "'a" $ (T.Var "'a") --> (T.Var "'a"))
         it "exists" do
             parsePretty type' "List (exists 'a. 'a)" `shouldBe` Right ("List" $: (∃) "'a" "'a")

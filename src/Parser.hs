@@ -116,7 +116,7 @@ type' = Expr.makeExprParser typeParens [[typeApp], [function], [forall', exists]
     forall' = Expr.Prefix $ lambdaLike Forall forallKeyword varBinder "."
     exists = Expr.Prefix $ lambdaLike Exists existsKeyword varBinder "."
 
-    typeApp = Expr.InfixL $ pure Application
+    typeApp = Expr.InfixL $ pure App
     function = Expr.InfixR $ appLoc Function <$ specialSymbol "->"
     appLoc con lhs rhs = con (zipLocOf lhs rhs) lhs rhs
 
@@ -205,10 +205,11 @@ expression :: ParserM m => m (Expr 'Parse)
 expression = expression' do
     expr <- Name <$> termName
     -- type applications bind tighther than anything else
+    -- that might not work well with higher-than-application precedence operators, though
     apps <- many do
         void $ single '@'
         typeParens
-    pure $ foldl' TypeApplication expr apps
+    pure $ foldl' TypeApp expr apps
 
 -- an expression with infix operators and unresolved priorities
 -- the `E.Infix` constructor is only used when there is more than one operator
@@ -218,8 +219,8 @@ expression' termParser = do
     pairs <- many $ (,) <$> optional someOperator <*> noPrec termParser
     let expr = case pairs of
             [] -> firstExpr
-            [(Nothing, secondExpr)] -> firstExpr `Application` secondExpr
-            [(Just op, secondExpr)] -> Name op `Application` firstExpr `Application` secondExpr
+            [(Nothing, secondExpr)] -> firstExpr `App` secondExpr
+            [(Just op, secondExpr)] -> Name op `App` firstExpr `App` secondExpr
             (_ : _ : _) -> uncurry InfixE $ shift firstExpr pairs
     option expr do
         specialSymbol ":"
@@ -304,7 +305,7 @@ expression' termParser = do
         name <- constructorName
         optional record <&> \case
             Nothing -> Name name
-            Just arg -> Name name `Application` arg
+            Just arg -> Name name `App` arg
 
 -- turns out that respecting operator precedence makes for confusing code
 -- i.e. consider, say, `3 + _ * 4`

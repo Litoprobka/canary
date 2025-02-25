@@ -23,10 +23,11 @@ import DependencyResolution (SimpleOutput (..), resolveDependenciesSimplified)
 import Diagnostic (Diagnose, runDiagnose, runDiagnose')
 import Effectful.Error.Static (Error)
 import Effectful.Reader.Static (Reader, runReader)
-import Effectful.State.Static.Local (State, execState, runState)
+import Effectful.State.Static.Local (State, evalState, execState, runState)
 import Error.Diagnose (Diagnostic)
 import Fixity (resolveFixity)
 import Fixity qualified (parse)
+import Interpreter (ValueEnv)
 import LangPrelude
 import LensyUniplate (unicast)
 import NameGen (NameGen, freshName, runNameGen)
@@ -44,6 +45,7 @@ import Syntax.Term qualified as E
 import Syntax.Term qualified as T
 import Text.Megaparsec (errorBundlePretty, parse, pos1)
 import TypeChecker
+import TypeChecker.Backend (Type')
 
 -- a lot of what is used here is only reasonable for interactive use
 
@@ -53,7 +55,7 @@ runDefault action = runPureEff . runDiagnose' ("<none>", "") $ runNameGen do
     (_, defaultEnv) <- mkDefaults
     run (Right <$> defaultEnv) action
 
-mkDefaults :: NameGen :> es => Eff es (Scope, HashMap Name (Type 'Fixity))
+mkDefaults :: NameGen :> es => Eff es (Scope, HashMap Name Type')
 mkDefaults = do
     types <-
         traverse (freshName . noLoc . Name') $
@@ -102,7 +104,7 @@ mkDefaults = do
 inferIO :: Expr 'Fixity -> IO ()
 inferIO = inferIO' $ snd <$> mkDefaults
 
-inferIO' :: Eff '[NameGen, Diagnose, IOE] (HashMap Name (Type 'Fixity)) -> Expr 'Fixity -> IO ()
+inferIO' :: Eff '[NameGen, Diagnose, IOE] (HashMap Name Type') -> Expr 'Fixity -> IO ()
 inferIO' mkEnv expr = do
     getTy >>= \case
         Nothing -> pass
@@ -114,7 +116,7 @@ inferIO' mkEnv expr = do
   where
     getTy = runEff $ runDiagnose ("<none>", "") $ runNameGen do
         env <- mkEnv
-        runWithFinalEnv (Right <$> env) $ normalise $ infer expr
+        evalState @ValueEnv HashMap.empty $ runWithFinalEnv (Right <$> env) $ normalise $ infer expr
 
 parseInfer :: Text -> IO ()
 parseInfer input = void . runEff . runDiagnose ("cli", input) $ runNameGen
@@ -125,7 +127,7 @@ parseInfer input = void . runEff . runDiagnose ("cli", input) $ runNameGen
             nameResolved <- NameResolution.run scope (resolveNames decls)
             SimpleOutput{fixityMap, operatorPriorities, declarations} <- resolveDependenciesSimplified nameResolved
             resolvedDecls <- resolveFixity fixityMap operatorPriorities declarations
-            types <- typecheck defaultEnv resolvedDecls
+            types <- evalState @ValueEnv HashMap.empty $ typecheck defaultEnv resolvedDecls
             liftIO $ for_ types \ty -> putDoc $ pretty ty <> line
 
 parseInferIO :: IO ()
@@ -192,7 +194,7 @@ from --> to = T.Function (zipLocOf from to) from to
 
 infixl 3 $:
 ($:) :: Type p -> Type p -> Type p
-($:) = T.Application
+($:) = T.App
 
 (∃) :: HasLoc (NameAt p) => NameAt p -> Type p -> Type p
 (∃) var body = T.Exists (zipLocOf var body) (T.plainBinder var) body
@@ -218,7 +220,7 @@ con = ConstructorP
 
 infixl 1 #
 (#) :: Expr p -> Expr p -> Expr p
-(#) = E.Application
+(#) = E.App
 
 binApp :: Expr 'Parse -> Expr 'Parse -> Expr 'Parse -> Expr 'Parse
 binApp f arg1 arg2 = f # arg1 # arg2

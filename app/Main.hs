@@ -6,7 +6,6 @@ import Common
 import Data.HashMap.Strict qualified as HashMap
 import Data.Traversable (for)
 import Diagnostic
-import Effectful.Reader.Static
 import NameGen (runNameGen)
 import NameResolution
 import Parser (parseModule)
@@ -30,8 +29,8 @@ runFile debug fileName input = do
     eval' <- fmap join . runEff . runDiagnose (fileName, input) $ runNameGen do
         decls <- parseModule (fileName, input)
         prettyAST debug decls
-        (evalBuiltins, env) <- Repl.mkDefaultEnv
-        mbNewEnv <- runReader evalBuiltins $ Repl.replStep env $ Repl.Decls decls
+        env <- Repl.mkDefaultEnv
+        mbNewEnv <- Repl.replStep env $ Repl.Decls decls
         for mbNewEnv \newEnv -> do
             nameOfMain <- NameResolution.run newEnv.scope $ resolve $ Located Blank $ Name' "main"
             pure case HashMap.lookup nameOfMain newEnv.values of
@@ -42,8 +41,8 @@ runFile debug fileName input = do
 runRepl :: IO ()
 runRepl = void $ runEff $ runDiagnose ("", "") $ runNameGen do
     liftIO $ hSetBuffering stdout NoBuffering
-    (evalBuiltins, replEnv) <- Repl.mkDefaultEnv
-    runReader evalBuiltins $ Repl.run replEnv
+    replEnv <- Repl.mkDefaultEnv
+    Repl.run replEnv
 
 prettyAST :: (Traversable t, Pretty a, MonadIO m) => Bool -> t a -> m ()
 prettyAST debug = when debug . liftIO . traverse_ (putDoc . (<> line) . pretty)

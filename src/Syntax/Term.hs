@@ -32,7 +32,7 @@ data Term (p :: Pass) where
 
     -- | value : Type
     Annotation :: Term p -> Type p -> Term p
-    Application :: Term p -> Term p -> Term p
+    App :: Term p -> Term p -> Term p
     -- expression-only stuff
     Lambda :: Loc -> Pattern p -> Expr p -> Expr p -- it's still unclear to me whether I want to desugar multi-arg lambdas while parsing
 
@@ -40,7 +40,7 @@ data Term (p :: Pass) where
     WildcardLambda :: Loc -> NonEmpty (NameAt p) -> Expr p -> Expr p
     Let :: Loc -> Binding p -> Expr p -> Expr p
     LetRec :: Loc -> NonEmpty (Binding p) -> Expr p -> Expr p
-    TypeApplication :: Expr p -> Type p -> Expr p
+    TypeApp :: Expr p -> Type p -> Expr p
     Case :: Loc -> Expr p -> [(Pattern p, Expr p)] -> Expr p
     -- | Haskell's \cases
     Match :: Loc -> [([Pattern p], Expr p)] -> Expr p
@@ -122,8 +122,8 @@ instance Pretty (NameAt p) => Pretty (Expr p) where
             WildcardLambda _ _ l@List{} -> pretty l
             WildcardLambda _ _ r@Record{} -> pretty r
             WildcardLambda _ _ body -> "(" <> pretty body <> ")"
-            Application lhs rhs -> parensWhen 3 $ go 2 lhs <+> go 3 rhs
-            TypeApplication f ty -> parensWhen 3 $ go 2 f <+> "@" <> go 3 ty
+            App lhs rhs -> parensWhen 3 $ go 2 lhs <+> go 3 rhs
+            TypeApp f ty -> parensWhen 3 $ go 2 f <+> "@" <> go 3 ty
             Let _ binding body -> "let" <+> pretty binding <> ";" <+> pretty body
             LetRec _ bindings body -> "let rec" <+> sep ((<> ";") . pretty <$> NE.toList bindings) <+> pretty body
             Case _ arg matches -> nest 4 (vsep $ ("case" <+> pretty arg <+> "of" :) $ matches <&> \(pat, body) -> pretty pat <+> "->" <+> pretty body)
@@ -139,7 +139,6 @@ instance Pretty (NameAt p) => Pretty (Expr p) where
             Do _ stmts lastAction -> nest 2 $ vsep ("do" : fmap pretty stmts <> [pretty lastAction])
             Literal lit -> pretty lit
             InfixE pairs last' -> "?(" <> sep (concatMap (\(lhs, op) -> pretty lhs : maybe [] (pure . pretty) op) pairs <> [pretty last']) <> ")"
-            -- Var name -> pretty name
             Skolem skolem -> pretty skolem
             UniVar _ uni -> pretty uni
             Function _ from to -> parensWhen 2 $ go 2 from <+> "->" <+> pretty to
@@ -179,8 +178,8 @@ instance HasLoc (NameAt p) => HasLoc (Expr p) where
     getLoc = \case
         Lambda loc _ _ -> loc
         WildcardLambda loc _ _ -> loc
-        Application lhs rhs -> zipLocOf lhs rhs
-        TypeApplication f ty -> zipLocOf f ty
+        App lhs rhs -> zipLocOf lhs rhs
+        TypeApp f ty -> zipLocOf f ty
         Let loc _ _ -> loc
         LetRec loc _ _ -> loc
         Case loc _ _ -> loc
@@ -284,8 +283,8 @@ instance
     cast = \case
         Lambda loc pat body -> Lambda loc (cast pat) (cast body)
         WildcardLambda loc args body -> WildcardLambda loc args (cast body)
-        Application lhs rhs -> Application (cast lhs) (cast rhs)
-        TypeApplication func ty -> TypeApplication (cast func) (cast ty)
+        App lhs rhs -> App (cast lhs) (cast rhs)
+        TypeApp func ty -> TypeApp (cast func) (cast ty)
         Let loc binding expr -> Let loc (cast binding) (cast expr)
         LetRec loc bindings expr -> LetRec loc (fmap cast bindings) (cast expr)
         Case loc arg matches -> Case loc (cast arg) (fmap (bimap cast cast) matches)
@@ -358,8 +357,8 @@ collectReferencedNames = go
         Lambda _ pat body -> collectReferencedNamesInPat pat <> go body
         WildcardLambda _ _pats body -> go body
         Annotation e ty -> go e <> go ty
-        Application lhs rhs -> go lhs <> go rhs
-        TypeApplication e ty -> go e <> go ty
+        App lhs rhs -> go lhs <> go rhs
+        TypeApp e ty -> go e <> go ty
         Function _ fn args -> go fn <> go args
         Forall _ _ body -> go body
         Exists _ _ body -> go body
@@ -404,8 +403,8 @@ uniplate :: SelfTraversal Type p p
 uniplate f = \case
     Lambda loc pat body -> Lambda loc pat <$> f body -- for now, we're ignoring the pattern arguments
     WildcardLambda loc args body -> WildcardLambda loc args <$> f body -- same
-    Application lhs rhs -> Application <$> f lhs <*> f rhs
-    TypeApplication func ty -> TypeApplication <$> f func <*> f ty
+    App lhs rhs -> App <$> f lhs <*> f rhs
+    TypeApp func ty -> TypeApp <$> f func <*> f ty
     Let loc binding expr -> Let loc <$> plateBinding f binding <*> f expr
     LetRec loc bindings expr -> LetRec loc <$> traverse (plateBinding f) bindings <*> f expr
     Case loc arg matches -> Case loc <$> f arg <*> traverse (traverse f) matches
@@ -451,7 +450,7 @@ uniplate f = \case
 -- >>> pretty $ Function (Var "a") (Record (fromList [("x", Name "Int"), ("x", Name "a")]) Nothing)
 -- >>> pretty $ Forall "a" $ Forall "b" $ Forall "c" $ Name "a" `Function` (Name "b" `Function` Name "c")
 -- >>> pretty $ Forall "a" $ (Forall "b" $ Name "b" `Function` Name "a") `Function` Name "a"
--- >>> pretty $ Application (Forall "f" $ Name "f") (Name "b") `Function` (Application (Application (Name "c") (Name "a")) $ Application (Name "d") (Name "e"))
+-- >>> pretty $ App (Forall "f" $ Name "f") (Name "b") `Function` (App (App (Name "c") (Name "a")) $ App (Name "d") (Name "e"))
 -- >>> pretty $ Record (fromList [("x", Name "Bool")]) (Just "r")
 -- >>> pretty $ Variant (fromList [("E", Name "Unit")]) (Just "v")
 -- a -> {x : Int, x : a}
@@ -480,7 +479,7 @@ uniplate'
     -> (p ~ DuringTypecheck => CT.Skolem -> Type' q)
     -> SelfTraversal Type' p q
 uniplate' castName castUni castSkolem recur = \case
-    Application lhs rhs -> Application <$> recur lhs <*> recur rhs
+    App lhs rhs -> App <$> recur lhs <*> recur rhs
     Function loc lhs rhs -> Function loc <$> recur lhs <*> recur rhs
     Forall loc var body -> Forall loc <$> castBinder var <*> recur body
     Exists loc var body -> Exists loc <$> castBinder var <*> recur body

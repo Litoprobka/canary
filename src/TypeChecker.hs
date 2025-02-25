@@ -31,8 +31,10 @@ import Data.List.NonEmpty qualified as NE
 import Data.Traversable (for)
 import Diagnostic (Diagnose, internalError)
 import Effectful
-import Effectful.State.Static.Local (modify)
+import Effectful.State.Static.Local (State, get, modify)
 import GHC.IsList qualified as IsList
+import Interpreter (ValueEnv)
+import Interpreter qualified as V
 import LangPrelude hiding (bool)
 import NameGen
 import Syntax
@@ -41,14 +43,13 @@ import Syntax.Row (ExtRow (..))
 import Syntax.Row qualified as Row
 import Syntax.Term hiding (Record, Variant)
 import Syntax.Term qualified as E (Term (Record, Variant))
-import Syntax.Term qualified as T (Term (Skolem, UniVar))
 import TypeChecker.Backend
 
 typecheck
-    :: (NameGen :> es, Diagnose :> es)
-    => HashMap Name (Type 'Fixity) -- imports; note that the types may not be incomplete
+    :: (NameGen :> es, Diagnose :> es, State ValueEnv :> es)
+    => HashMap Name Type' -- imports
     -> [Declaration 'Fixity]
-    -> Eff es (HashMap Name (Type 'Fixity)) -- type checking doesn't add anything new to the AST, so we reuse 'Fixity for simplicity
+    -> Eff es (HashMap Name Type') -- type checking doesn't add anything new to the AST
 typecheck env decls = run (Right <$> env) $ normaliseAll $ inferDecls decls
 
 -- | check / infer types of a list of declarations that may reference each other
@@ -58,9 +59,8 @@ inferDecls decls = do
     typeNames <- DList.toList . fold <$> traverse updateTopLevel decls
     let (values, sigs') = second HashMap.fromList $ foldr getValueDecls ([], []) decls
     -- kind-checking all signatures
-    traverse_ (\sig -> check sig $ type_ (getLoc sig)) sigs'
-    let sigs = fmap cast sigs'
-        types = HashMap.fromList $ map (\name -> (name, type_ (getLoc name))) typeNames
+    sigs <- traverse typeFromTerm sigs'
+    let types = HashMap.fromList $ map (\name -> (name, type_ (getLoc name))) typeNames
     (types <>) . (<> sigs) . fold <$> for values \(binding, locals) ->
         binding & collectNamesInBinding & listToMaybe >>= (`HashMap.lookup` sigs) & \case
             Just ty -> do
@@ -72,30 +72,38 @@ inferDecls decls = do
             Nothing -> scoped do
                 declareAll =<< inferDecls locals
                 typeMap <- normaliseAll $ inferBinding binding -- todo: true top level should be separated from the parent scopes
-                fmap cast typeMap <$ declareTopLevel typeMap
+                declareTopLevel typeMap
+                pure typeMap
   where
     updateTopLevel = \case
         D.Signature _ name sig -> do
-            modify \s -> s{topLevel = HashMap.insert name (Right sig) s.topLevel}
+            sigV <- typeFromTerm sig
+            modify \s -> s{topLevel = HashMap.insert name (Right sigV) s.topLevel}
             pure DList.empty
         D.Value _ binding@(FunctionB name _ _) locals -> DList.empty <$ insertBinding name binding locals
         D.Value _ binding@(ValueB (VarP name) _) locals -> DList.empty <$ insertBinding name binding locals
         D.Value loc ValueB{} _ -> internalError loc "destructuring bindings are not supported yet"
         D.Type loc name binders constrs -> do
-            for_ (mkConstrSigs name binders constrs) \(con, sig) ->
-                modify \s -> s{topLevel = HashMap.insert name (Right $ typeKind loc binders) $ HashMap.insert con (Right sig) s.topLevel}
+            modify @ValueEnv $ HashMap.insert name (V.TyCon name)
+            typeKind <- mkTypeKind loc binders
+            modify \s -> s{topLevel = HashMap.insert name (Right typeKind) s.topLevel}
+            for_ (mkConstrSigs name binders constrs) \(con, sig) -> do
+                sigV <- typeFromTerm sig
+                modify \s -> s{topLevel = HashMap.insert con (Right sigV) s.topLevel}
             pure $ DList.singleton name
         D.GADT loc name mbKind constrs -> do
-            for_ constrs \con ->
+            for_ constrs \con -> do
+                kind <- maybe (pure $ type_ loc) typeFromTerm mbKind
+                conSig <- typeFromTerm con.sig
                 modify \s ->
-                    s{topLevel = HashMap.insert name (Right $ fromMaybe (type_ loc) mbKind) $ HashMap.insert con.name (Right con.sig) s.topLevel}
+                    s{topLevel = HashMap.insert name (Right kind) $ HashMap.insert con.name (Right conSig) s.topLevel}
             pure $ DList.singleton name
-    typeKind loc = go
+    mkTypeKind loc = go
       where
-        go [] = type_ loc
-        go (binder : rest) = Function loc (binderKind binder) (go rest)
-    type_ :: NameAt p ~ Name => Loc -> Type p
-    type_ loc = Name $ Located loc TypeName
+        go [] = pure $ type_ loc
+        go (binder : rest) = V.Function loc <$> typeFromTerm (binderKind binder) <*> go rest
+    type_ :: Loc -> Type'
+    type_ loc = V.TyCon (Located loc TypeName)
 
     insertBinding name binding locals =
         let closure = UninferredType $ scoped do
@@ -122,17 +130,28 @@ inferDecls decls = do
             , foldr (Forall loc) (foldr (Function loc) fullType params) binders
             )
       where
-        fullType = foldl' Application (Name name) (Name . (.var) <$> binders)
+        fullType = foldl' App (Name name) (Name . (.var) <$> binders)
+
+typeFromTerm :: InfEffs es => Type 'Fixity -> Eff es Type'
+typeFromTerm term = do
+    check term $ V.TyCon (Located (getLoc term) TypeName)
+    env <- get @ValueEnv
+    V.eval env term
 
 subtype :: InfEffs es => TypeDT -> TypeDT -> Eff es ()
 subtype lhs_ rhs_ = join $ match <$> monoLayer In lhs_ <*> monoLayer Out rhs_
   where
     match = \cases
-        lhs rhs | lhs == rhs -> pass -- simple cases, i.e. two type constructors, two univars or two exvars
+        (MLTyCon lhs) (MLTyCon rhs) | lhs == rhs -> pass
+        (MLUniVar _ lhs) (MLUniVar _ rhs) | lhs == rhs -> pass
+        (MLSkolem lhs) (MLSkolem rhs) | lhs == rhs -> pass
         lhs (MLUniVar _ uni) -> solveOr (mono In $ unMonoLayer lhs) (subtype (unMonoLayer lhs) . unMono) uni
         (MLUniVar _ uni) rhs -> solveOr (mono Out $ unMonoLayer rhs) ((`subtype` unMonoLayer rhs) . unMono) uni
-        (MLName (Located _ NatName)) (MLName (Located _ IntName)) -> pass
-        (MLName lhs) (MLName rhs) -> typeError $ CannotUnify lhs rhs
+        (MLTyCon (Located _ NatName)) (MLTyCon (Located _ IntName)) -> pass
+        (MLCon lhs lhsArgs) (MLCon rhs rhsArgs) -> do
+            unless (lhs == rhs) $ typeError $ CannotUnify lhs rhs
+            -- we assume that the arg count is correct
+            zipWithM_ subtype lhsArgs rhsArgs
         (MLFn _ inl outl) (MLFn _ inr outr) -> do
             subtype inr inl
             subtype outl outr
@@ -145,8 +164,8 @@ subtype lhs_ rhs_ = join $ match <$> monoLayer In lhs_ <*> monoLayer Out rhs_
             -- QuickLook just assumes that all constructors are invariant and -> is a special case
             subtype lhs lhs'
             subtype rhs rhs'
-        (MLVariant locL lhs) (MLVariant locR rhs) -> rowCase Variant (locL, lhs) (locR, rhs)
-        (MLRecord locL lhs) (MLRecord locR rhs) -> rowCase Record (locL, lhs) (locR, rhs)
+        (MLVariantT locL lhs) (MLVariantT locR rhs) -> rowCase Variant (locL, lhs) (locR, rhs)
+        (MLRecordT locL lhs) (MLRecordT locR rhs) -> rowCase Record (locL, lhs) (locR, rhs)
         -- (MLVar var) _ -> internalError (getLoc var) $ "dangling type variable" <+> pretty var
         -- _ (MLVar var) -> internalError (getLoc var) $ "dangling type variable" <+> pretty var
         lhs rhs -> typeError $ NotASubtype (unMonoLayer lhs) (unMonoLayer rhs) Nothing
@@ -171,16 +190,16 @@ check e type_ = scoped $ match e type_
     match = \cases
         -- the case for E.Name is redundant, since
         -- `infer` just looks up its type anyway
-        (Lambda _ arg body) (Function _ from to) -> scoped do
+        (Lambda _ arg body) (V.Function _ from to) -> scoped do
             -- `checkPattern` updates signatures of all mentioned variables
             checkPattern arg from
             check body to
-        ann@(Annotation expr annTy) ty -> do
-            check annTy (Name $ Located (getLoc ann) TypeName)
-            check expr $ cast annTy
-            subtype (cast annTy) ty
+        (Annotation expr annTy) ty -> do
+            annTyV <- typeFromTerm annTy
+            check expr annTyV
+            subtype annTyV ty
         (If _ cond true false) ty -> do
-            check cond $ Name $ Located (getLoc cond) BoolName
+            check cond $ V.TyCon (Located (getLoc cond) BoolName)
             check true ty
             check false ty
         (Case _ arg matches) ty -> do
@@ -206,15 +225,15 @@ check e type_ = scoped $ match e type_
                                 argVars <- replicateM n freshUniVar'
                                 bodyVar <- freshUniVar'
                                 solveUniVar uni $ foldr (MFn loc' . MUniVar loc') (MUniVar loc' bodyVar) argVars
-                                pure (T.UniVar loc' <$> argVars, T.UniVar loc' bodyVar)
+                                pure (V.UniVar loc' <$> argVars, V.UniVar loc' bodyVar)
                     other -> typeError $ ArgCountMismatch $ getLoc other
-        (List _ items) (Application (Name (Located _ ListName)) itemTy) -> for_ items (`check` itemTy)
+        (List _ items) (V.TyCon (Located _ ListName) `V.App` itemTy) -> for_ items (`check` itemTy)
         (E.Record _ row) ty -> do
             for_ (IsList.toList row) \(name, expr) ->
                 deepLookup Record name ty >>= \case
                     Nothing -> typeError $ MissingField ty name
                     Just fieldTy -> check expr fieldTy
-        expr (T.UniVar _ uni) ->
+        expr (V.UniVar _ uni) ->
             lookupUniVar uni >>= \case
                 Right ty -> check expr $ unMono ty
                 Left _ -> do
@@ -222,8 +241,8 @@ check e type_ = scoped $ match e type_
                     lookupUniVar uni >>= \case
                         Left _ -> solveUniVar uni newTy
                         Right _ -> pass
-        expr (Forall _ binder body) -> check expr =<< substitute Out binder.var body
-        expr (Exists _ binder body) -> check expr =<< substitute In binder.var body
+        expr (V.Forall _ closure) -> check expr =<< substitute Out closure
+        expr (V.Exists _ closure) -> check expr =<< substitute In closure
         -- todo: a case for do-notation
         expr ty -> do
             inferredTy <- infer expr
@@ -268,20 +287,22 @@ infer =
             var <- freshUniVar loc
             rowVar <- freshUniVar loc
             -- #a -> [Name #a | #r]
-            pure $ Function loc var (VariantT loc $ ExtRow (fromList [(name, var)]) rowVar)
-        app@(Application f x) -> do
+            pure $ V.Function loc var (V.VariantT loc $ ExtRow (fromList [(name, var)]) rowVar)
+        app@(App f x) -> do
             fTy <- infer f
             inferApp (getLoc app) fTy x
-        TypeApplication expr tyArg -> do
+        TypeApp expr tyArg -> do
             infer expr >>= \case
-                Forall _ binder body -> do
-                    Subst{var, result} <- substitute' In binder.var body
-                    subtype var $ cast tyArg
+                V.Forall _ closure -> do
+                    Subst{var, result} <- substitute' In closure
+                    env <- get @ValueEnv
+                    tyArgV <- V.eval env tyArg
+                    subtype var tyArgV
                     pure result
                 ty -> typeError $ NoVisibleTypeArgument expr tyArg ty
         Lambda loc arg body -> do
             argTy <- inferPattern arg
-            Function loc argTy <$> infer body
+            V.Function loc argTy <$> infer body
         -- chances are, I'd want to add some specific error messages or context for wildcard lambdas
         -- for now, they are just desugared to normal lambdas before inference
         WildcardLambda loc args body -> infer $ foldr (Lambda loc . VarP) body args
@@ -291,11 +312,11 @@ infer =
         LetRec loc bindings body -> do
             declareAll =<< (inferDecls . map (\b -> D.Value loc b []) . NE.toList) bindings
             infer body
-        ann@(Annotation expr ty) -> do
-            check ty (Name $ Located (getLoc ann) TypeName)
-            cast ty <$ check expr (cast ty)
+        (Annotation expr ty) -> do
+            tyV <- typeFromTerm ty
+            tyV <$ check expr tyV
         If loc cond true false -> do
-            check cond $ Name $ Located loc BoolName
+            check cond $ V.TyCon (Located loc BoolName)
             result <- fmap unMono . mono In =<< infer true
             check false result
             pure result
@@ -316,33 +337,34 @@ infer =
             for_ matches \(pats, body) -> do
                 zipWithM_ checkPattern pats patTypes
                 check body result
-            pure $ foldr (Function loc) result patTypes
+            pure $ foldr (V.Function loc) result patTypes
         List loc items -> do
             itemTy <- freshUniVar loc
             traverse_ (`check` itemTy) items
-            pure $ Application (Name $ Located loc ListName) itemTy
-        E.Record loc row -> RecordT loc . NoExtRow <$> traverse infer row
+            pure $ V.TyCon (Located loc ListName) `V.App` itemTy
+        E.Record loc row -> V.RecordT loc . NoExtRow <$> traverse infer row
         RecordLens loc fields -> do
             recordParts <- for fields \field -> do
                 rowVar <- freshUniVar loc
-                pure \nested -> RecordT loc $ ExtRow (one (field, nested)) rowVar
+                pure \nested -> V.RecordT loc $ ExtRow (one (field, nested)) rowVar
             let mkNestedRecord = foldr1 (.) recordParts
             a <- freshUniVar loc
             b <- freshUniVar loc
             pure $
-                Name (Located loc LensName)
-                    `Application` mkNestedRecord a
-                    `Application` mkNestedRecord b
-                    `Application` a
-                    `Application` b
+                V.TyCon
+                    (Located loc LensName)
+                    `V.App` mkNestedRecord a
+                    `V.App` mkNestedRecord b
+                    `V.App` a
+                    `V.App` b
         Do loc _ _ -> internalError loc "do-notation is not supported yet"
-        Literal (Located loc lit) -> pure $ Name . Located loc $ case lit of
+        Literal (Located loc lit) -> pure $ V.TyCon . Located loc $ case lit of
             IntLiteral num
                 | num >= 0 -> NatName
                 | otherwise -> IntName
             TextLiteral _ -> TextName
-            CharLiteral _ -> TextName -- huh?
-            -- v@Var{} -> pure . Name $ Located (getLoc v) TypeName
+            CharLiteral _ -> CharName
+        -- v@Var{} -> pure . Name $ Located (getLoc v) TypeName
         Function loc lhs rhs -> do
             check lhs (type_ loc)
             check rhs (type_ loc)
@@ -354,17 +376,17 @@ infer =
             traverse_ (`check` type_ loc) row
             pure $ type_ loc
         Forall loc binder body -> scoped do
-            kind <- maybe (freshUniVar loc) (pure . cast) binder.kind
+            kind <- maybe (freshUniVar loc) typeFromTerm binder.kind
             updateSig binder.var kind
             check body (type_ loc)
             pure $ type_ loc
         Exists loc binder body -> scoped do
-            kind <- maybe (freshUniVar loc) (pure . cast) binder.kind
+            kind <- maybe (freshUniVar loc) typeFromTerm binder.kind
             updateSig binder.var kind
             check body (type_ loc)
             pure $ type_ loc
   where
-    type_ loc = Name $ Located loc TypeName
+    type_ loc = V.TyCon (Located loc TypeName)
 
 inferApp :: InfEffs es => Loc -> TypeDT -> Expr 'Fixity -> Eff es TypeDT
 inferApp appLoc fTy arg = do
@@ -372,7 +394,7 @@ inferApp appLoc fTy arg = do
         MLUniVar loc uni -> do
             from <- infer arg
             to <- freshUniVar loc
-            to <$ subtype (T.UniVar loc uni) (Function loc from to)
+            to <$ subtype (V.UniVar loc uni) (V.Function loc from to)
         MLFn _ from to -> do
             to <$ check arg from
         _ -> typeError $ NotAFunction appLoc fTy
@@ -395,10 +417,10 @@ inferBinding =
             -- while checking the body, the function itself is assigned a univar
             -- in the end, we check that the inferred type is compatible with the one in the univar (inferred from recursive calls)
             uni <- freshUniVar'
-            updateSig name $ T.UniVar (getLoc binding) uni
+            updateSig name $ V.UniVar (getLoc binding) uni
             argTypes <- traverse inferPattern args
             bodyTy <- infer body
-            let ty = foldr (Function $ getLoc binding) bodyTy argTypes
+            let ty = foldr (V.Function $ getLoc binding) bodyTy argTypes
             -- since we can still infer higher-rank types for non-recursive functions,
             -- we only need the subtype check when the univar is solved, i.e. when the
             -- function contains any recursive calls at all
@@ -412,9 +434,9 @@ inferPattern = \case
         updateSig name uni
         pure uni
     WildcardP loc _ -> freshUniVar loc
-    ann@(AnnotationP pat ty) -> do
-        check ty (Name $ Located (getLoc ann) TypeName)
-        cast ty <$ checkPattern pat (cast ty)
+    (AnnotationP pat ty) -> do
+        tyV <- typeFromTerm ty
+        tyV <$ checkPattern pat tyV
     p@(ConstructorP name args) -> do
         (resultType, argTypes) <- conArgTypes name
         unless (length argTypes == length args) $
@@ -425,77 +447,76 @@ inferPattern = \case
     ListP loc pats -> do
         result <- freshUniVar loc
         traverse_ (`checkPattern` result) pats
-        pure $ Application (Name $ Located loc ListName) result
+        pure $ V.TyCon (Located loc ListName) `V.App` result
     v@(VariantP name arg) -> do
         argTy <- inferPattern arg
-        VariantT (getLoc v) . ExtRow (fromList [(name, argTy)]) <$> freshUniVar (getLoc v)
+        V.VariantT (getLoc v) . ExtRow (fromList [(name, argTy)]) <$> freshUniVar (getLoc v)
     RecordP loc row -> do
         typeRow <- traverse inferPattern row
-        RecordT loc . ExtRow typeRow <$> freshUniVar loc
-    LiteralP (Located loc lit) -> pure $ Name . Located loc $ case lit of
+        V.RecordT loc . ExtRow typeRow <$> freshUniVar loc
+    LiteralP (Located loc lit) -> pure $ V.TyCon . Located loc $ case lit of
         IntLiteral num
             | num >= 0 -> NatName
             | otherwise -> IntName
         TextLiteral _ -> TextName
-        CharLiteral _ -> TextName -- huh?
+        CharLiteral _ -> CharName
   where
     -- conArgTypes and the zipM may be unified into a single function
     conArgTypes name = lookupSig name >>= go
-    go =
-        monoLayer In >=> \case
-            MLFn _ arg rest -> second (arg :) <$> go rest
-            -- univars should never appear as the rightmost argument of a value constructor type
-            -- i.e. types of value constructors have the shape `a -> b -> c -> d -> ConcreteType a b c d`
-            --
-            -- solved univars cannot appear here either, since `lookupSig` on a pattern returns a type with no univars
-            MLUniVar loc uni -> internalError loc $ "unexpected univar" <+> pretty uni <+> "in a constructor type"
-            -- this kind of repetition is necwithUniVaressary to retain missing pattern warnings
-            MLName name -> pure (Name name, [])
-            MLApp lhs rhs -> pure (Application lhs rhs, [])
-            MLVariant loc row -> pure (VariantT loc row, [])
-            MLRecord loc row -> pure (RecordT loc row, [])
-            MLSkolem skolem -> pure (T.Skolem skolem, [])
+      where
+        go =
+            monoLayer In >=> \case
+                MLFn _ arg rest -> second (arg :) <$> go rest
+                -- univars should never appear as the rightmost argument of a value constructor type
+                -- i.e. types of value constructors have the shape `a -> b -> c -> d -> ConcreteType a b c d`
+                --
+                -- solved univars cannot appear here either, since `lookupSig` on a pattern returns a type with no univars
+                MLUniVar loc uni -> internalError loc $ "unexpected univar" <+> pretty uni <+> "in a constructor type"
+                -- this kind of repetition is necessary to retain missing pattern warnings
+                MLCon cname args -> pure (V.Con cname args, [])
+                MLTyCon cname -> pure (V.TyCon cname, [])
+                MLApp lhs rhs -> pure (V.App lhs rhs, [])
+                MLVariantT loc _ -> internalError loc $ "unexpected variant type" <+> "in a constructor type"
+                MLRecordT loc _ -> internalError loc $ "unexpected record type" <+> "in a constructor type"
+                MLVariant{} -> internalError (getLoc name) $ "unexpected variant constructor" <+> "in a constructor type"
+                MLRecord{} -> internalError (getLoc name) $ "unexpected record value" <+> "in a constructor type"
+                MLLambda{} -> internalError (getLoc name) $ "unexpected lambda" <+> "in a constructor type"
+                MLPrim{} -> internalError (getLoc name) $ "unexpected value" <+> "in a constructor type"
+                MLCase{} -> internalError (getLoc name) $ "unexpected case" <+> "in a constructor type"
+                MLSkolem skolem -> pure (V.Skolem skolem, [])
 
 -- MLVar var -> pure (Var var, [])
 
-normalise :: InfEffs es => Eff es TypeDT -> Eff es (Type 'Fixity)
+normalise :: InfEffs es => Eff es TypeDT -> Eff es Type'
 normalise = fmap runIdentity . normaliseAll . fmap Identity
 
 -- gets rid of all univars
-normaliseAll :: (Traversable t, InfEffs es) => Eff es (t TypeDT) -> Eff es (t (Type 'Fixity))
-normaliseAll = generaliseAll {->=> skolemsToExists-} >=> traverse go
+normaliseAll :: (Traversable t, InfEffs es) => Eff es (t TypeDT) -> Eff es (t Type')
+normaliseAll = generaliseAll >=> traverse go
   where
-    go :: InfEffs es => TypeDT -> Eff es (Type 'Fixity)
+    go :: InfEffs es => TypeDT -> Eff es Type'
     go = \case
-        T.UniVar loc uni ->
+        V.UniVar loc uni ->
             lookupUniVar uni >>= \case
-                Left _ -> internalError loc $ "dangling univar " <> pretty uni
+                Left _ -> internalError loc $ "dangling univar" <+> pretty uni
                 Right body -> go (unMono body)
-        T.Skolem skolem -> internalError (getLoc skolem) $ "skolem " <> pretty (T.Skolem skolem) <> " remains in code"
+        V.Skolem skolem -> internalError (getLoc skolem) $ "skolem" <+> pretty (V.Skolem skolem) <+> "remains in code"
         -- other cases could be eliminated by a type changing uniplate
-        Application lhs rhs -> Application <$> go lhs <*> go rhs
-        Function loc lhs rhs -> Function loc <$> go lhs <*> go rhs
-        Forall loc var body -> Forall loc <$> goBinder var <*> go body
-        Exists loc var body -> Exists loc <$> goBinder var <*> go body
-        VariantT loc row -> VariantT loc <$> traverse go row
-        RecordT loc row -> RecordT loc <$> traverse go row
+        V.App lhs rhs -> V.App <$> go lhs <*> go rhs
+        V.Function loc lhs rhs -> V.Function loc <$> go lhs <*> go rhs
+        -- this might produce incorrect results if we ever share a single forall in multiple places
+        V.Forall loc closure -> V.Forall loc . (\body -> closure{V.body = body}) . V.quote <$> go (V.closureBody closure)
+        V.Exists loc closure -> V.Exists loc . (\body -> closure{V.body = body}) . V.quote <$> go (V.closureBody closure)
+        V.VariantT loc row -> V.VariantT loc <$> traverse go row
+        V.RecordT loc row -> V.RecordT loc <$> traverse go row
         -- expression-only constructors are unsupported for now
-        t@TypeApplication{} -> internalError (getLoc t) "type-level type applications are not supported yet"
-        l@Lambda{} -> internalError (getLoc l) "type-level lambdas are not supported yet"
-        w@WildcardLambda{} -> internalError (getLoc w) "type-level wildcard lambdas are not supported yet"
-        l@Let{} -> internalError (getLoc l) "type-level let bindings are not supported yet"
-        l@LetRec{} -> internalError (getLoc l) "type-level let rec bindings are not supported yet"
-        c@Case{} -> internalError (getLoc c) "type-level case is not supported yet"
-        m@Match{} -> internalError (getLoc m) "type-level match is not supported yet"
-        i@If{} -> internalError (getLoc i) "type-level lambdas if not supported yet"
-        a@Annotation{} -> internalError (getLoc a) "type-level annotations are not supported yet"
-        r@E.Record{} -> internalError (getLoc r) "type-level records are not supported yet"
-        l@List{} -> internalError (getLoc l) "type-level lists are not supported yet"
-        d@Do{} -> internalError (getLoc d) "type-level do blocks are not supported yet"
+        l@V.Lambda{} -> internalError (getLoc l) "type-level lambdas are not supported yet"
+        l@V.PrimFunction{} -> internalError (getLoc l) "type-level lambdas are not supported yet"
+        c@V.Case{} -> internalError (getLoc c) "type-level case is not supported yet"
+        r@V.Record{} -> internalError (getLoc r) "type-level records are not supported yet"
         -- and these are just boilerplate
-        Name name -> pure $ Name name
-        RecordLens loc name -> pure $ RecordLens loc name
-        E.Variant name -> pure $ E.Variant name
-        Literal lit -> pure $ Literal lit
-    -- Var var -> pure $ Var var
-    goBinder binder = VarBinder binder.var <$> traverse go binder.kind
+        V.Var name -> pure $ V.Var name
+        V.TyCon name -> pure $ V.TyCon name
+        V.Con name args -> pure $ V.Con name args
+        V.Variant name val -> pure $ V.Variant name val
+        V.PrimValue lit -> pure $ V.PrimValue lit

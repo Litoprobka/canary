@@ -110,8 +110,8 @@ parse :: Ctx es => Term 'DependencyRes -> Eff es (Term 'Fixity)
 parse = \case
     Lambda loc arg body -> Lambda loc <$> parsePattern arg <*> parse body
     WildcardLambda loc args body -> WildcardLambda loc args <$> parse body
-    Application lhs rhs -> Application <$> parse lhs <*> parse rhs
-    TypeApplication expr tyArg -> TypeApplication <$> parse expr <*> parse tyArg
+    App lhs rhs -> App <$> parse lhs <*> parse rhs
+    TypeApp expr tyArg -> TypeApp <$> parse expr <*> parse tyArg
     Let loc binding expr -> Let loc <$> parseBinding binding <*> parse expr
     LetRec loc bindings expr -> LetRec loc <$> traverse parseBinding bindings <*> parse expr
     Case loc arg cases -> Case loc <$> parse arg <*> traverse (bitraverse parsePattern parse) cases
@@ -161,12 +161,12 @@ parse = \case
         fixity <- lookup' mbOp =<< ask @FixityMap
         let loc = zipLocOf lhs rhs
         pure case (mbOp, fixity, lhs) of
-            (Nothing, _, _) -> Application lhs rhs
-            (Just op, InfixChain, Application (Name op') (List _ args))
+            (Nothing, _, _) -> App lhs rhs
+            (Just op, InfixChain, App (Name op') (List _ args))
                 | op == op' ->
-                    Application (Name op') (List loc $ args <> [rhs])
-            (Just op, InfixChain, _) -> Application (Name op) $ List loc [lhs, rhs]
-            (Just op, _, _) -> Application (Application (Name op) lhs) rhs
+                    App (Name op') (List loc $ args <> [rhs])
+            (Just op, InfixChain, _) -> App (Name op) $ List loc [lhs, rhs]
+            (Just op, _, _) -> App (App (Name op) lhs) rhs
 
 -- * Helpers
 

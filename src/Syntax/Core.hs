@@ -1,6 +1,6 @@
 module Syntax.Core where
 
-import Common (Literal_, Name)
+import Common (Literal, Literal_, Loc, Name, Skolem, UniVar)
 import LangPrelude
 import Prettyprinter
 import Syntax.Row (ExtRow (..), OpenName, Row, extension, sortedRow)
@@ -22,25 +22,36 @@ instance Pretty CorePattern where
 
 data CoreTerm
     = Name Name
+    | TyCon Name
+    | Con Name [CoreTerm] -- a fully-applied constructor. may only be produced by `quote`
     | Lambda Name CoreTerm
     | App CoreTerm CoreTerm
     | Case CoreTerm [(CorePattern, CoreTerm)]
     | Let Name CoreTerm CoreTerm
-    | Literal Literal_
+    | Literal Literal
     | Record (Row CoreTerm)
     | Variant OpenName
     | -- types
-      Function CoreTerm CoreTerm
-    | Forall Name CoreTerm
-    | Exists Name CoreTerm
-    | VariantT (ExtRow CoreTerm)
-    | RecordT (ExtRow CoreTerm)
+      Function Loc CoreTerm CoreTerm
+    | Forall Loc Name CoreTerm
+    | Exists Loc Name CoreTerm
+    | VariantT Loc (ExtRow CoreTerm)
+    | RecordT Loc (ExtRow CoreTerm)
+    | -- typechecking metavars
+      -- it might be a good idea to split terms-for-typecheck
+      -- from normal desugared terms
+      -- actually, it should be cleaner to implement standalone prettyprinting for Value
+      -- instead of using `quote` and keeping CoreTerm and Value in sync. This way will do for now, though
+      UniVar Loc UniVar
+    | Skolem Skolem
 
 instance Pretty CoreTerm where
     pretty = go (0 :: Int)
       where
         go n = \case
             Name name -> pretty name
+            TyCon name -> pretty name
+            Con name args -> parensWhen 3 $ hsep (pretty name : map pretty args)
             Lambda name body -> parensWhen 1 $ "λ" <> pretty name <+> compressLambda body
             App lhs rhs -> parensWhen 3 $ go 2 lhs <+> go 3 rhs
             Record row -> braces . sep . punctuate comma . map recordField $ sortedRow row
@@ -49,11 +60,13 @@ instance Pretty CoreTerm where
             Case arg matches -> nest 4 (vsep $ ("case" <+> pretty arg <+> "of" :) $ matches <&> \(pat, body) -> pretty pat <+> "->" <+> pretty body)
             Let name body expr -> "let" <+> pretty name <+> "=" <+> pretty body <> ";" <+> pretty expr
             Literal lit -> pretty lit
-            Function from to -> parensWhen 2 $ go 2 from <+> "->" <+> pretty to
-            Forall var body -> parensWhen 1 $ "∀" <> pretty var <> "." <+> compressForall body
-            Exists var body -> parensWhen 1 $ "∃" <> pretty var <> "." <+> compressExists body
-            VariantT row -> brackets . withExt row . sep . punctuate comma . map variantItem $ sortedRow row.row
-            RecordT row -> braces . withExt row . sep . punctuate comma . map recordTyField $ sortedRow row.row
+            Function _ from to -> parensWhen 2 $ go 2 from <+> "->" <+> pretty to
+            Forall _ var body -> parensWhen 1 $ "∀" <> pretty var <> compressForall body
+            Exists _ var body -> parensWhen 1 $ "∃" <> pretty var <> compressExists body
+            VariantT _ row -> brackets . withExt row . sep . punctuate comma . map variantItem $ sortedRow row.row
+            RecordT _ row -> braces . withExt row . sep . punctuate comma . map recordTyField $ sortedRow row.row
+            Skolem skolem -> pretty skolem
+            UniVar _ uni -> pretty uni
           where
             parensWhen minPrec
                 | n >= minPrec = parens
@@ -67,8 +80,8 @@ instance Pretty CoreTerm where
             Lambda name body -> pretty name <+> compressLambda body
             other -> "->" <+> pretty other
         compressForall = \case
-            Forall name body -> " " <> pretty name <> compressForall body
+            Forall _ name body -> " " <> pretty name <> compressForall body
             other -> "." <+> pretty other
         compressExists = \case
-            Exists name body -> " " <> pretty name <> compressExists body
+            Exists _ name body -> " " <> pretty name <> compressExists body
             other -> "." <+> pretty other

@@ -106,7 +106,10 @@ data Name_
     = Name Text Id
     | Wildcard Int Id
     | BoolName
+    | TrueName
     | ListName
+    | ConsName
+    | NilName
     | IntName
     | NatName
     | TextName
@@ -170,7 +173,10 @@ instance Pretty Name_ where
         (Name name id') -> pretty name <> "#" <> pretty id'
         (Wildcard n id') -> "_" <> pretty n <> "#" <> pretty id'
         BoolName -> "Bool"
+        TrueName -> "True"
         ListName -> "List"
+        ConsName -> "Cons"
+        NilName -> "Nil"
         IntName -> "Int"
         NatName -> "Nat"
         TextName -> "Text"
@@ -238,7 +244,10 @@ toSimpleName (Located loc name) = Located loc case name of
     Name txt _ -> Name' txt
     Wildcard n _ -> Wildcard' n
     BoolName -> Name' "Bool"
+    TrueName -> Name' "True"
     ListName -> Name' "List"
+    ConsName -> Name' "Cons"
+    NilName -> Name' "Nil"
     IntName -> Name' "Int"
     NatName -> Name' "Nat"
     TextName -> Name' "Text"
