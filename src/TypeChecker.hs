@@ -31,13 +31,14 @@ import Data.List.NonEmpty qualified as NE
 import Data.Traversable (for)
 import Diagnostic (Diagnose, internalError)
 import Effectful
-import Effectful.State.Static.Local (State, get, modify)
+import Effectful.State.Static.Local (State, get, gets, modify)
 import GHC.IsList qualified as IsList
 import Interpreter (ValueEnv)
 import Interpreter qualified as V
 import LangPrelude hiding (bool)
 import NameGen
 import Syntax
+import Syntax.Core qualified as C
 import Syntax.Declaration qualified as D
 import Syntax.Row (ExtRow (..))
 import Syntax.Row qualified as Row
@@ -60,7 +61,12 @@ inferDecls decls = do
     let (values, sigs') = second HashMap.fromList $ foldr getValueDecls ([], []) decls
     -- kind-checking all signatures
     sigs <- traverse typeFromTerm sigs'
-    let types = HashMap.fromList $ map (\name -> (name, type_ (getLoc name))) typeNames
+    topLevel <- gets @InfState (.topLevel)
+    types <-
+        traverse (either (const $ internalError Blank "uninferred type") pure) $
+            HashMap.compose topLevel $
+                HashMap.fromList $
+                    (\x -> (x, x)) <$> typeNames
     (types <>) . (<> sigs) . fold <$> for values \(binding, locals) ->
         binding & collectNamesInBinding & listToMaybe >>= (`HashMap.lookup` sigs) & \case
             Just ty -> do
@@ -92,11 +98,12 @@ inferDecls decls = do
                 modify \s -> s{topLevel = HashMap.insert con (Right sigV) s.topLevel}
             pure $ DList.singleton name
         D.GADT loc name mbKind constrs -> do
+            kind <- maybe (pure $ type_ loc) typeFromTerm mbKind
+            modify \s -> s{topLevel = HashMap.insert name (Right kind) s.topLevel}
             for_ constrs \con -> do
-                kind <- maybe (pure $ type_ loc) typeFromTerm mbKind
                 conSig <- typeFromTerm con.sig
                 modify \s ->
-                    s{topLevel = HashMap.insert name (Right kind) $ HashMap.insert con.name (Right conSig) s.topLevel}
+                    s{topLevel = HashMap.insert con.name (Right conSig) s.topLevel}
             pure $ DList.singleton name
     mkTypeKind loc = go
       where
@@ -492,31 +499,36 @@ normalise = fmap runIdentity . normaliseAll . fmap Identity
 
 -- gets rid of all univars
 normaliseAll :: (Traversable t, InfEffs es) => Eff es (t TypeDT) -> Eff es (t Type')
-normaliseAll = generaliseAll >=> traverse go
+normaliseAll = generaliseAll >=> traverse (eval' <=< go . V.quote)
   where
-    go :: InfEffs es => TypeDT -> Eff es Type'
+    eval' :: InfEffs es => CoreTerm -> Eff es Type'
+    eval' ty = do
+        env <- get @ValueEnv
+        pure $ V.evalCore env ty
+
+    go :: InfEffs es => CoreTerm -> Eff es CoreTerm
     go = \case
-        V.UniVar loc uni ->
+        C.UniVar loc uni ->
             lookupUniVar uni >>= \case
                 Left _ -> internalError loc $ "dangling univar" <+> pretty uni
-                Right body -> go (unMono body)
-        V.Skolem skolem -> internalError (getLoc skolem) $ "skolem" <+> pretty (V.Skolem skolem) <+> "remains in code"
+                Right body -> go $ V.quote (unMono body)
+        C.Skolem skolem -> internalError (getLoc skolem) $ "skolem" <+> pretty (V.Skolem skolem) <+> "remains in code"
         -- other cases could be eliminated by a type changing uniplate
-        V.App lhs rhs -> V.App <$> go lhs <*> go rhs
-        V.Function loc lhs rhs -> V.Function loc <$> go lhs <*> go rhs
+        C.App lhs rhs -> C.App <$> go lhs <*> go rhs
+        C.Function loc lhs rhs -> C.Function loc <$> go lhs <*> go rhs
         -- this might produce incorrect results if we ever share a single forall in multiple places
-        V.Forall loc closure -> V.Forall loc . (\body -> closure{V.body = body}) . V.quote <$> go (V.closureBody closure)
-        V.Exists loc closure -> V.Exists loc . (\body -> closure{V.body = body}) . V.quote <$> go (V.closureBody closure)
-        V.VariantT loc row -> V.VariantT loc <$> traverse go row
-        V.RecordT loc row -> V.RecordT loc <$> traverse go row
+        C.Forall loc var body -> C.Forall loc var <$> go body
+        C.Exists loc var body -> C.Exists loc var <$> go body
+        C.VariantT loc row -> C.VariantT loc <$> traverse go row
+        C.RecordT loc row -> C.RecordT loc <$> traverse go row
         -- expression-only constructors are unsupported for now
-        l@V.Lambda{} -> internalError (getLoc l) "type-level lambdas are not supported yet"
-        l@V.PrimFunction{} -> internalError (getLoc l) "type-level lambdas are not supported yet"
-        c@V.Case{} -> internalError (getLoc c) "type-level case is not supported yet"
-        r@V.Record{} -> internalError (getLoc r) "type-level records are not supported yet"
+        C.Lambda{} -> internalError Blank "type-level lambdas are not supported yet"
+        C.Case{} -> internalError Blank "type-level case is not supported yet"
+        C.Record{} -> internalError Blank "type-level records are not supported yet"
         -- and these are just boilerplate
-        V.Var name -> pure $ V.Var name
-        V.TyCon name -> pure $ V.TyCon name
-        V.Con name args -> pure $ V.Con name args
-        V.Variant name val -> pure $ V.Variant name val
-        V.PrimValue lit -> pure $ V.PrimValue lit
+        C.Name name -> pure $ C.Name name
+        C.TyCon name -> pure $ C.TyCon name
+        C.Con name args -> pure $ C.Con name args
+        C.Variant name -> pure $ C.Variant name
+        C.Literal lit -> pure $ C.Literal lit
+        C.Let name _ _ -> internalError (getLoc name) "unexpected let in a quoted value"
