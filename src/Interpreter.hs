@@ -10,7 +10,7 @@ import Common (
     Loc (..),
     Located (..),
     Name,
-    Name_ (ConsName, NilName, TrueName),
+    Name_ (ConsName, NilName, TrueName, TypeName),
     Pass (..),
     SimpleName_ (Name'),
     Skolem,
@@ -46,8 +46,8 @@ data Value
       PrimValue Literal -- the name 'Literal' is slightly misleading here
     | -- types
       Function Loc Type' Type'
-    | Forall Loc Closure
-    | Exists Loc Closure
+    | Forall Loc Type' Closure
+    | Exists Loc Type' Closure
     | VariantT Loc (ExtRow Type')
     | RecordT Loc (ExtRow Type')
     | -- stuck computations
@@ -73,8 +73,8 @@ quote = \case
     -- RecordLens path -> RecordLens path
     PrimValue lit -> C.Literal lit
     Function loc l r -> C.Function loc (quote l) (quote r)
-    Forall loc closure -> C.Forall loc closure.var $ quote (closureBody closure)
-    Exists loc closure -> C.Exists loc closure.var $ quote (closureBody closure)
+    Forall loc ty closure -> C.Forall loc closure.var (quote ty) $ quote (closureBody closure)
+    Exists loc ty closure -> C.Exists loc closure.var (quote ty) $ quote (closureBody closure)
     VariantT loc row -> C.VariantT loc $ fmap quote row
     RecordT loc row -> C.RecordT loc $ fmap quote row
     App lhs rhs -> C.App (quote lhs) (quote rhs)
@@ -118,8 +118,8 @@ evalCore !env = \case
     C.Record row -> Record $ evalCore env <$> row
     C.Variant _name -> error "todo: seems like evalCore needs namegen" -- Lambda (Located Blank $ Name' "x") $ C.Variant name `C.App`
     C.Function loc lhs rhs -> Function loc (evalCore env lhs) (evalCore env rhs)
-    C.Forall loc var body -> Forall loc $ Closure{var, env, body}
-    C.Exists loc var body -> Exists loc $ Closure{var, env, body}
+    C.Forall loc var ty body -> Forall loc (evalCore env ty) $ Closure{var, env, body}
+    C.Exists loc var ty body -> Exists loc (evalCore env ty) $ Closure{var, env, body}
     C.VariantT loc row -> VariantT loc $ evalCore env <$> row
     C.RecordT loc row -> RecordT loc $ evalCore env <$> row
     -- should normal evaluation resolve univars?
@@ -203,10 +203,12 @@ desugar = go
         T.List loc xs -> foldr (C.App . C.App (C.Name $ Located loc ConsName)) (C.Name $ Located loc NilName) <$> traverse go xs
         T.Do{} -> error "todo: desugar do blocks"
         T.Function loc from to -> C.Function loc <$> go from <*> go to
-        T.Forall loc binder body -> C.Forall loc binder.var <$> go body
-        T.Exists loc binder body -> C.Exists loc binder.var <$> go body
+        T.Forall loc binder body -> C.Forall loc binder.var <$> maybe (type_ loc) desugar binder.kind <*> go body
+        T.Exists loc binder body -> C.Exists loc binder.var <$> maybe (type_ loc) desugar binder.kind <*> go body
         T.VariantT loc row -> C.VariantT loc <$> traverse go row
         T.RecordT loc row -> C.RecordT loc <$> traverse go row
+
+    type_ loc = pure $ C.TyCon $ Located loc TypeName
 
     -- we only support non-nested patterns for now
     flattenPattern :: Pattern 'Fixity -> Eff es CorePattern

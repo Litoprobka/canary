@@ -427,7 +427,8 @@ generaliseAll action = do
         (ty', vars) <- runState HashMap.empty $ go scope $ V.quote ty
         let forallVars = hashNub . lefts $ toList vars
         env <- get @ValueEnv
-        pure $ V.evalCore env $ foldr (C.Forall (getLoc ty)) ty' forallVars
+        pure $ V.evalCore env $ foldr (\var body -> C.Forall (getLoc ty) var (type_ $ getLoc ty) body) ty' forallVars
+    type_ loc = C.TyCon $ Located loc TypeName
 
     go
         :: InfEffs es => Scope -> CoreTerm -> Eff (State (HashMap UniVar (Either Name CoreTerm)) : es) CoreTerm
@@ -452,8 +453,8 @@ generaliseAll action = do
         C.RecordT loc row -> C.RecordT loc <$> traverse (go scope) row
         C.VariantT loc row -> C.VariantT loc <$> traverse (go scope) row
         C.Record row -> C.Record <$> traverse (go scope) row
-        C.Forall loc var body -> C.Forall loc var <$> go scope body
-        C.Exists loc var body -> C.Exists loc var <$> go scope body
+        C.Forall loc var ty body -> C.Forall loc var <$> go scope ty <*> go scope body
+        C.Exists loc var ty body -> C.Exists loc var <$> go scope ty <*> go scope body
         C.Lambda var body -> C.Lambda var <$> go scope body
         C.Con name args -> C.Con name <$> traverse (go scope) args
         -- terminal cases
@@ -503,8 +504,8 @@ mono variance = \case
     V.Function loc from to -> MFn loc <$> mono (flipVariance variance) from <*> go to
     V.VariantT loc row -> MVariantT loc <$> traverse go row
     V.RecordT loc row -> MRecordT loc <$> traverse go row
-    V.Forall _ closure -> go =<< substitute variance closure
-    V.Exists _ closure -> go =<< substitute (flipVariance variance) closure
+    V.Forall _ _ closure -> go =<< substitute variance closure
+    V.Exists _ _ closure -> go =<< substitute (flipVariance variance) closure
     V.PrimFunction{} -> internalError Blank "mono: prim function"
     other -> internalError (getLoc other) "type-level expressions are not supported yet"
   where
@@ -554,8 +555,8 @@ monoLayer variance = \case
     V.Function loc from to -> pure $ MLFn loc from to
     V.VariantT loc row -> pure $ MLVariantT loc row
     V.RecordT loc row -> pure $ MLRecordT loc row
-    V.Forall _ closure -> monoLayer variance =<< substitute variance closure
-    V.Exists _ closure -> monoLayer variance =<< substitute (flipVariance variance) closure
+    V.Forall _ _ closure -> monoLayer variance =<< substitute variance closure
+    V.Exists _ _ closure -> monoLayer variance =<< substitute (flipVariance variance) closure
     V.PrimFunction{} -> internalError Blank "monoLayer: prim function"
     other -> internalError (getLoc other) "type-level expressions are not supported yet"
 

@@ -248,8 +248,8 @@ check e type_ = scoped $ match e type_
                     lookupUniVar uni >>= \case
                         Left _ -> solveUniVar uni newTy
                         Right _ -> pass
-        expr (V.Forall _ closure) -> check expr =<< substitute Out closure
-        expr (V.Exists _ closure) -> check expr =<< substitute In closure
+        expr (V.Forall _ _ closure) -> check expr =<< substitute Out closure
+        expr (V.Exists _ _ closure) -> check expr =<< substitute In closure
         -- todo: a case for do-notation
         expr ty -> do
             inferredTy <- infer expr
@@ -300,7 +300,7 @@ infer =
             inferApp (getLoc app) fTy x
         TypeApp expr tyArg -> do
             infer expr >>= \case
-                V.Forall _ closure -> do
+                V.Forall _ _ closure -> do
                     Subst{var, result} <- substitute' In closure
                     env <- get @ValueEnv
                     tyArgV <- V.eval env tyArg
@@ -517,8 +517,8 @@ normaliseAll = generaliseAll >=> traverse (eval' <=< go . V.quote)
         C.App lhs rhs -> C.App <$> go lhs <*> go rhs
         C.Function loc lhs rhs -> C.Function loc <$> go lhs <*> go rhs
         -- this might produce incorrect results if we ever share a single forall in multiple places
-        C.Forall loc var body -> C.Forall loc var <$> go body
-        C.Exists loc var body -> C.Exists loc var <$> go body
+        C.Forall loc var ty body -> C.Forall loc var <$> go ty <*> go body
+        C.Exists loc var ty body -> C.Exists loc var <$> go ty <*> go body
         C.VariantT loc row -> C.VariantT loc <$> traverse go row
         C.RecordT loc row -> C.RecordT loc <$> traverse go row
         -- expression-only constructors are unsupported for now

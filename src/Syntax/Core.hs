@@ -20,6 +20,8 @@ instance Pretty CorePattern where
         VariantP name arg -> parens $ pretty name <+> pretty arg
         LiteralP lit -> pretty lit
 
+type CoreType = CoreTerm
+
 data CoreTerm
     = Name Name
     | TyCon Name
@@ -33,8 +35,8 @@ data CoreTerm
     | Variant OpenName
     | -- types
       Function Loc CoreTerm CoreTerm
-    | Forall Loc Name CoreTerm
-    | Exists Loc Name CoreTerm
+    | Forall Loc Name CoreType CoreTerm
+    | Exists Loc Name CoreType CoreTerm
     | VariantT Loc (ExtRow CoreTerm)
     | RecordT Loc (ExtRow CoreTerm)
     | -- typechecking metavars
@@ -61,8 +63,8 @@ instance Pretty CoreTerm where
             Let name body expr -> "let" <+> pretty name <+> "=" <+> pretty body <> ";" <+> pretty expr
             Literal lit -> pretty lit
             Function _ from to -> parensWhen 2 $ go 2 from <+> "->" <+> pretty to
-            Forall _ var body -> parensWhen 1 $ "∀" <> pretty var <> compressForall body
-            Exists _ var body -> parensWhen 1 $ "∃" <> pretty var <> compressExists body
+            Forall _ var _ body -> parensWhen 1 $ "∀" <> pretty var <> compressForall body
+            Exists _ var _ body -> parensWhen 1 $ "∃" <> pretty var <> compressExists body
             VariantT _ row -> brackets . withExt row . sep . punctuate comma . map variantItem $ sortedRow row.row
             RecordT _ row -> braces . withExt row . sep . punctuate comma . map recordTyField $ sortedRow row.row
             Skolem skolem -> pretty skolem
@@ -80,8 +82,8 @@ instance Pretty CoreTerm where
             Lambda name body -> pretty name <+> compressLambda body
             other -> "->" <+> pretty other
         compressForall = \case
-            Forall _ name body -> " " <> pretty name <> compressForall body
+            Forall _ name _ body -> " " <> pretty name <> compressForall body
             other -> "." <+> pretty other
         compressExists = \case
-            Exists _ name body -> " " <> pretty name <> compressExists body
+            Exists _ name _ body -> " " <> pretty name <> compressExists body
             other -> "." <+> pretty other
