@@ -25,6 +25,7 @@ data Term (p :: Pass) where
     -- | 'a
     -- | type variables with an inferred forall binder
     ImplicitVar :: NameAt p ~ SimpleName => NameAt p -> Term p
+    Parens :: NameAt p ~ SimpleName => Term p -> Term p
     UniVar :: Loc -> UniVar -> Type 'DuringTypecheck
     Skolem :: Skolem -> Type 'DuringTypecheck
     Literal :: Literal -> Expr p
@@ -132,6 +133,7 @@ instance Pretty (NameAt p) => Pretty (Expr p) where
             Annotation expr ty -> parensWhen 1 $ pretty expr <+> ":" <+> pretty ty
             Name name -> pretty name
             ImplicitVar var -> pretty var
+            Parens expr -> parens $ pretty expr
             RecordLens _ fields -> encloseSep "." "" "." $ toList $ pretty <$> fields
             Variant name -> pretty name
             Record _ row -> braces . sep . punctuate comma . map recordField $ sortedRow row
@@ -188,6 +190,7 @@ instance HasLoc (NameAt p) => HasLoc (Expr p) where
         Annotation expr ty -> zipLocOf expr ty
         Name name -> getLoc name
         ImplicitVar var -> getLoc var
+        Parens expr -> getLoc expr
         RecordLens loc _ -> loc
         Variant name -> getLoc name
         Record loc _ -> loc
@@ -305,6 +308,7 @@ instance
         VariantT loc row -> VariantT loc (fmap cast row)
         RecordT loc row -> RecordT loc (fmap cast row)
         ImplicitVar var -> ImplicitVar var
+        Parens expr -> Parens (cast expr)
         UniVar loc uni -> castUni loc uni
         Skolem skolem -> castSkolem skolem
 
@@ -343,6 +347,7 @@ collectReferencedNames = go
     go = \case
         Name name -> [name]
         ImplicitVar var -> [var]
+        Parens expr -> go expr
         UniVar{} -> []
         Skolem _ -> []
         Literal _ -> []
@@ -420,6 +425,7 @@ uniplate f = \case
     Exists loc var body -> Exists loc <$> plateBinder f var <*> f body
     VariantT loc row -> VariantT loc <$> traverse f row
     RecordT loc row -> RecordT loc <$> traverse f row
+    Parens expr -> Parens <$> f expr
     u@UniVar{} -> pure u
     s@Skolem{} -> pure s
     n@Name{} -> pure n

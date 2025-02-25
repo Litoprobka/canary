@@ -220,9 +220,9 @@ takeInputChunk = do
 parseCommand :: Parser ReplCommand
 parseCommand =
     choice @[]
-        [ keyword ":t" *> fmap Type_ Parser.expression
+        [ keyword ":t" *> fmap Type_ Parser.term
         , keyword ":q" $> Quit
         , keyword ":load" *> fmap (Load . Text.unpack) takeRest
         , try $ fmap Decls Parser.code
-        , fmap Expr Parser.expression
+        , fmap Expr Parser.term
         ]

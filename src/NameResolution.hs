@@ -294,6 +294,7 @@ resolveTerm e = scoped case e of
         pure $ Exists loc var' body'
     Function loc from to -> Function loc <$> resolveTerm from <*> resolveTerm to
     ImplicitVar var -> internalError (getLoc var) "inference for implicit vars is not implemented yet"
+    Parens expr -> resolveTerm expr -- todo: construct implicit lambdas here
     VariantT loc row -> VariantT loc <$> traverse resolveTerm row
     RecordT loc row -> RecordT loc <$> traverse resolveTerm row
 

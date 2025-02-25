@@ -3,7 +3,7 @@
 {-# LANGUAGE LambdaCase #-}
 {-# OPTIONS_GHC -Wno-unrecognised-pragmas #-}
 
-module Parser (code, declaration, type', pattern', expression, parseModule, run) where
+module Parser (code, declaration, type', pattern', term, expression, parseModule, run) where
 
 import LangPrelude
 
@@ -21,10 +21,8 @@ import Common (
 import Control.Monad.Combinators.Expr qualified as Expr
 import Control.Monad.Combinators.NonEmpty qualified as NE
 import Data.List.NonEmpty qualified as NE
-import Data.Sequence qualified as Seq
 import Diagnostic (Diagnose, fatal, reportsFromBundle)
 import Lexer
-import Relude.Monad (gets, modify)
 import Syntax
 import Syntax.Declaration qualified as D
 import Syntax.Row
@@ -62,11 +60,11 @@ declaration = withLoc $ choice [typeDec, fixityDec, signature, valueDec]
 
     gadtDec :: SimpleName -> Parser (Loc -> Declaration 'Parse)
     gadtDec name = do
-        mbKind <- optional $ specialSymbol ":" *> type'
+        mbKind <- optional $ specialSymbol ":" *> term
         constrs <- block "where" $ withLoc do
             con <- typeName
             specialSymbol ":"
-            sig <- type'
+            sig <- term
             pure $ flip3 D.GadtConstructor con sig
         pure $ flip4 D.GADT name mbKind constrs
 
@@ -78,7 +76,7 @@ declaration = withLoc $ choice [typeDec, fixityDec, signature, valueDec]
 
     signature = do
         name <- try $ (operatorInParens <|> termName) <* specialSymbol ":"
-        flip3 D.Signature name <$> type'
+        flip3 D.Signature name <$> term
 
     fixityDec = do
         keyword "infix"
@@ -103,12 +101,15 @@ declaration = withLoc $ choice [typeDec, fixityDec, signature, valueDec]
 
 varBinder :: ParserM m => m (VarBinder 'Parse)
 varBinder =
-    parens (VarBinder <$> termName <* specialSymbol ":" <*> fmap Just type')
+    parens (VarBinder <$> termName <* specialSymbol ":" <*> fmap Just term)
         <|> flip VarBinder Nothing
         <$> termName
 
 typeVariable :: ParserM m => m (Type 'Parse)
 typeVariable = Name <$> termName <|> ImplicitVar <$> implicitVariable
+
+term :: ParserM m => m (Term 'Parse)
+term = expression <|> type'
 
 type' :: ParserM m => m (Type 'Parse)
 type' = Expr.makeExprParser typeParens [[typeApp], [function], [forall', exists]]
@@ -128,8 +129,8 @@ typeParens =
         choice
             [ Name <$> typeName
             , typeVariable
-            , parens type'
-            , withLoc' RecordT $ NoExtRow <$> someRecord ":" type' Nothing
+            , parens term
+            , withLoc' RecordT $ NoExtRow <$> someRecord ":" term Nothing
             , withLoc' VariantT $ NoExtRow <$> brackets (fromList <$> commaSep variantItem)
             ]
   where
@@ -182,7 +183,7 @@ patternParens = do
             ]
     option pat do
         specialSymbol ":"
-        AnnotationP pat <$> type'
+        AnnotationP pat <$> term
   where
     record = withLoc' RecordP $ someRecord "=" pattern' (Just VarP)
     unit = RecordP Blank Row.empty
@@ -195,7 +196,7 @@ binding = do
         try (FunctionB <$> funcName <*> NE.some patternParens)
             <|> (ValueB <$> pattern')
     specialSymbol "="
-    f <$> expression
+    f <$> term
   where
     -- we might want to support infix operator declarations in the future
     -- > f $ x = f x
@@ -214,9 +215,9 @@ expression = expression' do
 -- an expression with infix operators and unresolved priorities
 -- the `E.Infix` constructor is only used when there is more than one operator
 expression' :: ParserM m => m (Expr 'Parse) -> m (Expr 'Parse)
-expression' termParser = do
-    firstExpr <- noPrec termParser
-    pairs <- many $ (,) <$> optional someOperator <*> noPrec termParser
+expression' atom = do
+    firstExpr <- noPrec
+    pairs <- many $ (,) <$> optional someOperator <*> noPrec
     let expr = case pairs of
             [] -> firstExpr
             [(Nothing, secondExpr)] -> firstExpr `App` secondExpr
@@ -224,27 +225,16 @@ expression' termParser = do
             (_ : _ : _) -> uncurry InfixE $ shift firstExpr pairs
     option expr do
         specialSymbol ":"
-        Annotation expr <$> type'
+        Annotation expr <$> term
   where
-    sameScopeExpr = expression' termParser
-
-    -- overrides the term parser of expression to collect wildcards
-    -- has to be called in the scope of `withWildcards`
-    newScopeExpr :: ParserM m => StateT (Seq Loc) m (Expr 'Parse)
-    newScopeExpr =
-        expression' $
-            nextVar
-                <|> fmap Name termName
-
     -- x [(+, y), (*, z), (+, w)] --> [(x, +), (y, *), (z, +)] w
     shift expr [] = ([], expr)
     shift lhs ((op, rhs) : rest) = first ((lhs, op) :) $ shift rhs rest
-    noPrec varParser = choice $ [varParser] <> keywordBased <> terminals
+    noPrec = choice $ [atom] <> keywordBased <> terminals
 
     -- expression forms that have a leading keyword/symbol
     keywordBased =
-        [ -- note that we don't use `sameScopeExpression` here, since interleaving explicit and implicit lambdas, i.e. `(\f -> f _)`, is way too confusing
-          lambdaLike Lambda lambda pattern' "->" <*> expression
+        [ lambdaLike Lambda lambda pattern' "->" <*> term
         , letRec
         , let'
         , case'
@@ -252,37 +242,37 @@ expression' termParser = do
         , if'
         , doBlock
         , record
-        , withWildcards $ withLoc $ flip List <$> brackets (commaSep newScopeExpr)
-        , Name <$> operatorInParens -- operators are never wildcards, so it's okay to sidestep termParser here
-        , parens $ withWildcards newScopeExpr
+        , withLoc $ flip List <$> brackets (commaSep term)
+        , Name <$> operatorInParens
+        , parens term
         ]
       where
-        letRec = withLoc $ letRecBlock (try $ keyword "let" *> keyword "rec") (flip3 LetRec) binding expression
+        letRec = withLoc $ letRecBlock (try $ keyword "let" *> keyword "rec") (flip3 LetRec) binding term
         let' =
             withLoc $
-                letBlock "let" (flip3 Let) binding expression -- wildcards do not propagate through let bindings. Use an explicit lambda instead!
+                letBlock "let" (flip3 Let) binding term
         case' = withLoc do
             keyword "case"
-            arg <- expression -- `case _ of` is redundant, since it has the same meaning as a one arg `match`
-            matches <- block "of" $ (,) <$> pattern' <* specialSymbol "->" <*> expression
+            arg <- term
+            matches <- block "of" $ (,) <$> pattern' <* specialSymbol "->" <*> term
             pure $ flip3 Case arg matches
-        match' = withLoc $ flip Match <$> block "match" ((,) <$> some patternParens <* specialSymbol "->" <*> expression)
+        match' = withLoc $ flip Match <$> block "match" ((,) <$> some patternParens <* specialSymbol "->" <*> term)
         if' = withLoc do
             keyword "if"
-            cond <- sameScopeExpr
+            cond <- term
             keyword "then"
-            true <- sameScopeExpr
+            true <- term
             keyword "else"
-            false <- sameScopeExpr
+            false <- term
             pure $ flip4 If cond true false
         doBlock = withLoc do
             stmts <-
                 block "do" $
                     choice
-                        [ try $ Bind <$> pattern' <* specialSymbol "<-" <*> expression
-                        , withLoc $ flip3 With <$ keyword "with" <*> pattern' <* specialSymbol "<-" <*> expression
+                        [ try $ Bind <$> pattern' <* specialSymbol "<-" <*> term
+                        , withLoc $ flip3 With <$ keyword "with" <*> pattern' <* specialSymbol "<-" <*> term
                         , withLoc' DoLet $ keyword "let" *> binding
-                        , Action <$> expression
+                        , Action <$> term
                         ]
             case unsnoc stmts of
                 Nothing -> fail "empty do block"
@@ -293,7 +283,7 @@ expression' termParser = do
         unsnoc (x : xs) = first (x :) <$> unsnoc xs
 
     record =
-        withWildcards $ withLoc $ flip Record <$> someRecord "=" newScopeExpr (Just Name)
+        withLoc $ flip Record <$> someRecord "=" term (Just Name)
 
     terminals =
         [ withLoc' RecordLens recordLens
@@ -306,36 +296,6 @@ expression' termParser = do
         optional record <&> \case
             Nothing -> Name name
             Just arg -> Name name `App` arg
-
--- turns out that respecting operator precedence makes for confusing code
--- i.e. consider, say, `3 + _ * 4`
--- with precendence, it should be parsed as `3 + (\x -> x * 4)`
--- but what you probably mean is `\x -> 3 + x * 4`
---
--- in the end, I decided to go with the simplest rules possible - that is, parens determine
--- the scope of the implicit lambda
---
--- it's not clear whether I want to require parens around list and record literals
--- on one hand, `({x = 3, y = 3})` looks a bit janky
--- on the other hand, without that you wouldn't be able to write `f {x = 3, y = _}`
--- if you want it to mean `\y -> f {x = 3, y}`
-withWildcards :: ParserM m => StateT (Seq Loc) m (Expr 'Parse) -> m (Expr 'Parse)
-withWildcards p = do
-    -- todo: collect a list of wildcard names along with the counter
-    ((expr, mbVarLocs), loc) <- withLoc $ (,) <$> runStateT p Seq.empty
-    pure case NE.nonEmpty $ zip [1 ..] $ toList mbVarLocs of
-        Just varLocs ->
-            WildcardLambda loc ((\(i, varLoc) -> Located varLoc $ Wildcard' i) <$> varLocs) expr
-        Nothing -> expr
-
--- foldr (\i -> E.Lambda loc (P.Var $ SimpleName Blank $ "$" <> show i)) expr [1 .. varCount]
-
-nextVar :: ParserM m => StateT (Seq Loc) m (Expr 'Parse)
-nextVar = do
-    loc <- withLoc' const wildcard
-    modify (Seq.|> loc)
-    i <- gets Seq.length
-    pure . Name . Located loc $ Wildcard' i
 
 flip3 :: (a -> b -> c -> d) -> b -> c -> a -> d
 flip3 f y z x = f x y z
