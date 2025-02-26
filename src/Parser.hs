@@ -3,7 +3,7 @@
 {-# LANGUAGE LambdaCase #-}
 {-# OPTIONS_GHC -Wno-unrecognised-pragmas #-}
 
-module Parser (code, declaration, type', pattern', term, expression, parseModule, run) where
+module Parser (code, declaration, pattern', term, parseModule, run) where
 
 import LangPrelude
 
@@ -18,7 +18,6 @@ import Common (
     locFromSourcePos,
     zipLocOf,
  )
-import Control.Monad.Combinators.Expr qualified as Expr
 import Control.Monad.Combinators.NonEmpty qualified as NE
 import Data.List.NonEmpty qualified as NE
 import Diagnostic (Diagnose, fatal, reportsFromBundle)
@@ -71,7 +70,7 @@ declaration = withLoc $ choice [typeDec, fixityDec, signature, valueDec]
     typePattern :: Parser (Constructor 'Parse)
     typePattern = withLoc do
         name <- typeName
-        args <- many typeParens
+        args <- many termParens
         pure $ flip3 D.Constructor name args
 
     signature = do
@@ -99,44 +98,16 @@ declaration = withLoc $ choice [typeDec, fixityDec, signature, valueDec]
             commaSep someOperator
         pure $ \loc -> D.Fixity loc fixity op PriorityRelation{above, below, equal}
 
-varBinder :: ParserM m => m (VarBinder 'Parse)
+varBinder :: Parser (VarBinder 'Parse)
 varBinder =
     parens (VarBinder <$> termName <* specialSymbol ":" <*> fmap Just term)
         <|> flip VarBinder Nothing
         <$> termName
 
-typeVariable :: ParserM m => m (Type 'Parse)
+typeVariable :: Parser (Type 'Parse)
 typeVariable = Name <$> termName <|> ImplicitVar <$> implicitVariable
 
-term :: ParserM m => m (Term 'Parse)
-term = expression <|> type'
-
-type' :: ParserM m => m (Type 'Parse)
-type' = Expr.makeExprParser typeParens [[typeApp], [function], [forall', exists]]
-  where
-    forall' = Expr.Prefix $ lambdaLike Forall forallKeyword varBinder "."
-    exists = Expr.Prefix $ lambdaLike Exists existsKeyword varBinder "."
-
-    typeApp = Expr.InfixL $ pure App
-    function = Expr.InfixR $ appLoc Function <$ specialSymbol "->"
-    appLoc con lhs rhs = con (zipLocOf lhs rhs) lhs rhs
-
--- a type expression with higher precedence than application
--- used when parsing constructor argument types and the like
-typeParens :: ParserM m => m (Type 'Parse)
-typeParens =
-    label "type" $
-        choice
-            [ Name <$> typeName
-            , typeVariable
-            , parens term
-            , withLoc' RecordT $ NoExtRow <$> someRecord ":" term Nothing
-            , withLoc' VariantT $ NoExtRow <$> brackets (fromList <$> commaSep variantItem)
-            ]
-  where
-    variantItem = (,) <$> variantConstructor <*> option (Name $ Located Blank $ Name' "Unit") typeParens
-
-someRecord :: ParserM m => Text -> m value -> Maybe (SimpleName -> value) -> m (Row value)
+someRecord :: Text -> Parser value -> Maybe (SimpleName -> value) -> Parser (Row value)
 someRecord delim valueP missingValue = braces (fromList <$> commaSep recordItem)
   where
     onMissing name = case missingValue of
@@ -147,7 +118,7 @@ someRecord delim valueP missingValue = braces (fromList <$> commaSep recordItem)
         valuePattern <- onMissing recordLabel $ specialSymbol delim *> valueP
         pure (recordLabel, valuePattern)
 
-lambdaLike :: ParserM m => (Loc -> a -> b -> b) -> m () -> m a -> Text -> m (b -> b)
+lambdaLike :: (Loc -> a -> b -> b) -> Parser () -> Parser a -> Text -> Parser (b -> b)
 lambdaLike con kw argP endSym = do
     kw
     args <- NE.some $ (,) <$> getSourcePos <*> argP
@@ -155,7 +126,7 @@ lambdaLike con kw argP endSym = do
     end <- getSourcePos
     pure \body -> foldr (\(start, arg) -> con (locFromSourcePos start end) arg) body args
 
-pattern' :: ParserM m => m (Pattern 'Parse)
+pattern' :: Parser (Pattern 'Parse)
 pattern' =
     choice
         [ ConstructorP <$> typeName <*> many patternParens
@@ -167,7 +138,7 @@ pattern' =
 should be used in cases where multiple patterns in a row are accepted, i.e.
 function definitions and match expressions
 -}
-patternParens :: ParserM m => m (Pattern 'Parse)
+patternParens :: Parser (Pattern 'Parse)
 patternParens = do
     pat <-
         choice
@@ -188,7 +159,7 @@ patternParens = do
     record = withLoc' RecordP $ someRecord "=" pattern' (Just VarP)
     unit = RecordP Blank Row.empty
 
-binding :: ParserM m => m (Binding 'Parse)
+binding :: Parser (Binding 'Parse)
 binding = do
     f <-
         -- it should probably be `try (E.FunctionBinding <$> funcName) <*> NE.some patternParens
@@ -202,95 +173,125 @@ binding = do
     -- > f $ x = f x
     funcName = operatorInParens <|> termName
 
-expression :: ParserM m => m (Expr 'Parse)
-expression = expression' do
-    expr <- Name <$> termName
-    -- type applications bind tighther than anything else
-    -- that might not work well with higher-than-application precedence operators, though
-    apps <- many do
-        void $ single '@'
-        typeParens
-    pure $ foldl' TypeApp expr apps
-
 -- an expression with infix operators and unresolved priorities
 -- the `E.Infix` constructor is only used when there is more than one operator
-expression' :: ParserM m => m (Expr 'Parse) -> m (Expr 'Parse)
-expression' atom = do
+-- function arrows are a special case that is handled directly in the parser
+term :: Parser (Expr 'Parse)
+term = do
     firstExpr <- noPrec
     pairs <- many $ (,) <$> optional someOperator <*> noPrec
     let expr = case pairs of
             [] -> firstExpr
             [(Nothing, secondExpr)] -> firstExpr `App` secondExpr
-            [(Just op, secondExpr)] -> Name op `App` firstExpr `App` secondExpr
+            [(Just op, secondExpr)] -> Name op `App` firstExpr `App` secondExpr -- todo: a separate AST node for an infix application?
             (_ : _ : _) -> uncurry InfixE $ shift firstExpr pairs
-    option expr do
+    -- todo: this doesn't quite handle `a -> b -> c : Type` yet
+    withFnArrows <- option expr do
+        specialSymbol "->"
+        rhs <- term
+        pure $ Function (zipLocOf expr rhs) expr rhs
+    option withFnArrows do
         specialSymbol ":"
         Annotation expr <$> term
   where
+    atom = do
+        expr <- Name <$> termName
+        -- type applications bind tighther than anything else
+        -- this might not work well with higher-than-application precedence operators, though
+        apps <- many do
+            void $ single '@'
+            termParens
+        pure $ foldl' TypeApp expr apps
     -- x [(+, y), (*, z), (+, w)] --> [(x, +), (y, *), (z, +)] w
     shift expr [] = ([], expr)
     shift lhs ((op, rhs) : rest) = first ((lhs, op) :) $ shift rhs rest
-    noPrec = choice $ [atom] <> keywordBased <> terminals
+    noPrec = atom <|> keywordBased <|> termParens
 
     -- expression forms that have a leading keyword/symbol
     keywordBased =
-        [ lambdaLike Lambda lambda pattern' "->" <*> term
-        , letRec
-        , let'
-        , case'
-        , match'
-        , if'
-        , doBlock
-        , record
+        choice
+            [ lambdaLike Lambda lambda pattern' "->" <*> term
+            , lambdaLike Forall forallKeyword varBinder "." <*> term
+            , lambdaLike Exists forallKeyword varBinder "." <*> term
+            , letRec
+            , let'
+            , case'
+            , match'
+            , if'
+            , doBlock
+            ]
+
+letRec :: Parser (Expr Parse)
+letRec = withLoc $ letRecBlock (try $ keyword "let" *> keyword "rec") (flip3 LetRec) binding term
+
+let' :: Parser (Expr Parse)
+let' =
+    withLoc $
+        letBlock "let" (flip3 Let) binding term
+
+case' :: Parser (Expr Parse)
+case' = withLoc do
+    keyword "case"
+    arg <- term
+    matches <- block "of" $ (,) <$> pattern' <* specialSymbol "->" <*> term
+    pure $ flip3 Case arg matches
+
+match' :: Parser (Expr Parse)
+match' = withLoc $ flip Match <$> block "match" ((,) <$> some patternParens <* specialSymbol "->" <*> term)
+
+if' :: Parser (Expr Parse)
+if' = withLoc do
+    keyword "if"
+    cond <- term
+    keyword "then"
+    true <- term
+    keyword "else"
+    false <- term
+    pure $ flip4 If cond true false
+
+doBlock :: Parser (Expr Parse)
+doBlock = withLoc do
+    stmts <-
+        block "do" $
+            choice
+                [ try $ Bind <$> pattern' <* specialSymbol "<-" <*> term
+                , withLoc $ flip3 With <$ keyword "with" <*> pattern' <* specialSymbol "<-" <*> term
+                , withLoc' DoLet $ keyword "let" *> binding
+                , Action <$> term
+                ]
+    case unsnoc stmts of
+        Nothing -> fail "empty do block"
+        Just (stmts', Action lastAction) -> pure $ flip3 Do stmts' lastAction
+        _ -> fail "last statement in a do block must be an expression"
+  where
+    unsnoc [] = Nothing
+    unsnoc [x] = Just ([], x)
+    unsnoc (x : xs) = first (x :) <$> unsnoc xs
+
+-- a term that may be used as a type parameter or type application
+-- that is, it does not contain any unparenthesized spaces
+termParens :: Parser (Expr 'Parse)
+termParens =
+    choice
+        [ record
+        , recordType -- todo: ambiguity
         , withLoc $ flip List <$> brackets (commaSep term)
+        , variantType -- todo: ambiguity
         , Name <$> operatorInParens
         , parens term
-        ]
-      where
-        letRec = withLoc $ letRecBlock (try $ keyword "let" *> keyword "rec") (flip3 LetRec) binding term
-        let' =
-            withLoc $
-                letBlock "let" (flip3 Let) binding term
-        case' = withLoc do
-            keyword "case"
-            arg <- term
-            matches <- block "of" $ (,) <$> pattern' <* specialSymbol "->" <*> term
-            pure $ flip3 Case arg matches
-        match' = withLoc $ flip Match <$> block "match" ((,) <$> some patternParens <* specialSymbol "->" <*> term)
-        if' = withLoc do
-            keyword "if"
-            cond <- term
-            keyword "then"
-            true <- term
-            keyword "else"
-            false <- term
-            pure $ flip4 If cond true false
-        doBlock = withLoc do
-            stmts <-
-                block "do" $
-                    choice
-                        [ try $ Bind <$> pattern' <* specialSymbol "<-" <*> term
-                        , withLoc $ flip3 With <$ keyword "with" <*> pattern' <* specialSymbol "<-" <*> term
-                        , withLoc' DoLet $ keyword "let" *> binding
-                        , Action <$> term
-                        ]
-            case unsnoc stmts of
-                Nothing -> fail "empty do block"
-                Just (stmts', Action lastAction) -> pure $ flip3 Do stmts' lastAction
-                _ -> fail "last statement in a do block must be an expression"
-        unsnoc [] = Nothing
-        unsnoc [x] = Just ([], x)
-        unsnoc (x : xs) = first (x :) <$> unsnoc xs
-
-    record =
-        withLoc $ flip Record <$> someRecord "=" term (Just Name)
-
-    terminals =
-        [ withLoc' RecordLens recordLens
+        , withLoc' RecordLens recordLens
         , constructor
         , Variant <$> variantConstructor
         , Literal <$> literal
+        , Name <$> termName
+        , typeVariable
+        , parens term
         ]
+  where
+    variantItem = (,) <$> variantConstructor <*> option (Name $ Located Blank $ Name' "Unit") termParens
+    record = withLoc $ flip Record <$> someRecord "=" term (Just Name)
+    recordType = withLoc' RecordT $ NoExtRow <$> someRecord ":" term Nothing
+    variantType = withLoc' VariantT $ NoExtRow <$> brackets (fromList <$> commaSep variantItem)
     constructor = lexeme do
         name <- constructorName
         optional record <&> \case
