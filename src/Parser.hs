@@ -14,9 +14,10 @@ import Common (
     Pass (..),
     PriorityRelation' (..),
     SimpleName,
-    SimpleName_ (..),
-    locFromSourcePos,
+    getLoc,
+    unLoc,
     zipLocOf,
+    pattern L,
  )
 import Control.Monad.Combinators.NonEmpty qualified as NE
 import Data.List.NonEmpty qualified as NE
@@ -42,10 +43,10 @@ code :: Parser [Declaration 'Parse]
 code = topLevelBlock declaration
 
 declaration :: Parser (Declaration 'Parse)
-declaration = withLoc $ choice [typeDec, fixityDec, signature, valueDec]
+declaration = located $ choice [typeDec, fixityDec, signature, valueDec]
   where
-    valueDec = flip3 D.Value <$> binding <*> whereBlock
-    whereBlock = option [] $ block "where" (withLoc valueDec)
+    valueDec = D.Value <$> binding <*> whereBlock
+    whereBlock = option [] $ block "where" (located valueDec)
 
     typeDec = do
         keyword "type"
@@ -55,27 +56,27 @@ declaration = withLoc $ choice [typeDec, fixityDec, signature, valueDec]
     simpleTypeDec name = do
         vars <- many varBinder
         specialSymbol "="
-        flip4 D.Type name vars <$> typePattern `sepBy` specialSymbol "|"
+        D.Type name vars <$> typePattern `sepBy` specialSymbol "|"
 
-    gadtDec :: SimpleName -> Parser (Loc -> Declaration 'Parse)
+    gadtDec :: SimpleName -> Parser (Declaration_ 'Parse)
     gadtDec name = do
         mbKind <- optional $ specialSymbol ":" *> term
         constrs <- block "where" $ withLoc do
             con <- typeName
             specialSymbol ":"
             sig <- term
-            pure $ flip3 D.GadtConstructor con sig
-        pure $ flip4 D.GADT name mbKind constrs
+            pure \loc -> D.GadtConstructor loc con sig
+        pure $ D.GADT name mbKind constrs
 
     typePattern :: Parser (Constructor 'Parse)
     typePattern = withLoc do
         name <- typeName
         args <- many termParens
-        pure $ flip3 D.Constructor name args
+        pure \loc -> D.Constructor loc name args
 
     signature = do
         name <- try $ (operatorInParens <|> termName) <* specialSymbol ":"
-        flip3 D.Signature name <$> term
+        D.Signature name <$> term
 
     fixityDec = do
         keyword "infix"
@@ -96,7 +97,7 @@ declaration = withLoc $ choice [typeDec, fixityDec, signature, valueDec]
         equal <- option [] do
             keyword "equals"
             commaSep someOperator
-        pure $ \loc -> D.Fixity loc fixity op PriorityRelation{above, below, equal}
+        pure $ D.Fixity fixity op PriorityRelation{above, below, equal}
 
 varBinder :: Parser (VarBinder 'Parse)
 varBinder =
@@ -104,7 +105,7 @@ varBinder =
         <|> flip VarBinder Nothing
         <$> termName
 
-typeVariable :: Parser (Type 'Parse)
+typeVariable :: Parser (Type_ 'Parse)
 typeVariable = Name <$> termName <|> ImplicitVar <$> implicitVariable
 
 someRecord :: Text -> Parser value -> Maybe (SimpleName -> value) -> Parser (Row value)
@@ -118,13 +119,13 @@ someRecord delim valueP missingValue = braces (fromList <$> commaSep recordItem)
         valuePattern <- onMissing recordLabel $ specialSymbol delim *> valueP
         pure (recordLabel, valuePattern)
 
-lambdaLike :: (Loc -> a -> b -> b) -> Parser () -> Parser a -> Text -> Parser (b -> b)
-lambdaLike con kw argP endSym = do
+lambdaLike :: (a -> Located b -> b) -> Parser () -> Parser a -> Text -> Parser (Located b) -> Parser b
+lambdaLike con kw argP endSym bodyP = withLoc do
     kw
-    args <- NE.some $ (,) <$> getSourcePos <*> argP
+    (firstArg :| args) <- NE.some argP
     specialSymbol endSym
-    end <- getSourcePos
-    pure \body -> foldr (\(start, arg) -> con (locFromSourcePos start end) arg) body args
+    body <- bodyP
+    pure \loc -> con firstArg $ foldr (\var -> Located loc . con var) body args
 
 pattern' :: Parser (Pattern 'Parse)
 pattern' =
@@ -177,25 +178,28 @@ binding = do
 -- the `E.Infix` constructor is only used when there is more than one operator
 -- function arrows are a special case that is handled directly in the parser
 term :: Parser (Expr 'Parse)
-term = do
+term = located do
     expr <- nonAnn
-    option expr do
+    option (unLoc expr) do
         specialSymbol ":"
         Annotation expr <$> term
   where
     -- second lowest level of precedence, 'anything but annotations'
-    nonAnn = do
-        firstExpr <- noPrec
-        pairs <- many $ (,) <$> optional someOperator <*> noPrec
+    nonAnn :: Parser (Expr 'Parse)
+    nonAnn = located do
+        (Located loc (firstExpr, pairs)) <- located do
+            firstExpr <- noPrec
+            pairs <- many $ (,) <$> optional someOperator <*> noPrec
+            pure (firstExpr, pairs)
         let expr = case pairs of
-                [] -> firstExpr
+                [] -> unLoc firstExpr
                 [(Nothing, secondExpr)] -> firstExpr `App` secondExpr
-                [(Just op, secondExpr)] -> Name op `App` firstExpr `App` secondExpr -- todo: a separate AST node for an infix application?
+                [(Just op, secondExpr)] -> Located (zipLocOf firstExpr op) (Located (getLoc op) (Name op) `App` firstExpr) `App` secondExpr -- todo: a separate AST node for an infix application?
                 (_ : _ : _) -> uncurry InfixE $ shift firstExpr pairs
         option expr do
             specialSymbol "->"
             rhs <- nonAnn
-            pure $ Function (zipLocOf expr rhs) expr rhs
+            pure $ Function (Located loc expr) rhs
     -- type application precedence level
     typeApp = do
         expr <- termParens
@@ -204,7 +208,7 @@ term = do
         apps <- many do
             void $ single '@'
             termParens
-        pure $ foldl' TypeApp expr apps
+        pure $ foldl' (\e app -> Located (zipLocOf e app) $ TypeApp e app) expr apps
     -- x [(+, y), (*, z), (+, w)] --> [(x, +), (y, *), (z, +)] w
     shift expr [] = ([], expr)
     shift lhs ((op, rhs) : rest) = first ((lhs, op) :) $ shift rhs rest
@@ -212,52 +216,55 @@ term = do
 
     -- expression forms that have a leading keyword/symbol
     -- most of them also consume all trailing terms
+    keywordBased :: Parser (Term 'Parse)
     keywordBased =
-        choice
-            [ lambdaLike Lambda lambda pattern' "->" <*> term
-            , lambdaLike Forall forallKeyword varBinder "." <*> term
-            , lambdaLike Exists forallKeyword varBinder "." <*> term
-            , withLoc $ letRecBlock (try $ keyword "let" *> keyword "rec") (flip3 LetRec) binding term
-            , withLoc $ letBlock "let" (flip3 Let) binding term
-            , case'
-            , match'
-            , if'
-            , doBlock
-            ]
+        located $
+            choice
+                [ lambdaLike Lambda lambda pattern' "->" term
+                , lambdaLike Forall forallKeyword varBinder "." term
+                , lambdaLike Exists forallKeyword varBinder "." term
+                , letRecBlock (try $ keyword "let" *> keyword "rec") LetRec binding term
+                , letBlock "let" Let binding term
+                , case'
+                , match'
+                , if'
+                , doBlock
+                ]
 
-case' :: Parser (Expr Parse)
-case' = withLoc do
+case' :: Parser (Expr_ Parse)
+case' = do
     keyword "case"
     arg <- term
     matches <- block "of" $ (,) <$> pattern' <* specialSymbol "->" <*> term
-    pure $ flip3 Case arg matches
+    pure $ Case arg matches
 
-match' :: Parser (Expr Parse)
-match' = withLoc $ flip Match <$> block "match" ((,) <$> some patternParens <* specialSymbol "->" <*> term)
+match' :: Parser (Expr_ Parse)
+match' = Match <$> block "match" ((,) <$> some patternParens <* specialSymbol "->" <*> term)
 
-if' :: Parser (Expr Parse)
-if' = withLoc do
+if' :: Parser (Expr_ Parse)
+if' = do
     keyword "if"
     cond <- term
     keyword "then"
     true <- term
     keyword "else"
     false <- term
-    pure $ flip4 If cond true false
+    pure $ If cond true false
 
-doBlock :: Parser (Expr Parse)
-doBlock = withLoc do
+doBlock :: Parser (Expr_ Parse)
+doBlock = do
     stmts <-
         block "do" $
-            choice
-                [ try $ Bind <$> pattern' <* specialSymbol "<-" <*> term
-                , withLoc $ flip3 With <$ keyword "with" <*> pattern' <* specialSymbol "<-" <*> term
-                , withLoc' DoLet $ keyword "let" *> binding
-                , Action <$> term
-                ]
+            located $
+                choice
+                    [ try $ Bind <$> pattern' <* specialSymbol "<-" <*> term
+                    , With <$ keyword "with" <*> pattern' <* specialSymbol "<-" <*> term
+                    , keyword "let" *> fmap DoLet binding
+                    , Action <$> term
+                    ]
     case unsnoc stmts of
         Nothing -> fail "empty do block"
-        Just (stmts', Action lastAction) -> pure $ flip3 Do stmts' lastAction
+        Just (stmts', L (Action lastAction)) -> pure $ Do stmts' lastAction
         _ -> fail "last statement in a do block must be an expression"
   where
     unsnoc [] = Nothing
@@ -268,34 +275,28 @@ doBlock = withLoc do
 -- that is, it does not contain any unparenthesized spaces
 termParens :: Parser (Expr 'Parse)
 termParens =
-    choice
-        [ record
-        , recordType -- todo: ambiguity with empty record value
-        , withLoc $ flip List <$> brackets (commaSep term)
-        , variantType -- todo: ambiguity with empty list; unit sugar ambiguity
-        , Name <$> operatorInParens
-        , parens term
-        , withLoc' RecordLens recordLens
-        , constructor
-        , Variant <$> variantConstructor
-        , Literal <$> literal
-        , Name <$> termName
-        , typeVariable
-        , parens term
-        ]
+    located $
+        choice
+            [ record
+            , recordType -- todo: ambiguity with empty record value
+            , List <$> brackets (commaSep term)
+            , variantType -- todo: ambiguity with empty list; unit sugar ambiguity
+            , Name <$> operatorInParens
+            , parens $ unLoc <$> term
+            , RecordLens <$> recordLens
+            , constructor
+            , Variant <$> variantConstructor
+            , Literal <$> literal
+            , Name <$> termName
+            , typeVariable
+            ]
   where
-    variantItem = (,) <$> variantConstructor <*> option (Name $ Located Blank $ Name' "Unit") termParens
-    record = withLoc $ flip Record <$> someRecord "=" term (Just Name)
-    recordType = withLoc' RecordT $ NoExtRow <$> someRecord ":" term Nothing
-    variantType = withLoc' VariantT $ NoExtRow <$> brackets (fromList <$> commaSep variantItem)
+    variantItem = (,) <$> variantConstructor <*> option (Located Blank $ RecordT $ NoExtRow Row.empty) termParens
+    record = Record <$> someRecord "=" term (Just $ \n -> Located (getLoc n) $ Name n)
+    recordType = RecordT . NoExtRow <$> someRecord ":" term Nothing
+    variantType = VariantT . NoExtRow <$> brackets (fromList <$> commaSep variantItem)
     constructor = lexeme do
         name <- constructorName
-        optional record <&> \case
+        optional (located record) <&> \case
             Nothing -> Name name
-            Just arg -> Name name `App` arg
-
-flip3 :: (a -> b -> c -> d) -> b -> c -> a -> d
-flip3 f y z x = f x y z
-
-flip4 :: (a -> b -> c -> d -> e) -> b -> c -> d -> a -> e
-flip4 f y z w x = f x y z w
+            Just arg -> Located (getLoc name) (Name name) `App` arg

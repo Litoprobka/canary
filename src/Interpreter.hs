@@ -1,6 +1,7 @@
 {-# LANGUAGE DataKinds #-}
 {-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE OverloadedRecordDot #-}
+{-# LANGUAGE PatternSynonyms #-}
 
 module Interpreter where
 
@@ -17,6 +18,7 @@ import Common (
     UniVar,
     getLoc,
     toSimpleName,
+    pattern L,
  )
 import Data.HashMap.Lazy qualified as HashMap -- note that we use the lazy functions here
 import Data.Traversable (for)
@@ -164,32 +166,32 @@ desugar :: forall es. (NameGen :> es, Diagnose :> es) => Term 'Fixity -> Eff es 
 desugar = go
   where
     go :: Term 'Fixity -> Eff es CoreTerm
-    go = \case
+    go (Located loc e) = case e of
         T.Name name -> pure $ C.Name name
         T.Literal lit -> pure $ C.Literal lit
         T.Annotation expr _ -> go expr
         T.App lhs rhs -> C.App <$> go lhs <*> go rhs
-        T.Lambda loc pat body -> do
+        T.Lambda pat body -> do
             name <- freshName $ Located Blank $ Name' "lamArg"
-            C.Lambda name <$> go (T.Case loc (T.Name name) [(pat, body)])
-        T.WildcardLambda _ args body -> do
+            C.Lambda name <$> go (Located loc $ T.Case (Located (getLoc name) $ T.Name name) [(pat, body)])
+        T.WildcardLambda args body -> do
             body' <- go body
             pure $ foldr C.Lambda body' args
-        T.Let loc binding expr -> case binding of
+        T.Let binding expr -> case binding of
             T.ValueB (T.VarP name) body -> C.Let name <$> go body <*> go expr
             T.ValueB _ _ -> internalError loc "todo: desugar pattern bindings"
-            T.FunctionB name args body -> C.Let name <$> go (foldr (T.Lambda loc) body args) <*> go expr
-        T.LetRec loc _bindings _body -> internalError loc "todo: letrec desugar"
+            T.FunctionB name args body -> C.Let name <$> go (foldr (\x -> Located loc . T.Lambda x) body args) <*> go expr
+        T.LetRec _bindings _body -> internalError loc "todo: letrec desugar"
         T.TypeApp expr _ -> go expr
-        T.Case _ arg matches -> C.Case <$> go arg <*> traverse (bitraverse flattenPattern go) matches
-        T.Match loc matches@(([_], _) : _) -> do
+        T.Case arg matches -> C.Case <$> go arg <*> traverse (bitraverse flattenPattern go) matches
+        T.Match matches@(([_], _) : _) -> do
             name <- freshName $ Located Blank $ Name' "matchArg"
             matches' <- for matches \case
                 ([pat], body) -> bitraverse flattenPattern desugar (pat, body)
                 _ -> internalError loc "inconsistent pattern count in a match expression"
             pure $ C.Lambda name $ C.Case (C.Name name) matches'
-        T.Match loc _ -> internalError loc "todo: multi-arg match desugar"
-        T.If _ cond true false -> do
+        T.Match _ -> internalError loc "todo: multi-arg match desugar"
+        T.If cond true false -> do
             cond' <- go cond
             true' <- go true
             false' <- go false
@@ -197,16 +199,16 @@ desugar = go
                 [ (C.ConstructorP (Located (getLoc cond) TrueName) [], true')
                 , (C.WildcardP "", false')
                 ]
-        T.RecordLens loc _ -> internalError loc "todo: desugar RecordLens"
+        T.RecordLens _ -> internalError loc "todo: desugar RecordLens"
         T.Variant name -> pure $ C.Variant name
-        T.Record _ fields -> C.Record <$> traverse go fields
-        T.List loc xs -> foldr (C.App . C.App (C.Name $ Located loc ConsName)) (C.Name $ Located loc NilName) <$> traverse go xs
+        T.Record fields -> C.Record <$> traverse go fields
+        T.List xs -> foldr (C.App . C.App (C.Name $ Located loc ConsName)) (C.Name $ Located loc NilName) <$> traverse go xs
         T.Do{} -> error "todo: desugar do blocks"
-        T.Function loc from to -> C.Function loc <$> go from <*> go to
-        T.Forall loc binder body -> C.Forall loc binder.var <$> maybe (type_ loc) desugar binder.kind <*> go body
-        T.Exists loc binder body -> C.Exists loc binder.var <$> maybe (type_ loc) desugar binder.kind <*> go body
-        T.VariantT loc row -> C.VariantT loc <$> traverse go row
-        T.RecordT loc row -> C.RecordT loc <$> traverse go row
+        T.Function from to -> C.Function loc <$> go from <*> go to
+        T.Forall binder body -> C.Forall loc binder.var <$> maybe (type_ loc) desugar binder.kind <*> go body
+        T.Exists binder body -> C.Exists loc binder.var <$> maybe (type_ loc) desugar binder.kind <*> go body
+        T.VariantT row -> C.VariantT loc <$> traverse go row
+        T.RecordT row -> C.RecordT loc <$> traverse go row
 
     type_ loc = pure $ C.TyCon $ Located loc TypeName
 
@@ -296,23 +298,23 @@ modifyEnv env decls = do
     pure newEnv
   where
     collectBindings :: Declaration 'Fixity -> Eff es [(Name, Either Value (Term 'Fixity))]
-    collectBindings = \case
-        D.Value loc _ (_ : _) -> internalError loc "local bindings are not supported yet"
-        D.Value _ (T.ValueB (T.VarP name) body) [] -> pure [(name, Right body)]
-        D.Value loc (T.ValueB _ _) _ -> internalError loc "whoops, destructuring bindings are not supported yet"
-        D.Value _ (T.FunctionB name args body) [] -> pure [(name, Right $ foldr (T.Lambda Blank) body args)]
-        D.Type _ _ _ constrs -> traverse mkConstr constrs
-        D.GADT _ _ _ constrs -> traverse mkGadtConstr constrs
+    collectBindings (Located loc decl) = case decl of
+        D.Value _ (_ : _) -> internalError loc "local bindings are not supported yet"
+        D.Value (T.ValueB (T.VarP name) body) [] -> pure [(name, Right body)]
+        D.Value (T.ValueB _ _) _ -> internalError loc "whoops, destructuring bindings are not supported yet"
+        D.Value (T.FunctionB name args body) [] -> pure [(name, Right $ foldr (\x -> Located Blank . T.Lambda x) body args)]
+        D.Type _ _ constrs -> traverse mkConstr constrs
+        D.GADT _ _ constrs -> traverse mkGadtConstr constrs
         D.Signature{} -> pure mempty
 
     mkConstr con = (con.name,) . Left <$> mkConLambda (length con.args) con.name env
     mkGadtConstr con = (con.name,) . Left <$> mkConLambda (countArgs con.sig) con.name env
     countArgs = go 0
       where
-        go acc = \case
-            T.Function _ _ rhs -> go (succ acc) rhs
-            T.Forall _ _ body -> go acc body
-            T.Exists _ _ body -> go acc body
+        go acc (L e) = case e of
+            T.Function _ rhs -> go (succ acc) rhs
+            T.Forall _ body -> go acc body
+            T.Exists _ body -> go acc body
             _ -> acc
 
 mkConLambda :: NameGen :> es => Int -> Name -> ValueEnv -> Eff es Value

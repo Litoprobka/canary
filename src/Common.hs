@@ -4,6 +4,7 @@
 {-# LANGUAGE DerivingStrategies #-}
 {-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE OverloadedRecordDot #-}
+{-# LANGUAGE PatternSynonyms #-}
 {-# LANGUAGE TypeFamilies #-}
 {-# LANGUAGE UndecidableInstances #-}
 {-# LANGUAGE NoFieldSelectors #-}
@@ -36,6 +37,8 @@ module Common (
     type (!=),
     Cast (..),
     toSimpleName,
+    pattern L,
+    unLoc,
 ) where
 
 import Data.Type.Bool (type (||))
@@ -102,6 +105,7 @@ type family NameAt (pass :: Pass) where
 --
 -- it is also convenient to pretty print local ids as `name` or `name#10`, which is
 -- not really an option with global ids
+type Name = Located Name_
 data Name_
     = Name Text Id
     | Wildcard Int Id
@@ -118,30 +122,30 @@ data Name_
     | TypeName
     deriving (Show, Eq, Generic, Hashable)
 
-type Name = Located Name_
-
+type SimpleName = Located SimpleName_
 data SimpleName_
     = Name' Text
     | Wildcard' Int
     deriving (Show, Eq, Ord, Generic, Hashable)
 
--- using
-data Located a = Located Loc a deriving (Show, Generic)
-type SimpleName = Located SimpleName_
+data Located a = Located Loc a deriving (Show, Generic, Functor, Foldable, Traversable)
 
+{-# COMPLETE L #-}
+pattern L :: a -> Located a
+pattern L x <- Located _ x
 instance Eq a => Eq (Located a) where
-    (Located _ lhs) == (Located _ rhs) = lhs == rhs
+    (L lhs) == (L rhs) = lhs == rhs
 
 instance Ord a => Ord (Located a) where
-    compare (Located _ lhs) (Located _ rhs) = compare lhs rhs
+    compare (L lhs) (L rhs) = compare lhs rhs
 
 instance Hashable a => Hashable (Located a) where
-    hashWithSalt salt (Located _ x) = hashWithSalt salt x
+    hashWithSalt salt (L x) = hashWithSalt salt x
 instance HasLoc (Located a) where
     getLoc (Located loc _) = loc
 
 instance Pretty a => Pretty (Located a) where
-    pretty (Located _ x) = pretty x
+    pretty (L x) = pretty x
 
 instance Pretty SimpleName_ where
     pretty (Name' name) = pretty name
@@ -186,7 +190,7 @@ instance Pretty Name_ where
 instance Pretty UniVar where
     pretty (UniVar n) = "#" <> pretty n
 instance Pretty Skolem where
-    pretty (Skolem (Located _ (Name name n))) = pretty name <> "?" <> pretty n
+    pretty (Skolem (L (Name name n))) = pretty name <> "?" <> pretty n
     pretty (Skolem builtin) = pretty builtin <> "?"
 
 data Loc
@@ -216,6 +220,9 @@ instance Pretty Literal_ where
 -- this should probably be replaced by a classy lens
 class HasLoc a where
     getLoc :: a -> Loc
+
+unLoc :: Located a -> a
+unLoc (L x) = x
 
 zipLoc :: Loc -> Loc -> Loc
 zipLoc loc Blank = loc

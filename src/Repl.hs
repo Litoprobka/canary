@@ -92,14 +92,17 @@ mkDefaultEnv = do
         nil <- freshName' "Nil"
         let builtinTypes = [C.TypeName, C.IntName, C.NatName, C.TextName]
             decls =
-                [ D.Type Blank (noLoc C.BoolName) [] [D.Constructor Blank true [], D.Constructor Blank false []]
-                , D.Type
-                    Blank
-                    (noLoc C.ListName)
-                    [plainBinder a]
-                    [D.Constructor Blank cons [Name a, Name (noLoc C.ListName) `App` Name a], D.Constructor Blank nil []]
-                ]
-                    <> map (\name -> D.Type Blank (noLoc name) [] []) builtinTypes
+                map
+                    noLoc
+                    [ D.Type (noLoc C.BoolName) [] [D.Constructor Blank true [], D.Constructor Blank false []]
+                    , D.Type
+                        (noLoc C.ListName)
+                        [plainBinder a]
+                        [ D.Constructor Blank cons $ map noLoc [Name a, noLoc (Name (noLoc C.ListName)) `App` noLoc (Name a)]
+                        , D.Constructor Blank nil []
+                        ]
+                    ]
+                    <> map (\name -> noLoc $ D.Type (noLoc name) [] []) builtinTypes
             scope =
                 Scope . HashMap.fromList . map (first C.Name') $
                     [ ("Type", noLoc C.TypeName)
@@ -179,7 +182,7 @@ replStep env command = do
   where
     processExpr expr = do
         afterNameRes <- NameResolution.run env.scope $ resolveTerm expr
-        afterFixityRes <- Fixity.run env.fixityMap env.operatorPriorities $ Fixity.parse $ cast afterNameRes
+        afterFixityRes <- Fixity.run env.fixityMap env.operatorPriorities $ Fixity.parse $ fmap cast afterNameRes
         fmap (afterFixityRes,) $ TC.run env.types $ normalise $ infer afterFixityRes
 
 localDiagnose :: IOE :> es => a -> (FilePath, Text) -> Eff (Diagnose : es) (Maybe a) -> Eff es (Maybe a)

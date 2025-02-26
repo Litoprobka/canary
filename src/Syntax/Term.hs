@@ -16,53 +16,56 @@ import Prettyprinter
 import Syntax.Row
 import Prelude (show)
 
-type Type = Term
-type Expr = Term
+type Term p = Located (Term_ p)
+type Type p = Term p
+type Expr p = Term p
+type Type_ = Term_
+type Expr_ = Term_
 
-data Term (p :: Pass) where
+data Term_ (p :: Pass) where
     -- terminal constructors
-    Name :: NameAt p -> Term p
+    Name :: NameAt p -> Term_ p
     -- | 'a
     -- | type variables with an inferred forall binder
-    ImplicitVar :: NameAt p ~ SimpleName => NameAt p -> Term p
-    Parens :: NameAt p ~ SimpleName => Term p -> Term p
-    UniVar :: Loc -> UniVar -> Type 'DuringTypecheck
-    Skolem :: Skolem -> Type 'DuringTypecheck
-    Literal :: Literal -> Expr p
+    ImplicitVar :: NameAt p ~ SimpleName => NameAt p -> Term_ p
+    Parens :: NameAt p ~ SimpleName => Term p -> Term_ p
+    UniVar :: UniVar -> Type_ 'DuringTypecheck
+    Skolem :: Skolem -> Type_ 'DuringTypecheck
+    Literal :: Literal -> Expr_ p
     -- shared between Expr and Type
 
     -- | value : Type
-    Annotation :: Term p -> Type p -> Term p
-    App :: Term p -> Term p -> Term p
+    Annotation :: Term p -> Type p -> Term_ p
+    App :: Term p -> Term p -> Term_ p
     -- expression-only stuff
-    Lambda :: Loc -> Pattern p -> Expr p -> Expr p -- it's still unclear to me whether I want to desugar multi-arg lambdas while parsing
+    Lambda :: Pattern p -> Expr p -> Expr_ p -- it's still unclear to me whether I want to desugar multi-arg lambdas while parsing
 
     -- | (f _ x + _ y)
-    WildcardLambda :: Loc -> NonEmpty (NameAt p) -> Expr p -> Expr p
-    Let :: Loc -> Binding p -> Expr p -> Expr p
-    LetRec :: Loc -> NonEmpty (Binding p) -> Expr p -> Expr p
-    TypeApp :: Expr p -> Type p -> Expr p
-    Case :: Loc -> Expr p -> [(Pattern p, Expr p)] -> Expr p
+    WildcardLambda :: NonEmpty (NameAt p) -> Expr p -> Expr_ p
+    Let :: Binding p -> Expr p -> Expr_ p
+    LetRec :: NonEmpty (Binding p) -> Expr p -> Expr_ p
+    TypeApp :: Expr p -> Type p -> Expr_ p
+    Case :: Expr p -> [(Pattern p, Expr p)] -> Expr_ p
     -- | Haskell's \cases
-    Match :: Loc -> [([Pattern p], Expr p)] -> Expr p
-    If :: Loc -> Expr p -> Expr p -> Expr p -> Expr p
+    Match :: [([Pattern p], Expr p)] -> Expr_ p
+    If :: Expr p -> Expr p -> Expr p -> Expr_ p
     -- | .field.otherField.thirdField
-    RecordLens :: Loc -> NonEmpty OpenName -> Expr p
+    RecordLens :: NonEmpty OpenName -> Expr_ p
     -- | 'Constructor
     -- unlike the rest of the cases, variant tags and record fields
     -- don't need any kind of name resolution
-    Variant :: OpenName -> Expr p
-    Record :: Loc -> Row (Expr p) -> Expr p
-    List :: Loc -> [Expr p] -> Expr p
-    Do :: Loc -> [DoStatement p] -> Expr p -> Expr p
+    Variant :: OpenName -> Expr_ p
+    Record :: Row (Expr p) -> Expr_ p
+    List :: [Expr p] -> Expr_ p
+    Do :: [DoStatement p] -> Expr p -> Expr_ p
     -- | an unresolved expression with infix / prefix operators
-    InfixE :: p < 'Fixity => [(Expr p, Maybe (NameAt p))] -> Expr p -> Expr p
+    InfixE :: p < 'Fixity => [(Expr p, Maybe (NameAt p))] -> Expr p -> Expr_ p
     -- type-only stuff
-    Function :: Loc -> Type p -> Type p -> Type p -- doesn't need a Loc, unless it's used in an infix position
-    Forall :: Loc -> VarBinder p -> Type p -> Type p
-    Exists :: Loc -> VarBinder p -> Type p -> Type p
-    VariantT :: Loc -> ExtRow (Type p) -> Type p
-    RecordT :: Loc -> ExtRow (Type p) -> Type p
+    Function :: Type p -> Type p -> Type_ p
+    Forall :: VarBinder p -> Type p -> Type_ p
+    Exists :: VarBinder p -> Type p -> Type_ p
+    VariantT :: ExtRow (Type p) -> Type_ p
+    RecordT :: ExtRow (Type p) -> Type_ p
 
 data Binding (p :: Pass)
     = ValueB {pat :: Pattern p, body :: Expr p}
@@ -74,20 +77,21 @@ plainBinder :: NameAt p -> VarBinder p
 plainBinder = flip VarBinder Nothing
 
 binderKind :: NameAt p ~ C.Name => VarBinder p -> Type p
-binderKind binder = fromMaybe (Name $ Located (getLoc binder) TypeName) binder.kind
+binderKind binder = fromMaybe (Located (getLoc binder) $ Name $ Located (getLoc binder) TypeName) binder.kind
 
-data DoStatement (p :: Pass)
+type DoStatement p = Located (DoStatement_ p)
+data DoStatement_ (p :: Pass)
     = Bind (Pattern p) (Expr p)
-    | With Loc (Pattern p) (Expr p) -- with and let have leading keywords, so
-    | DoLet Loc (Binding p) -- their locations are not derivable from argument locations
+    | With (Pattern p) (Expr p)
+    | DoLet (Binding p)
     | Action (Expr p)
 
-deriving instance Eq (Term 'DuringTypecheck)
-deriving instance Eq (Term 'Parse)
+deriving instance Eq (Term_ 'DuringTypecheck)
+deriving instance Eq (Term_ 'Parse)
 deriving instance Eq (VarBinder 'DuringTypecheck)
 deriving instance Eq (VarBinder 'Parse)
-deriving instance Eq (DoStatement 'DuringTypecheck)
-deriving instance Eq (DoStatement 'Parse)
+deriving instance Eq (DoStatement_ 'DuringTypecheck)
+deriving instance Eq (DoStatement_ 'Parse)
 deriving instance Eq (Binding 'DuringTypecheck)
 deriving instance Eq (Binding 'Parse)
 
@@ -115,39 +119,39 @@ instance Pretty (NameAt p) => Pretty (Binding p) where
         ValueB pat body -> pretty pat <+> "=" <+> pretty body
         FunctionB name args body -> pretty name <+> concatWith (<+>) (pretty <$> args) <+> "=" <+> pretty body
 
-instance Pretty (NameAt p) => Pretty (Expr p) where
-    pretty = go (0 :: Int)
+instance Pretty (NameAt p) => Pretty (Expr_ p) where
+    pretty = go (0 :: Int) . Located Blank
       where
-        go n = \case
-            Lambda _ arg body -> parensWhen 1 $ "λ" <> pretty arg <+> "->" <+> pretty body
-            WildcardLambda _ _ l@List{} -> pretty l
-            WildcardLambda _ _ r@Record{} -> pretty r
-            WildcardLambda _ _ body -> "(" <> pretty body <> ")"
+        go n (Located _ e) = case e of
+            Lambda arg body -> parensWhen 1 $ "λ" <> pretty arg <+> "->" <+> pretty body
+            WildcardLambda _ l@(Located _ List{}) -> pretty l
+            WildcardLambda _ r@(Located _ Record{}) -> pretty r
+            WildcardLambda _ body -> "(" <> pretty body <> ")"
             App lhs rhs -> parensWhen 3 $ go 2 lhs <+> go 3 rhs
             TypeApp f ty -> parensWhen 3 $ go 2 f <+> "@" <> go 3 ty
-            Let _ binding body -> "let" <+> pretty binding <> ";" <+> pretty body
-            LetRec _ bindings body -> "let rec" <+> sep ((<> ";") . pretty <$> NE.toList bindings) <+> pretty body
-            Case _ arg matches -> nest 4 (vsep $ ("case" <+> pretty arg <+> "of" :) $ matches <&> \(pat, body) -> pretty pat <+> "->" <+> pretty body)
-            Match _ matches -> nest 4 (vsep $ ("match" :) $ matches <&> \(pats, body) -> sep (parens . pretty <$> pats) <+> "->" <+> pretty body)
-            If _ cond true false -> "if" <+> pretty cond <+> "then" <+> pretty true <+> "else" <+> pretty false
+            Let binding body -> "let" <+> pretty binding <> ";" <+> pretty body
+            LetRec bindings body -> "let rec" <+> sep ((<> ";") . pretty <$> NE.toList bindings) <+> pretty body
+            Case arg matches -> nest 4 (vsep $ ("case" <+> pretty arg <+> "of" :) $ matches <&> \(pat, body) -> pretty pat <+> "->" <+> pretty body)
+            Match matches -> nest 4 (vsep $ ("match" :) $ matches <&> \(pats, body) -> sep (parens . pretty <$> pats) <+> "->" <+> pretty body)
+            If cond true false -> "if" <+> pretty cond <+> "then" <+> pretty true <+> "else" <+> pretty false
             Annotation expr ty -> parensWhen 1 $ pretty expr <+> ":" <+> pretty ty
             Name name -> pretty name
             ImplicitVar var -> pretty var
             Parens expr -> parens $ pretty expr
-            RecordLens _ fields -> encloseSep "." "" "." $ toList $ pretty <$> fields
+            RecordLens fields -> encloseSep "." "" "." $ toList $ pretty <$> fields
             Variant name -> pretty name
-            Record _ row -> braces . sep . punctuate comma . map recordField $ sortedRow row
-            List _ xs -> brackets . sep . punctuate comma $ pretty <$> xs
-            Do _ stmts lastAction -> nest 2 $ vsep ("do" : fmap pretty stmts <> [pretty lastAction])
+            Record row -> braces . sep . punctuate comma . map recordField $ sortedRow row
+            List xs -> brackets . sep . punctuate comma $ pretty <$> xs
+            Do stmts lastAction -> nest 2 $ vsep ("do" : fmap pretty stmts <> [pretty lastAction])
             Literal lit -> pretty lit
             InfixE pairs last' -> "?(" <> sep (concatMap (\(lhs, op) -> pretty lhs : maybe [] (pure . pretty) op) pairs <> [pretty last']) <> ")"
             Skolem skolem -> pretty skolem
-            UniVar _ uni -> pretty uni
-            Function _ from to -> parensWhen 2 $ go 2 from <+> "->" <+> pretty to
-            Forall _ var body -> parensWhen 1 $ "∀" <> prettyBinder var <> "." <+> pretty body
-            Exists _ var body -> parensWhen 1 $ "∃" <> prettyBinder var <> "." <+> pretty body
-            VariantT _ row -> brackets . withExt row . sep . punctuate comma . map variantItem $ sortedRow row.row
-            RecordT _ row -> braces . withExt row . sep . punctuate comma . map recordTyField $ sortedRow row.row
+            UniVar uni -> pretty uni
+            Function from to -> parensWhen 2 $ go 2 from <+> "->" <+> pretty to
+            Forall var body -> parensWhen 1 $ "∀" <> prettyBinder var <> "." <+> pretty body
+            Exists var body -> parensWhen 1 $ "∃" <> prettyBinder var <> "." <+> pretty body
+            VariantT row -> brackets . withExt row . sep . punctuate comma . map variantItem $ sortedRow row.row
+            RecordT row -> braces . withExt row . sep . punctuate comma . map recordTyField $ sortedRow row.row
           where
             parensWhen minPrec
                 | n >= minPrec = parens
@@ -166,54 +170,15 @@ prettyBinder :: Pretty (NameAt pass) => VarBinder pass -> Doc ann
 prettyBinder (VarBinder var Nothing) = pretty var
 prettyBinder (VarBinder var (Just kind)) = parens $ pretty var <+> ":" <+> pretty kind
 
-instance Pretty (NameAt p) => Pretty (DoStatement p) where
+instance Pretty (NameAt p) => Pretty (DoStatement_ p) where
     pretty = \case
         Bind pat expr -> pretty pat <+> "<-" <+> pretty expr
-        With _ pat expr -> "with" <+> pretty pat <+> "<-" <+> pretty expr
-        DoLet _ binding -> pretty binding
+        With pat expr -> "with" <+> pretty pat <+> "<-" <+> pretty expr
+        DoLet binding -> pretty binding
         Action expr -> pretty expr
 
-instance Pretty (NameAt p) => Show (Expr p) where
+instance Pretty (NameAt p) => Show (Expr_ p) where
     show = show . pretty
-
-instance HasLoc (NameAt p) => HasLoc (Expr p) where
-    getLoc = \case
-        Lambda loc _ _ -> loc
-        WildcardLambda loc _ _ -> loc
-        App lhs rhs -> zipLocOf lhs rhs
-        TypeApp f ty -> zipLocOf f ty
-        Let loc _ _ -> loc
-        LetRec loc _ _ -> loc
-        Case loc _ _ -> loc
-        Match loc _ -> loc
-        If loc _ _ _ -> loc
-        Annotation expr ty -> zipLocOf expr ty
-        Name name -> getLoc name
-        ImplicitVar var -> getLoc var
-        Parens expr -> getLoc expr
-        RecordLens loc _ -> loc
-        Variant name -> getLoc name
-        Record loc _ -> loc
-        List loc _ -> loc
-        Do loc _ _ -> loc
-        Literal lit -> getLoc lit
-        InfixE ((e, _) : _) l -> zipLocOf e l
-        InfixE [] l -> getLoc l
-        -- Var name -> getLoc name
-        Skolem skolem -> getLoc skolem
-        UniVar loc _ -> loc
-        Function loc _ _ -> loc
-        Forall loc _ _ -> loc
-        Exists loc _ _ -> loc
-        VariantT loc _ -> loc
-        RecordT loc _ -> loc
-
-instance HasLoc (NameAt p) => HasLoc (DoStatement p) where
-    getLoc = \case
-        Bind pat body -> zipLocOf pat body
-        With loc _ _ -> loc
-        DoLet loc _ -> loc
-        Action expr -> getLoc expr
 
 instance HasLoc (NameAt p) => HasLoc (Binding p) where
     getLoc = \case
@@ -258,7 +223,7 @@ instance Pretty (NameAt pass) => Pretty (Pattern pass) where
             recordField (name, pat) = pretty name <+> "=" <+> pretty pat
 
 class FixityAgrees (p :: Pass) (q :: Pass) where
-    castInfix :: p < 'Fixity => [(Expr q, Maybe (NameAt q))] -> Expr q -> Expr q
+    castInfix :: p < 'Fixity => [(Expr q, Maybe (NameAt q))] -> Expr q -> Expr_ q
 instance {-# OVERLAPPABLE #-} q < 'Fixity => FixityAgrees p q where
     castInfix = InfixE
 instance FixityAgrees 'Fixity q where
@@ -267,8 +232,8 @@ instance FixityAgrees 'DuringTypecheck q where
     castInfix = error "unsatisfiable"
 
 class TcAgrees (p :: Pass) (q :: Pass) where
-    castUni :: p ~ 'DuringTypecheck => Loc -> UniVar -> Type q
-    castSkolem :: p ~ 'DuringTypecheck => Skolem -> Type q
+    castUni :: p ~ 'DuringTypecheck => UniVar -> Type_ q
+    castSkolem :: p ~ 'DuringTypecheck => Skolem -> Type_ q
 instance TcAgrees p 'DuringTypecheck where
     castUni = UniVar
     castSkolem = Skolem
@@ -281,56 +246,58 @@ instance
     , FixityAgrees p q
     , TcAgrees p q
     )
-    => Cast Expr p q
+    => Cast Expr_ p q
     where
     cast = \case
-        Lambda loc pat body -> Lambda loc (cast pat) (cast body)
-        WildcardLambda loc args body -> WildcardLambda loc args (cast body)
-        App lhs rhs -> App (cast lhs) (cast rhs)
-        TypeApp func ty -> TypeApp (cast func) (cast ty)
-        Let loc binding expr -> Let loc (cast binding) (cast expr)
-        LetRec loc bindings expr -> LetRec loc (fmap cast bindings) (cast expr)
-        Case loc arg matches -> Case loc (cast arg) (fmap (bimap cast cast) matches)
-        Match loc matches -> Match loc (fmap (bimap (fmap cast) cast) matches)
-        If loc cond true false -> If loc (cast cond) (cast true) (cast false)
-        Annotation expr ty -> Annotation (cast expr) (cast ty)
-        Record loc row -> Record loc (fmap cast row)
-        List loc exprs -> List loc (fmap cast exprs)
-        Do loc stmts ret -> Do loc (fmap cast stmts) (cast ret)
-        InfixE pairs l -> castInfix @p (fmap (first cast) pairs) (cast l)
+        Lambda pat body -> Lambda (cast pat) (cast' body)
+        WildcardLambda args body -> WildcardLambda args (cast' body)
+        App lhs rhs -> App (cast' lhs) (cast' rhs)
+        TypeApp func ty -> TypeApp (cast' func) (cast' ty)
+        Let binding expr -> Let (cast binding) (cast' expr)
+        LetRec bindings expr -> LetRec (fmap cast bindings) (cast' expr)
+        Case arg matches -> Case (cast' arg) (fmap (bimap cast cast') matches)
+        Match matches -> Match (fmap (bimap (fmap cast) cast') matches)
+        If cond true false -> If (cast' cond) (cast' true) (cast' false)
+        Annotation expr ty -> Annotation (cast' expr) (cast' ty)
+        Record row -> Record (fmap cast' row)
+        List exprs -> List (fmap cast' exprs)
+        Do stmts ret -> Do ((fmap . fmap) cast stmts) (cast' ret)
+        InfixE pairs l -> castInfix @p (fmap (first cast') pairs) (cast' l)
         Name name -> Name name
-        RecordLens loc oname -> RecordLens loc oname
+        RecordLens oname -> RecordLens oname
         Variant oname -> Variant oname
         Literal lit -> Literal lit
-        Function loc lhs rhs -> Function loc (cast lhs) (cast rhs)
-        Forall loc var body -> Forall loc (cast var) (cast body)
-        Exists loc var body -> Exists loc (cast var) (cast body)
-        VariantT loc row -> VariantT loc (fmap cast row)
-        RecordT loc row -> RecordT loc (fmap cast row)
+        Function lhs rhs -> Function (cast' lhs) (cast' rhs)
+        Forall var body -> Forall (cast var) (cast' body)
+        Exists var body -> Exists (cast var) (cast' body)
+        VariantT row -> VariantT (fmap cast' row)
+        RecordT row -> RecordT (fmap cast' row)
         ImplicitVar var -> ImplicitVar var
-        Parens expr -> Parens (cast expr)
-        UniVar loc uni -> castUni loc uni
+        Parens expr -> Parens (cast' expr)
+        UniVar uni -> castUni uni
         Skolem skolem -> castSkolem skolem
+      where
+        cast' = fmap cast
 
-instance (NameAt p ~ NameAt q, Cast Pattern p q, Cast Expr p q) => Cast Binding p q where
+instance (NameAt p ~ NameAt q, Cast Pattern p q, Cast Expr_ p q) => Cast Binding p q where
     cast = \case
-        ValueB pat body -> ValueB (cast pat) (cast body)
-        FunctionB name args body -> FunctionB name (fmap cast args) (cast body)
-instance (Cast Expr p q, Cast Pattern p q, Cast Binding p q) => Cast DoStatement p q where
+        ValueB pat body -> ValueB (cast pat) (fmap cast body)
+        FunctionB name args body -> FunctionB name (fmap cast args) (fmap cast body)
+instance (Cast Expr_ p q, Cast Pattern p q, Cast Binding p q) => Cast DoStatement_ p q where
     cast = \case
-        Bind pat expr -> Bind (cast pat) (cast expr)
-        With loc pat expr -> With loc (cast pat) (cast expr)
-        DoLet loc binding -> DoLet loc (cast binding)
-        Action expr -> Action (cast expr)
+        Bind pat expr -> Bind (cast pat) (fmap cast expr)
+        With pat expr -> With (cast pat) (fmap cast expr)
+        DoLet binding -> DoLet (cast binding)
+        Action expr -> Action (fmap cast expr)
 
-instance (NameAt p ~ NameAt q, Cast Term p q) => Cast VarBinder p q where
-    cast VarBinder{var, kind} = VarBinder{var, kind = fmap cast kind}
+instance (NameAt p ~ NameAt q, Cast Term_ p q) => Cast VarBinder p q where
+    cast VarBinder{var, kind} = VarBinder{var, kind = (fmap . fmap) cast kind}
 
-instance (NameAt p ~ NameAt q, Cast Term p q) => Cast Pattern p q where
+instance (NameAt p ~ NameAt q, Cast Term_ p q) => Cast Pattern p q where
     cast = \case
         VarP name -> VarP name
         WildcardP loc name -> WildcardP loc name
-        AnnotationP pat ty -> AnnotationP (cast pat) (cast ty)
+        AnnotationP pat ty -> AnnotationP (cast pat) (fmap cast ty)
         ConstructorP name pats -> ConstructorP name (fmap cast pats)
         VariantP name pat -> VariantP name (cast pat)
         RecordP loc row -> RecordP loc (fmap cast row)
@@ -344,7 +311,7 @@ instance (NameAt p ~ NameAt q, Cast Term p q) => Cast Pattern p q where
 collectReferencedNames :: Type p -> [NameAt p]
 collectReferencedNames = go
   where
-    go = \case
+    go (Located _ inner) = case inner of
         Name name -> [name]
         ImplicitVar var -> [var]
         Parens expr -> go expr
@@ -357,21 +324,21 @@ collectReferencedNames = go
         LetRec{} -> error "collectReferencedNames: local bindings are not supported yet"
         Case{} -> error "collectReferencedNames: local bindings are not supported yet"
         Match{} -> error "collectReferencedNames: local bindings are not supported yet"
-        If _ cond true false -> go cond <> go true <> go false
-        List _ xs -> foldMap go xs
-        Lambda _ pat body -> collectReferencedNamesInPat pat <> go body
-        WildcardLambda _ _pats body -> go body
+        If cond true false -> go cond <> go true <> go false
+        List xs -> foldMap go xs
+        Lambda pat body -> collectReferencedNamesInPat pat <> go body
+        WildcardLambda _pats body -> go body
         Annotation e ty -> go e <> go ty
         App lhs rhs -> go lhs <> go rhs
         TypeApp e ty -> go e <> go ty
-        Function _ fn args -> go fn <> go args
-        Forall _ _ body -> go body
-        Exists _ _ body -> go body
-        VariantT _ row -> foldMap go $ toList row
-        RecordT _ row -> foldMap go $ toList row
-        Record _ row -> foldMap go $ toList row
+        Function fn args -> go fn <> go args
+        Forall _ body -> go body
+        Exists _ body -> go body
+        VariantT row -> foldMap go $ toList row
+        RecordT row -> foldMap go $ toList row
+        Record row -> foldMap go $ toList row
         InfixE pairs lastE -> foldMap (\(e, mbName) -> go e <> maybeToList mbName) pairs <> go lastE
-        Do _ _stmts _action -> error "collectReferencedNames: local bindings are not supported yet"
+        Do _stmts _action -> error "collectReferencedNames: local bindings are not supported yet"
 
 -- | collects all to-be-declared names in a pattern
 collectNamesInPat :: Pattern p -> [NameAt p]
@@ -405,26 +372,26 @@ collectNamesInBinding = \case
 
 -- | at the moment, uniplate works properly only for types
 uniplate :: SelfTraversal Type p p
-uniplate f = \case
-    Lambda loc pat body -> Lambda loc pat <$> f body -- for now, we're ignoring the pattern arguments
-    WildcardLambda loc args body -> WildcardLambda loc args <$> f body -- same
+uniplate f = traverse \case
+    Lambda pat body -> Lambda pat <$> f body -- for now, we're ignoring the pattern arguments
+    WildcardLambda args body -> WildcardLambda args <$> f body -- same
     App lhs rhs -> App <$> f lhs <*> f rhs
     TypeApp func ty -> TypeApp <$> f func <*> f ty
-    Let loc binding expr -> Let loc <$> plateBinding f binding <*> f expr
-    LetRec loc bindings expr -> LetRec loc <$> traverse (plateBinding f) bindings <*> f expr
-    Case loc arg matches -> Case loc <$> f arg <*> traverse (traverse f) matches
-    Match loc matches -> Match loc <$> traverse (traverse f) matches
-    If loc cond true false -> If loc <$> f cond <*> f true <*> f false
+    Let binding expr -> Let <$> plateBinding f binding <*> f expr
+    LetRec bindings expr -> LetRec <$> traverse (plateBinding f) bindings <*> f expr
+    Case arg matches -> Case <$> f arg <*> traverse (traverse f) matches
+    Match matches -> Match <$> traverse (traverse f) matches
+    If cond true false -> If <$> f cond <*> f true <*> f false
     Annotation expr ty -> Annotation <$> f expr <*> f ty
-    Record loc row -> Record loc <$> traverse f row
-    List loc exprs -> List loc <$> traverse f exprs
-    Do loc stmts ret -> Do loc <$> traverse (plateStmt f) stmts <*> f ret
+    Record row -> Record <$> traverse f row
+    List exprs -> List <$> traverse f exprs
+    Do stmts ret -> Do <$> traverse (plateStmt f) stmts <*> f ret
     InfixE pairs l -> InfixE <$> traverse (\(e, op) -> (,op) <$> f e) pairs <*> f l
-    Function loc lhs rhs -> Function loc <$> f lhs <*> f rhs
-    Forall loc var body -> Forall loc <$> plateBinder f var <*> f body
-    Exists loc var body -> Exists loc <$> plateBinder f var <*> f body
-    VariantT loc row -> VariantT loc <$> traverse f row
-    RecordT loc row -> RecordT loc <$> traverse f row
+    Function lhs rhs -> Function <$> f lhs <*> f rhs
+    Forall var body -> Forall <$> plateBinder f var <*> f body
+    Exists var body -> Exists <$> plateBinder f var <*> f body
+    VariantT row -> VariantT <$> traverse f row
+    RecordT row -> RecordT <$> traverse f row
     Parens expr -> Parens <$> f expr
     u@UniVar{} -> pure u
     s@Skolem{} -> pure s
@@ -437,10 +404,10 @@ uniplate f = \case
     -- v@Var{} -> pure v
 
     plateStmt :: Traversal' (DoStatement p) (Term p)
-    plateStmt f' = \case
+    plateStmt f' = traverse \case
         Bind pat expr -> Bind pat <$> uniplate f' expr
-        With loc pat expr -> With loc pat <$> uniplate f' expr
-        DoLet loc binding -> DoLet loc <$> plateBinding f' binding
+        With pat expr -> With pat <$> uniplate f' expr
+        DoLet binding -> DoLet <$> plateBinding f' binding
         Action expr -> Action <$> uniplate f' expr
 
     plateBinding :: Traversal' (Binding p) (Term p)

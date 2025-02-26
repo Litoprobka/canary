@@ -124,15 +124,15 @@ resolveDependenciesSimplified' initFixity initPoset = fmap packOutput . runState
   where
     packOutput ((declarations, operatorPriorities), fixityMap) = SimpleOutput{..}
     go :: Declaration 'NameRes -> Eff (State (Poset Op) : State FixityMap : es) (Maybe (Declaration 'DependencyRes))
-    go = \case
-        D.Fixity loc fixity op rels -> do
+    go (Located loc decl) = fmap (fmap $ Located loc) case decl of
+        D.Fixity fixity op rels -> do
             modify @FixityMap $ HashMap.insert (Just op) fixity
             modifyM @(Poset Op) $ updatePrecedence loc op rels
             pure Nothing
-        D.Value loc binding locals -> Just . D.Value loc (cast binding) <$> mapMaybeM go locals
-        D.Type loc name vars constrs -> pure . Just $ D.Type loc name (map cast vars) (map cast constrs)
-        D.GADT loc name sig constrs -> pure . Just $ D.GADT loc name (fmap cast sig) (map cast constrs)
-        D.Signature loc name ty -> pure . Just $ D.Signature loc name (cast ty)
+        D.Value binding locals -> Just . D.Value (cast binding) <$> mapMaybeM go locals
+        D.Type name vars constrs -> pure . Just $ D.Type name (map cast vars) (map cast constrs)
+        D.GADT name sig constrs -> pure . Just $ D.GADT name ((fmap . fmap) cast sig) (map cast constrs)
+        D.Signature name ty -> pure . Just $ D.Signature name (fmap cast ty)
 
 reportCycleWarnings :: (State (Poset Op) :> es, Diagnose :> es) => Loc -> Eff (Writer (Seq (Poset.Cycle Op)) : es) a -> Eff es a
 reportCycleWarnings loc action = do

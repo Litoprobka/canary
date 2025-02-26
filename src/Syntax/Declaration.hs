@@ -5,13 +5,14 @@
 {-# LANGUAGE UndecidableInstances #-}
 {-# LANGUAGE NoFieldSelectors #-}
 
-module Syntax.Declaration (Declaration (..), Constructor (..), GadtConstructor (..)) where
+module Syntax.Declaration (Declaration_ (..), Declaration, Constructor (..), GadtConstructor (..)) where
 
 import Common (
     Cast (..),
     Fixity (..),
     HasLoc (..),
     Loc,
+    Located,
     NameAt,
     Pass (DependencyRes, Parse),
     PriorityRelation,
@@ -20,17 +21,18 @@ import Common (
 import Data.Type.Ord (type (<))
 import LangPrelude hiding (show)
 import Prettyprinter
-import Syntax.Term (Binding, Type, VarBinder)
+import Syntax.Term (Binding, Type, Type_, VarBinder)
 import Prelude (show)
 
-data Declaration (p :: Pass)
-    = Value Loc (Binding p) [Declaration p]
-    | Type Loc (NameAt p) [VarBinder p] [Constructor p]
-    | GADT Loc (NameAt p) (Maybe (Type p)) [GadtConstructor p]
-    | Signature Loc (NameAt p) (Type p)
-    | p < DependencyRes => Fixity Loc Fixity (NameAt p) (PriorityRelation p)
+type Declaration p = Located (Declaration_ p)
+data Declaration_ (p :: Pass)
+    = Value (Binding p) [Declaration p]
+    | Type (NameAt p) [VarBinder p] [Constructor p]
+    | GADT (NameAt p) (Maybe (Type p)) [GadtConstructor p]
+    | Signature (NameAt p) (Type p)
+    | p < DependencyRes => Fixity Fixity (NameAt p) (PriorityRelation p)
 
-deriving instance Eq (Declaration 'Parse)
+deriving instance Eq (Declaration_ 'Parse)
 
 data Constructor p = Constructor {loc :: Loc, name :: NameAt p, args :: [Type p]}
 deriving instance Eq (Constructor 'Parse)
@@ -38,15 +40,15 @@ deriving instance Eq (Constructor 'Parse)
 data GadtConstructor p = GadtConstructor {loc :: Loc, name :: NameAt p, sig :: Type p}
 deriving instance (Eq (NameAt p), Eq (Type p)) => Eq (GadtConstructor p)
 
-instance Pretty (NameAt p) => Pretty (Declaration p) where
+instance Pretty (NameAt p) => Pretty (Declaration_ p) where
     pretty = \case
-        Value _ binding locals -> pretty binding <> line <> whereIfNonEmpty locals <> line <> nest 4 (vsep (pretty <$> locals))
-        Signature _ name ty -> pretty name <+> ":" <+> pretty ty
-        Type _ name vars cons ->
+        Value binding locals -> pretty binding <> line <> whereIfNonEmpty locals <> line <> nest 4 (vsep (pretty <$> locals))
+        Signature name ty -> pretty name <+> ":" <+> pretty ty
+        Type name vars cons ->
             sep ("type" : pretty name : map pretty vars)
                 <+> encloseSep "= " "" (space <> "|" <> space) (cons <&> \(Constructor _ con args) -> sep (pretty con : map pretty args))
-        GADT _ name mbKind constrs -> "type" <+> nameWithKind name mbKind <+> "where" <> line <> nest 4 (vsep (pretty <$> constrs))
-        Fixity _ fixity op priority ->
+        GADT name mbKind constrs -> "type" <+> nameWithKind name mbKind <+> "where" <> line <> nest 4 (vsep (pretty <$> constrs))
+        Fixity fixity op priority ->
             fixityKeyword fixity
                 <+> pretty op
                 <> listIfNonEmpty "above" priority.above
@@ -72,22 +74,14 @@ instance Pretty (NameAt p) => Pretty (Declaration p) where
 instance Pretty (NameAt p) => Pretty (GadtConstructor p) where
     pretty (GadtConstructor _ name sig) = pretty name <+> ":" <+> pretty sig
 
-instance Pretty (NameAt p) => Show (Declaration p) where
+instance Pretty (NameAt p) => Show (Declaration_ p) where
     show = show . pretty
-
-instance HasLoc (Declaration p) where
-    getLoc = \case
-        Value loc _ _ -> loc
-        Type loc _ _ _ -> loc
-        GADT loc _ _ _ -> loc
-        Signature loc _ _ -> loc
-        Fixity loc _ _ _ -> loc
 
 instance HasLoc (Constructor p) where
     getLoc Constructor{loc} = loc
 
-instance (Cast Type p q, NameAt p ~ NameAt q) => Cast Constructor p q where
-    cast Constructor{loc, name, args} = Constructor{loc, name, args = fmap cast args}
+instance (Cast Type_ p q, NameAt p ~ NameAt q) => Cast Constructor p q where
+    cast Constructor{loc, name, args} = Constructor{loc, name, args = (fmap . fmap) cast args}
 
-instance (Cast Type p q, NameAt p ~ NameAt q) => Cast GadtConstructor p q where
-    cast GadtConstructor{loc, name, sig} = GadtConstructor{loc, name, sig = cast sig}
+instance (Cast Type_ p q, NameAt p ~ NameAt q) => Cast GadtConstructor p q where
+    cast GadtConstructor{loc, name, sig} = GadtConstructor{loc, name, sig = fmap cast sig}

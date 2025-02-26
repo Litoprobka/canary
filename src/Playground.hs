@@ -164,8 +164,8 @@ instance IsString (Pattern 'Parse) where
     fromString = matchCase (\name -> ConstructorP (mkName name) []) (VarP . mkName)
 
 instance IsString (Term 'Parse) where
-    fromString ('\'' : rest) = rest & matchCase (E.Variant . mkName . ("'" <>)) (T.Name . mkName . ("'" <>))
-    fromString str = E.Name . mkName $ fromString str
+    fromString ('\'' : rest) = rest & matchCase (noLoc . E.Variant . mkName . ("'" <>)) (noLoc . T.Name . mkName . ("'" <>))
+    fromString str = noLoc . E.Name . mkName $ fromString str
 
 instance IsString SimpleName where
     fromString = mkName . fromString
@@ -180,8 +180,8 @@ instance {-# OVERLAPPABLE #-} NameAt p ~ Name => IsString (Pattern p) where
     fromString = matchCase (\txt -> ConstructorP (nameFromText txt) []) (VarP . nameFromText)
 
 instance {-# OVERLAPPABLE #-} NameAt p ~ Name => IsString (Term p) where
-    fromString ('\'' : rest) = rest & matchCase (E.Variant . mkName . ("'" <>)) (T.Name . nameFromText . ("'" <>))
-    fromString str = E.Name . nameFromText $ fromString str
+    fromString ('\'' : rest) = rest & noLoc . matchCase (E.Variant . mkName . ("'" <>)) (T.Name . nameFromText . ("'" <>))
+    fromString str = noLoc . E.Name . nameFromText $ fromString str
 
 instance {-# OVERLAPPABLE #-} (NameAt p ~ name, IsString name) => IsString (VarBinder p) where
     fromString = T.plainBinder . fromString @name
@@ -189,21 +189,21 @@ instance {-# OVERLAPPABLE #-} (NameAt p ~ name, IsString name) => IsString (VarB
 -- Type
 
 infixr 2 -->
-(-->) :: HasLoc (NameAt p) => Type p -> Type p -> Type p
-from --> to = T.Function (zipLocOf from to) from to
+(-->) :: Type p -> Type p -> Type p
+from --> to = Located (zipLocOf from to) $ T.Function from to
 
 infixl 3 $:
 ($:) :: Type p -> Type p -> Type p
-($:) = T.App
+($:) lhs = noLoc . T.App lhs
 
 (∃) :: HasLoc (NameAt p) => NameAt p -> Type p -> Type p
-(∃) var body = T.Exists (zipLocOf var body) (T.plainBinder var) body
+(∃) var body = Located (zipLocOf var body) $ T.Exists (T.plainBinder var) body
 
 recordT :: ExtRow (Type p) -> Type p
-recordT = T.RecordT Blank
+recordT = noLoc . T.RecordT
 
 variantT :: ExtRow (Type p) -> Type p
-variantT = T.VariantT Blank
+variantT = noLoc . T.VariantT
 
 -- Pattern
 
@@ -220,50 +220,50 @@ con = ConstructorP
 
 infixl 1 #
 (#) :: Expr p -> Expr p -> Expr p
-(#) = E.App
+(#) = ($:)
 
 binApp :: Expr 'Parse -> Expr 'Parse -> Expr 'Parse -> Expr 'Parse
 binApp f arg1 arg2 = f # arg1 # arg2
 
 λ :: HasLoc (NameAt p) => Pattern p -> Expr p -> Expr p
-λ pat expr = E.Lambda (zipLocOf pat expr) pat expr
+λ pat expr = Located (zipLocOf pat expr) $ E.Lambda pat expr
 
 lam :: HasLoc (NameAt p) => Pattern p -> Expr p -> Expr p
 lam = λ
 
 let_ :: HasLoc (NameAt p) => Binding p -> Expr p -> Expr p
-let_ binding body = E.Let (zipLocOf binding body) binding body
+let_ binding body = Located (zipLocOf binding body) $ E.Let binding body
 
 recordExpr :: Row (Expr p) -> Expr p
-recordExpr = E.Record Blank
+recordExpr = noLoc . E.Record
 
-list :: HasLoc (NameAt p) => [Expr p] -> Expr p
-list xs = E.List loc xs
+list :: [Expr p] -> Expr p
+list xs = Located loc $ E.List xs
   where
     loc = case (xs, reverse xs) of
         (first' : _, last' : _) -> zipLocOf first' last'
         _ -> Blank
 
 match :: [([Pattern p], Expr p)] -> Expr p
-match = E.Match Blank
+match = noLoc . E.Match
 
 case_ :: Expr p -> [(Pattern p, Expr p)] -> Expr p
-case_ = E.Case Blank
+case_ m = noLoc . E.Case m
 
 if_ :: Expr p -> Expr p -> Expr p -> Expr p
-if_ = E.If Blank
+if_ c t = noLoc . E.If c t
 
 -- Declaration
 
 valueDec :: HasLoc (NameAt p) => Binding p -> [Declaration p] -> Declaration p
-valueDec binding decls = D.Value loc binding decls
+valueDec binding decls = Located loc $ D.Value binding decls
   where
     loc = case reverse decls of
         [] -> getLoc binding
         (lastDecl : _) -> zipLocOf binding lastDecl
 
 typeDec :: HasLoc (NameAt p) => NameAt p -> [NameAt p] -> [D.Constructor p] -> Declaration p
-typeDec typeName vars constrs = D.Type loc typeName (map T.plainBinder vars) constrs
+typeDec typeName vars constrs = Located loc $ D.Type typeName (map T.plainBinder vars) constrs
   where
     loc = case (reverse vars, reverse constrs) of
         ([], []) -> getLoc typeName
@@ -271,7 +271,7 @@ typeDec typeName vars constrs = D.Type loc typeName (map T.plainBinder vars) con
         (_, x : _) -> zipLocOf typeName x
 
 sigDec :: HasLoc (NameAt p) => NameAt p -> Type p -> Declaration p
-sigDec name ty = D.Signature (zipLocOf name ty) name ty
+sigDec name ty = Located (zipLocOf name ty) $ D.Signature name ty
 
 conDec :: HasLoc (NameAt p) => NameAt p -> [Type p] -> D.Constructor p
 conDec name args = D.Constructor loc name args

@@ -1,45 +1,7 @@
 {-# OPTIONS_GHC -Wno-unrecognised-pragmas #-}
 
 {-# HLINT ignore "Use <$>" #-}
-module Lexer (
-    Parser,
-    keywords,
-    specialSymbols,
-    block,
-    block1,
-    topLevelBlock,
-    letBlock,
-    lexeme,
-    lambda,
-    keyword,
-    specialSymbol,
-    intLiteral,
-    textLiteral,
-    charLiteral,
-    operator,
-    termName,
-    termName',
-    typeName,
-    implicitVariable,
-    variantConstructor,
-    recordLens,
-    parens,
-    brackets,
-    braces,
-    commaSep,
-    someOperator,
-    wildcard,
-    forallKeyword,
-    existsKeyword,
-    withLoc,
-    withLoc',
-    mkName,
-    constructorName,
-    literal,
-    located,
-    operatorInParens,
-    letRecBlock,
-) where
+module Lexer where
 
 import Common (Literal, Literal_ (..), Loc (..), Located (..), SimpleName, SimpleName_ (..), locFromSourcePos)
 import Control.Monad.Combinators.NonEmpty qualified as NE

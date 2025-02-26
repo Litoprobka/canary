@@ -28,6 +28,7 @@ default-extensions:
   - StrictData
   - OverloadedRecordDot
   - ExplicitNamespaces
+  - PatternSynonyms
 
 dependencies:
 - base >= 4.7 && < 5

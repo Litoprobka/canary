@@ -3,6 +3,7 @@
 {-# LANGUAGE DeriveAnyClass #-}
 {-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE OverloadedRecordDot #-}
+{-# LANGUAGE PatternSynonyms #-}
 {-# LANGUAGE TemplateHaskell #-}
 {-# LANGUAGE TypeFamilies #-}
 
@@ -137,7 +138,7 @@ resolveNames decls = do
     mkGlobalScope :: (NameResCtx es, Declare :> es) => Eff es ()
     mkGlobalScope = collectNames decls
 
-    isValueDecl D.Value{} = True
+    isValueDecl (Located _ D.Value{}) = True
     isValueDecl _ = False
 
 {- | adds declarations to the current scope
@@ -145,22 +146,22 @@ this function should be used very carefully, since it will
 generate different IDs when called twice on the same data
 -}
 collectNames :: (NameResCtx es, Declare :> es) => [Declaration 'Parse] -> Eff es ()
-collectNames decls = for_ decls \case
-    D.Value _ (FunctionB name _ _) _ -> void $ declare name
-    D.Value _ (ValueB pat _) _ -> void $ declarePat pat
-    D.Type _ name _ _ -> void $ declare name
-    D.GADT _ name _ _ -> void $ declare name
+collectNames decls = for_ decls $ traverse_ \case
+    D.Value (FunctionB name _ _) _ -> void $ declare name
+    D.Value (ValueB pat _) _ -> void $ declarePat pat
+    D.Type name _ _ -> void $ declare name
+    D.GADT name _ _ -> void $ declare name
     D.Signature{} -> pass
     D.Fixity{} -> pass
 
 -- | resolves names in a declaration. Adds type constructors to the current scope
 resolveDec :: (NameResCtx es, Declare :> es) => Declaration 'Parse -> Eff es (Declaration 'NameRes)
-resolveDec decl = case decl of
-    D.Value loc binding locals -> scoped do
+resolveDec = traverse \case
+    D.Value binding locals -> scoped do
         binding' <- resolveBinding locals binding
         locals' <- traverse resolveDec locals
-        pure $ D.Value loc binding' locals'
-    D.Type loc name vars constrs -> do
+        pure $ D.Value binding' locals'
+    D.Type name vars constrs -> do
         -- TODO: NAMESPACES: constrs should be declared in a corresponding type namespace
         name' <- resolve name
         for_ constrs \con -> declare con.name
@@ -170,17 +171,17 @@ resolveDec decl = case decl of
                 con' <- resolve con
                 args' <- traverse resolveTerm args
                 pure $ D.Constructor conLoc con' args'
-            pure $ D.Type loc name' vars' constrs'
-    D.GADT loc name mbKind constrs -> do
+            pure $ D.Type name' vars' constrs'
+    D.GADT name mbKind constrs -> do
         name' <- resolve name
         mbKind' <- traverse resolveTerm mbKind
         constrs' <- for constrs \(D.GadtConstructor conLoc con sig) -> do
             con' <- declare con
             sig' <- resolveTerm sig
             pure $ D.GadtConstructor conLoc con' sig'
-        pure $ D.GADT loc name' mbKind' constrs'
-    D.Signature loc name ty -> D.Signature loc <$> resolve name <*> resolveTerm ty
-    D.Fixity loc fixity name rels -> D.Fixity loc fixity <$> resolve name <*> traverse resolve rels
+        pure $ D.GADT name' mbKind' constrs'
+    D.Signature name ty -> D.Signature <$> resolve name <*> resolveTerm ty
+    D.Fixity fixity name rels -> D.Fixity fixity <$> resolve name <*> traverse resolve rels
 
 {- | resolves names in a binding. Unlike the rest of the functions, it also
 takes local definitions as an argument, and uses them after resolving the name / pattern
@@ -241,74 +242,77 @@ declarePat = \case
 
 -- | resolves names in a term. Doesn't change the current scope
 resolveTerm :: NameResCtx es => Term 'Parse -> Eff es (Term 'NameRes)
-resolveTerm e = scoped case e of
-    Lambda loc arg body -> do
-        arg' <- declarePat arg
-        body' <- resolveTerm body
-        pure $ Lambda loc arg' body'
-    WildcardLambda loc args body -> do
-        args' <- traverse declare args
-        body' <- resolveTerm body
-        pure $ WildcardLambda loc args' body'
-    App f arg -> App <$> resolveTerm f <*> resolveTerm arg
-    TypeApp expr tyArg -> TypeApp <$> resolveTerm expr <*> resolveTerm tyArg
-    Let loc binding expr -> do
-        binding' <- declareBinding binding
-        expr' <- resolveTerm expr
-        pure $ Let loc binding' expr'
-    LetRec loc bindings expr -> do
-        collectNames $ map (\b -> D.Value loc b []) $ NE.toList bindings
-        bindings' <- traverse (resolveBinding []) bindings
-        expr' <- resolveTerm expr
-        pure $ LetRec loc bindings' expr'
-    Case loc arg matches ->
-        Case loc <$> resolveTerm arg <*> for matches \(pat, expr) -> scoped do
-            pat' <- declarePat pat
+resolveTerm (Located loc e) =
+    Located loc <$> scoped case e of
+        Lambda arg body -> do
+            arg' <- declarePat arg
+            body' <- resolveTerm body
+            pure $ Lambda arg' body'
+        WildcardLambda args body -> do
+            args' <- traverse declare args
+            body' <- resolveTerm body
+            pure $ WildcardLambda args' body'
+        App f arg -> App <$> resolveTerm f <*> resolveTerm arg
+        TypeApp expr tyArg -> TypeApp <$> resolveTerm expr <*> resolveTerm tyArg
+        Let binding expr -> do
+            binding' <- declareBinding binding
             expr' <- resolveTerm expr
-            pure (pat', expr')
-    Match loc matches ->
-        Match loc <$> for matches \(pats, expr) -> scoped do
-            pats' <- traverse declarePat pats
+            pure $ Let binding' expr'
+        LetRec bindings expr -> do
+            collectNames $ map (\b -> Located loc $ D.Value b []) $ NE.toList bindings
+            bindings' <- traverse (resolveBinding []) bindings
             expr' <- resolveTerm expr
-            pure (pats', expr')
-    Annotation body ty -> Annotation <$> resolveTerm body <*> resolveTerm ty
-    If loc cond true false -> If loc <$> resolveTerm cond <*> resolveTerm true <*> resolveTerm false
-    Record loc row -> Record loc <$> traverse resolveTerm row
-    List loc items -> List loc <$> traverse resolveTerm items
-    Do loc stmts lastAction -> Do loc <$> traverse resolveStmt stmts <*> resolveTerm lastAction
-    InfixE pairs last' ->
-        InfixE
-            <$> traverse (bitraverse resolveTerm (traverse resolve)) pairs
-            <*> resolveTerm last'
-    Name name -> Name <$> resolve name
-    RecordLens loc lens -> pure $ RecordLens loc lens
-    Variant openName -> pure $ Variant openName
-    Literal lit -> pure $ Literal lit
-    Forall loc binder body -> do
-        var' <- resolveBinder binder
-        body' <- resolveTerm body
-        pure $ Forall loc var' body'
-    Exists loc binder body -> do
-        var' <- resolveBinder binder
-        body' <- resolveTerm body
-        pure $ Exists loc var' body'
-    Function loc from to -> Function loc <$> resolveTerm from <*> resolveTerm to
-    ImplicitVar var -> internalError (getLoc var) "inference for implicit vars is not implemented yet"
-    Parens expr -> resolveTerm expr -- todo: construct implicit lambdas here
-    VariantT loc row -> VariantT loc <$> traverse resolveTerm row
-    RecordT loc row -> RecordT loc <$> traverse resolveTerm row
+            pure $ LetRec bindings' expr'
+        Case arg matches ->
+            Case <$> resolveTerm arg <*> for matches \(pat, expr) -> scoped do
+                pat' <- declarePat pat
+                expr' <- resolveTerm expr
+                pure (pat', expr')
+        Match matches ->
+            Match <$> for matches \(pats, expr) -> scoped do
+                pats' <- traverse declarePat pats
+                expr' <- resolveTerm expr
+                pure (pats', expr')
+        Annotation body ty -> Annotation <$> resolveTerm body <*> resolveTerm ty
+        If cond true false -> If <$> resolveTerm cond <*> resolveTerm true <*> resolveTerm false
+        Record row -> Record <$> traverse resolveTerm row
+        List items -> List <$> traverse resolveTerm items
+        Do stmts lastAction -> Do <$> traverse resolveStmt stmts <*> resolveTerm lastAction
+        InfixE pairs last' ->
+            InfixE
+                <$> traverse (bitraverse resolveTerm (traverse resolve)) pairs
+                <*> resolveTerm last'
+        Name name -> Name <$> resolve name
+        RecordLens lens -> pure $ RecordLens lens
+        Variant openName -> pure $ Variant openName
+        Literal lit -> pure $ Literal lit
+        Forall binder body -> do
+            var' <- resolveBinder binder
+            body' <- resolveTerm body
+            pure $ Forall var' body'
+        Exists binder body -> do
+            var' <- resolveBinder binder
+            body' <- resolveTerm body
+            pure $ Exists var' body'
+        Function from to -> Function <$> resolveTerm from <*> resolveTerm to
+        ImplicitVar var -> internalError (getLoc var) "inference for implicit vars is not implemented yet"
+        Parens expr ->
+            -- todo: construct implicit lambdas here
+            resolveTerm expr <&> \(L inner) -> inner
+        VariantT row -> VariantT <$> traverse resolveTerm row
+        RecordT row -> RecordT <$> traverse resolveTerm row
 
 resolveStmt :: (NameResCtx es, Declare :> es) => DoStatement 'Parse -> Eff es (DoStatement 'NameRes)
-resolveStmt = \case
+resolveStmt = traverse \case
     Bind pat body -> do
         body' <- resolveTerm body
         pat' <- declarePat pat
         pure $ Bind pat' body'
-    With loc pat body -> do
+    With pat body -> do
         body' <- resolveTerm body
         pat' <- declarePat pat
-        pure $ With loc pat' body'
-    DoLet loc binding -> DoLet loc <$> declareBinding binding
+        pure $ With pat' body'
+    DoLet binding -> DoLet <$> declareBinding binding
     Action expr -> Action <$> resolveTerm expr
 
 {- | declares the var in a binder; resolves names in its kind annotation, if any
