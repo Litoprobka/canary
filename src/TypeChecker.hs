@@ -51,7 +51,7 @@ typecheck
     => HashMap Name Type' -- imports
     -> [Declaration 'Fixity]
     -> Eff es (HashMap Name Type') -- type checking doesn't add anything new to the AST
-typecheck env decls = run (Right <$> env) $ normaliseAll $ inferDecls decls
+typecheck env decls = run env $ normaliseAll $ inferDecls decls
 
 -- | check / infer types of a list of declarations that may reference each other
 inferDecls :: InfEffs es => [Declaration 'Fixity] -> Eff es (HashMap Name TypeDT)
@@ -62,11 +62,7 @@ inferDecls decls = do
     -- kind-checking all signatures
     sigs <- traverse typeFromTerm sigs'
     topLevel <- gets @InfState (.topLevel)
-    types <-
-        traverse (either (const $ internalError Blank "uninferred type") pure) $
-            HashMap.compose topLevel $
-                HashMap.fromList $
-                    (\x -> (x, x)) <$> typeNames
+    let types = HashMap.compose topLevel $ HashMap.fromList $ (\x -> (x, x)) <$> typeNames
     (types <>) . (<> sigs) . fold <$> for values \(binding, locals) ->
         binding & collectNamesInBinding & listToMaybe >>= (`HashMap.lookup` sigs) & \case
             Just ty -> do
@@ -84,27 +80,25 @@ inferDecls decls = do
     updateTopLevel = \case
         D.Signature _ name sig -> do
             sigV <- typeFromTerm sig
-            modify \s -> s{topLevel = HashMap.insert name (Right sigV) s.topLevel}
+            modify \s -> s{topLevel = HashMap.insert name sigV s.topLevel}
             pure DList.empty
-        D.Value _ binding@(FunctionB name _ _) locals -> DList.empty <$ insertBinding name binding locals
-        D.Value _ binding@(ValueB (VarP name) _) locals -> DList.empty <$ insertBinding name binding locals
-        D.Value loc ValueB{} _ -> internalError loc "destructuring bindings are not supported yet"
+        D.Value{} -> pure DList.empty
         D.Type loc name binders constrs -> do
             modify @ValueEnv $ HashMap.insert name (V.TyCon name)
             typeKind <- mkTypeKind loc binders
-            modify \s -> s{topLevel = HashMap.insert name (Right typeKind) s.topLevel}
+            modify \s -> s{topLevel = HashMap.insert name typeKind s.topLevel}
             for_ (mkConstrSigs name binders constrs) \(con, sig) -> do
                 sigV <- typeFromTerm sig
-                modify \s -> s{topLevel = HashMap.insert con (Right sigV) s.topLevel}
+                modify \s -> s{topLevel = HashMap.insert con sigV s.topLevel}
             pure $ DList.singleton name
         D.GADT loc name mbKind constrs -> do
             modify @ValueEnv $ HashMap.insert name (V.TyCon name)
             kind <- maybe (pure $ type_ loc) typeFromTerm mbKind
-            modify \s -> s{topLevel = HashMap.insert name (Right kind) s.topLevel}
+            modify \s -> s{topLevel = HashMap.insert name kind s.topLevel}
             for_ constrs \con -> do
                 conSig <- typeFromTerm con.sig
                 modify \s ->
-                    s{topLevel = HashMap.insert con.name (Right conSig) s.topLevel}
+                    s{topLevel = HashMap.insert con.name conSig s.topLevel}
             pure $ DList.singleton name
     mkTypeKind loc = go
       where
@@ -112,18 +106,6 @@ inferDecls decls = do
         go (binder : rest) = V.Function loc <$> typeFromTerm (binderKind binder) <*> go rest
     type_ :: Loc -> Type'
     type_ loc = V.TyCon (Located loc TypeName)
-
-    insertBinding name binding locals =
-        let closure = UninferredType $ scoped do
-                declareAll =<< inferDecls locals
-                nameTypePairs <- topLevelScope $ normaliseAll $ inferBinding binding
-                declareTopLevel nameTypePairs
-                case HashMap.lookup name nameTypePairs of
-                    -- this can only happen if `inferBinding` returns an incorrect map of types
-                    Nothing -> internalError (getLoc name) $ "type closure for" <+> pretty name <+> "didn't infer its type"
-                    Just ty -> pure ty
-         in modify \s ->
-                s{topLevel = HashMap.insertWith (\_ x -> x) name (Left closure) s.topLevel}
 
     getValueDecls decl (values, sigs) = case decl of
         D.Value _ binding locals -> ((binding, locals) : values, sigs)

@@ -49,7 +49,6 @@ import Syntax
 import Syntax.Core qualified as C
 import Syntax.Row
 import Syntax.Row qualified as Row
-import Prelude (show)
 
 type Pat = Pattern 'Fixity
 type TypeDT = Value
@@ -121,21 +120,13 @@ instance HasLoc MonoLayer where
         MLUniVar loc _ -> loc
         MLSkolem skolem -> getLoc skolem
 
--- calling an uninferred type closure should introduce all of the inferred bindings
--- into the global scope
-newtype UninferredType = UninferredType (forall es. InfEffs es => Eff es Type')
-instance Show UninferredType where
-    show _ = "<closure>"
-
--- the types of top-level bindings should not contain metavars
--- this is not enforced at type level, though
-type TopLevelBindings = HashMap Name (Either UninferredType Type')
-
 data InfState = InfState
     { nextUniVarId :: Int
     , nextTypeVar :: Char
     , currentScope :: Scope
-    , topLevel :: TopLevelBindings
+    , -- the types of top-level bindings should not contain metavars
+      -- this is not enforced at type level, though
+      topLevel :: HashMap Name Type'
     -- ^ top level bindings that may or may not have a type signature
     , locals :: HashMap Name TypeDT -- local variables
     , vars :: HashMap UniVar (Either Scope Monotype) -- contains either the scope of an unsolved var or a type
@@ -260,13 +251,13 @@ instance Pretty MonoLayer where
     pretty = pretty . unMonoLayer
 
 run
-    :: TopLevelBindings
+    :: HashMap Name Type'
     -> Eff (Declare : State InfState : es) a
     -> Eff es a
 run env = fmap fst . runWithFinalEnv env
 
 runWithFinalEnv
-    :: TopLevelBindings
+    :: HashMap Name Type'
     -> Eff (Declare : State InfState : es) a
     -> Eff es (a, InfState)
 runWithFinalEnv env = do
@@ -392,17 +383,16 @@ skolemScope skolem =
         . HashMap.lookup skolem
         =<< gets @InfState (.skolems)
 
--- looks up a type of a binding. Local binding take precedence over uninferred globals, but not over inferred ones
+-- looks up a type of a binding. Global bindings take precedence over local ones (should they?)
 lookupSig :: (InfEffs es, Declare :> es) => Name -> Eff es TypeDT
 lookupSig name = do
     InfState{topLevel, locals} <- get @InfState
     case (HashMap.lookup name topLevel, HashMap.lookup name locals) of
-        (Just (Right ty), _) -> pure ty
+        (Just ty, _) -> pure ty
         (_, Just ty) -> pure ty
-        (Just (Left (UninferredType closure)), _) -> closure
         (Nothing, Nothing) -> do
             -- assuming that type checking is performed after name resolution,
-            -- all encountered names have to be in scope
+            -- we may just treat unbound names as holes
             uni <- freshUniVar (getLoc name)
             uni <$ updateSig name uni
 
@@ -410,7 +400,7 @@ declareAll :: Declare :> es => HashMap Name TypeDT -> Eff es ()
 declareAll = traverse_ (uncurry updateSig) . HashMap.toList
 
 declareTopLevel :: InfEffs es => HashMap Name Type' -> Eff es ()
-declareTopLevel types = modify \s -> s{topLevel = fmap Right types <> s.topLevel}
+declareTopLevel types = modify \s -> s{topLevel = types <> s.topLevel}
 
 generalise :: InfEffs es => Eff es TypeDT -> Eff es TypeDT
 generalise = fmap runIdentity . generaliseAll . fmap Identity
@@ -464,21 +454,7 @@ generaliseAll action = do
         C.Variant con -> pure $ C.Variant con
         C.Case arg matches -> C.Case arg <$> for matches \(pat, body) -> (pat,) <$> go scope body
         C.Let name _ _ -> internalError (getLoc name) "unexpected let in a quoted type"
-
-    -- other -> pure $ Right other
     toTypeVar = either C.Name id
-
--- perform an action at top level
--- at the moment this function doesn't work as intended
-topLevelScope :: InfEffs es => Eff es a -> Eff es a
-topLevelScope action = do
-    InfState{currentScope} <- get
-    modify @InfState \s -> s{currentScope = Scope 0}
-    out <- action
-    modify @InfState \s -> s{currentScope}
-    pure out
-
---
 
 data Variance = In | Out | Inv
 

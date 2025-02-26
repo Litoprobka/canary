@@ -53,7 +53,7 @@ runDefault
     :: Eff '[Declare, State InfState, NameGen, Diagnose] a -> (Maybe a, Diagnostic (Doc AnsiStyle))
 runDefault action = runPureEff . runDiagnose' ("<none>", "") $ runNameGen do
     (_, defaultEnv) <- mkDefaults
-    run (Right <$> defaultEnv) action
+    run defaultEnv action
 
 mkDefaults :: NameGen :> es => Eff es (Scope, HashMap Name Type')
 mkDefaults = do
@@ -116,7 +116,7 @@ inferIO' mkEnv expr = do
   where
     getTy = runEff $ runDiagnose ("<none>", "") $ runNameGen do
         env <- mkEnv
-        evalState @ValueEnv HashMap.empty $ runWithFinalEnv (Right <$> env) $ normalise $ infer expr
+        evalState @ValueEnv HashMap.empty $ runWithFinalEnv env $ normalise $ infer expr
 
 parseInfer :: Text -> IO ()
 parseInfer input = void . runEff . runDiagnose ("cli", input) $ runNameGen
@@ -140,7 +140,7 @@ testCheck
 testCheck toResolve action = fst $ runPureEff $ runNameGen $ runDiagnose' ("<none>", "") do
     (scope, env) <- mkDefaults
     resolved <- NameResolution.run scope toResolve
-    run (Right <$> env) $ action resolved
+    run env $ action resolved
 
 {-
 dummyFixity :: Diagnose :> es => Expr 'NameRes -> Eff es (Expr 'Fixity)
