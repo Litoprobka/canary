@@ -178,24 +178,27 @@ binding = do
 -- function arrows are a special case that is handled directly in the parser
 term :: Parser (Expr 'Parse)
 term = do
-    firstExpr <- noPrec
-    pairs <- many $ (,) <$> optional someOperator <*> noPrec
-    let expr = case pairs of
-            [] -> firstExpr
-            [(Nothing, secondExpr)] -> firstExpr `App` secondExpr
-            [(Just op, secondExpr)] -> Name op `App` firstExpr `App` secondExpr -- todo: a separate AST node for an infix application?
-            (_ : _ : _) -> uncurry InfixE $ shift firstExpr pairs
-    -- todo: this doesn't quite handle `a -> b -> c : Type` yet
-    withFnArrows <- option expr do
-        specialSymbol "->"
-        rhs <- term
-        pure $ Function (zipLocOf expr rhs) expr rhs
-    option withFnArrows do
+    expr <- nonAnn
+    option expr do
         specialSymbol ":"
         Annotation expr <$> term
   where
-    atom = do
-        expr <- Name <$> termName
+    -- second lowest level of precedence, 'anything but annotations'
+    nonAnn = do
+        firstExpr <- noPrec
+        pairs <- many $ (,) <$> optional someOperator <*> noPrec
+        let expr = case pairs of
+                [] -> firstExpr
+                [(Nothing, secondExpr)] -> firstExpr `App` secondExpr
+                [(Just op, secondExpr)] -> Name op `App` firstExpr `App` secondExpr -- todo: a separate AST node for an infix application?
+                (_ : _ : _) -> uncurry InfixE $ shift firstExpr pairs
+        option expr do
+            specialSymbol "->"
+            rhs <- nonAnn
+            pure $ Function (zipLocOf expr rhs) expr rhs
+    -- type application precedence level
+    typeApp = do
+        expr <- termParens
         -- type applications bind tighther than anything else
         -- this might not work well with higher-than-application precedence operators, though
         apps <- many do
@@ -205,29 +208,22 @@ term = do
     -- x [(+, y), (*, z), (+, w)] --> [(x, +), (y, *), (z, +)] w
     shift expr [] = ([], expr)
     shift lhs ((op, rhs) : rest) = first ((lhs, op) :) $ shift rhs rest
-    noPrec = atom <|> keywordBased <|> termParens
+    noPrec = typeApp <|> keywordBased <|> termParens
 
     -- expression forms that have a leading keyword/symbol
+    -- most of them also consume all trailing terms
     keywordBased =
         choice
             [ lambdaLike Lambda lambda pattern' "->" <*> term
             , lambdaLike Forall forallKeyword varBinder "." <*> term
             , lambdaLike Exists forallKeyword varBinder "." <*> term
-            , letRec
-            , let'
+            , withLoc $ letRecBlock (try $ keyword "let" *> keyword "rec") (flip3 LetRec) binding term
+            , withLoc $ letBlock "let" (flip3 Let) binding term
             , case'
             , match'
             , if'
             , doBlock
             ]
-
-letRec :: Parser (Expr Parse)
-letRec = withLoc $ letRecBlock (try $ keyword "let" *> keyword "rec") (flip3 LetRec) binding term
-
-let' :: Parser (Expr Parse)
-let' =
-    withLoc $
-        letBlock "let" (flip3 Let) binding term
 
 case' :: Parser (Expr Parse)
 case' = withLoc do
@@ -274,9 +270,9 @@ termParens :: Parser (Expr 'Parse)
 termParens =
     choice
         [ record
-        , recordType -- todo: ambiguity
+        , recordType -- todo: ambiguity with empty record value
         , withLoc $ flip List <$> brackets (commaSep term)
-        , variantType -- todo: ambiguity
+        , variantType -- todo: ambiguity with empty list; unit sugar ambiguity
         , Name <$> operatorInParens
         , parens term
         , withLoc' RecordLens recordLens

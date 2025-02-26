@@ -117,32 +117,35 @@ mkDefaultEnv = do
     freshName' :: NameGen :> es => Text -> Eff es C.Name
     freshName' = freshName . noLoc . C.Name'
     prelude =
-        [ D.Type Blank "Unit" [] [D.Constructor Blank "MkUnit" []]
-        , D.Value Blank (FunctionB "id" [VarP "x"] (Name "x")) []
-        , D.Value Blank (FunctionB "const" [VarP "x", VarP "y"] (Name "x")) []
-        , D.Fixity Blank C.InfixL "|>" (C.PriorityRelation [] [] [])
-        , D.Fixity Blank C.InfixR "<|" (C.PriorityRelation [] ["|>"] [])
-        , D.Fixity Blank C.InfixR "<<" (C.PriorityRelation [] [] [">>"]) -- this is bugged atm
-        , D.Fixity Blank C.InfixL ">>" (C.PriorityRelation [Just "|>"] [] [])
-        , D.Value Blank (FunctionB "|>" [VarP "x", VarP "f"] (Name "f" `App` Name "x")) []
-        , D.Value Blank (FunctionB "<|" [VarP "f", VarP "x"] (Name "f" `App` Name "x")) []
-        , D.Value Blank (FunctionB ">>" [VarP "f", VarP "g", VarP "x"] (Name "g" `App` (Name "f" `App` Name "x"))) []
-        , D.Value Blank (FunctionB "<<" [VarP "f", VarP "g", VarP "x"] (Name "f" `App` (Name "g" `App` Name "x"))) []
-        , D.Value
-            Blank
-            ( FunctionB
-                "map"
-                [VarP "f", VarP "xs"]
-                ( Case
-                    Blank
-                    (Name "xs")
-                    [ (ConstructorP "Nil" [], Name "Nil")
-                    , (ConstructorP "Cons" [VarP "h", VarP "t"], app "Cons" [app "f" ["h"], app "map" ["f", "t"]])
-                    ]
-                )
+        []
+    -- D.Type Blank "Unit" [] [D.Constructor Blank "MkUnit" []]
+    -- , D.Value Blank (FunctionB "id" [VarP "x"] (Name "x")) []
+    -- , D.Value Blank (FunctionB "const" [VarP "x", VarP "y"] (Name "x")) []
+    -- , D.Fixity Blank C.InfixL "|>" (C.PriorityRelation [] [] [])
+    -- , D.Fixity Blank C.InfixR "<|" (C.PriorityRelation [] ["|>"] [])
+    -- , D.Fixity Blank C.InfixR "<<" (C.PriorityRelation [] [] [">>"]) -- this is bugged atm
+    -- , D.Fixity Blank C.InfixL ">>" (C.PriorityRelation [Just "|>"] [] [])
+    -- , D.Value Blank (FunctionB "|>" [VarP "x", VarP "f"] (Name "f" `App` Name "x")) []
+    -- , D.Value Blank (FunctionB "<|" [VarP "f", VarP "x"] (Name "f" `App` Name "x")) []
+    -- , D.Value Blank (FunctionB ">>" [VarP "f", VarP "g", VarP "x"] (Name "g" `App` (Name "f" `App` Name "x"))) []
+    -- , D.Value Blank (FunctionB "<<" [VarP "f", VarP "g", VarP "x"] (Name "f" `App` (Name "g" `App` Name "x"))) []
+    {-
+    , D.Value
+        Blank
+        ( FunctionB
+            "map"
+            [VarP "f", VarP "xs"]
+            ( Case
+                Blank
+                (Name "xs")
+                [ (ConstructorP "Nil" [], Name "Nil")
+                , (ConstructorP "Cons" [VarP "h", VarP "t"], app "Cons" [App "f" "h", app "map" ["f", "t"]])
+                ]
             )
-            []
-        ]
+        )
+        []
+    -}
+
     app :: Term p -> [Term p] -> Term p
     app = foldl' App
 

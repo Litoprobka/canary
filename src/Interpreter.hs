@@ -98,7 +98,7 @@ instance HasLoc Value where
 evalCore :: ValueEnv -> CoreTerm -> Value
 evalCore !env = \case
     -- note that env is a lazy hashmap, so we only force the outer structure here
-    C.Name name -> fromMaybe (Var name) $ HashMap.lookup name env
+    C.Name name -> fromMaybe (error . show $ "whoopsie, out of scope" <+> pretty name) $ HashMap.lookup name env
     C.TyCon name -> TyCon name
     C.Con name args -> Con name $ map (evalCore env) args
     C.Lambda name body -> Lambda $ Closure{var = name, env, body}
@@ -170,7 +170,7 @@ desugar = go
         T.Annotation expr _ -> go expr
         T.App lhs rhs -> C.App <$> go lhs <*> go rhs
         T.Lambda loc pat body -> do
-            name <- freshName $ Located Blank $ Name' "x"
+            name <- freshName $ Located Blank $ Name' "lamArg"
             C.Lambda name <$> go (T.Case loc (T.Name name) [(pat, body)])
         T.WildcardLambda _ args body -> do
             body' <- go body
@@ -183,11 +183,11 @@ desugar = go
         T.TypeApp expr _ -> go expr
         T.Case _ arg matches -> C.Case <$> go arg <*> traverse (bitraverse flattenPattern go) matches
         T.Match loc matches@(([_], _) : _) -> do
-            x <- freshName $ Located Blank $ Name' "x"
+            name <- freshName $ Located Blank $ Name' "matchArg"
             matches' <- for matches \case
                 ([pat], body) -> bitraverse flattenPattern desugar (pat, body)
                 _ -> internalError loc "inconsistent pattern count in a match expression"
-            pure $ C.Lambda x $ C.Case (C.Name x) matches'
+            pure $ C.Lambda name $ C.Case (C.Name name) matches'
         T.Match loc _ -> internalError loc "todo: multi-arg match desugar"
         T.If _ cond true false -> do
             cond' <- go cond
@@ -317,7 +317,7 @@ modifyEnv env decls = do
 
 mkConLambda :: NameGen :> es => Int -> Name -> ValueEnv -> Eff es Value
 mkConLambda num con env = do
-    names <- replicateM num (freshName $ Located Blank $ Name' "x")
+    names <- replicateM num (freshName $ Located Blank $ Name' "conArg")
     pure $ foldr (\var body -> Lambda $ Closure{var, env, body = quote body}) (Con con (map Var names)) names
 
 mkLambda' :: [Name] -> ([Value] -> Value) -> Value

@@ -1,0 +1,7 @@
+type Peano = S Peano | Z
+
+type Vec : Peano -> Type -> Type where
+  VNil : forall a. Vec Z a
+  VCons : forall (n : Peano) a. a -> Vec n a -> Vec (S n) a
+
+vcons = VCons

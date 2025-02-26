@@ -98,6 +98,7 @@ inferDecls decls = do
                 modify \s -> s{topLevel = HashMap.insert con (Right sigV) s.topLevel}
             pure $ DList.singleton name
         D.GADT loc name mbKind constrs -> do
+            modify @ValueEnv $ HashMap.insert name (V.TyCon name)
             kind <- maybe (pure $ type_ loc) typeFromTerm mbKind
             modify \s -> s{topLevel = HashMap.insert name (Right kind) s.topLevel}
             for_ constrs \con -> do
