@@ -32,6 +32,8 @@ import Syntax.Declaration qualified as D
 import Syntax.Row (ExtRow (..), OpenName)
 import Syntax.Term qualified as T
 import Prelude qualified (Show (..))
+import Syntax.Term (Visibility(..), Quantifier, Erased)
+import qualified Data.DList as DList
 
 type ValueEnv = HashMap Name Value
 type Type' = Value
@@ -48,9 +50,7 @@ data Value
       PrimValue Literal -- the name 'Literal' is slightly misleading here
     | -- types
       Function Loc Type' Type'
-    | Pi Loc Type' Closure
-    | Forall Loc Type' Closure
-    | Exists Loc Type' Closure
+    | Q Loc Quantifier Visibility Erased Closure
     | VariantT Loc (ExtRow Type')
     | RecordT Loc (ExtRow Type')
     | -- stuck computations
@@ -60,7 +60,7 @@ data Value
       UniVar Loc UniVar
     | Skolem Skolem
 
-data Closure = Closure {var :: Name, env :: ValueEnv, body :: CoreTerm}
+data Closure = Closure {var :: Name, ty :: Type', env :: ValueEnv, body :: CoreTerm}
 
 quote :: Value -> CoreTerm
 quote = \case
@@ -69,16 +69,14 @@ quote = \case
     Con con args -> C.Con con (map quote args)
     -- if we use quote for anything but pretty-printing,
     -- we'd probably need alpha conversion for all the function-like cases
-    Lambda closure -> C.Lambda closure.var $ quote (closureBody closure)
+    Lambda closure -> C.Lambda closure.var (quote closure.ty) (quote $ closureBody closure)
     PrimFunction name f -> quote $ f (Var name)
     Record vals -> C.Record $ fmap quote vals
     Variant name val -> C.App (C.Variant name) $ quote val
     -- RecordLens path -> RecordLens path
     PrimValue lit -> C.Literal lit
     Function loc l r -> C.Function loc (quote l) (quote r)
-    Pi loc ty closure -> C.Pi loc closure.var (quote ty) $ quote (closureBody closure)
-    Forall loc ty closure -> C.Forall loc closure.var (quote ty) $ quote (closureBody closure)
-    Exists loc ty closure -> C.Exists loc closure.var (quote ty) $ quote (closureBody closure)
+    Q loc q vis e closure -> C.Q loc q vis e closure.var (quote closure.ty) $ quote (closureBody closure)
     VariantT loc row -> C.VariantT loc $ fmap quote row
     RecordT loc row -> C.RecordT loc $ fmap quote row
     App lhs rhs -> C.App (quote lhs) (quote rhs)
@@ -105,7 +103,7 @@ evalCore !env = \case
     C.Name name -> fromMaybe (error . show $ "whoopsie, out of scope" <+> pretty name) $ HashMap.lookup name env
     C.TyCon name -> TyCon name
     C.Con name args -> Con name $ map (evalCore env) args
-    C.Lambda name body -> Lambda $ Closure{var = name, env, body}
+    C.Lambda name ty body -> Lambda $ Closure{var = name, ty = evalCore env ty, env, body}
     C.App (C.Variant name) arg -> Variant name $ evalCore env arg -- this is a bit of an ugly case
     C.App lhs rhs -> case (evalCore env lhs, evalCore env rhs) of
         (Lambda closure, arg) -> closure `app` arg
@@ -122,9 +120,7 @@ evalCore !env = \case
     C.Record row -> Record $ evalCore env <$> row
     C.Variant _name -> error "todo: seems like evalCore needs namegen" -- Lambda (Located Blank $ Name' "x") $ C.Variant name `C.App`
     C.Function loc lhs rhs -> Function loc (evalCore env lhs) (evalCore env rhs)
-    C.Pi loc var ty body -> Pi loc (evalCore env ty) $ Closure{var, env, body}
-    C.Forall loc var ty body -> Forall loc (evalCore env ty) $ Closure{var, env, body}
-    C.Exists loc var ty body -> Exists loc (evalCore env ty) $ Closure{var, env, body}
+    C.Q loc q vis e var ty body -> Q loc q vis e $ Closure{var, ty = evalCore env ty, env, body}
     C.VariantT loc row -> VariantT loc $ evalCore env <$> row
     C.RecordT loc row -> RecordT loc $ evalCore env <$> row
     -- should normal evaluation resolve univars?
@@ -176,10 +172,10 @@ desugar = go
         T.App lhs rhs -> C.App <$> go lhs <*> go rhs
         T.Lambda pat body -> do
             name <- freshName $ Located Blank $ Name' "lamArg"
-            C.Lambda name <$> go (Located loc $ T.Case (Located (getLoc name) $ T.Name name) [(pat, body)])
+            C.Lambda name (error "todo: desugar needs a type env") <$> go (Located loc $ T.Case (Located (getLoc name) $ T.Name name) [(pat, body)])
         T.WildcardLambda args body -> do
             body' <- go body
-            pure $ foldr C.Lambda body' args
+            pure $ foldr (`C.Lambda` error "todo: desugar needs a type env") body' args
         T.Let binding expr -> case binding of
             T.ValueB (L (T.VarP name)) body -> C.Let name <$> go body <*> go expr
             T.ValueB _ _ -> internalError loc "todo: desugar pattern bindings"
@@ -192,7 +188,7 @@ desugar = go
             matches' <- for matches \case
                 ([pat], body) -> bitraverse flattenPattern desugar (pat, body)
                 _ -> internalError loc "inconsistent pattern count in a match expression"
-            pure $ C.Lambda name $ C.Case (C.Name name) matches'
+            pure $ C.Lambda name (error "todo: desugar needs a type env") $ C.Case (C.Name name) matches'
         T.Match _ -> internalError loc "todo: multi-arg match desugar"
         T.If cond true false -> do
             cond' <- go cond
@@ -208,9 +204,7 @@ desugar = go
         T.List xs -> foldr (C.App . C.App (C.Name $ Located loc ConsName)) (C.Name $ Located loc NilName) <$> traverse go xs
         T.Do{} -> error "todo: desugar do blocks"
         T.Function from to -> C.Function loc <$> go from <*> go to
-        T.Pi var ty body -> C.Pi loc var <$> go ty <*> go body
-        T.Forall binder body -> C.Forall loc binder.var <$> maybe (type_ loc) desugar binder.kind <*> go body
-        T.Exists binder body -> C.Exists loc binder.var <$> maybe (type_ loc) desugar binder.kind <*> go body
+        T.Q q vis er binder body -> C.Q loc q vis er binder.var <$> maybe (type_ loc) desugar binder.kind <*> go body
         T.VariantT row -> C.VariantT loc <$> traverse go row
         T.RecordT row -> C.RecordT loc <$> traverse go row
 
@@ -311,20 +305,24 @@ modifyEnv env decls = do
         D.GADT _ _ constrs -> traverse mkGadtConstr constrs
         D.Signature{} -> pure mempty
 
-    mkConstr con = (con.name,) . Left <$> mkConLambda (length con.args) con.name env
-    mkGadtConstr con = (con.name,) . Left <$> mkConLambda (countArgs con.sig) con.name env
-    countArgs = go 0
+    mkConstr con = do
+        argTypes <- traverse (eval env) con.args
+        (con.name,) . Left <$> mkConLambda argTypes con.name env
+    mkGadtConstr con = do
+        argTypes <- traverse (eval env) $ argsFromSig con.sig
+        (con.name,) . Left <$> mkConLambda argTypes con.name env
+    argsFromSig = DList.toList . go DList.empty
       where
         go acc (L e) = case e of
-            T.Function _ rhs -> go (succ acc) rhs
-            T.Forall _ body -> go acc body
-            T.Exists _ body -> go acc body
+            T.Function arg rhs -> go (DList.cons arg acc) rhs
+            T.Q T.Forall Visible _ binder body -> go (DList.cons (fromMaybe (Located Blank $ T.Name $ Located Blank TypeName) binder.kind) acc) body
+            T.Q _ _ _ _ body -> go acc body
             _ -> acc
 
-mkConLambda :: NameGen :> es => Int -> Name -> ValueEnv -> Eff es Value
-mkConLambda num con env = do
-    names <- replicateM num (freshName $ Located Blank $ Name' "conArg")
-    pure $ foldr (\var body -> Lambda $ Closure{var, env, body = quote body}) (Con con (map Var names)) names
+mkConLambda :: NameGen :> es => [Type'] -> Name -> ValueEnv -> Eff es Value
+mkConLambda argTypes con env = do
+    namesAndTypes <- traverse (\ty -> (ty,) <$> freshName (Located Blank $ Name' "conArg")) argTypes
+    pure $ foldr (\(ty, var) body -> Lambda $ Closure{var, ty, env, body = quote body}) (Con con (map (Var . snd) namesAndTypes)) namesAndTypes
 
 mkLambda' :: [Name] -> ([Value] -> Value) -> Value
 mkLambda' [] f = f []

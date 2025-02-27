@@ -7,6 +7,7 @@
 {-# LANGUAGE TemplateHaskell #-}
 {-# LANGUAGE TypeFamilies #-}
 {-# LANGUAGE NoFieldSelectors #-}
+{-# LANGUAGE DuplicateRecordFields #-}
 {-# OPTIONS_GHC -Wno-missing-export-lists #-}
 
 module TypeChecker.Backend where
@@ -49,6 +50,7 @@ import Syntax
 import Syntax.Core qualified as C
 import Syntax.Row
 import Syntax.Row qualified as Row
+import Syntax.Term (Quantifier(..), Visibility (..), Erased (..))
 
 type Pat = Pattern 'Fixity
 type TypeDT = Value
@@ -57,12 +59,13 @@ type Type' = Value
 data Monotype
     = MCon Name [Monotype]
     | MTyCon Name
-    | MLambda SimpleName (Monotype -> Monotype)
+    | MLambda MonoClosure
     | MRecord (Row Monotype)
     | MVariant OpenName Monotype
     | MPrim Literal
     | -- types
       MFn Loc Monotype Monotype
+    | MQ Loc Quantifier Erased MonoClosure
     | MVariantT Loc (ExtRow Monotype)
     | MRecordT Loc (ExtRow Monotype)
     | -- stuck computations
@@ -72,10 +75,12 @@ data Monotype
       MUniVar Loc UniVar
     | MSkolem Skolem
 
+data MonoClosure = MonoClosure {var :: Name, ty :: Monotype, env :: HashMap Name Value, body :: Monotype}
+
 uniplateMono :: Traversal' Monotype Monotype
 uniplateMono f = \case
     MCon name args -> MCon name <$> traverse f args
-    MLambda _name _body -> error "todo: uniplate HOAS lambda" -- MLambda name \x -> f (body x)
+    MLambda _closure -> error "todo: uniplate monolambda" -- MLambda name \x -> f (body x)
     MApp lhs rhs -> MApp <$> f lhs <*> f rhs
     MFn loc lhs rhs -> MFn loc <$> f lhs <*> f rhs
     MVariantT loc row -> MVariantT loc <$> traverse f row
@@ -96,6 +101,7 @@ data MonoLayer
     | MLPrimFunc Name (Value -> Value)
     | -- types
       MLFn Loc TypeDT TypeDT
+    | MLQ Loc Quantifier Erased V.Closure
     | MLVariantT Loc (ExtRow TypeDT)
     | MLRecordT Loc (ExtRow TypeDT)
     | -- stuck computations
@@ -115,6 +121,7 @@ instance HasLoc MonoLayer where
         MLPrim val -> getLoc val
         MLPrimFunc name _ -> getLoc name -- to fix?
         MLFn loc _ _ -> loc
+        MLQ loc _ _ _ -> loc
         MLVariantT loc _ -> loc
         MLRecordT loc _ -> loc
         MLApp{} -> Blank
@@ -348,13 +355,14 @@ alterUniVar override uni ty = do
                 Left _ -> pure NoCycle
                 Right ty' -> cycleCheck (selfRefType, HashSet.insert uni2 acc) ty'
         MFn _ from to -> cycleCheck (Indirect, acc) from >> cycleCheck (Indirect, acc) to
+        MQ loc _q _e _closure -> internalError loc "todo: cycleCheck MQ"
         MCon _ args -> NoCycle <$ traverse_ (cycleCheck (Indirect, acc)) args
         MApp lhs rhs -> cycleCheck (Indirect, acc) lhs >> cycleCheck (Indirect, acc) rhs
         MVariantT _ row -> NoCycle <$ traverse_ (cycleCheck (Indirect, acc)) row
         MRecordT _ row -> NoCycle <$ traverse_ (cycleCheck (Indirect, acc)) row
         MVariant _ val -> cycleCheck (Indirect, acc) val
         MRecord row -> NoCycle <$ traverse_ (cycleCheck (Indirect, acc)) row
-        MLambda _ f -> NoCycle <$ cycleCheck (Indirect, acc) (f $ MPrim $ Located Blank $ TextLiteral "something")
+        MLambda _f -> internalError Blank "todo: cycleCheck monolambda" -- NoCycle <$ cycleCheck (Indirect, acc) (f $ MPrim $ Located Blank $ TextLiteral "something")
         MCase arg matches -> cycleCheck (Indirect, acc) arg <* (traverse_ . traverse_) (cycleCheck (Indirect, acc)) matches
         MTyCon{} -> pure NoCycle
         MSkolem{} -> pure NoCycle
@@ -419,7 +427,7 @@ generaliseAll action = do
         (ty', vars) <- runState HashMap.empty $ go scope $ V.quote ty
         let forallVars = hashNub . lefts $ toList vars
         env <- get @ValueEnv
-        pure $ V.evalCore env $ foldr (\var body -> C.Forall (getLoc ty) var (type_ $ getLoc ty) body) ty' forallVars
+        pure $ V.evalCore env $ foldr (\var body -> C.Q (getLoc ty) Forall Implicit Erased var (type_ $ getLoc ty) body) ty' forallVars
     type_ loc = C.TyCon $ Located loc TypeName
 
     go
@@ -445,9 +453,8 @@ generaliseAll action = do
         C.RecordT loc row -> C.RecordT loc <$> traverse (go scope) row
         C.VariantT loc row -> C.VariantT loc <$> traverse (go scope) row
         C.Record row -> C.Record <$> traverse (go scope) row
-        C.Forall loc var ty body -> C.Forall loc var <$> go scope ty <*> go scope body
-        C.Exists loc var ty body -> C.Exists loc var <$> go scope ty <*> go scope body
-        C.Lambda var body -> C.Lambda var <$> go scope body
+        C.Q loc q vis e var ty body -> C.Q loc q vis e var <$> go scope ty <*> go scope body
+        C.Lambda var ty body -> C.Lambda var <$> go scope ty <*> go scope body
         C.Con name args -> C.Con name <$> traverse (go scope) args
         -- terminal cases
         C.Name name -> pure $ C.Name name
@@ -482,8 +489,9 @@ mono variance = \case
     V.Function loc from to -> MFn loc <$> mono (flipVariance variance) from <*> go to
     V.VariantT loc row -> MVariantT loc <$> traverse go row
     V.RecordT loc row -> MRecordT loc <$> traverse go row
-    V.Forall _ _ closure -> go =<< substitute variance closure
-    V.Exists _ _ closure -> go =<< substitute (flipVariance variance) closure
+    V.Q loc q Visible e closure -> internalError loc "mono: monomorhise closures" -- pure $ MQ loc q e $ _toMonoClosure closure
+    V.Q _ Forall vis _ closure -> go =<< substitute variance closure
+    V.Q _ Exists vis _ closure -> go =<< substitute (flipVariance variance) closure
     V.PrimFunction{} -> internalError Blank "mono: prim function"
     V.PrimValue val -> pure $ MPrim val
     V.Record row -> MRecord <$> traverse (mono variance) row
@@ -492,6 +500,7 @@ mono variance = \case
     l@V.Lambda{} -> internalError (getLoc l) "mono: type-level lambdas are not supported yet"
   where
     go = mono variance
+
 
 flipVariance :: Variance -> Variance
 flipVariance = \case
@@ -511,7 +520,8 @@ unMono = \case
     MRecordT loc row -> V.RecordT loc $ fmap unMono row
     MVariant name val -> V.Variant name (unMono val)
     MRecord row -> V.Record (fmap unMono row)
-    MLambda _name _body -> error "todo: unMono MLambda; do lambdas even belong in Monotype?"
+    MLambda _closure -> error "todo: unMono MLambda; do lambdas even belong in Monotype?"
+    MQ loc q e _closure -> V.Q loc q Visible e (error "todo: unMono Q")
     MPrim val -> V.PrimValue val
     MCase arg matches -> V.Case (unMono arg) ((map . second) unMono matches)
 
@@ -537,8 +547,11 @@ monoLayer variance = \case
     V.Function loc from to -> pure $ MLFn loc from to
     V.VariantT loc row -> pure $ MLVariantT loc row
     V.RecordT loc row -> pure $ MLRecordT loc row
-    V.Forall _ _ closure -> monoLayer variance =<< substitute variance closure
-    V.Exists _ _ closure -> monoLayer variance =<< substitute (flipVariance variance) closure
+    V.Q loc q Visible e closure -> pure $ MLQ loc q e closure
+    -- todo: I'm not sure how to handle erased vs retained vars yet
+    -- in theory, no value may depend on an erased var
+    V.Q _ Forall _ _e closure -> monoLayer variance =<< substitute variance closure
+    V.Q _ Exists _ _e closure -> monoLayer variance =<< substitute (flipVariance variance) closure
     V.PrimFunction{} -> internalError Blank "monoLayer: prim function"
     V.Lambda closure -> pure $ MLLambda closure
     V.Record row -> pure $ MLRecord row
@@ -555,6 +568,7 @@ unMonoLayer = \case
     MLUniVar loc uni -> V.UniVar loc uni
     MLApp lhs rhs -> V.App lhs rhs
     MLFn loc lhs rhs -> V.Function loc lhs rhs
+    MLQ loc q e closure -> V.Q loc q Visible e closure
     MLVariantT loc row -> V.VariantT loc row
     MLRecordT loc row -> V.RecordT loc row
     MLVariant name val -> V.Variant name val

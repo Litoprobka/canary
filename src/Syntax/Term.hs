@@ -62,11 +62,13 @@ data Term_ (p :: Pass) where
     InfixE :: p < 'Fixity => [(Expr p, Maybe (NameAt p))] -> Expr p -> Expr_ p
     -- type-only stuff
     Function :: Type p -> Type p -> Type_ p
-    Pi :: NameAt p -> Type p -> Type p -> Type_ p
-    Forall :: VarBinder p -> Type p -> Type_ p
-    Exists :: VarBinder p -> Type p -> Type_ p
+    Q :: Quantifier -> Visibility -> Erased -> VarBinder p -> Type p -> Type_ p
     VariantT :: ExtRow (Type p) -> Type_ p
     RecordT :: ExtRow (Type p) -> Type_ p
+
+data Quantifier = Forall | Exists deriving (Eq, Show)
+data Visibility = Visible | Implicit | Hidden deriving (Eq, Show)
+data Erased = Retained | Erased deriving (Eq, Show)
 
 data Binding (p :: Pass)
     = ValueB {pat :: Pattern p, body :: Expr p}
@@ -150,9 +152,7 @@ instance Pretty (NameAt p) => Pretty (Expr_ p) where
             Skolem skolem -> pretty skolem
             UniVar uni -> pretty uni
             Function from to -> parensWhen 2 $ go 2 from <+> "->" <+> pretty to
-            Pi arg from to -> parensWhen 2 $ parens (pretty arg <+> ":" <+> pretty from) <+> "->" <+> pretty to
-            Forall var body -> parensWhen 1 $ "∀" <> prettyBinder var <> "." <+> pretty body
-            Exists var body -> parensWhen 1 $ "∃" <> prettyBinder var <> "." <+> pretty body
+            Q q vis er binder body -> parensWhen 2 $ kw q er <+> prettyBinder binder <+> arrOrDot vis <+> pretty body
             VariantT row -> brackets . withExt row . sep . punctuate comma . map variantItem $ sortedRow row.row
             RecordT row -> braces . withExt row . sep . punctuate comma . map recordTyField $ sortedRow row.row
           where
@@ -161,6 +161,14 @@ instance Pretty (NameAt p) => Pretty (Expr_ p) where
                 | otherwise = id
             recordField (name, body) = pretty name <+> "=" <+> pretty body
             withExt row = maybe id (\r doc -> doc <+> "|" <+> pretty r) (extension row)
+
+            kw Forall Erased = "∀"
+            kw Forall Retained = "foreach"
+            kw Exists Erased = "∃"
+            kw Exists Retained = "some" -- placeholder
+
+            arrOrDot Visible = "->"
+            arrOrDot _ = "."
 
             -- todo: a special case for unit
             variantItem (name, ty) = pretty name <+> pretty ty
@@ -258,9 +266,7 @@ instance
         Variant oname -> Variant oname
         Literal lit -> Literal lit
         Function lhs rhs -> Function (cast' lhs) (cast' rhs)
-        Pi arg from to -> Pi arg (cast' from) (cast' to)
-        Forall var body -> Forall (cast var) (cast' body)
-        Exists var body -> Exists (cast var) (cast' body)
+        Q q dep vis binder body -> Q q dep vis (cast binder) (cast' body)
         VariantT row -> VariantT (fmap cast' row)
         RecordT row -> RecordT (fmap cast' row)
         ImplicitVar var -> ImplicitVar var
@@ -324,9 +330,9 @@ collectReferencedNames = go
         App lhs rhs -> go lhs <> go rhs
         TypeApp e ty -> go e <> go ty
         Function fn args -> go fn <> go args
-        Pi _ from to -> go from <> go to
-        Forall _ body -> go body
-        Exists _ body -> go body
+        Q _ _ _ binder body -> case binder.kind of
+            Nothing -> go body
+            Just ty -> go ty <> go body
         VariantT row -> foldMap go $ toList row
         RecordT row -> foldMap go $ toList row
         Record row -> foldMap go $ toList row
@@ -381,9 +387,7 @@ uniplate f = traverse \case
     Do stmts ret -> Do <$> traverse (plateStmt f) stmts <*> f ret
     InfixE pairs l -> InfixE <$> traverse (\(e, op) -> (,op) <$> f e) pairs <*> f l
     Function lhs rhs -> Function <$> f lhs <*> f rhs
-    Pi arg from to -> Pi arg <$> f from <*> f to
-    Forall var body -> Forall <$> plateBinder f var <*> f body
-    Exists var body -> Exists <$> plateBinder f var <*> f body
+    Q q vis e binder body -> Q q vis e <$> plateBinder f binder <*> f body
     VariantT row -> VariantT <$> traverse f row
     RecordT row -> RecordT <$> traverse f row
     Parens expr -> Parens <$> f expr

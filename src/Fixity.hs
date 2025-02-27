@@ -130,10 +130,8 @@ parse = traverse \case
         pairs' <- traverse (bitraverse parse pure) pairs
         last'' <- parse last'
         go' pairs' last''
-    Forall binder body -> Forall <$> parseBinder binder <*> parse body
-    Exists binder body -> Exists <$> parseBinder binder <*> parse body
     Function lhs rhs -> Function <$> parse lhs <*> parse rhs
-    Pi arg ty body -> Pi arg <$> parse ty <*> parse body
+    Q q vis e binder body -> Q q vis e <$> parseBinder binder <*> parse body
     VariantT row -> VariantT <$> traverse parse row
     RecordT row -> RecordT <$> traverse parse row
   where

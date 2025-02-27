@@ -79,6 +79,7 @@ keywords =
         , "match"
         , "of"
         , "forall"
+        , "foreach"
         , "∀"
         , "exists"
         , "∃"

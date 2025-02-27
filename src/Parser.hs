@@ -220,8 +220,9 @@ term = located do
         located $
             choice
                 [ lambdaLike Lambda lambda pattern' "->" term
-                , lambdaLike Forall forallKeyword varBinder "." term
-                , lambdaLike Exists forallKeyword varBinder "." term
+                , lambdaLike (Q Forall Implicit Erased) forallKeyword varBinder "." term
+                , lambdaLike (Q Forall Visible Retained) (keyword "foreach") varBinder "->" term
+                , lambdaLike (Q Exists Implicit Erased) forallKeyword varBinder "." term
                 , letRecBlock (try $ keyword "let" *> keyword "rec") LetRec binding term
                 , letBlock "let" Let binding term
                 , case'

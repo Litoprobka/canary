@@ -117,7 +117,10 @@ inferDecls decls = do
     mkConstrSigs name binders constrs =
         constrs <&> \(D.Constructor loc con params) ->
             ( con
-            , foldr (\var -> Located loc . Forall var) (foldr (\lhs -> Located loc . Function lhs) (fullType loc) params) binders
+            , foldr
+                (\var -> Located loc . Q Forall Implicit Erased var)
+                (foldr (\lhs -> Located loc . Function lhs) (fullType loc) params)
+                binders
             )
       where
         fullType loc = foldl' (\lhs -> Located loc . App lhs) (Located (getLoc name) $ Name name) (Located loc . Name . (.var) <$> binders)
@@ -180,6 +183,10 @@ check (Located loc e) type_ = scoped $ match e type_
     match = \cases
         -- the case for E.Name is redundant, since
         -- `infer` just looks up its type anyway
+        (Lambda (L (VarP arg)) body) (V.Q _ Forall Visible Retained closure) -> scoped do
+            updateSig arg closure.ty -- checkPattern arg closure.ty
+            modify @ValueEnv $ HashMap.insert arg (V.Var arg)
+            check body (closure `V.app` V.Var arg)
         (Lambda arg body) (V.Function _ from to) -> scoped do
             -- `checkPattern` updates signatures of all mentioned variables
             checkPattern arg from
@@ -231,8 +238,8 @@ check (Located loc e) type_ = scoped $ match e type_
                     lookupUniVar uni >>= \case
                         Left _ -> solveUniVar uni newTy
                         Right _ -> pass
-        expr (V.Forall _ _ closure) -> check (Located loc expr) =<< substitute Out closure
-        expr (V.Exists _ _ closure) -> check (Located loc expr) =<< substitute In closure
+        expr (V.Q _ Forall _vis _e closure) -> check (Located loc expr) =<< substitute Out closure
+        expr (V.Q _ Exists _vis _e closure) -> check (Located loc expr) =<< substitute In closure
         -- todo: a case for do-notation
         expr ty -> do
             inferredTy <- infer (Located loc expr)
@@ -280,14 +287,8 @@ infer (Located loc e) = scoped case e of
         fTy <- infer f
         inferApp loc fTy x
     TypeApp expr tyArg -> do
-        infer expr >>= \case
-            V.Forall _ _ closure -> do
-                Subst{var, result} <- substitute' In closure
-                env <- get @ValueEnv
-                tyArgV <- V.eval env tyArg
-                subtype var tyArgV
-                pure result
-            ty -> typeError $ NoVisibleTypeArgument expr tyArg ty
+        ty <- infer expr
+        inferTyApp expr ty tyArg
     Lambda arg body -> do
         argTy <- inferPattern arg
         V.Function loc argTy <$> infer body
@@ -320,7 +321,7 @@ infer (Located loc e) = scoped case e of
         argCount <- case getArgCount matches of
             Just argCount -> pure argCount
             Nothing -> typeError $ ArgCountMismatch loc
-        result <- freshUniVar loc
+        result <- freshUniVar loc -- alpha-conversion?
         patTypes <- replicateM argCount (freshUniVar loc)
         for_ matches \(pats, body) -> do
             zipWithM_ checkPattern pats patTypes
@@ -355,10 +356,10 @@ infer (Located loc e) = scoped case e of
     Function lhs rhs -> do
         check lhs type_
         check rhs type_
-        pure type_
-    Pi arg ty body -> do
-        tyV <- typeFromTerm ty
-        updateSig arg tyV
+        pure type_ -- alpha-conversion?
+    Q _ _ _ binder body -> do
+        tyV <- maybe (freshUniVar loc) typeFromTerm binder.kind
+        updateSig binder.var tyV
         check body type_
         pure type_
     VariantT row -> do
@@ -366,16 +367,6 @@ infer (Located loc e) = scoped case e of
         pure type_
     RecordT row -> do
         traverse_ (`check` type_) row
-        pure type_
-    Forall binder body -> scoped do
-        kind <- maybe (freshUniVar loc) typeFromTerm binder.kind
-        updateSig binder.var kind
-        check body type_
-        pure type_
-    Exists binder body -> scoped do
-        kind <- maybe (freshUniVar loc) typeFromTerm binder.kind
-        updateSig binder.var kind
-        check body type_
         pure type_
   where
     type_ = V.TyCon (Located loc TypeName)
@@ -390,6 +381,23 @@ inferApp appLoc fTy arg = do
         MLFn _ from to -> do
             to <$ check arg from
         _ -> typeError $ NotAFunction appLoc fTy
+
+inferTyApp :: InfEffs es => Expr 'Fixity -> TypeDT -> Type 'Fixity -> Eff es TypeDT
+inferTyApp expr ty tyArg = case ty of
+    V.Q _ Forall Implicit _e closure -> do
+        Subst{var, result} <- substitute' In closure
+        env <- get @ValueEnv
+        tyArgV <- V.eval env tyArg
+        subtype var tyArgV
+        pure result
+    V.Q _ q Hidden _e closure -> do
+        Subst{result} <- substitute' (qVariance q) closure
+        inferTyApp expr result tyArg
+    _ -> typeError $ NoVisibleTypeArgument expr tyArg ty
+  where
+    qVariance = \case
+        Forall -> In
+        Exists -> Out
 
 -- infers the type of a function / variables in a pattern
 -- does not implicitly declare anything
@@ -458,6 +466,8 @@ inferPattern (Located loc p) = case p of
         go =
             monoLayer In >=> \case
                 MLFn _ arg rest -> second (arg :) <$> go rest
+                MLQ loc' _ _ _ -> internalError loc' "dependent constructor types are not supported yet"
+                -- MLQ _loc Forall _e closure -> second (closure.ty :) <$> go (V.closureBody closure) -- alpha-conversion?
                 -- univars should never appear as the rightmost argument of a value constructor type
                 -- i.e. types of value constructors have the shape `a -> b -> c -> d -> ConcreteType a b c d`
                 --
@@ -501,10 +511,8 @@ normaliseAll = generaliseAll >=> traverse (eval' <=< go . V.quote)
         -- other cases could be eliminated by a type changing uniplate
         C.App lhs rhs -> C.App <$> go lhs <*> go rhs
         C.Function loc lhs rhs -> C.Function loc <$> go lhs <*> go rhs
-        C.Pi loc var ty body -> C.Pi loc var <$> go ty <*> go body
         -- this might produce incorrect results if we ever share a single forall in multiple places
-        C.Forall loc var ty body -> C.Forall loc var <$> go ty <*> go body
-        C.Exists loc var ty body -> C.Exists loc var <$> go ty <*> go body
+        C.Q loc q v e var ty body -> C.Q loc q v e var <$> go ty <*> go body
         C.VariantT loc row -> C.VariantT loc <$> traverse go row
         C.RecordT loc row -> C.RecordT loc <$> traverse go row
         -- expression-only constructors are unsupported for now

@@ -286,20 +286,11 @@ resolveTerm (Located loc e) =
         RecordLens lens -> pure $ RecordLens lens
         Variant openName -> pure $ Variant openName
         Literal lit -> pure $ Literal lit
-        Forall binder body -> do
-            var' <- resolveBinder binder
-            body' <- resolveTerm body
-            pure $ Forall var' body'
-        Exists binder body -> do
-            var' <- resolveBinder binder
-            body' <- resolveTerm body
-            pure $ Exists var' body'
         Function from to -> Function <$> resolveTerm from <*> resolveTerm to
-        Pi arg ty body -> do
-            ty' <- resolveTerm ty
-            arg' <- declare arg
+        Q q vis er binder body -> do
+            binder' <- resolveBinder binder
             body' <- resolveTerm body
-            pure $ Pi arg' ty' body'
+            pure $ Q q vis er binder' body'
         ImplicitVar var -> internalError (getLoc var) "inference for implicit vars is not implemented yet"
         Parens expr ->
             -- todo: construct implicit lambdas here

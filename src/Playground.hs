@@ -40,7 +40,7 @@ import Prettyprinter.Render.Text (putDoc)
 import Syntax
 import Syntax.Declaration qualified as D
 import Syntax.Row
-import Syntax.Term (Pattern_ (..))
+import Syntax.Term (Pattern_ (..), Quantifier (..), Erased (..), Visibility (..))
 import Syntax.Term qualified as E
 import Syntax.Term qualified as T
 import Text.Megaparsec (errorBundlePretty, parse, pos1)
@@ -197,7 +197,7 @@ infixl 3 $:
 ($:) lhs = noLoc . T.App lhs
 
 (∃) :: HasLoc (NameAt p) => NameAt p -> Type p -> Type p
-(∃) var body = Located (zipLocOf var body) $ T.Exists (T.plainBinder var) body
+(∃) var body = Located (zipLocOf var body) $ T.Q Exists Implicit Erased (T.plainBinder var) body
 
 recordT :: ExtRow (Type p) -> Type p
 recordT = noLoc . T.RecordT
