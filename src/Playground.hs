@@ -40,7 +40,7 @@ import Prettyprinter.Render.Text (putDoc)
 import Syntax
 import Syntax.Declaration qualified as D
 import Syntax.Row
-import Syntax.Term (Pattern (..))
+import Syntax.Term (Pattern_ (..))
 import Syntax.Term qualified as E
 import Syntax.Term qualified as T
 import Text.Megaparsec (errorBundlePretty, parse, pos1)
@@ -161,7 +161,7 @@ noLoc :: a -> Located a
 noLoc = Located Blank
 
 instance IsString (Pattern 'Parse) where
-    fromString = matchCase (\name -> ConstructorP (mkName name) []) (VarP . mkName)
+    fromString = noLoc . matchCase (\name -> ConstructorP (mkName name) []) (VarP . mkName)
 
 instance IsString (Term 'Parse) where
     fromString ('\'' : rest) = rest & matchCase (noLoc . E.Variant . mkName . ("'" <>)) (noLoc . T.Name . mkName . ("'" <>))
@@ -177,7 +177,7 @@ nameFromText :: Text -> Name
 nameFromText txt = noLoc $ Name txt (Id $ hashWithSalt 0 txt)
 
 instance {-# OVERLAPPABLE #-} NameAt p ~ Name => IsString (Pattern p) where
-    fromString = matchCase (\txt -> ConstructorP (nameFromText txt) []) (VarP . nameFromText)
+    fromString = noLoc . matchCase (\txt -> ConstructorP (nameFromText txt) []) (VarP . nameFromText)
 
 instance {-# OVERLAPPABLE #-} NameAt p ~ Name => IsString (Term p) where
     fromString ('\'' : rest) = rest & noLoc . matchCase (E.Variant . mkName . ("'" <>)) (T.Name . nameFromText . ("'" <>))
@@ -208,13 +208,13 @@ variantT = noLoc . T.VariantT
 -- Pattern
 
 recordP :: Row (Pattern p) -> Pattern p
-recordP = RecordP Blank
+recordP = noLoc . RecordP
 
 listP :: [Pattern p] -> Pattern p
-listP = ListP Blank
+listP = noLoc . ListP
 
 con :: NameAt p -> [Pattern p] -> Pattern p
-con = ConstructorP
+con name = noLoc . ConstructorP name
 
 -- Expression
 
@@ -225,10 +225,10 @@ infixl 1 #
 binApp :: Expr 'Parse -> Expr 'Parse -> Expr 'Parse -> Expr 'Parse
 binApp f arg1 arg2 = f # arg1 # arg2
 
-λ :: HasLoc (NameAt p) => Pattern p -> Expr p -> Expr p
+λ :: Pattern p -> Expr p -> Expr p
 λ pat expr = Located (zipLocOf pat expr) $ E.Lambda pat expr
 
-lam :: HasLoc (NameAt p) => Pattern p -> Expr p -> Expr p
+lam :: Pattern p -> Expr p -> Expr p
 lam = λ
 
 let_ :: HasLoc (NameAt p) => Binding p -> Expr p -> Expr p

@@ -35,6 +35,7 @@ data CoreTerm
     | Variant OpenName
     | -- types
       Function Loc CoreTerm CoreTerm
+    | Pi Loc Name CoreType CoreType
     | Forall Loc Name CoreType CoreTerm
     | Exists Loc Name CoreType CoreTerm
     | VariantT Loc (ExtRow CoreTerm)
@@ -64,6 +65,7 @@ instance Pretty CoreTerm where
             Let name body expr -> "let" <+> pretty name <+> "=" <+> pretty body <> ";" <+> pretty expr
             Literal lit -> pretty lit
             Function _ from to -> parensWhen 2 $ go 2 from <+> "->" <+> pretty to
+            Pi _ arg from to -> parensWhen 2 $ parens (pretty arg <+> ":" <+> pretty from) <+> "->" <+> pretty to
             Forall _ var _ body -> parensWhen 1 $ "∀" <> pretty var <> compressForall body
             Exists _ var _ body -> parensWhen 1 $ "∃" <> pretty var <> compressExists body
             VariantT _ row -> brackets . withExt row . sep . punctuate comma . map variantItem $ sortedRow row.row

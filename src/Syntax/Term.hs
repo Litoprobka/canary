@@ -62,6 +62,7 @@ data Term_ (p :: Pass) where
     InfixE :: p < 'Fixity => [(Expr p, Maybe (NameAt p))] -> Expr p -> Expr_ p
     -- type-only stuff
     Function :: Type p -> Type p -> Type_ p
+    Pi :: NameAt p -> Type p -> Type p -> Type_ p
     Forall :: VarBinder p -> Type p -> Type_ p
     Exists :: VarBinder p -> Type p -> Type_ p
     VariantT :: ExtRow (Type p) -> Type_ p
@@ -98,20 +99,21 @@ deriving instance Eq (Binding 'Parse)
 -- unfortunately, Term and Pattern are mutually recursive, so I had to copypaste
 -- the entire pattern module here
 
-data Pattern (p :: Pass)
+type Pattern p = Located (Pattern_ p)
+data Pattern_ (p :: Pass)
     = VarP (NameAt p)
-    | WildcardP Loc Text
+    | WildcardP Text
     | AnnotationP (Pattern p) (Type p)
     | ConstructorP (NameAt p) [Pattern p]
     | VariantP OpenName (Pattern p)
-    | RecordP Loc (Row (Pattern p))
-    | ListP Loc [Pattern p]
+    | RecordP (Row (Pattern p))
+    | ListP [Pattern p]
     | LiteralP Literal
 
-deriving instance Eq (Pattern 'DuringTypecheck)
-deriving instance Eq (Pattern 'Parse)
+deriving instance Eq (Pattern_ 'DuringTypecheck)
+deriving instance Eq (Pattern_ 'Parse)
 
-instance Pretty (NameAt p) => Show (Pattern p) where
+instance Pretty (NameAt p) => Show (Pattern_ p) where
     show = show . pretty
 
 instance Pretty (NameAt p) => Pretty (Binding p) where
@@ -148,6 +150,7 @@ instance Pretty (NameAt p) => Pretty (Expr_ p) where
             Skolem skolem -> pretty skolem
             UniVar uni -> pretty uni
             Function from to -> parensWhen 2 $ go 2 from <+> "->" <+> pretty to
+            Pi arg from to -> parensWhen 2 $ parens (pretty arg <+> ":" <+> pretty from) <+> "->" <+> pretty to
             Forall var body -> parensWhen 1 $ "∀" <> prettyBinder var <> "." <+> pretty body
             Exists var body -> parensWhen 1 $ "∃" <> prettyBinder var <> "." <+> pretty body
             VariantT row -> brackets . withExt row . sep . punctuate comma . map variantItem $ sortedRow row.row
@@ -185,35 +188,22 @@ instance HasLoc (NameAt p) => HasLoc (Binding p) where
         ValueB pat body -> zipLocOf pat body
         FunctionB name _ body -> zipLocOf name body
 
-instance HasLoc (NameAt p) => HasLoc (Pattern p) where
-    getLoc = \case
-        VarP name -> getLoc name
-        WildcardP loc _ -> loc
-        AnnotationP pat ty -> zipLocOf pat ty
-        ConstructorP name args -> case listToMaybe $ reverse args of
-            Nothing -> getLoc name
-            Just lastArg -> zipLocOf name lastArg
-        VariantP name arg -> zipLocOf name arg
-        RecordP loc _ -> loc
-        ListP loc _ -> loc
-        LiteralP lit -> getLoc lit
-
 instance HasLoc (NameAt pass) => HasLoc (VarBinder pass) where
     getLoc VarBinder{var, kind = Nothing} = getLoc var
     getLoc VarBinder{var, kind = Just ty} = zipLocOf var ty
 
-instance Pretty (NameAt pass) => Pretty (Pattern pass) where
-    pretty = go 0
+instance Pretty (NameAt pass) => Pretty (Pattern_ pass) where
+    pretty = go 0 . Located Blank
       where
         go :: Int -> Pattern pass -> Doc ann
-        go n = \case
+        go n (L p) = case p of
             VarP name -> pretty name
-            WildcardP _ txt -> pretty txt
+            WildcardP txt -> pretty txt
             AnnotationP pat ty -> parens $ pretty pat <+> ":" <+> pretty ty
             ConstructorP name args -> parensWhen 1 $ sep (pretty name : map (go 1) args)
             VariantP name body -> parensWhen 1 $ pretty name <+> go 1 body -- todo: special case for unit?
-            RecordP _ row -> braces . sep . punctuate comma . map recordField $ sortedRow row
-            ListP _ items -> brackets . sep $ map pretty items
+            RecordP row -> braces . sep . punctuate comma . map recordField $ sortedRow row
+            ListP items -> brackets . sep $ map pretty items
             LiteralP lit -> pretty lit
           where
             parensWhen minPrec
@@ -249,25 +239,26 @@ instance
     => Cast Expr_ p q
     where
     cast = \case
-        Lambda pat body -> Lambda (cast pat) (cast' body)
+        Lambda pat body -> Lambda (cast' pat) (cast' body)
         WildcardLambda args body -> WildcardLambda args (cast' body)
         App lhs rhs -> App (cast' lhs) (cast' rhs)
         TypeApp func ty -> TypeApp (cast' func) (cast' ty)
         Let binding expr -> Let (cast binding) (cast' expr)
         LetRec bindings expr -> LetRec (fmap cast bindings) (cast' expr)
-        Case arg matches -> Case (cast' arg) (fmap (bimap cast cast') matches)
-        Match matches -> Match (fmap (bimap (fmap cast) cast') matches)
+        Case arg matches -> Case (cast' arg) (fmap (bimap cast' cast') matches)
+        Match matches -> Match (fmap (bimap (fmap cast') cast') matches)
         If cond true false -> If (cast' cond) (cast' true) (cast' false)
         Annotation expr ty -> Annotation (cast' expr) (cast' ty)
         Record row -> Record (fmap cast' row)
         List exprs -> List (fmap cast' exprs)
-        Do stmts ret -> Do ((fmap . fmap) cast stmts) (cast' ret)
+        Do stmts ret -> Do (fmap cast' stmts) (cast' ret)
         InfixE pairs l -> castInfix @p (fmap (first cast') pairs) (cast' l)
         Name name -> Name name
         RecordLens oname -> RecordLens oname
         Variant oname -> Variant oname
         Literal lit -> Literal lit
         Function lhs rhs -> Function (cast' lhs) (cast' rhs)
+        Pi arg from to -> Pi arg (cast' from) (cast' to)
         Forall var body -> Forall (cast var) (cast' body)
         Exists var body -> Exists (cast var) (cast' body)
         VariantT row -> VariantT (fmap cast' row)
@@ -277,31 +268,32 @@ instance
         UniVar uni -> castUni uni
         Skolem skolem -> castSkolem skolem
       where
+        cast' :: (Functor f, Cast con p q) => f (con p) -> f (con q)
         cast' = fmap cast
 
-instance (NameAt p ~ NameAt q, Cast Pattern p q, Cast Expr_ p q) => Cast Binding p q where
+instance (NameAt p ~ NameAt q, Cast Pattern_ p q, Cast Expr_ p q) => Cast Binding p q where
     cast = \case
-        ValueB pat body -> ValueB (cast pat) (fmap cast body)
-        FunctionB name args body -> FunctionB name (fmap cast args) (fmap cast body)
-instance (Cast Expr_ p q, Cast Pattern p q, Cast Binding p q) => Cast DoStatement_ p q where
+        ValueB pat body -> ValueB (fmap cast pat) (fmap cast body)
+        FunctionB name args body -> FunctionB name ((fmap . fmap) cast args) (fmap cast body)
+instance (Cast Expr_ p q, Cast Pattern_ p q, Cast Binding p q) => Cast DoStatement_ p q where
     cast = \case
-        Bind pat expr -> Bind (cast pat) (fmap cast expr)
-        With pat expr -> With (cast pat) (fmap cast expr)
+        Bind pat expr -> Bind (fmap cast pat) (fmap cast expr)
+        With pat expr -> With (fmap cast pat) (fmap cast expr)
         DoLet binding -> DoLet (cast binding)
         Action expr -> Action (fmap cast expr)
 
 instance (NameAt p ~ NameAt q, Cast Term_ p q) => Cast VarBinder p q where
     cast VarBinder{var, kind} = VarBinder{var, kind = (fmap . fmap) cast kind}
 
-instance (NameAt p ~ NameAt q, Cast Term_ p q) => Cast Pattern p q where
+instance (NameAt p ~ NameAt q, Cast Term_ p q) => Cast Pattern_ p q where
     cast = \case
         VarP name -> VarP name
-        WildcardP loc name -> WildcardP loc name
-        AnnotationP pat ty -> AnnotationP (cast pat) (fmap cast ty)
-        ConstructorP name pats -> ConstructorP name (fmap cast pats)
-        VariantP name pat -> VariantP name (cast pat)
-        RecordP loc row -> RecordP loc (fmap cast row)
-        ListP loc pats -> ListP loc (fmap cast pats)
+        WildcardP name -> WildcardP name
+        AnnotationP pat ty -> AnnotationP (fmap cast pat) (fmap cast ty)
+        ConstructorP name pats -> ConstructorP name ((fmap . fmap) cast pats)
+        VariantP name pat -> VariantP name (fmap cast pat)
+        RecordP row -> RecordP ((fmap . fmap) cast row)
+        ListP pats -> ListP ((fmap . fmap) cast pats)
         LiteralP lit -> LiteralP lit
 
 -- one place where recursion schemes would come in handy
@@ -332,6 +324,7 @@ collectReferencedNames = go
         App lhs rhs -> go lhs <> go rhs
         TypeApp e ty -> go e <> go ty
         Function fn args -> go fn <> go args
+        Pi _ from to -> go from <> go to
         Forall _ body -> go body
         Exists _ body -> go body
         VariantT row -> foldMap go $ toList row
@@ -342,27 +335,27 @@ collectReferencedNames = go
 
 -- | collects all to-be-declared names in a pattern
 collectNamesInPat :: Pattern p -> [NameAt p]
-collectNamesInPat = \case
+collectNamesInPat (L p) = case p of
     VarP name -> [name]
     WildcardP{} -> []
     AnnotationP pat _ -> collectNamesInPat pat
     VariantP _ pat -> collectNamesInPat pat
     ConstructorP _ pats -> foldMap collectNamesInPat pats
-    ListP _ pats -> foldMap collectNamesInPat pats
-    RecordP _ row -> foldMap collectNamesInPat $ toList row
+    ListP pats -> foldMap collectNamesInPat pats
+    RecordP row -> foldMap collectNamesInPat $ toList row
     LiteralP _ -> []
 
 collectReferencedNamesInPat :: Pattern p -> [NameAt p]
 collectReferencedNamesInPat = go
   where
-    go = \case
+    go (L p) = case p of
         VarP _ -> []
         WildcardP{} -> []
         AnnotationP pat ty -> go pat <> collectReferencedNames ty
         VariantP _ pat -> go pat
         ConstructorP con pats -> con : foldMap go pats
-        ListP _ pats -> foldMap go pats
-        RecordP _ row -> foldMap go $ toList row
+        ListP pats -> foldMap go pats
+        RecordP row -> foldMap go $ toList row
         LiteralP _ -> []
 
 collectNamesInBinding :: Binding p -> [NameAt p]
@@ -388,6 +381,7 @@ uniplate f = traverse \case
     Do stmts ret -> Do <$> traverse (plateStmt f) stmts <*> f ret
     InfixE pairs l -> InfixE <$> traverse (\(e, op) -> (,op) <$> f e) pairs <*> f l
     Function lhs rhs -> Function <$> f lhs <*> f rhs
+    Pi arg from to -> Pi arg <$> f from <*> f to
     Forall var body -> Forall <$> plateBinder f var <*> f body
     Exists var body -> Exists <$> plateBinder f var <*> f body
     VariantT row -> VariantT <$> traverse f row

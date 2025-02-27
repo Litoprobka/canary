@@ -48,6 +48,7 @@ data Value
       PrimValue Literal -- the name 'Literal' is slightly misleading here
     | -- types
       Function Loc Type' Type'
+    | Pi Loc Type' Closure
     | Forall Loc Type' Closure
     | Exists Loc Type' Closure
     | VariantT Loc (ExtRow Type')
@@ -75,6 +76,7 @@ quote = \case
     -- RecordLens path -> RecordLens path
     PrimValue lit -> C.Literal lit
     Function loc l r -> C.Function loc (quote l) (quote r)
+    Pi loc ty closure -> C.Pi loc closure.var (quote ty) $ quote (closureBody closure)
     Forall loc ty closure -> C.Forall loc closure.var (quote ty) $ quote (closureBody closure)
     Exists loc ty closure -> C.Exists loc closure.var (quote ty) $ quote (closureBody closure)
     VariantT loc row -> C.VariantT loc $ fmap quote row
@@ -120,6 +122,7 @@ evalCore !env = \case
     C.Record row -> Record $ evalCore env <$> row
     C.Variant _name -> error "todo: seems like evalCore needs namegen" -- Lambda (Located Blank $ Name' "x") $ C.Variant name `C.App`
     C.Function loc lhs rhs -> Function loc (evalCore env lhs) (evalCore env rhs)
+    C.Pi loc var ty body -> Pi loc (evalCore env ty) $ Closure{var, env, body}
     C.Forall loc var ty body -> Forall loc (evalCore env ty) $ Closure{var, env, body}
     C.Exists loc var ty body -> Exists loc (evalCore env ty) $ Closure{var, env, body}
     C.VariantT loc row -> VariantT loc $ evalCore env <$> row
@@ -178,7 +181,7 @@ desugar = go
             body' <- go body
             pure $ foldr C.Lambda body' args
         T.Let binding expr -> case binding of
-            T.ValueB (T.VarP name) body -> C.Let name <$> go body <*> go expr
+            T.ValueB (L (T.VarP name)) body -> C.Let name <$> go body <*> go expr
             T.ValueB _ _ -> internalError loc "todo: desugar pattern bindings"
             T.FunctionB name args body -> C.Let name <$> go (foldr (\x -> Located loc . T.Lambda x) body args) <*> go expr
         T.LetRec _bindings _body -> internalError loc "todo: letrec desugar"
@@ -205,6 +208,7 @@ desugar = go
         T.List xs -> foldr (C.App . C.App (C.Name $ Located loc ConsName)) (C.Name $ Located loc NilName) <$> traverse go xs
         T.Do{} -> error "todo: desugar do blocks"
         T.Function from to -> C.Function loc <$> go from <*> go to
+        T.Pi var ty body -> C.Pi loc var <$> go ty <*> go body
         T.Forall binder body -> C.Forall loc binder.var <$> maybe (type_ loc) desugar binder.kind <*> go body
         T.Exists binder body -> C.Exists loc binder.var <$> maybe (type_ loc) desugar binder.kind <*> go body
         T.VariantT row -> C.VariantT loc <$> traverse go row
@@ -214,17 +218,17 @@ desugar = go
 
     -- we only support non-nested patterns for now
     flattenPattern :: Pattern 'Fixity -> Eff es CorePattern
-    flattenPattern = \case
+    flattenPattern (Located loc p) = case p of
         T.VarP name -> pure $ C.VarP name
-        T.WildcardP _ name -> pure $ C.WildcardP name
+        T.WildcardP name -> pure $ C.WildcardP name
         T.AnnotationP pat _ -> flattenPattern pat
         T.ConstructorP name pats -> C.ConstructorP name <$> traverse asVar pats
         T.VariantP name pat -> C.VariantP name <$> asVar pat
-        T.RecordP loc _ -> internalError loc "todo: record pattern desugaring"
-        T.ListP loc _ -> internalError loc "todo: list pattern desugaring"
+        T.RecordP _ -> internalError loc "todo: record pattern desugaring"
+        T.ListP _ -> internalError loc "todo: list pattern desugaring"
         T.LiteralP (Located _ lit) -> pure $ C.LiteralP lit
-    asVar (T.VarP name) = pure name
-    asVar (T.WildcardP loc txt) = freshName $ Located loc $ Name' txt
+    asVar (L (T.VarP name)) = pure name
+    asVar (Located loc (T.WildcardP txt)) = freshName $ Located loc $ Name' txt
     asVar v = internalError (getLoc v) "todo: nested patterns"
 
 eval :: (Diagnose :> es, NameGen :> es) => ValueEnv -> Term 'Fixity -> Eff es Value
@@ -300,7 +304,7 @@ modifyEnv env decls = do
     collectBindings :: Declaration 'Fixity -> Eff es [(Name, Either Value (Term 'Fixity))]
     collectBindings (Located loc decl) = case decl of
         D.Value _ (_ : _) -> internalError loc "local bindings are not supported yet"
-        D.Value (T.ValueB (T.VarP name) body) [] -> pure [(name, Right body)]
+        D.Value (T.ValueB (L (T.VarP name)) body) [] -> pure [(name, Right body)]
         D.Value (T.ValueB _ _) _ -> internalError loc "whoops, destructuring bindings are not supported yet"
         D.Value (T.FunctionB name args body) [] -> pure [(name, Right $ foldr (\x -> Located Blank . T.Lambda x) body args)]
         D.Type _ _ constrs -> traverse mkConstr constrs

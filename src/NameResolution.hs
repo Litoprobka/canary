@@ -218,26 +218,26 @@ declareBinding = \case
 -- this could have been a Traversable instance
 -- resolves names in a pattern, assuming that all new bindings have already been declared
 resolvePat :: NameResCtx es => Pattern 'Parse -> Eff es (Pattern 'NameRes)
-resolvePat = \case
+resolvePat = traverse \case
     ConstructorP con pats -> ConstructorP <$> resolve con <*> traverse resolvePat pats
     AnnotationP pat ty -> AnnotationP <$> resolvePat pat <*> resolveTerm ty
-    RecordP loc row -> RecordP loc <$> traverse resolvePat row
+    RecordP row -> RecordP <$> traverse resolvePat row
     VariantP openName arg -> VariantP openName <$> resolvePat arg
     VarP name -> VarP <$> resolve name
-    ListP loc pats -> ListP loc <$> traverse resolvePat pats
-    WildcardP loc name -> pure $ WildcardP loc name
+    ListP pats -> ListP <$> traverse resolvePat pats
+    WildcardP name -> pure $ WildcardP name
     LiteralP lit -> pure $ LiteralP lit
 
 -- | resolves names in a pattern. Adds all new names to the current scope
 declarePat :: (NameResCtx es, Declare :> es) => Pattern 'Parse -> Eff es (Pattern 'NameRes)
-declarePat = \case
+declarePat = traverse \case
     ConstructorP con pats -> ConstructorP <$> resolve con <*> traverse declarePat pats
     AnnotationP pat ty -> AnnotationP <$> declarePat pat <*> resolveTerm ty
-    RecordP loc row -> RecordP loc <$> traverse declarePat row
+    RecordP row -> RecordP <$> traverse declarePat row
     VariantP openName arg -> VariantP openName <$> declarePat arg
     VarP name -> VarP <$> declare name
-    ListP loc pats -> ListP loc <$> traverse declarePat pats
-    WildcardP loc name -> pure $ WildcardP loc name
+    ListP pats -> ListP <$> traverse declarePat pats
+    WildcardP name -> pure $ WildcardP name
     LiteralP lit -> pure $ LiteralP lit
 
 -- | resolves names in a term. Doesn't change the current scope
@@ -295,6 +295,11 @@ resolveTerm (Located loc e) =
             body' <- resolveTerm body
             pure $ Exists var' body'
         Function from to -> Function <$> resolveTerm from <*> resolveTerm to
+        Pi arg ty body -> do
+            ty' <- resolveTerm ty
+            arg' <- declare arg
+            body' <- resolveTerm body
+            pure $ Pi arg' ty' body'
         ImplicitVar var -> internalError (getLoc var) "inference for implicit vars is not implemented yet"
         Parens expr ->
             -- todo: construct implicit lambdas here

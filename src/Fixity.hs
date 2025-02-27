@@ -130,10 +130,10 @@ parse = traverse \case
         pairs' <- traverse (bitraverse parse pure) pairs
         last'' <- parse last'
         go' pairs' last''
-    -- Var name -> pure $ Var name
     Forall binder body -> Forall <$> parseBinder binder <*> parse body
     Exists binder body -> Exists <$> parseBinder binder <*> parse body
     Function lhs rhs -> Function <$> parse lhs <*> parse rhs
+    Pi arg ty body -> Pi arg <$> parse ty <*> parse body
     VariantT row -> VariantT <$> traverse parse row
     RecordT row -> RecordT <$> traverse parse row
   where
@@ -178,14 +178,14 @@ parseBinder :: Ctx es => VarBinder DependencyRes -> Eff es (VarBinder 'Fixity)
 parseBinder VarBinder{var, kind} = VarBinder var <$> traverse parse kind
 
 parsePattern :: Ctx es => Pattern 'DependencyRes -> Eff es (Pattern 'Fixity)
-parsePattern = \case
+parsePattern = traverse  \case
     VarP name -> pure $ VarP name
-    WildcardP loc name -> pure $ WildcardP loc name
+    WildcardP name -> pure $ WildcardP name
     AnnotationP pat ty -> AnnotationP <$> parsePattern pat <*> parse ty
     ConstructorP name pats -> ConstructorP name <$> traverse parsePattern pats
     VariantP name pat -> VariantP name <$> parsePattern pat
-    RecordP loc row -> RecordP loc <$> traverse parsePattern row
-    ListP loc pats -> ListP loc <$> traverse parsePattern pats
+    RecordP row -> RecordP <$> traverse parsePattern row
+    ListP pats -> ListP <$> traverse parsePattern pats
     LiteralP lit -> pure $ LiteralP lit
 
 parseBinding :: Ctx es => Binding 'DependencyRes -> Eff es (Binding 'Fixity)

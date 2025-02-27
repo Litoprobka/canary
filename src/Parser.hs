@@ -130,8 +130,8 @@ lambdaLike con kw argP endSym bodyP = withLoc do
 pattern' :: Parser (Pattern 'Parse)
 pattern' =
     choice
-        [ ConstructorP <$> typeName <*> many patternParens
-        , VariantP <$> variantConstructor <*> patternParens
+        [ located $ ConstructorP <$> typeName <*> many patternParens
+        , located $ VariantP <$> variantConstructor <*> patternParens
         , patternParens
         ]
 
@@ -140,25 +140,24 @@ should be used in cases where multiple patterns in a row are accepted, i.e.
 function definitions and match expressions
 -}
 patternParens :: Parser (Pattern 'Parse)
-patternParens = do
-    pat <-
-        choice
+patternParens = located do
+    pat <- located . choice $
             [ VarP <$> termName
-            , lexeme $ withLoc' WildcardP $ string "_" <* option "" termName'
+            , lexeme $ WildcardP <$> string "_" <* option "" termName'
             , record
-            , withLoc' ListP $ brackets (commaSep pattern')
+            , ListP <$> brackets (commaSep pattern')
             , LiteralP <$> literal
             , -- a constructor without arguments or with a tightly-bound record pattern
-              lexeme $ ConstructorP <$> constructorName <*> option [] (one <$> record)
+              lexeme $ ConstructorP <$> constructorName <*> option [] (one <$> located record)
             , flip VariantP unit <$> variantConstructor -- some sugar for variants with a unit payload
-            , parens pattern'
+            , unLoc <$> parens pattern'
             ]
-    option pat do
+    option (unLoc pat) do
         specialSymbol ":"
         AnnotationP pat <$> term
   where
-    record = withLoc' RecordP $ someRecord "=" pattern' (Just VarP)
-    unit = RecordP Blank Row.empty
+    record = RecordP <$> someRecord "=" pattern' (Just $ \n -> Located (getLoc n) $ VarP n)
+    unit = Located Blank $ RecordP Row.empty
 
 binding :: Parser (Binding 'Parse)
 binding = do
@@ -254,14 +253,12 @@ if' = do
 doBlock :: Parser (Expr_ Parse)
 doBlock = do
     stmts <-
-        block "do" $
-            located $
-                choice
-                    [ try $ Bind <$> pattern' <* specialSymbol "<-" <*> term
-                    , With <$ keyword "with" <*> pattern' <* specialSymbol "<-" <*> term
-                    , keyword "let" *> fmap DoLet binding
-                    , Action <$> term
-                    ]
+        block "do" . located . choice $
+            [ try $ Bind <$> pattern' <* specialSymbol "<-" <*> term
+            , With <$ keyword "with" <*> pattern' <* specialSymbol "<-" <*> term
+            , keyword "let" *> fmap DoLet binding
+            , Action <$> term
+            ]
     case unsnoc stmts of
         Nothing -> fail "empty do block"
         Just (stmts', L (Action lastAction)) -> pure $ Do stmts' lastAction

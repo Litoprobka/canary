@@ -251,21 +251,21 @@ checkBinding binding ty = case binding of
     ValueB pat body -> scoped $ checkPattern pat ty >> check body ty
 
 checkPattern :: (InfEffs es, Declare :> es) => Pat -> TypeDT -> Eff es ()
-checkPattern = \cases
+checkPattern (Located ploc outerPat) ty = case outerPat of
     -- we need this case, since inferPattern only infers monotypes for var patterns
-    (VarP name) ty -> updateSig name ty
+    VarP name -> updateSig name ty
     -- we probably do need a case for ConstructorP for the same reason
-    (VariantP name arg) ty ->
+    VariantP name arg ->
         deepLookup Variant name ty >>= \case
             Nothing -> typeError $ MissingVariant ty name
             Just argTy -> checkPattern arg argTy
-    (RecordP _ patRow) ty -> do
+    RecordP patRow -> do
         for_ (IsList.toList patRow) \(name, pat) ->
             deepLookup Record name ty >>= \case
                 Nothing -> typeError $ MissingField ty name
                 Just fieldTy -> checkPattern pat fieldTy
-    pat ty -> do
-        inferredTy <- inferPattern pat
+    _ -> do
+        inferredTy <- inferPattern $ Located ploc outerPat
         subtype inferredTy ty
 
 infer :: InfEffs es => Expr 'Fixity -> Eff es TypeDT
@@ -293,7 +293,7 @@ infer (Located loc e) = scoped case e of
         V.Function loc argTy <$> infer body
     -- chances are, I'd want to add some specific error messages or context for wildcard lambdas
     -- for now, they are just desugared to normal lambdas before inference
-    WildcardLambda args body -> infer $ foldr (\var -> Located loc . Lambda (VarP var)) body args
+    WildcardLambda args body -> infer $ foldr (\var -> Located loc . Lambda (Located (getLoc var) $ VarP var)) body args
     Let binding body -> do
         declareAll =<< inferBinding binding
         infer body
@@ -352,10 +352,14 @@ infer (Located loc e) = scoped case e of
             | otherwise -> IntName
         TextLiteral _ -> TextName
         CharLiteral _ -> CharName
-    -- v@Var{} -> pure . Name $ Located (getLoc v) TypeName
     Function lhs rhs -> do
         check lhs type_
         check rhs type_
+        pure type_
+    Pi arg ty body -> do
+        tyV <- typeFromTerm ty
+        updateSig arg tyV
+        check body type_
         pure type_
     VariantT row -> do
         traverse_ (`check` type_) row
@@ -416,32 +420,32 @@ inferBinding =
             pure $ HashMap.singleton name ty
 
 inferPattern :: (InfEffs es, Declare :> es) => Pat -> Eff es TypeDT
-inferPattern = \case
+inferPattern (Located loc p) = case p of
     VarP name -> do
         uni <- freshUniVar $ getLoc name
         updateSig name uni
         pure uni
-    WildcardP loc _ -> freshUniVar loc
+    WildcardP _ -> freshUniVar loc
     (AnnotationP pat ty) -> do
         tyV <- typeFromTerm ty
         tyV <$ checkPattern pat tyV
-    p@(ConstructorP name args) -> do
+    ConstructorP name args -> do
         (resultType, argTypes) <- conArgTypes name
         unless (length argTypes == length args) do
-            typeError $ ArgCountMismatchPattern p (length argTypes) (length args)
+            typeError $ ArgCountMismatchPattern (Located loc p) (length argTypes) (length args)
         zipWithM_ checkPattern args argTypes
         pure resultType
-    ListP loc pats -> do
+    ListP pats -> do
         result <- freshUniVar loc
         traverse_ (`checkPattern` result) pats
         pure $ V.TyCon (Located loc ListName) `V.App` result
-    v@(VariantP name arg) -> do
+    VariantP name arg -> do
         argTy <- inferPattern arg
-        V.VariantT (getLoc v) . ExtRow (fromList [(name, argTy)]) <$> freshUniVar (getLoc v)
-    RecordP loc row -> do
+        V.VariantT loc . ExtRow (fromList [(name, argTy)]) <$> freshUniVar loc
+    RecordP row -> do
         typeRow <- traverse inferPattern row
         V.RecordT loc . ExtRow typeRow <$> freshUniVar loc
-    LiteralP (Located loc lit) -> pure $ V.TyCon . Located loc $ case lit of
+    LiteralP (Located _ lit) -> pure $ V.TyCon . Located loc $ case lit of
         IntLiteral num
             | num >= 0 -> NatName
             | otherwise -> IntName
@@ -497,6 +501,7 @@ normaliseAll = generaliseAll >=> traverse (eval' <=< go . V.quote)
         -- other cases could be eliminated by a type changing uniplate
         C.App lhs rhs -> C.App <$> go lhs <*> go rhs
         C.Function loc lhs rhs -> C.Function loc <$> go lhs <*> go rhs
+        C.Pi loc var ty body -> C.Pi loc var <$> go ty <*> go body
         -- this might produce incorrect results if we ever share a single forall in multiple places
         C.Forall loc var ty body -> C.Forall loc var <$> go ty <*> go body
         C.Exists loc var ty body -> C.Exists loc var <$> go ty <*> go body
