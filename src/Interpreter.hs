@@ -155,7 +155,7 @@ matchCore env = \cases
             Just $ foldr (uncurry HashMap.insert) env (zip argNames args)
     (C.VariantP pname argName) (Variant name val)
         | pname == name -> Just $ HashMap.insert argName val env
-    (C.LiteralP lit) (PrimValue (Located _ val)) -> env <$ guard (lit == val)
+    (C.LiteralP lit) (PrimValue (L val)) -> env <$ guard (lit == val)
     _ _ -> Nothing
 
 -- desugar *almost* could be pure, but unfortunately, we need name gen here
@@ -172,10 +172,10 @@ desugar = go
         T.App lhs rhs -> C.App <$> go lhs <*> go rhs
         T.Lambda pat body -> do
             name <- freshName $ Located Blank $ Name' "lamArg"
-            C.Lambda name (error "todo: desugar needs a type env") <$> go (Located loc $ T.Case (Located (getLoc name) $ T.Name name) [(pat, body)])
+            C.Lambda name (placeholder loc) <$> go (Located loc $ T.Case (Located (getLoc name) $ T.Name name) [(pat, body)])
         T.WildcardLambda args body -> do
             body' <- go body
-            pure $ foldr (`C.Lambda` error "todo: desugar needs a type env") body' args
+            pure $ foldr (`C.Lambda` placeholder loc) body' args
         T.Let binding expr -> case binding of
             T.ValueB (L (T.VarP name)) body -> C.Let name <$> go body <*> go expr
             T.ValueB _ _ -> internalError loc "todo: desugar pattern bindings"
@@ -188,7 +188,7 @@ desugar = go
             matches' <- for matches \case
                 ([pat], body) -> bitraverse flattenPattern desugar (pat, body)
                 _ -> internalError loc "inconsistent pattern count in a match expression"
-            pure $ C.Lambda name (error "todo: desugar needs a type env") $ C.Case (C.Name name) matches'
+            pure $ C.Lambda name (placeholder loc) $ C.Case (C.Name name) matches'
         T.Match _ -> internalError loc "todo: multi-arg match desugar"
         T.If cond true false -> do
             cond' <- go cond
@@ -209,6 +209,7 @@ desugar = go
         T.RecordT row -> C.RecordT loc <$> traverse go row
 
     type_ loc = pure $ C.TyCon $ Located loc TypeName
+    placeholder loc = C.TyCon $ Located loc TypeName
 
     -- we only support non-nested patterns for now
     flattenPattern :: Pattern 'Fixity -> Eff es CorePattern
@@ -220,7 +221,7 @@ desugar = go
         T.VariantP name pat -> C.VariantP name <$> asVar pat
         T.RecordP _ -> internalError loc "todo: record pattern desugaring"
         T.ListP _ -> internalError loc "todo: list pattern desugaring"
-        T.LiteralP (Located _ lit) -> pure $ C.LiteralP lit
+        T.LiteralP (L lit) -> pure $ C.LiteralP lit
     asVar (L (T.VarP name)) = pure name
     asVar (Located loc (T.WildcardP txt)) = freshName $ Located loc $ Name' txt
     asVar v = internalError (getLoc v) "todo: nested patterns"
@@ -235,7 +236,7 @@ desugar builtins = go
     go :: Term 'Fixity -> CoreTerm
     go = \case
         T.Name name -> NameC name
-        T.Literal (Located _ lit) -> LiteralC lit
+        T.Literal (L lit) -> LiteralC lit
         T.Annotation expr _ -> go expr
         T.App lhs rhs -> AppC (go lhs) (go rhs)
         T.Lambda loc pat body ->
@@ -276,7 +277,7 @@ desugar builtins = go
         T.VariantP name pat -> VariantP name $ asVar pat
         T.RecordP{} -> error "todo: record pattern desugaring"
         T.ListP{} -> error "todo: list pattern desugaring"
-        T.LiteralP (Located _ lit) -> LiteralP lit
+        T.LiteralP (L lit) -> LiteralP lit
     asVar (T.VarP name) = name
     asVar _ = error "todo: nested patterns"
 -}

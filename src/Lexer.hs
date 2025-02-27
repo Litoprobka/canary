@@ -81,8 +81,11 @@ keywords =
         , "forall"
         , "foreach"
         , "∀"
+        , "Π"
         , "exists"
+        , "some"
         , "∃"
+        , "Σ"
         , "do"
         , "with"
         , "infix"
@@ -91,7 +94,7 @@ keywords =
 
 -- | punctuation that has a special meaning, like keywords
 specialSymbols :: HashSet Text
-specialSymbols = Set.fromList ["=", "|", ":", ".", "λ", "\\", "∀", "∃", "->", "=>", "<-", "@", "~"]
+specialSymbols = Set.fromList ["=", "|", ":", ".", "λ", "\\", "∀", "∃", "->", "=>", "<-", "@", "~", "**"]
 
 -- lambda, forall and exists all have an ASCII and a unicode version
 
@@ -99,10 +102,16 @@ lambda :: Parser ()
 lambda = void $ specialSymbol "\\" <|> specialSymbol "λ" -- should we allow `λx -> expr` without a space after λ?
 
 forallKeyword :: Parser ()
-forallKeyword = keyword "forall" <|> void (specialSymbol "∀")
+forallKeyword = keyword "forall" <|> specialSymbol "∀"
+
+piKeyword :: Parser ()
+piKeyword = keyword "foreach" <|> specialSymbol "Π"
 
 existsKeyword :: Parser ()
-existsKeyword = keyword "exists" <|> void (specialSymbol "∃")
+existsKeyword = keyword "exists" <|> specialSymbol "∃"
+
+sigmaKeyword :: Parser ()
+sigmaKeyword = keyword "some" <|> specialSymbol "Σ"
 
 -- | a helper for `block` and `block1`.
 block'

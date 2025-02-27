@@ -152,7 +152,7 @@ instance Pretty (NameAt p) => Pretty (Expr_ p) where
             Skolem skolem -> pretty skolem
             UniVar uni -> pretty uni
             Function from to -> parensWhen 2 $ go 2 from <+> "->" <+> pretty to
-            Q q vis er binder body -> parensWhen 2 $ kw q er <+> prettyBinder binder <+> arrOrDot vis <+> pretty body
+            Q q vis er binder body -> parensWhen 2 $ kw q er <+> prettyBinder binder <+> arrOrDot q vis <+> pretty body
             VariantT row -> brackets . withExt row . sep . punctuate comma . map variantItem $ sortedRow row.row
             RecordT row -> braces . withExt row . sep . punctuate comma . map recordTyField $ sortedRow row.row
           where
@@ -163,12 +163,13 @@ instance Pretty (NameAt p) => Pretty (Expr_ p) where
             withExt row = maybe id (\r doc -> doc <+> "|" <+> pretty r) (extension row)
 
             kw Forall Erased = "∀"
-            kw Forall Retained = "foreach"
+            kw Forall Retained = "Π"
             kw Exists Erased = "∃"
-            kw Exists Retained = "some" -- placeholder
+            kw Exists Retained = "Σ"
 
-            arrOrDot Visible = "->"
-            arrOrDot _ = "."
+            arrOrDot Forall Visible = "->"
+            arrOrDot Exists Visible = "**"
+            arrOrDot _ _ = "."
 
             -- todo: a special case for unit
             variantItem (name, ty) = pretty name <+> pretty ty

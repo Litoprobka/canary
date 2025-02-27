@@ -489,7 +489,7 @@ mono variance = \case
     V.Function loc from to -> MFn loc <$> mono (flipVariance variance) from <*> go to
     V.VariantT loc row -> MVariantT loc <$> traverse go row
     V.RecordT loc row -> MRecordT loc <$> traverse go row
-    V.Q loc q Visible e closure -> internalError loc "mono: monomorhise closures" -- pure $ MQ loc q e $ _toMonoClosure closure
+    V.Q loc q Visible e closure -> internalError loc "mono: monomorphise closures" -- pure $ MQ loc q e $ _toMonoClosure closure
     V.Q _ Forall vis _ closure -> go =<< substitute variance closure
     V.Q _ Exists vis _ closure -> go =<< substitute (flipVariance variance) closure
     V.PrimFunction{} -> internalError Blank "mono: prim function"

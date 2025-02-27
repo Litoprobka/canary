@@ -140,7 +140,7 @@ subtype lhs_ rhs_ = join $ match <$> monoLayer In lhs_ <*> monoLayer Out rhs_
         (MLSkolem lhs) (MLSkolem rhs) | lhs == rhs -> pass
         lhs (MLUniVar _ uni) -> solveOr (mono In $ unMonoLayer lhs) (subtype (unMonoLayer lhs) . unMono) uni
         (MLUniVar _ uni) rhs -> solveOr (mono Out $ unMonoLayer rhs) ((`subtype` unMonoLayer rhs) . unMono) uni
-        (MLTyCon (Located _ NatName)) (MLTyCon (Located _ IntName)) -> pass
+        (MLTyCon (L NatName)) (MLTyCon (L IntName)) -> pass
         (MLCon lhs lhsArgs) (MLCon rhs rhsArgs) -> do
             unless (lhs == rhs) $ typeError $ CannotUnify lhs rhs
             -- we assume that the arg count is correct
@@ -185,8 +185,9 @@ check (Located loc e) type_ = scoped $ match e type_
         -- `infer` just looks up its type anyway
         (Lambda (L (VarP arg)) body) (V.Q _ Forall Visible Retained closure) -> scoped do
             updateSig arg closure.ty -- checkPattern arg closure.ty
-            modify @ValueEnv $ HashMap.insert arg (V.Var arg)
-            check body (closure `V.app` V.Var arg)
+            var <- freshSkolem (toSimpleName arg)
+            modify @ValueEnv $ HashMap.insert arg var
+            check body (closure `V.app` var)
         (Lambda arg body) (V.Function _ from to) -> scoped do
             -- `checkPattern` updates signatures of all mentioned variables
             checkPattern arg from
@@ -224,7 +225,7 @@ check (Located loc e) type_ = scoped $ match e type_
                                 solveUniVar uni $ foldr (MFn loc' . MUniVar loc') (MUniVar loc' bodyVar) argVars
                                 pure (V.UniVar loc' <$> argVars, V.UniVar loc' bodyVar)
                     other -> typeError $ ArgCountMismatch $ getLoc other
-        (List items) (V.TyCon (Located _ ListName) `V.App` itemTy) -> for_ items (`check` itemTy)
+        (List items) (V.TyCon (L ListName) `V.App` itemTy) -> for_ items (`check` itemTy)
         (E.Record row) ty -> do
             for_ (IsList.toList row) \(name, expr) ->
                 deepLookup Record name ty >>= \case
@@ -380,6 +381,11 @@ inferApp appLoc fTy arg = do
             to <$ subtype (V.UniVar loc uni) (V.Function loc from to)
         MLFn _ from to -> do
             to <$ check arg from
+        -- todo: special case for erased args
+        MLQ _ Forall _e closure -> do
+            env <- get @ValueEnv
+            argV <- V.eval env arg
+            V.app closure argV <$ check arg closure.ty
         _ -> typeError $ NotAFunction appLoc fTy
 
 inferTyApp :: InfEffs es => Expr 'Fixity -> TypeDT -> Type 'Fixity -> Eff es TypeDT
@@ -403,7 +409,7 @@ inferTyApp expr ty tyArg = case ty of
 -- does not implicitly declare anything
 inferBinding :: InfEffs es => Binding 'Fixity -> Eff es (HashMap Name TypeDT)
 inferBinding =
-    scoped . generaliseAll . \case
+    scoped . \case
         ValueB pat body -> do
             (patTy, bodyTy) <- do
                 patTy <- inferPattern pat
@@ -453,7 +459,7 @@ inferPattern (Located loc p) = case p of
     RecordP row -> do
         typeRow <- traverse inferPattern row
         V.RecordT loc . ExtRow typeRow <$> freshUniVar loc
-    LiteralP (Located _ lit) -> pure $ V.TyCon . Located loc $ case lit of
+    LiteralP (L lit) -> pure $ V.TyCon . Located loc $ case lit of
         IntLiteral num
             | num >= 0 -> NatName
             | otherwise -> IntName

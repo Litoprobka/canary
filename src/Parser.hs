@@ -119,13 +119,30 @@ someRecord delim valueP missingValue = braces (fromList <$> commaSep recordItem)
         valuePattern <- onMissing recordLabel $ specialSymbol delim *> valueP
         pure (recordLabel, valuePattern)
 
-lambdaLike :: (a -> Located b -> b) -> Parser () -> Parser a -> Text -> Parser (Located b) -> Parser b
-lambdaLike con kw argP endSym bodyP = withLoc do
-    kw
-    (firstArg :| args) <- NE.some argP
-    specialSymbol endSym
-    body <- bodyP
-    pure \loc -> con firstArg $ foldr (\var -> Located loc . con var) body args
+lambda' :: Parser (Expr 'Parse)
+lambda' = withLoc do
+    lambda
+    args <- NE.some patternParens
+    specialSymbol "->"
+    body <- term
+    pure \loc -> foldr (\var -> Located loc . Lambda var) body args
+
+quantifier :: Parser (Type 'Parse)
+quantifier = withLoc do
+    (q, erased) <- choice
+        [ (Forall, Erased) <$ forallKeyword 
+        , (Exists, Erased) <$ existsKeyword
+        , (Forall, Retained) <$ piKeyword
+        , (Exists, Retained) <$ sigmaKeyword
+        ]
+    binders <- NE.some varBinder
+    let arrOrStar = specialSymbol case q of
+         Forall -> "->"
+         Exists -> "**"
+    visibility <- Implicit <$ specialSymbol "." <|> Visible <$ arrOrStar
+    body <- term
+    pure \loc -> foldr (\binder acc -> Located loc $ Q q visibility erased binder acc) body binders
+  
 
 pattern' :: Parser (Pattern 'Parse)
 pattern' =
@@ -219,10 +236,8 @@ term = located do
     keywordBased =
         located $
             choice
-                [ lambdaLike Lambda lambda pattern' "->" term
-                , lambdaLike (Q Forall Implicit Erased) forallKeyword varBinder "." term
-                , lambdaLike (Q Forall Visible Retained) (keyword "foreach") varBinder "->" term
-                , lambdaLike (Q Exists Implicit Erased) forallKeyword varBinder "." term
+                [ unLoc <$> lambda'
+                , unLoc <$> quantifier
                 , letRecBlock (try $ keyword "let" *> keyword "rec") LetRec binding term
                 , letBlock "let" Let binding term
                 , case'
