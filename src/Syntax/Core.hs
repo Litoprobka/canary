@@ -53,7 +53,8 @@ instance Pretty CoreTerm where
         go n = \case
             Name name -> pretty name
             TyCon name -> pretty name
-            Con name args -> parensWhen 3 $ hsep (pretty name : map pretty args)
+            Con name [] -> pretty name
+            Con name args -> parensWhen 3 $ hsep (pretty name : map (go 3) args)
             Lambda name body -> parensWhen 1 $ "λ" <> pretty name <+> compressLambda body
             App lhs rhs -> parensWhen 3 $ go 2 lhs <+> go 3 rhs
             Record row -> braces . sep . punctuate comma . map recordField $ sortedRow row

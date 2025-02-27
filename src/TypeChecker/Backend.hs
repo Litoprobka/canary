@@ -93,6 +93,7 @@ data MonoLayer
     | MLRecord (Row Value)
     | MLVariant OpenName Value
     | MLPrim Literal
+    | MLPrimFunc Name (Value -> Value)
     | -- types
       MLFn Loc TypeDT TypeDT
     | MLVariantT Loc (ExtRow TypeDT)
@@ -112,6 +113,7 @@ instance HasLoc MonoLayer where
         MLRecord _ -> Blank --
         MLVariant{} -> Blank --
         MLPrim val -> getLoc val
+        MLPrimFunc name _ -> getLoc name -- to fix?
         MLFn loc _ _ -> loc
         MLVariantT loc _ -> loc
         MLRecordT loc _ -> loc
@@ -483,7 +485,11 @@ mono variance = \case
     V.Forall _ _ closure -> go =<< substitute variance closure
     V.Exists _ _ closure -> go =<< substitute (flipVariance variance) closure
     V.PrimFunction{} -> internalError Blank "mono: prim function"
-    other -> internalError (getLoc other) "type-level expressions are not supported yet"
+    V.PrimValue val -> pure $ MPrim val
+    V.Record row -> MRecord <$> traverse (mono variance) row
+    V.Variant name arg -> MVariant name <$> mono variance arg
+    V.Case arg matches -> MCase <$> mono variance arg <*> traverse (bitraverse pure (mono variance)) matches
+    l@V.Lambda{} -> internalError (getLoc l) "mono: type-level lambdas are not supported yet"
   where
     go = mono variance
 
@@ -534,7 +540,11 @@ monoLayer variance = \case
     V.Forall _ _ closure -> monoLayer variance =<< substitute variance closure
     V.Exists _ _ closure -> monoLayer variance =<< substitute (flipVariance variance) closure
     V.PrimFunction{} -> internalError Blank "monoLayer: prim function"
-    other -> internalError (getLoc other) "type-level expressions are not supported yet"
+    V.Lambda closure -> pure $ MLLambda closure
+    V.Record row -> pure $ MLRecord row
+    V.Variant con arg -> pure $ MLVariant con arg
+    V.PrimValue val -> pure $ MLPrim val
+    V.Case arg matches -> pure $ MLCase arg matches
 
 unMonoLayer :: MonoLayer -> TypeDT
 unMonoLayer = \case
@@ -550,6 +560,7 @@ unMonoLayer = \case
     MLVariant name val -> V.Variant name val
     MLRecord row -> V.Record row
     MLPrim val -> V.PrimValue val
+    MLPrimFunc name f -> V.PrimFunction name f
     MLCase arg matches -> V.Case arg matches
 
 -- WARN: substitute doesn't traverse univars at the moment

@@ -469,6 +469,7 @@ inferPattern = \case
                 MLRecord{} -> internalError (getLoc name) $ "unexpected record value" <+> "in a constructor type"
                 MLLambda{} -> internalError (getLoc name) $ "unexpected lambda" <+> "in a constructor type"
                 MLPrim{} -> internalError (getLoc name) $ "unexpected value" <+> "in a constructor type"
+                MLPrimFunc{} -> internalError (getLoc name) $ "unexpected primitive function" <+> "in a constructor type"
                 MLCase{} -> internalError (getLoc name) $ "unexpected case" <+> "in a constructor type"
                 MLSkolem skolem -> pure (V.Skolem skolem, [])
 
