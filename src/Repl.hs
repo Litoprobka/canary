@@ -11,14 +11,14 @@ import Data.HashMap.Strict qualified as HashMap
 import Data.Text qualified as Text
 import Data.Text.Encoding (strictBuilderToText, textToStrictBuilder)
 import DependencyResolution (FixityMap, Op, SimpleOutput (..), resolveDependenciesSimplified')
-import Diagnostic (Diagnose, guardNoErrors, runDiagnose)
+import Diagnostic (Diagnose, guardNoErrors, runDiagnose, fatal)
 import Effectful
 import Effectful.State.Static.Local (runState)
 import Fixity qualified (parse, resolveFixity, run)
 import Interpreter (ValueEnv, eval, modifyEnv)
 import Interpreter qualified as V
 import LangPrelude
-import Lexer (Parser, keyword)
+import Lexer (Parser, keyword, symbol)
 import NameGen (NameGen, freshName)
 import NameResolution (Scope (..), resolveNames, resolveTerm)
 import NameResolution qualified
@@ -32,6 +32,7 @@ import Syntax.Term
 import Text.Megaparsec (takeRest, try)
 import TypeChecker (infer, normalise, typecheck)
 import TypeChecker.Backend qualified as TC
+import Error.Diagnose (Report(..))
 
 data ReplCommand
     = Decls [Declaration 'Parse]
@@ -39,6 +40,7 @@ data ReplCommand
     | Type_ (Expr 'Parse)
     | Load FilePath
     | Quit
+    | UnknownCommand Text
 
 data ReplEnv = ReplEnv
     { values :: ValueEnv
@@ -179,6 +181,7 @@ replStep env command = do
                 decls <- Parser.parseModule (path, fileContents)
                 processDecls env decls
         Quit -> pure Nothing
+        UnknownCommand cmd -> fatal . one $ Err Nothing ("Unknown command:" <+> pretty cmd) [] []
   where
     processExpr expr = do
         afterNameRes <- NameResolution.run env.scope $ resolveTerm expr
@@ -229,6 +232,7 @@ parseCommand =
         [ keyword ":t" *> fmap Type_ Parser.term
         , keyword ":q" $> Quit
         , keyword ":load" *> fmap (Load . Text.unpack) takeRest
+        , symbol ":" *> (UnknownCommand <$> takeRest)
         , try $ fmap Decls Parser.code
         , fmap Expr Parser.term
         ]
