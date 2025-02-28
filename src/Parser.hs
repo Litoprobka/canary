@@ -34,7 +34,7 @@ import Text.Megaparsec.Char (string)
 run :: Diagnose :> es => (FilePath, Text) -> Parser a -> Eff es a
 run (fileName, fileContents) parser =
     either (fatal . NE.toList . reportsFromBundle) pure $
-        parse (usingReaderT pos1 parser) fileName fileContents
+        parse (usingReaderT pos1 $ parser <* eof) fileName fileContents
 
 parseModule :: Diagnose :> es => (FilePath, Text) -> Eff es [Declaration 'Parse]
 parseModule input = run input code

@@ -148,6 +148,22 @@ subtype lhs_ rhs_ = join $ match <$> monoLayer In lhs_ <*> monoLayer Out rhs_
         (MLFn _ inl outl) (MLFn _ inr outr) -> do
             subtype inr inl
             subtype outl outr
+        (MLQ _ Forall erasedl closurel) (MLQ _ Forall erasedr closurer) | subErased erasedl erasedr -> do
+            subtype closurer.ty closurel.ty
+            skolem <- freshSkolem $ toSimpleName closurel.var
+            subtype (V.app closurel skolem) (V.app closurer skolem)
+        (MLQ _ Exists erasedl closurel) (MLQ _ Exists erasedr closurer) | subErased erasedl erasedr -> do
+            subtype closurel.ty closurer.ty
+            skolem <- freshSkolem $ toSimpleName closurel.var
+            subtype (V.app closurel skolem) (V.app closurer skolem)
+        (MLFn _ inl outl) (MLQ _ Forall Retained closure) -> do
+            subtype closure.ty inl
+            skolem <- freshSkolem $ toSimpleName closure.var
+            subtype outl (V.app closure skolem)
+        (MLQ _ Forall Retained closure) (MLFn _ inr outr) -> do
+            subtype inr closure.ty
+            skolem <- freshSkolem $ toSimpleName closure.var
+            subtype (V.app closure skolem) outr
         (MLApp lhs rhs) (MLApp lhs' rhs') -> do
             -- note that we assume the same variance for all type parameters
             -- seems like we need to track variance in kinds for this to work properly
@@ -162,6 +178,13 @@ subtype lhs_ rhs_ = join $ match <$> monoLayer In lhs_ <*> monoLayer Out rhs_
         -- (MLVar var) _ -> internalError (getLoc var) $ "dangling type variable" <+> pretty var
         -- _ (MLVar var) -> internalError (getLoc var) $ "dangling type variable" <+> pretty var
         lhs rhs -> typeError $ NotASubtype (unMonoLayer lhs) (unMonoLayer rhs) Nothing
+
+    -- (forall a -> ty) <: (foreach a -> ty)
+    -- (exists a ** ty) <: (some a ** ty)
+    subErased :: Erased -> Erased -> Bool
+    subErased _ Retained = True
+    subErased Erased Erased = True
+    subErased Retained Erased = False
 
     rowCase :: InfEffs es => RecordOrVariant -> (Loc, ExtRow TypeDT) -> (Loc, ExtRow TypeDT) -> Eff es ()
     rowCase whatToMatch (locL, lhsRow) (locR, rhsRow) = do
@@ -215,6 +238,8 @@ check (Located loc e) type_ = scoped $ match e type_
             unwrapFn 0 = pure . ([],)
             unwrapFn n =
                 monoLayer Out >=> \case
+                    -- todo: this should support Pi and dependent pattern matching
+                    -- MLQ{} -> uhhh
                     MLFn _ from to -> first (from :) <$> unwrapFn (pred n) to
                     MLUniVar loc' uni ->
                         lookupUniVar uni >>= \case
@@ -302,7 +327,7 @@ infer (Located loc e) = scoped case e of
     LetRec bindings body -> do
         declareAll =<< (inferDecls . map (\b -> Located loc $ D.Value b []) . NE.toList) bindings
         infer body
-    (Annotation expr ty) -> do
+    Annotation expr ty -> do
         tyV <- typeFromTerm ty
         tyV <$ check expr tyV
     If cond true false -> do
@@ -375,10 +400,14 @@ infer (Located loc e) = scoped case e of
 inferApp :: InfEffs es => Loc -> TypeDT -> Expr 'Fixity -> Eff es TypeDT
 inferApp appLoc fTy arg = do
     monoLayer In fTy >>= \case
+        -- todo: this case is not ideal if the univar is already solved with a concrete function type
         MLUniVar loc uni -> do
             from <- infer arg
             to <- freshUniVar loc
-            to <$ subtype (V.UniVar loc uni) (V.Function loc from to)
+            env <- get @ValueEnv
+            var <- freshName $ Located loc $ Name' "x"
+            let closure = V.Closure { var, env, ty = from, body = V.quote to }
+            to <$ subtype (V.UniVar loc uni) (V.Q loc Forall Visible Retained closure)
         MLFn _ from to -> do
             to <$ check arg from
         -- todo: special case for erased args
@@ -478,13 +507,13 @@ inferPattern (Located loc p) = case p of
                 -- i.e. types of value constructors have the shape `a -> b -> c -> d -> ConcreteType a b c d`
                 --
                 -- solved univars cannot appear here either, since `lookupSig` on a pattern returns a type with no univars
-                MLUniVar loc uni -> internalError loc $ "unexpected univar" <+> pretty uni <+> "in a constructor type"
+                MLUniVar loc' uni -> internalError loc' $ "unexpected univar" <+> pretty uni <+> "in a constructor type"
                 -- this kind of repetition is necessary to retain missing pattern warnings
                 MLCon cname args -> pure (V.Con cname args, [])
                 MLTyCon cname -> pure (V.TyCon cname, [])
                 MLApp lhs rhs -> pure (V.App lhs rhs, [])
-                MLVariantT loc _ -> internalError loc $ "unexpected variant type" <+> "in a constructor type"
-                MLRecordT loc _ -> internalError loc $ "unexpected record type" <+> "in a constructor type"
+                MLVariantT loc' _ -> internalError loc' $ "unexpected variant type" <+> "in a constructor type"
+                MLRecordT loc' _ -> internalError loc' $ "unexpected record type" <+> "in a constructor type"
                 MLVariant{} -> internalError (getLoc name) $ "unexpected variant constructor" <+> "in a constructor type"
                 MLRecord{} -> internalError (getLoc name) $ "unexpected record value" <+> "in a constructor type"
                 MLLambda{} -> internalError (getLoc name) $ "unexpected lambda" <+> "in a constructor type"
@@ -522,9 +551,9 @@ normaliseAll = generaliseAll >=> traverse (eval' <=< go . V.quote)
         C.VariantT loc row -> C.VariantT loc <$> traverse go row
         C.RecordT loc row -> C.RecordT loc <$> traverse go row
         -- expression-only constructors are unsupported for now
-        C.Lambda{} -> internalError Blank "type-level lambdas are not supported yet"
-        C.Case{} -> internalError Blank "type-level case is not supported yet"
-        C.Record{} -> internalError Blank "type-level records are not supported yet"
+        C.Lambda name ty body -> C.Lambda name <$> go ty <*> go body
+        C.Case arg matches -> C.Case <$> go arg <*> traverse (traverse go) matches 
+        C.Record row -> C.Record <$> traverse go row
         -- and these are just boilerplate
         C.Name name -> pure $ C.Name name
         C.TyCon name -> pure $ C.TyCon name

@@ -127,7 +127,7 @@ instance Pretty (NameAt p) => Pretty (Expr_ p) where
     pretty = go (0 :: Int) . Located Blank
       where
         go n (Located _ e) = case e of
-            Lambda arg body -> parensWhen 1 $ "λ" <> pretty arg <+> "->" <+> pretty body
+            Lambda arg body -> parensWhen 1 $ "λ" <> pretty arg <+> compressLambda body
             WildcardLambda _ l@(Located _ List{}) -> pretty l
             WildcardLambda _ r@(Located _ Record{}) -> pretty r
             WildcardLambda _ body -> "(" <> pretty body <> ")"
@@ -152,7 +152,7 @@ instance Pretty (NameAt p) => Pretty (Expr_ p) where
             Skolem skolem -> pretty skolem
             UniVar uni -> pretty uni
             Function from to -> parensWhen 2 $ go 2 from <+> "->" <+> pretty to
-            Q q vis er binder body -> parensWhen 2 $ kw q er <+> prettyBinder binder <+> arrOrDot q vis <+> pretty body
+            Q q vis er binder body -> parensWhen 2 $ kw q er <+> prettyBinder binder <+> compressQ q vis er body
             VariantT row -> brackets . withExt row . sep . punctuate comma . map variantItem $ sortedRow row.row
             RecordT row -> braces . withExt row . sep . punctuate comma . map recordTyField $ sortedRow row.row
           where
@@ -166,6 +166,15 @@ instance Pretty (NameAt p) => Pretty (Expr_ p) where
             kw Forall Retained = "Π"
             kw Exists Erased = "∃"
             kw Exists Retained = "Σ"
+
+            compressLambda (L term) = case term of
+                Lambda pat body -> pretty pat <+> compressLambda body
+                other -> "->" <+> pretty other
+
+            compressQ q vis er (L term) = case term of
+                Q q' vis' er' binder body | q == q' && vis == vis' && er == er' ->
+                    parens (prettyBinder binder) <+> compressQ q vis er body
+                other -> arrOrDot q vis <+> pretty other
 
             arrOrDot Forall Visible = "->"
             arrOrDot Exists Visible = "**"

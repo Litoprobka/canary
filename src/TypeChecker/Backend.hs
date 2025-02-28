@@ -75,7 +75,9 @@ data Monotype
       MUniVar Loc UniVar
     | MSkolem Skolem
 
-data MonoClosure = MonoClosure {var :: Name, ty :: Monotype, env :: HashMap Name Value, body :: Monotype}
+-- invariant: given a monotype arg, `body` evaluates to a monotype
+data MonoClosure = MonoClosure {var :: Name, variance :: Variance, ty :: Monotype, env :: HashMap Name Value, body :: CoreTerm}
+data Variance = In | Out | Inv
 
 uniplateMono :: Traversal' Monotype Monotype
 uniplateMono f = \case
@@ -355,7 +357,10 @@ alterUniVar override uni ty = do
                 Left _ -> pure NoCycle
                 Right ty' -> cycleCheck (selfRefType, HashSet.insert uni2 acc) ty'
         MFn _ from to -> cycleCheck (Indirect, acc) from >> cycleCheck (Indirect, acc) to
-        MQ loc _q _e _closure -> internalError loc "todo: cycleCheck MQ"
+        MQ _ _q _e closure -> do
+            void $ cycleCheck (Indirect, acc) closure.ty
+            skolem <- freshSkolem $ toSimpleName closure.var
+            cycleCheck (Indirect, acc) =<< appMono closure skolem
         MCon _ args -> NoCycle <$ traverse_ (cycleCheck (Indirect, acc)) args
         MApp lhs rhs -> cycleCheck (Indirect, acc) lhs >> cycleCheck (Indirect, acc) rhs
         MVariantT _ row -> NoCycle <$ traverse_ (cycleCheck (Indirect, acc)) row
@@ -445,7 +450,12 @@ generaliseAll action = do
         C.Skolem skolem -> do
             skScope <- skolemScope skolem
             if skScope > scope
-                then internalError (getLoc skolem) "the skolem\nhas escaped its scope\nyes\nYES\nthe skolem is out"
+                then do
+                    -- if the skolem would escape its scope, we just convert it to an existential
+                    -- i.e. \x -> runST (newSTRef x) : forall a. a -> STRef (exists s. s) a
+                    let loc = getLoc skolem
+                    var <- freshTypeVar loc
+                    pure $ C.Q loc Exists Implicit Erased var (type_ loc) $ C.Name var
                 else pure $ C.Skolem skolem
         -- simple recursive cases
         C.Function loc l r -> C.Function loc <$> go scope l <*> go scope r
@@ -465,8 +475,6 @@ generaliseAll action = do
         C.Let name _ _ -> internalError (getLoc name) "unexpected let in a quoted type"
     toTypeVar = either C.Name id
 
-data Variance = In | Out | Inv
-
 {- | converts a polytype to a monotype, instantiating / skolemizing depending on variance
 
 > mono Out (forall a. a -> a)
@@ -481,7 +489,7 @@ data Variance = In | Out | Inv
 mono :: InfEffs es => Variance -> TypeDT -> Eff es Monotype
 mono variance = \case
     V.Var var -> internalError (getLoc var) $ "mono: dangling var" <+> pretty var
-    V.Con name args -> MCon name <$> traverse (mono variance) args
+    V.Con name args -> MCon name <$> traverse go args
     V.TyCon name -> pure $ MTyCon name
     V.Skolem skolem -> pure $ MSkolem skolem
     V.UniVar loc uni -> pure $ MUniVar loc uni
@@ -489,18 +497,24 @@ mono variance = \case
     V.Function loc from to -> MFn loc <$> mono (flipVariance variance) from <*> go to
     V.VariantT loc row -> MVariantT loc <$> traverse go row
     V.RecordT loc row -> MRecordT loc <$> traverse go row
-    V.Q loc q Visible e closure -> internalError loc "mono: monomorphise closures" -- pure $ MQ loc q e $ _toMonoClosure closure
-    V.Q _ Forall vis _ closure -> go =<< substitute variance closure
-    V.Q _ Exists vis _ closure -> go =<< substitute (flipVariance variance) closure
+    V.Q loc q Visible e closure -> do
+        ty <- go closure.ty
+        pure $ MQ loc q e MonoClosure{var = closure.var, variance, env = closure.env, ty, body = closure.body}
+    V.Q _ Forall _ _ closure -> go =<< substitute variance closure
+    V.Q _ Exists _ _ closure -> go =<< substitute (flipVariance variance) closure
     V.PrimFunction{} -> internalError Blank "mono: prim function"
     V.PrimValue val -> pure $ MPrim val
-    V.Record row -> MRecord <$> traverse (mono variance) row
-    V.Variant name arg -> MVariant name <$> mono variance arg
-    V.Case arg matches -> MCase <$> mono variance arg <*> traverse (bitraverse pure (mono variance)) matches
-    l@V.Lambda{} -> internalError (getLoc l) "mono: type-level lambdas are not supported yet"
+    V.Record row -> MRecord <$> traverse go row
+    V.Variant name arg -> MVariant name <$> go arg
+    V.Case arg matches -> MCase <$> go arg <*> traverse (bitraverse pure go) matches
+    V.Lambda closure -> do
+        ty <- go closure.ty
+        pure $ MLambda MonoClosure{var = closure.var, variance, env = closure.env, ty, body = closure.body}
   where
     go = mono variance
 
+appMono :: InfEffs es => MonoClosure -> Value -> Eff es Monotype
+appMono MonoClosure{var, variance, env, body} arg = mono variance $ V.evalCore (HashMap.insert var arg env) body
 
 flipVariance :: Variance -> Variance
 flipVariance = \case
@@ -520,8 +534,8 @@ unMono = \case
     MRecordT loc row -> V.RecordT loc $ fmap unMono row
     MVariant name val -> V.Variant name (unMono val)
     MRecord row -> V.Record (fmap unMono row)
-    MLambda _closure -> error "todo: unMono MLambda; do lambdas even belong in Monotype?"
-    MQ loc q e _closure -> V.Q loc q Visible e (error "todo: unMono Q")
+    MLambda MonoClosure{var, ty, env, body} -> V.Lambda V.Closure{var, ty = unMono ty, env, body}
+    MQ loc q e MonoClosure{var, ty, env, body} -> V.Q loc q Visible e V.Closure{var, ty = unMono ty, env, body}
     MPrim val -> V.PrimValue val
     MCase arg matches -> V.Case (unMono arg) ((map . second) unMono matches)
 
