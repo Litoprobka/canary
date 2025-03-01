@@ -148,7 +148,9 @@ subtype lhs_ rhs_ = join $ match <$> monoLayer In lhs_ <*> monoLayer Out rhs_
         (MLFn _ inl outl) (MLFn _ inr outr) -> do
             subtype inr inl
             subtype outl outr
-        (MLQ _ Forall erasedl closurel) (MLQ _ Forall erasedr closurer) | subErased erasedl erasedr -> do
+        -- I'm not sure whether the subtyping between erased and non-erased arguments is right, since
+        -- those types would have different runtime representations
+        (MLQ _ Forall erasedl closurel) (MLQ _ Forall erasedr closurer) | subErased erasedr erasedl -> do
             subtype closurer.ty closurel.ty
             skolem <- freshSkolem $ toSimpleName closurel.var
             subtype (V.app closurel skolem) (V.app closurer skolem)
@@ -180,11 +182,11 @@ subtype lhs_ rhs_ = join $ match <$> monoLayer In lhs_ <*> monoLayer Out rhs_
         lhs rhs -> typeError $ NotASubtype (unMonoLayer lhs) (unMonoLayer rhs) Nothing
 
     -- (forall a -> ty) <: (foreach a -> ty)
-    -- (exists a ** ty) <: (some a ** ty)
+    -- (some a ** ty) <: (exists a ** ty)
     subErased :: Erased -> Erased -> Bool
-    subErased _ Retained = True
-    subErased Erased Erased = True
-    subErased Retained Erased = False
+    subErased _ Erased = True
+    subErased Retained Retained = True
+    subErased Erased Retained = False
 
     rowCase :: InfEffs es => RecordOrVariant -> (Loc, ExtRow TypeDT) -> (Loc, ExtRow TypeDT) -> Eff es ()
     rowCase whatToMatch (locL, lhsRow) (locR, rhsRow) = do

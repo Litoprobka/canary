@@ -333,20 +333,21 @@ data Cycle = DirectCycle | NoCycle deriving (Eq)
 alterUniVar :: InfEffs es => Bool -> UniVar -> Monotype -> Eff es ()
 alterUniVar override uni ty = do
     -- here comes the magic. If the new type contains other univars, we change their scope
-    lookupUniVar uni >>= \case
+    mbScope <- lookupUniVar uni >>= \case
         Right _
             | not override ->
                 internalError Blank $ "Internal error (probably a bug): attempted to solve a solved univar " <> pretty uni
-        Right _ -> pass
-        Left scope -> rescope scope ty
-    cycle <- cycleCheck (Direct, HashSet.singleton uni) ty
+        Right _ -> pure Nothing
+        Left scope -> pure $ Just scope
+    cycle <- cycleCheck mbScope (Direct, HashSet.singleton uni) ty
     when (cycle == NoCycle) $ modify \s -> s{vars = HashMap.insert uni (Right ty) s.vars}
   where
     -- errors out on indirect cycles (i.e. a ~ Maybe a)
     -- returns False on direct univar cycles (i.e. a ~ b, b ~ c, c ~ a)
     -- returns True when there are no cycles
     -- todo: we can infer equirecursive types (mu) when a cycle goes through a record / variant
-    cycleCheck (selfRefType, acc) = \case
+    cycleCheck mbScope = go where
+     go (selfRefType, acc) = \case
         MUniVar _ uni2 | HashSet.member uni2 acc -> case selfRefType of
             Direct -> pure DirectCycle
             Indirect -> do
@@ -354,42 +355,36 @@ alterUniVar override uni ty = do
                 typeError $ SelfReferential (getLoc $ unMono ty) uni unwrappedTy
         MUniVar _ uni2 ->
             lookupUniVar uni2 >>= \case
-                Left _ -> pure NoCycle
-                Right ty' -> cycleCheck (selfRefType, HashSet.insert uni2 acc) ty'
-        MFn _ from to -> cycleCheck (Indirect, acc) from >> cycleCheck (Indirect, acc) to
-        MQ _ _q _e closure -> do
-            void $ cycleCheck (Indirect, acc) closure.ty
-            skolem <- freshSkolem $ toSimpleName closure.var
-            cycleCheck (Indirect, acc) =<< appMono closure skolem
-        MCon _ args -> NoCycle <$ traverse_ (cycleCheck (Indirect, acc)) args
-        MApp lhs rhs -> cycleCheck (Indirect, acc) lhs >> cycleCheck (Indirect, acc) rhs
-        MVariantT _ row -> NoCycle <$ traverse_ (cycleCheck (Indirect, acc)) row
-        MRecordT _ row -> NoCycle <$ traverse_ (cycleCheck (Indirect, acc)) row
-        MVariant _ val -> cycleCheck (Indirect, acc) val
-        MRecord row -> NoCycle <$ traverse_ (cycleCheck (Indirect, acc)) row
-        MLambda _f -> internalError Blank "todo: cycleCheck monolambda" -- NoCycle <$ cycleCheck (Indirect, acc) (f $ MPrim $ Located Blank $ TextLiteral "something")
-        MCase arg matches -> cycleCheck (Indirect, acc) arg <* (traverse_ . traverse_) (cycleCheck (Indirect, acc)) matches
+                Right ty' -> go (selfRefType, HashSet.insert uni2 acc) ty'
+                Left scope' -> do
+                    case mbScope of
+                        Just scope | scope' > scope -> modify \s -> s{vars = HashMap.insert uni2 (Left scope') s.vars}
+                        _ -> pass
+                    pure NoCycle
+        MFn _ from to -> go (Indirect, acc) from >> go (Indirect, acc) to
+        MQ _ _q _e closure -> cycleCheckClosure acc closure
+        MCon _ args -> NoCycle <$ traverse_ (go (Indirect, acc)) args
+        MApp lhs rhs -> go (Indirect, acc) lhs >> go (Indirect, acc) rhs
+        MVariantT _ row -> NoCycle <$ traverse_ (go (Indirect, acc)) row
+        MRecordT _ row -> NoCycle <$ traverse_ (go (Indirect, acc)) row
+        MVariant _ val -> go (Indirect, acc) val
+        MRecord row -> NoCycle <$ traverse_ (go (Indirect, acc)) row
+        MLambda closure -> cycleCheckClosure acc closure
+        MCase arg matches -> go (Indirect, acc) arg <* (traverse_ . traverse_) (go (Indirect, acc)) matches
         MTyCon{} -> pure NoCycle
         MSkolem{} -> pure NoCycle
         MPrim{} -> pure NoCycle
 
-    rescope scope = foldUniVars \v -> lookupUniVar v >>= either (rescopeVar v scope) (const pass)
-    rescopeVar v scope oldScope = modify \s -> s{vars = HashMap.insert v (Left $ min oldScope scope) s.vars}
+     cycleCheckClosure acc closure = do
+        void $ go (Indirect, acc) closure.ty
+        skolem <- freshSkolem $ toSimpleName closure.var
+        go (Indirect, acc) =<< appMono closure skolem
 
     unwrap = \case
         uni2@(MUniVar _ var) ->
             lookupUniVar var >>= \case
                 Right refTy -> unwrap refTy
                 Left{} -> pure uni2
-        other -> pure other
-
-foldUniVars :: InfEffs es => (UniVar -> Eff es ()) -> Monotype -> Eff es ()
-foldUniVars action =
-    void . transformM uniplateMono \case
-        var@(MUniVar _ v) -> do
-            action v
-            lookupUniVar v >>= either (const pass) (foldUniVars action)
-            pure var
         other -> pure other
 
 skolemScope :: InfEffs es => Skolem -> Eff es Scope
