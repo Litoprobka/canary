@@ -26,7 +26,6 @@ import Common (Name)
 import Common hiding (Name)
 import Data.DList qualified as DList
 import Data.Foldable1 (foldr1)
-import Data.HashMap.Strict qualified as HashMap
 import Data.List.NonEmpty qualified as NE
 import Data.Traversable (for)
 import Diagnostic (Diagnose, internalError)
@@ -45,29 +44,31 @@ import Syntax.Row qualified as Row
 import Syntax.Term hiding (Record, Variant)
 import Syntax.Term qualified as E (Term_ (Record, Variant))
 import TypeChecker.Backend
+import Data.EnumMap.Strict qualified as Map
+import Data.EnumMap.Lazy qualified as LMap
 
 typecheck
     :: (NameGen :> es, Diagnose :> es, State ValueEnv :> es)
-    => HashMap Name Type' -- imports
+    => EnumMap Name Type' -- imports
     -> [Declaration 'Fixity]
-    -> Eff es (HashMap Name Type') -- type checking doesn't add anything new to the AST
+    -> Eff es (EnumMap Name Type') -- type checking doesn't add anything new to the AST
 typecheck env decls = run env $ normaliseAll $ inferDecls decls
 
 -- | check / infer types of a list of declarations that may reference each other
-inferDecls :: InfEffs es => [Declaration 'Fixity] -> Eff es (HashMap Name TypeDT)
+inferDecls :: InfEffs es => [Declaration 'Fixity] -> Eff es (EnumMap Name TypeDT)
 inferDecls decls = do
     -- ideally, all of this shuffling around should be moved to the dependency resolution pass
-    (typeNames, sigs) <- bimap toList (HashMap.fromList . toList) . fold <$> traverse updateTopLevel decls
+    (typeNames, sigs) <- bimap toList (Map.fromList . toList) . fold <$> traverse updateTopLevel decls
     let values = foldr getValueDecls [] decls
     topLevel <- gets @InfState (.topLevel)
-    let types = HashMap.compose topLevel $ HashMap.fromList $ (\x -> (x, x)) <$> typeNames
+    let types = composeMap topLevel $ Map.fromList $ (\x -> (x, x)) <$> typeNames
     (types <>) . (<> sigs) . fold <$> for values \(binding, locals) ->
-        binding & collectNamesInBinding & listToMaybe >>= (`HashMap.lookup` sigs) & \case
+        binding & collectNamesInBinding & listToMaybe >>= (`Map.lookup` sigs) & \case
             Just ty -> do
                 checkBinding binding ty
                 pure $
-                    HashMap.compose sigs $
-                        HashMap.fromList $
+                    composeMap sigs $
+                        Map.fromList $
                             (\x -> (x, x)) <$> collectNamesInBinding binding
             Nothing -> scoped do
                 declareAll =<< inferDecls locals
@@ -75,29 +76,31 @@ inferDecls decls = do
                 declareTopLevel typeMap
                 pure typeMap
   where
+    composeMap bc !ab
+        | Map.null bc = Map.empty
+        | otherwise = Map.mapMaybe (`Map.lookup` bc) ab
     updateTopLevel (Located loc decl) = case decl of
         D.Signature name sig -> do
             sigV <- typeFromTerm sig
-            modify \s -> s{topLevel = HashMap.insert name sigV s.topLevel}
+            declareTopLevel' name sigV
             pure (mempty, DList.singleton (name, sigV))
         D.Value{} -> pure mempty
         D.Type name binders constrs -> do
-            modify @ValueEnv $ HashMap.insert name (V.TyCon name)
+            modify @ValueEnv $ LMap.insert name (V.TyCon name)
             typeKind <- mkTypeKind loc binders
-            modify \s -> s{topLevel = HashMap.insert name typeKind s.topLevel}
+            declareTopLevel' name typeKind
             conSigs <- for (mkConstrSigs name binders constrs) \(con, sig) -> do
                 sigV <- typeFromTerm sig
-                modify \s -> s{topLevel = HashMap.insert con sigV s.topLevel}
+                declareTopLevel' con sigV
                 pure (con, sigV)
             pure (DList.singleton name, DList.fromList conSigs)
         D.GADT name mbKind constrs -> do
-            modify @ValueEnv $ HashMap.insert name (V.TyCon name)
+            modify @ValueEnv $ LMap.insert name (V.TyCon name)
             kind <- maybe (pure $ type_ loc) typeFromTerm mbKind
-            modify \s -> s{topLevel = HashMap.insert name kind s.topLevel}
+            declareTopLevel' name kind
             conSigs <- for constrs \con -> do
                 conSig <- typeFromTerm con.sig
-                modify \s ->
-                    s{topLevel = HashMap.insert con.name conSig s.topLevel}
+                declareTopLevel' con.name conSig
                 pure (con.name, conSig)
             pure (DList.singleton name, DList.fromList conSigs)
     mkTypeKind loc = go
@@ -212,7 +215,7 @@ check (Located loc e) type_ = scoped $ match e type_
         (Lambda (L (VarP arg)) body) (V.Q _ Forall Visible Retained closure) -> scoped do
             updateSig arg closure.ty -- checkPattern arg closure.ty
             var <- freshSkolem (toSimpleName arg)
-            modify @ValueEnv $ HashMap.insert arg var
+            modify @ValueEnv $ LMap.insert arg var
             check body (closure `V.app` var)
         (Lambda arg body) (V.Function _ from to) -> scoped do
             -- `checkPattern` updates signatures of all mentioned variables
@@ -439,7 +442,7 @@ inferTyApp expr ty tyArg = case ty of
 
 -- infers the type of a function / variables in a pattern
 -- does not implicitly declare anything
-inferBinding :: InfEffs es => Binding 'Fixity -> Eff es (HashMap Name TypeDT)
+inferBinding :: InfEffs es => Binding 'Fixity -> Eff es (EnumMap Name TypeDT)
 inferBinding =
     scoped . \case
         ValueB pat body -> do
@@ -449,7 +452,7 @@ inferBinding =
                 pure (patTy, bodyTy)
             subtype patTy bodyTy
             checkPattern pat bodyTy
-            traverse lookupSig (HashMap.fromList $ (\x -> (x, x)) <$> collectNamesInPat pat)
+            traverse lookupSig (Map.fromList $ (\x -> (x, x)) <$> collectNamesInPat pat)
         binding@(FunctionB name args body) -> do
             -- note: we can only infer monotypes for recursive functions
             -- while checking the body, the function itself is assigned a univar
@@ -463,7 +466,7 @@ inferBinding =
             -- we only need the subtype check when the univar is solved, i.e. when the
             -- function contains any recursive calls at all
             withUniVar uni (subtype ty . unMono)
-            pure $ HashMap.singleton name ty
+            pure $ Map.singleton name ty
 
 inferPattern :: (InfEffs es, Declare :> es) => Pat -> Eff es TypeDT
 inferPattern (Located loc p) = case p of
@@ -555,7 +558,7 @@ normaliseAll = generaliseAll >=> traverse (eval' <=< go . V.quote)
         C.RecordT loc row -> C.RecordT loc <$> traverse go row
         -- expression-only constructors are unsupported for now
         C.Lambda name ty body -> C.Lambda name <$> go ty <*> go body
-        C.Case arg matches -> C.Case <$> go arg <*> traverse (traverse go) matches 
+        C.Case arg matches -> C.Case <$> go arg <*> traverse (traverse go) matches
         C.Record row -> C.Record <$> traverse go row
         -- and these are just boilerplate
         C.Name name -> pure $ C.Name name

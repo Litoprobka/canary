@@ -5,6 +5,8 @@ module LangPrelude (module Reexport, (.>)) where
 import Effectful as Reexport
 import Effectful.TH as Reexport
 import Prettyprinter as Reexport (Doc, Pretty (..), (<+>))
+import Data.EnumMap as Reexport (EnumMap)
+import Data.EnumSet as Reexport (EnumSet)
 import Relude as Reexport hiding (
     Op,
     Reader,

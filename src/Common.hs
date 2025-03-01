@@ -121,6 +121,43 @@ data Name_
     | TypeName
     deriving (Show, Eq, Generic, Hashable)
 
+-- some hacky code to use Name_ in an EnumMap
+-- this relies on the fact that ids are non-negative
+-- also, EnumMap wouldn't work well with randomly generated ids
+instance Enum Name_ where
+    fromEnum = \case
+        Name _ (Id id') -> id'
+        Wildcard _ (Id id') -> id'
+        BoolName -> -10
+        TrueName -> -11
+        ListName -> -12
+        ConsName -> -13
+        NilName -> -14
+        IntName -> -15
+        NatName -> -16
+        TextName -> -17
+        CharName -> -18
+        LensName -> -19
+        TypeName -> -20
+    -- I don't think we ever care about retrieving name keys from an EnumMap
+    toEnum = \case
+        -10 -> BoolName
+        -11 -> TrueName
+        -12 -> ListName
+        -13 -> ConsName
+        -14 -> NilName 
+        -15 -> IntName 
+        -16 -> NatName 
+        -17 -> TextName
+        -18 -> CharName
+        -19 -> LensName
+        -20 -> TypeName
+        n -> Name "" (Id n)
+
+instance Enum Name where
+    fromEnum (L name) = fromEnum name
+    toEnum = Located Blank . toEnum
+
 type SimpleName = Located SimpleName_
 data SimpleName_
     = Name' Text
@@ -153,18 +190,18 @@ instance Pretty SimpleName_ where
 -- univars use a different range of ids, so it's not clear whether they should use the same Id newtype
 newtype UniVar = UniVar Int
     deriving (Show, Eq)
-    deriving newtype (Hashable)
+    deriving newtype (Hashable, Enum)
 
 newtype Id = Id {id :: Int}
     deriving (Show, Eq)
-    deriving newtype (Hashable, Pretty)
+    deriving newtype (Hashable, Pretty, Enum)
 
 inc :: Id -> Id
 inc (Id n) = Id $ n + 1
 
 newtype Skolem = Skolem Name
     deriving (Show, Eq)
-    deriving newtype (Hashable)
+    deriving newtype (Hashable, Enum)
 
 instance HasLoc Skolem where
     getLoc (Skolem name) = getLoc name

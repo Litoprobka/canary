@@ -20,7 +20,6 @@ import Common (
     toSimpleName,
     pattern L,
  )
-import Data.HashMap.Lazy qualified as HashMap -- note that we use the lazy functions here
 import Data.Traversable (for)
 import Diagnostic
 import LangPrelude
@@ -34,8 +33,9 @@ import Syntax.Term qualified as T
 import Prelude qualified (Show (..))
 import Syntax.Term (Visibility(..), Quantifier, Erased)
 import qualified Data.DList as DList
+import qualified Data.EnumMap.Lazy as LMap -- note that we use the lazy functions here
 
-type ValueEnv = HashMap Name Value
+type ValueEnv = EnumMap Name Value
 type Type' = Value
 
 data Value
@@ -100,7 +100,7 @@ instance HasLoc Value where
 evalCore :: ValueEnv -> CoreTerm -> Value
 evalCore !env = \case
     -- note that env is a lazy hashmap, so we only force the outer structure here
-    C.Name name -> fromMaybe (error . show $ "whoopsie, out of scope" <+> pretty name) $ HashMap.lookup name env
+    C.Name name -> fromMaybe (error . show $ "whoopsie, out of scope" <+> pretty name) $ LMap.lookup name env
     C.TyCon name -> TyCon name
     C.Con name args -> Con name $ map (evalCore env) args
     C.Lambda name ty body -> Lambda $ Closure{var = name, ty = evalCore env ty, env, body}
@@ -115,7 +115,7 @@ evalCore !env = \case
                 . (<|> mbStuckCase val matches)
                 . asum
                 $ matches <&> \(pat, body) -> evalCore <$> matchCore env pat val <*> pure body
-    C.Let name expr body -> evalCore (HashMap.insert name (evalCore env expr) env) body
+    C.Let name expr body -> evalCore (LMap.insert name (evalCore env expr) env) body
     C.Literal lit -> PrimValue lit
     C.Record row -> Record $ evalCore env <$> row
     C.Variant _name -> error "todo: seems like evalCore needs namegen" -- Lambda (Located Blank $ Name' "x") $ C.Variant name `C.App`
@@ -135,7 +135,7 @@ evalCore !env = \case
     mbStuckCase _ _ = Nothing
 
 app :: Closure -> Value -> Value
-app Closure{var, env, body} arg = evalCore (HashMap.insert var arg env) body
+app Closure{var, env, body} arg = evalCore (LMap.insert var arg env) body
 
 -- do we need a fresh name here?
 closureBody :: Closure -> Value
@@ -148,13 +148,13 @@ closureBody' closure = do
 
 matchCore :: ValueEnv -> CorePattern -> Value -> Maybe ValueEnv
 matchCore env = \cases
-    (C.VarP name) val -> Just $ HashMap.insert name val env
+    (C.VarP name) val -> Just $ LMap.insert name val env
     C.WildcardP{} _ -> Just env
     (C.ConstructorP pname argNames) (Con name args)
         | pname == name && length argNames == length args ->
-            Just $ foldr (uncurry HashMap.insert) env (zip argNames args)
+            Just $ foldr (uncurry LMap.insert) env (zip argNames args)
     (C.VariantP pname argName) (Variant name val)
-        | pname == name -> Just $ HashMap.insert argName val env
+        | pname == name -> Just $ LMap.insert argName val env
     (C.LiteralP lit) (PrimValue (L val)) -> env <$ guard (lit == val)
     _ _ -> Nothing
 
@@ -283,7 +283,7 @@ desugar builtins = go
 -}
 
 evalAll :: (Diagnose :> es, NameGen :> es) => [Declaration 'Fixity] -> Eff es ValueEnv
-evalAll = modifyEnv HashMap.empty
+evalAll = modifyEnv LMap.empty
 
 modifyEnv
     :: forall es
@@ -292,7 +292,7 @@ modifyEnv
     -> [Declaration 'Fixity]
     -> Eff es ValueEnv
 modifyEnv env decls = do
-    desugared <- (traverse . traverse) desugar . HashMap.fromList =<< foldMapM collectBindings decls
+    desugared <- (traverse . traverse) desugar . LMap.fromList =<< foldMapM collectBindings decls
     let newEnv = fmap (either id (evalCore newEnv)) desugared <> env
     pure newEnv
   where

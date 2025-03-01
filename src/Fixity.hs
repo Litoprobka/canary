@@ -4,9 +4,8 @@
 
 module Fixity (resolveFixity, run, parse, Fixity (..)) where
 
-import Common (Fixity (..), Loc (..), Located (..), Name, Pass (..), getLoc, mkNotes, zipLocOf, pattern L)
+import Common (Fixity (..), Loc (..), Located (..), Pass (..), getLoc, mkNotes, zipLocOf, pattern L)
 import Control.Monad (foldM)
-import Data.HashMap.Strict qualified as HashMap
 import Data.List.NonEmpty qualified as NE
 import Data.Traversable (for)
 import Diagnostic (Diagnose, fatal, internalError)
@@ -19,10 +18,9 @@ import Syntax
 import Syntax.Declaration (GadtConstructor (..))
 import Syntax.Declaration qualified as D
 import Syntax.Term
+import DependencyResolution (FixityMap, Op (..))
+import qualified Data.EnumMap.Strict as Map
 
-type Op = Maybe Name
-
-type FixityMap = HashMap Op Fixity
 data Priority = Left' | Right' deriving (Show)
 
 type Ctx es = (Reader (Poset Op) :> es, Reader FixityMap :> es, Diagnose :> es)
@@ -38,29 +36,29 @@ opError =
         IncompatibleFixity prev next ->
             Err
                 Nothing
-                ("incompatible fixity of" <+> mbPretty prev <+> "and" <+> mbPretty next)
-                (mkNotes [(getLocMb next, This "next operator"), (getLocMb prev, This "previous operator")])
+                ("incompatible fixity of" <+> pretty prev <+> "and" <+> pretty next)
+                (mkNotes [(getLocOp next, This "next operator"), (getLocOp prev, This "previous operator")])
                 []
         UndefinedOrdering prev next ->
             Err
                 Nothing
-                ("undefined ordering of" <+> mbPretty prev <+> "and" <+> mbPretty next)
-                (mkNotes [(getLocMb next, This "next operator"), (getLocMb prev, This "previous operator")])
+                ("undefined ordering of" <+> pretty prev <+> "and" <+> pretty next)
+                (mkNotes [(getLocOp next, This "next operator"), (getLocOp prev, This "previous operator")])
                 []
         AmbiguousOrdering prev next ->
             Err
                 Nothing
                 -- TODO: this error is very unclear
-                ("ambiguous ordering of" <+> mbPretty prev <+> "and" <+> mbPretty next <+> "- their priority relations are cyclic")
-                (mkNotes [(getLocMb next, This "next operator"), (getLocMb prev, This "previous operator")])
+                ("ambiguous ordering of" <+> pretty prev <+> "and" <+> pretty next <+> "- their priority relations are cyclic")
+                (mkNotes [(getLocOp next, This "next operator"), (getLocOp prev, This "previous operator")])
                 []
   where
-    getLocMb = maybe Blank getLoc
-    mbPretty Nothing = "function application"
-    mbPretty (Just op) = pretty op
+    getLocOp =  \case
+        AppOp -> Blank
+        Op op -> getLoc op
 
-lookup' :: (Diagnose :> es, Hashable k, Pretty k) => k -> HashMap k v -> Eff es v
-lookup' key hmap = case HashMap.lookup key hmap of
+lookup' :: (Diagnose :> es, Enum k, Pretty k) => k -> EnumMap k v -> Eff es v
+lookup' key emap = case Map.lookup key emap of
     Nothing -> internalError Blank $ "missing operator" <+> pretty key
     Just v -> pure v
 
@@ -127,7 +125,7 @@ parse = traverse \case
     Do stmts lastAction -> Do <$> traverse parseStmt stmts <*> parse lastAction
     Literal lit -> pure $ Literal lit
     InfixE pairs last' -> do
-        pairs' <- traverse (bitraverse parse pure) pairs
+        pairs' <- traverse (bitraverse parse (pure . maybe AppOp Op)) pairs
         last'' <- parse last'
         go' pairs' last''
     Function lhs rhs -> Function <$> parse lhs <*> parse rhs
@@ -163,12 +161,12 @@ parse = traverse \case
         fixity <- lookup' mbOp =<< ask @FixityMap
         let loc = zipLocOf lhs rhs
         pure $ Located loc case (mbOp, fixity, lhs) of
-            (Nothing, _, _) -> App lhs rhs
-            (Just op, InfixChain, L (App (Located nloc (Name op')) (L (List args))))
+            (AppOp, _, _) -> App lhs rhs
+            (Op op, InfixChain, L (App (Located nloc (Name op')) (L (List args))))
                 | op == op' ->
                     App (Located nloc $ Name op') (Located loc $ List $ args <> [rhs])
-            (Just op, InfixChain, _) -> App (Located (getLoc op) (Name op)) $ Located loc $ List [lhs, rhs]
-            (Just op, _, _) -> App (Located (zipLocOf lhs op) $ App (Located (getLoc op) (Name op)) lhs) rhs
+            (Op op, InfixChain, _) -> App (Located (getLoc op) (Name op)) $ Located loc $ List [lhs, rhs]
+            (Op op, _, _) -> App (Located (zipLocOf lhs op) $ App (Located (getLoc op) (Name op)) lhs) rhs
 
 -- * Helpers
 

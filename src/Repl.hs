@@ -10,7 +10,7 @@ import Control.Monad.Combinators (choice)
 import Data.HashMap.Strict qualified as HashMap
 import Data.Text qualified as Text
 import Data.Text.Encoding (strictBuilderToText, textToStrictBuilder)
-import DependencyResolution (FixityMap, Op, SimpleOutput (..), resolveDependenciesSimplified')
+import DependencyResolution (FixityMap, Op (..), SimpleOutput (..), resolveDependenciesSimplified')
 import Diagnostic (Diagnose, guardNoErrors, runDiagnose, fatal)
 import Effectful
 import Effectful.State.Static.Local (runState)
@@ -34,6 +34,8 @@ import TypeChecker (infer, normalise, typecheck)
 import TypeChecker.Backend qualified as TC
 import Error.Diagnose (Report(..))
 import qualified Control.Exception as Exception
+import qualified Data.EnumMap.Strict as Map
+import qualified Data.EnumMap.Lazy as LMap
 
 data ReplCommand
     = Decls [Declaration 'Parse]
@@ -48,7 +50,7 @@ data ReplEnv = ReplEnv
     , fixityMap :: FixityMap
     , operatorPriorities :: Poset Op
     , scope :: Scope
-    , types :: HashMap Name TC.Type'
+    , types :: EnumMap Name TC.Type'
     -- , inputHistory :: Zipper Text? -- todo: remember previous commands
     }
 
@@ -60,11 +62,11 @@ type ReplCtx es =
 emptyEnv :: ReplEnv
 emptyEnv = ReplEnv{..}
   where
-    values = HashMap.singleton (noLoc TypeName) (V.TyCon (noLoc TypeName))
-    fixityMap = HashMap.singleton Nothing InfixL
-    types = HashMap.singleton (noLoc TypeName) (V.TyCon (noLoc TypeName))
+    values = LMap.singleton (noLoc TypeName) (V.TyCon (noLoc TypeName))
+    fixityMap = Map.singleton AppOp InfixL
+    types = Map.singleton (noLoc TypeName) (V.TyCon (noLoc TypeName))
     scope = Scope $ HashMap.singleton (Name' "Type") (noLoc TypeName)
-    (_, operatorPriorities) = Poset.eqClass Nothing Poset.empty
+    (_, operatorPriorities) = Poset.eqClass AppOp Poset.empty
 
 mkDefaultEnv :: (Diagnose :> es, NameGen :> es) => Eff es ReplEnv
 mkDefaultEnv = do

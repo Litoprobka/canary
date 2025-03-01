@@ -32,6 +32,7 @@ default-extensions:
 
 dependencies:
 - base >= 4.7 && < 5
+- enummapset
 - effectful >= 2.3 && < 3
 - effectful-th
 - diagnose

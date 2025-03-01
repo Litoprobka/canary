@@ -4,7 +4,6 @@
 module DependencyResolution where
 
 import Common
-import Data.HashMap.Strict qualified as HashMap
 import Diagnostic (Diagnose, fatal, nonFatal)
 import Effectful.State.Static.Local
 import Effectful.Writer.Static.Local (Writer, runWriter)
@@ -15,6 +14,7 @@ import Poset qualified
 import Prettyprinter (comma, hsep, punctuate)
 import Syntax
 import Syntax.Declaration qualified as D
+import qualified Data.EnumMap.Strict as Map
 
 -- once we've done name resolution, all sorts of useful information may be collected into tables
 -- this pass gets rid of the old [Declaration] shape of the AST and transforms it into something more structured
@@ -30,9 +30,23 @@ data Output = Output
     }
 
 type Decl = Declaration 'DependencyRes
-type Op = Maybe Name
-type FixityMap = HashMap Op Fixity
+type FixityMap = EnumMap Op Fixity
 type Signatures = HashMap Name (Type 'DependencyRes)
+
+data Op = Op Name | AppOp deriving (Eq)
+instance Pretty Op where
+    pretty = \case
+        Op name -> pretty name
+        AppOp -> "function application"
+
+-- yes, this is hacky
+instance Enum Op where
+    toEnum = \case
+        -1 -> AppOp
+        n -> Op $ toEnum n
+    fromEnum = \case
+        AppOp -> -1
+        Op name -> fromEnum name
 
 {-
 nameDependencies :: Diagnose :> es => [Declaration 'NameRes] -> Eff es (Poset Name)
@@ -115,8 +129,8 @@ resolveDependenciesSimplified
     -> Eff es SimpleOutput
 resolveDependenciesSimplified = resolveDependenciesSimplified' initFixity initPoset
   where
-    initFixity = HashMap.singleton Nothing InfixL
-    (_, initPoset) = Poset.eqClass Nothing Poset.empty
+    initFixity = Map.singleton AppOp InfixL
+    (_, initPoset) = Poset.eqClass AppOp Poset.empty
 
 resolveDependenciesSimplified'
     :: forall es. Diagnose :> es => FixityMap -> Poset Op -> [Declaration 'NameRes] -> Eff es SimpleOutput
@@ -126,7 +140,7 @@ resolveDependenciesSimplified' initFixity initPoset = fmap packOutput . runState
     go :: Declaration 'NameRes -> Eff (State (Poset Op) : State FixityMap : es) (Maybe (Declaration 'DependencyRes))
     go (Located loc decl) = fmap (fmap $ Located loc) case decl of
         D.Fixity fixity op rels -> do
-            modify @FixityMap $ HashMap.insert (Just op) fixity
+            modify @FixityMap $ Map.insert (Op op) fixity
             modifyM @(Poset Op) $ updatePrecedence loc op rels
             pure Nothing
         D.Value binding locals -> Just . D.Value (cast binding) <$> mapMaybeM go locals
@@ -144,19 +158,19 @@ reportCycleWarnings loc action = do
 
 updatePrecedence :: Diagnose :> es => Loc -> Name -> PriorityRelation 'NameRes -> Poset Op -> Eff es (Poset Op)
 updatePrecedence loc op rels poset = execState poset $ Poset.reportError $ reportCycleWarnings loc do
-    traverse_ (addRelation GT) rels.above
+    traverse_ (addRelation GT . maybe AppOp Op) rels.above
     traverse_ (addRelation LT) below
-    traverse_ (addRelation EQ . Just) rels.equal
+    traverse_ (addRelation EQ . Op) rels.equal
   where
     -- all operators implicitly have a lower precedence than function application, unless stated otherwise
     below
-        | Nothing `notElem` rels.above = Nothing : map Just rels.below
-        | otherwise = map Just rels.below
+        | Nothing `notElem` rels.above = AppOp : map Op rels.below
+        | otherwise = map Op rels.below
 
     addRelation _ op2
-        | Just op == op2 = selfRelationError op
+        | Op op == op2 = selfRelationError op
     addRelation rel op2 = do
-        modifyM @(Poset Op) $ Poset.addRelationLenient (Just op) op2 rel
+        modifyM @(Poset Op) $ Poset.addRelationLenient (Op op) op2 rel
 
 -- errors
 
@@ -179,8 +193,8 @@ cycleWarning loc ops ops2 =
             (mkNotes [(loc, This "occured at this declaration")])
             []
   where
-    mbPretty Nothing = "function application"
-    mbPretty (Just op) = pretty op
+    mbPretty AppOp = "function application"
+    mbPretty (Op op) = pretty op
 
 selfRelationError :: Diagnose :> es => Name -> Eff es ()
 selfRelationError op =

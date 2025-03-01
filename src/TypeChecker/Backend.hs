@@ -13,7 +13,6 @@
 module TypeChecker.Backend where
 
 import Common
-import Data.HashMap.Strict qualified as HashMap
 import Data.HashSet qualified as HashSet
 import Data.Traversable (for)
 import Diagnostic (Diagnose, fatal, internalError)
@@ -27,29 +26,13 @@ import Error.Diagnose qualified as M (Marker (..))
 import Interpreter (Value, ValueEnv)
 import Interpreter qualified as V
 import NameGen
-import Prettyprinter (Pretty, pretty, (<+>))
-import Relude hiding (
-    Reader,
-    State,
-    Type,
-    ask,
-    asks,
-    bool,
-    break,
-    cycle,
-    evalState,
-    get,
-    gets,
-    modify,
-    put,
-    runReader,
-    runState,
- )
 import Syntax
 import Syntax.Core qualified as C
 import Syntax.Row
 import Syntax.Row qualified as Row
 import Syntax.Term (Quantifier(..), Visibility (..), Erased (..))
+import LangPrelude hiding (cycle, break)
+import qualified Data.EnumMap.Strict as Map
 
 type Pat = Pattern 'Fixity
 type TypeDT = Value
@@ -75,7 +58,7 @@ data Monotype
     | MSkolem Skolem
 
 -- invariant: given a monotype arg, `body` evaluates to a monotype
-data MonoClosure = MonoClosure {var :: Name, variance :: Variance, ty :: Monotype, env :: HashMap Name Value, body :: CoreTerm}
+data MonoClosure = MonoClosure {var :: Name, variance :: Variance, ty :: Monotype, env :: EnumMap Name Value, body :: CoreTerm}
 data Variance = In | Out | Inv
 
 -- а type whose outer constructor is monomorphic
@@ -123,11 +106,11 @@ data InfState = InfState
     , currentScope :: Scope
     , -- the types of top-level bindings should not contain metavars
       -- this is not enforced at type level, though
-      topLevel :: HashMap Name Type'
+      topLevel :: EnumMap Name Type'
     -- ^ top level bindings that may or may not have a type signature
-    , locals :: HashMap Name TypeDT -- local variables
-    , vars :: HashMap UniVar (Either Scope Monotype) -- contains either the scope of an unsolved var or a type
-    , skolems :: HashMap Skolem Scope -- skolem scopes
+    , locals :: EnumMap Name TypeDT -- local variables
+    , vars :: EnumMap UniVar (Either Scope Monotype) -- contains either the scope of an unsolved var or a type
+    , skolems :: EnumMap Skolem Scope -- skolem scopes
     }
 
 data TypeError
@@ -231,7 +214,7 @@ scoped action =
 
 -- | interpret `updateSig` as an update of InfState
 runDeclare :: State InfState :> es => Eff (Declare : es) a -> Eff es a
-runDeclare = interpret \_ (UpdateSig name ty) -> modify \s -> s{locals = HashMap.insert name ty s.locals}
+runDeclare = interpret \_ (UpdateSig name ty) -> modify \s -> s{locals = Map.insert name ty s.locals}
 
 data Break err :: Effect where
     Break :: err -> Break err m a
@@ -248,13 +231,13 @@ instance Pretty MonoLayer where
     pretty = pretty . unMonoLayer
 
 run
-    :: HashMap Name Type'
+    :: EnumMap Name Type'
     -> Eff (Declare : State InfState : es) a
     -> Eff es a
 run env = fmap fst . runWithFinalEnv env
 
 runWithFinalEnv
-    :: HashMap Name Type'
+    :: EnumMap Name Type'
     -> Eff (Declare : State InfState : es) a
     -> Eff es (a, InfState)
 runWithFinalEnv env = do
@@ -264,9 +247,9 @@ runWithFinalEnv env = do
             , nextTypeVar = 'a'
             , currentScope = Scope 0
             , topLevel = env
-            , locals = HashMap.empty
-            , vars = HashMap.empty
-            , skolems = HashMap.empty
+            , locals = Map.empty
+            , vars = Map.empty
+            , skolems = Map.empty
             }
         . runDeclare
 
@@ -278,14 +261,14 @@ freshUniVar' = do
     -- and this is where I wish I had lens
     var <- UniVar <$> gets @InfState (.nextUniVarId) <* modify @InfState \s -> s{nextUniVarId = succ s.nextUniVarId}
     scope <- gets @InfState (.currentScope)
-    modify \s -> s{vars = HashMap.insert var (Left scope) s.vars}
+    modify \s -> s{vars = Map.insert var (Left scope) s.vars}
     pure var
 
 freshSkolem :: InfEffs es => SimpleName -> Eff es TypeDT
 freshSkolem name = do
     skolem <- Skolem <$> mkName name
     scope <- gets @InfState (.currentScope)
-    modify \s -> s{skolems = HashMap.insert skolem scope s.skolems}
+    modify \s -> s{skolems = Map.insert skolem scope s.skolems}
     pure $ V.Skolem skolem
   where
     mkName (Located loc (Name' txtName)) = Located loc <$> freshName_ (Name' txtName)
@@ -301,7 +284,7 @@ freshTypeVar loc = do
     cycleChar c = succ c
 
 lookupUniVar :: InfEffs es => UniVar -> Eff es (Either Scope Monotype)
-lookupUniVar uni = maybe (internalError Blank $ "missing univar" <+> pretty uni) pure . HashMap.lookup uni =<< gets @InfState (.vars)
+lookupUniVar uni = maybe (internalError Blank $ "missing univar" <+> pretty uni) pure . Map.lookup uni =<< gets @InfState (.vars)
 
 withUniVar :: InfEffs es => UniVar -> (Monotype -> Eff es a) -> Eff es ()
 withUniVar uni f =
@@ -326,7 +309,7 @@ alterUniVar override uni ty = do
         Right _ -> pure Nothing
         Left scope -> pure $ Just scope
     cycle <- cycleCheck mbScope (Direct, HashSet.singleton uni) ty
-    when (cycle == NoCycle) $ modify \s -> s{vars = HashMap.insert uni (Right ty) s.vars}
+    when (cycle == NoCycle) $ modify \s -> s{vars = Map.insert uni (Right ty) s.vars}
   where
     -- errors out on indirect cycles (i.e. a ~ Maybe a)
     -- returns False on direct univar cycles (i.e. a ~ b, b ~ c, c ~ a)
@@ -344,7 +327,7 @@ alterUniVar override uni ty = do
                 Right ty' -> go (selfRefType, HashSet.insert uni2 acc) ty'
                 Left scope' -> do
                     case mbScope of
-                        Just scope | scope' > scope -> modify \s -> s{vars = HashMap.insert uni2 (Left scope') s.vars}
+                        Just scope | scope' > scope -> modify \s -> s{vars = Map.insert uni2 (Left scope') s.vars}
                         _ -> pass
                     pure NoCycle
         MFn _ from to -> go (Indirect, acc) from >> go (Indirect, acc) to
@@ -376,14 +359,14 @@ alterUniVar override uni ty = do
 skolemScope :: InfEffs es => Skolem -> Eff es Scope
 skolemScope skolem =
     maybe (internalError (getLoc skolem) $ "missing skolem" <+> pretty skolem) pure
-        . HashMap.lookup skolem
+        . Map.lookup skolem
         =<< gets @InfState (.skolems)
 
 -- looks up a type of a binding. Global bindings take precedence over local ones (should they?)
 lookupSig :: (InfEffs es, Declare :> es) => Name -> Eff es TypeDT
 lookupSig name = do
     InfState{topLevel, locals} <- get @InfState
-    case (HashMap.lookup name topLevel, HashMap.lookup name locals) of
+    case (Map.lookup name topLevel, Map.lookup name locals) of
         (Just ty, _) -> pure ty
         (_, Just ty) -> pure ty
         (Nothing, Nothing) -> do
@@ -392,11 +375,14 @@ lookupSig name = do
             uni <- freshUniVar (getLoc name)
             uni <$ updateSig name uni
 
-declareAll :: Declare :> es => HashMap Name TypeDT -> Eff es ()
-declareAll = traverse_ (uncurry updateSig) . HashMap.toList
+declareAll :: Declare :> es => EnumMap Name TypeDT -> Eff es ()
+declareAll = traverse_ (uncurry updateSig) . Map.toList
 
-declareTopLevel :: InfEffs es => HashMap Name Type' -> Eff es ()
+declareTopLevel :: InfEffs es => EnumMap Name Type' -> Eff es ()
 declareTopLevel types = modify \s -> s{topLevel = types <> s.topLevel}
+
+declareTopLevel' :: InfEffs es => Name -> Type' -> Eff es ()
+declareTopLevel' name ty = declareTopLevel $ Map.singleton name ty
 
 generalise :: InfEffs es => Eff es TypeDT -> Eff es TypeDT
 generalise = fmap runIdentity . generaliseAll . fmap Identity
@@ -410,23 +396,23 @@ generaliseAll action = do
     traverse (generaliseOne outerScope) types
   where
     generaliseOne scope ty = do
-        (ty', vars) <- runState HashMap.empty $ go scope $ V.quote ty
+        (ty', vars) <- runState Map.empty $ go scope $ V.quote ty
         let forallVars = hashNub . lefts $ toList vars
         env <- get @ValueEnv
         pure $ V.evalCore env $ foldr (\var body -> C.Q (getLoc ty) Forall Implicit Erased var (type_ $ getLoc ty) body) ty' forallVars
     type_ loc = C.TyCon $ Located loc TypeName
 
     go
-        :: InfEffs es => Scope -> CoreTerm -> Eff (State (HashMap UniVar (Either Name CoreTerm)) : es) CoreTerm
+        :: InfEffs es => Scope -> CoreTerm -> Eff (State (EnumMap UniVar (Either Name CoreTerm)) : es) CoreTerm
     go scope = \case
         C.UniVar loc uni -> do
-            whenNothingM (fmap toTypeVar <$> gets @(HashMap UniVar (Either Name CoreTerm)) (HashMap.lookup uni)) do
+            whenNothingM (fmap toTypeVar <$> gets @(EnumMap UniVar (Either Name CoreTerm)) (Map.lookup uni)) do
                 lookupUniVar uni >>= \case
                     -- don't generalise outer-scoped vars
                     Left varScope | varScope <= scope -> pure $ C.UniVar loc uni
                     innerScoped -> do
                         newTy <- bitraverse (const $ freshTypeVar loc) (go scope . V.quote . unMono) innerScoped
-                        modify @(HashMap UniVar (Either Name CoreTerm)) $ HashMap.insert uni newTy
+                        modify @(EnumMap UniVar (Either Name CoreTerm)) $ Map.insert uni newTy
                         pure $ toTypeVar newTy
         C.Skolem skolem -> do
             skScope <- skolemScope skolem
@@ -495,7 +481,7 @@ mono variance = \case
     go = mono variance
 
 appMono :: InfEffs es => MonoClosure -> Value -> Eff es Monotype
-appMono MonoClosure{var, variance, env, body} arg = mono variance $ V.evalCore (HashMap.insert var arg env) body
+appMono MonoClosure{var, variance, env, body} arg = mono variance $ V.evalCore (Map.insert var arg env) body
 
 flipVariance :: Variance -> Variance
 flipVariance = \case

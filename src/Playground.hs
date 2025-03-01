@@ -45,6 +45,8 @@ import Syntax.Term qualified as T
 import Text.Megaparsec (errorBundlePretty, parse, pos1)
 import TypeChecker
 import TypeChecker.Backend (Type')
+import qualified Data.EnumMap.Lazy as LMap
+import qualified Data.EnumMap as Map
 
 -- a lot of what is used here is only reasonable for interactive use
 
@@ -54,7 +56,7 @@ runDefault action = runPureEff . runDiagnose' ("<none>", "") $ runNameGen do
     (_, defaultEnv) <- mkDefaults
     run defaultEnv action
 
-mkDefaults :: NameGen :> es => Eff es (Scope, HashMap Name Type')
+mkDefaults :: NameGen :> es => Eff es (Scope, EnumMap Name Type')
 mkDefaults = do
     types <-
         traverse (freshName . noLoc . Name') $
@@ -95,7 +97,7 @@ mkDefaults = do
                 , ("reverse", T.Forall Blank "'a" $ listT "'a" --> listT "'a")
                 ]
             )-}
-    pure (Scope scope, HashMap.empty)
+    pure (Scope scope, Map.empty)
 
 -- where
 -- listT var = "List" $: var
@@ -103,19 +105,19 @@ mkDefaults = do
 inferIO :: Expr 'Fixity -> IO ()
 inferIO = inferIO' $ snd <$> mkDefaults
 
-inferIO' :: Eff '[NameGen, Diagnose, IOE] (HashMap Name Type') -> Expr 'Fixity -> IO ()
+inferIO' :: Eff '[NameGen, Diagnose, IOE] (EnumMap Name Type') -> Expr 'Fixity -> IO ()
 inferIO' mkEnv expr = do
     getTy >>= \case
         Nothing -> pass
         Just (ty, finalEnv) -> do
             putDoc $ pretty ty <> line
-            for_ (HashMap.toList finalEnv.vars) \case
+            for_ (Map.toList finalEnv.vars) \case
                 (name, Left _) -> putDoc $ pretty name <> line
                 (name, Right ty') -> putDoc $ pretty name <> ":" <+> pretty ty' <> line
   where
     getTy = runEff $ runDiagnose ("<none>", "") $ runNameGen do
         env <- mkEnv
-        evalState @ValueEnv HashMap.empty $ runWithFinalEnv env $ normalise $ infer expr
+        evalState @ValueEnv LMap.empty $ runWithFinalEnv env $ normalise $ infer expr
 
 parseInfer :: Text -> IO ()
 parseInfer input = void . runEff . runDiagnose ("cli", input) $ runNameGen
@@ -126,7 +128,7 @@ parseInfer input = void . runEff . runDiagnose ("cli", input) $ runNameGen
             nameResolved <- NameResolution.run scope (resolveNames decls)
             SimpleOutput{fixityMap, operatorPriorities, declarations} <- resolveDependenciesSimplified nameResolved
             resolvedDecls <- resolveFixity fixityMap operatorPriorities declarations
-            types <- evalState @ValueEnv HashMap.empty $ typecheck defaultEnv resolvedDecls
+            types <- evalState @ValueEnv LMap.empty $ typecheck defaultEnv resolvedDecls
             liftIO $ for_ types \ty -> putDoc $ pretty ty <> line
 
 parseInferIO :: IO ()
