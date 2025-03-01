@@ -30,7 +30,6 @@ library
       Fixity
       Interpreter
       LangPrelude
-      LensyUniplate
       Lexer
       NameGen
       NameResolution

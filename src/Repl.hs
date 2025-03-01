@@ -33,6 +33,7 @@ import Text.Megaparsec (takeRest, try)
 import TypeChecker (infer, normalise, typecheck)
 import TypeChecker.Backend qualified as TC
 import Error.Diagnose (Report(..))
+import qualified Control.Exception as Exception
 
 data ReplCommand
     = Decls [Declaration 'Parse]
@@ -48,6 +49,7 @@ data ReplEnv = ReplEnv
     , operatorPriorities :: Poset Op
     , scope :: Scope
     , types :: HashMap Name TC.Type'
+    -- , inputHistory :: Zipper Text? -- todo: remember previous commands
     }
 
 type ReplCtx es =
@@ -162,6 +164,7 @@ run env = do
         replStep env =<< Parser.run ("<interactive>", input) parseCommand
     traverse_ run newEnv
 
+-- todo: locations of previous expressions get borked
 replStep :: (ReplCtx es, Diagnose :> es) => ReplEnv -> ReplCommand -> Eff es (Maybe ReplEnv)
 replStep env command = do
     case command of
@@ -176,10 +179,14 @@ replStep env command = do
             print ty
             pure $ Just env{values}
         Load path -> do
-            fileContents <- decodeUtf8 <$> readFileBS path
-            localDiagnose env (path, fileContents) do
-                decls <- Parser.parseModule (path, fileContents)
-                processDecls env decls
+            excOrFile <- liftIO $ Exception.try @SomeException (decodeUtf8 <$> readFileBS path)
+            case excOrFile of
+                Right fileContents -> localDiagnose env (path, fileContents) do
+                  decls <- Parser.parseModule (path, fileContents)
+                  processDecls env decls
+                Left exc -> do
+                    putStrLn $ "An exception has occured while reading the file: " <> displayException exc
+                    pure $ Just env
         Quit -> pure Nothing
         UnknownCommand cmd -> fatal . one $ Err Nothing ("Unknown command:" <+> pretty cmd) [] []
   where

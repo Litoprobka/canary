@@ -47,7 +47,6 @@ import Error.Diagnose (Position (..))
 import Error.Diagnose qualified as M
 import GHC.TypeError (Assert, ErrorMessage (..), TypeError)
 import LangPrelude
-import LensyUniplate (UniplateCast, unicast)
 import Prettyprinter
 import Text.Megaparsec (SourcePos (..), unPos)
 
@@ -270,6 +269,3 @@ mkNotes = mapMaybe \case
 -- a class for AST nodes that can be losslessly cast to a different pass
 class Cast ty (p :: Pass) (q :: Pass) where
     cast :: ty p -> ty q
-
-instance {-# OVERLAPPABLE #-} UniplateCast (ty p) (ty q) => Cast ty p q where
-    cast = unicast

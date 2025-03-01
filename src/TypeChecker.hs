@@ -57,10 +57,8 @@ typecheck env decls = run env $ normaliseAll $ inferDecls decls
 inferDecls :: InfEffs es => [Declaration 'Fixity] -> Eff es (HashMap Name TypeDT)
 inferDecls decls = do
     -- ideally, all of this shuffling around should be moved to the dependency resolution pass
-    typeNames <- DList.toList . fold <$> traverse updateTopLevel decls
-    let (values, sigs') = second HashMap.fromList $ foldr getValueDecls ([], []) decls
-    -- kind-checking all signatures
-    sigs <- traverse typeFromTerm sigs'
+    (typeNames, sigs) <- bimap toList (HashMap.fromList . toList) . fold <$> traverse updateTopLevel decls
+    let values = foldr getValueDecls [] decls
     topLevel <- gets @InfState (.topLevel)
     let types = HashMap.compose topLevel $ HashMap.fromList $ (\x -> (x, x)) <$> typeNames
     (types <>) . (<> sigs) . fold <$> for values \(binding, locals) ->
@@ -81,25 +79,27 @@ inferDecls decls = do
         D.Signature name sig -> do
             sigV <- typeFromTerm sig
             modify \s -> s{topLevel = HashMap.insert name sigV s.topLevel}
-            pure DList.empty
-        D.Value{} -> pure DList.empty
+            pure (mempty, DList.singleton (name, sigV))
+        D.Value{} -> pure mempty
         D.Type name binders constrs -> do
             modify @ValueEnv $ HashMap.insert name (V.TyCon name)
             typeKind <- mkTypeKind loc binders
             modify \s -> s{topLevel = HashMap.insert name typeKind s.topLevel}
-            for_ (mkConstrSigs name binders constrs) \(con, sig) -> do
+            conSigs <- for (mkConstrSigs name binders constrs) \(con, sig) -> do
                 sigV <- typeFromTerm sig
                 modify \s -> s{topLevel = HashMap.insert con sigV s.topLevel}
-            pure $ DList.singleton name
+                pure (con, sigV)
+            pure (DList.singleton name, DList.fromList conSigs)
         D.GADT name mbKind constrs -> do
             modify @ValueEnv $ HashMap.insert name (V.TyCon name)
             kind <- maybe (pure $ type_ loc) typeFromTerm mbKind
             modify \s -> s{topLevel = HashMap.insert name kind s.topLevel}
-            for_ constrs \con -> do
+            conSigs <- for constrs \con -> do
                 conSig <- typeFromTerm con.sig
                 modify \s ->
                     s{topLevel = HashMap.insert con.name conSig s.topLevel}
-            pure $ DList.singleton name
+                pure (con.name, conSig)
+            pure (DList.singleton name, DList.fromList conSigs)
     mkTypeKind loc = go
       where
         go [] = pure $ type_ loc
@@ -107,11 +107,12 @@ inferDecls decls = do
     type_ :: Loc -> Type'
     type_ loc = V.TyCon (Located loc TypeName)
 
-    getValueDecls (L decl) (values, sigs) = case decl of
-        D.Value binding locals -> ((binding, locals) : values, sigs)
-        D.Signature name sig -> (values, (name, sig) : sigs)
-        D.Type name vars constrs -> (values, mkConstrSigs name vars constrs ++ sigs)
-        D.GADT _ _ constrs -> (values, (constrs <&> \con -> (con.name, con.sig)) ++ sigs)
+    getValueDecls :: Declaration 'Fixity -> [(Binding 'Fixity, [Declaration 'Fixity])] -> [(Binding 'Fixity, [Declaration 'Fixity])]
+    getValueDecls (L decl) values = case decl of
+        D.Value binding locals -> (binding, locals) : values
+        D.Signature{} -> values
+        D.Type{} -> values
+        D.GADT{} -> values
 
     mkConstrSigs :: Name -> [VarBinder 'Fixity] -> [Constructor 'Fixity] -> [(Name, Type 'Fixity)]
     mkConstrSigs name binders constrs =

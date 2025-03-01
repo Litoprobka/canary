@@ -29,7 +29,6 @@ import Fixity (resolveFixity)
 import Fixity qualified (parse)
 import Interpreter (ValueEnv)
 import LangPrelude
-import LensyUniplate (unicast)
 import NameGen (NameGen, freshName, runNameGen)
 import NameResolution (Scope (..), declare, resolveNames, resolveTerm, runDeclare)
 import NameResolution qualified (Declare, run)

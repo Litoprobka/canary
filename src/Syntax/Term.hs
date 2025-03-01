@@ -11,7 +11,6 @@ import Common qualified as C
 import Data.List.NonEmpty qualified as NE
 import Data.Type.Ord (type (<))
 import LangPrelude hiding (show)
-import LensyUniplate (SelfTraversal, Traversal')
 import Prettyprinter
 import Syntax.Row
 import Prelude (show)
@@ -379,54 +378,6 @@ collectNamesInBinding = \case
     FunctionB name _ _ -> [name]
     ValueB pat _ -> collectNamesInPat pat
 
--- | at the moment, uniplate works properly only for types
-uniplate :: SelfTraversal Type p p
-uniplate f = traverse \case
-    Lambda pat body -> Lambda pat <$> f body -- for now, we're ignoring the pattern arguments
-    WildcardLambda args body -> WildcardLambda args <$> f body -- same
-    App lhs rhs -> App <$> f lhs <*> f rhs
-    TypeApp func ty -> TypeApp <$> f func <*> f ty
-    Let binding expr -> Let <$> plateBinding f binding <*> f expr
-    LetRec bindings expr -> LetRec <$> traverse (plateBinding f) bindings <*> f expr
-    Case arg matches -> Case <$> f arg <*> traverse (traverse f) matches
-    Match matches -> Match <$> traverse (traverse f) matches
-    If cond true false -> If <$> f cond <*> f true <*> f false
-    Annotation expr ty -> Annotation <$> f expr <*> f ty
-    Record row -> Record <$> traverse f row
-    List exprs -> List <$> traverse f exprs
-    Do stmts ret -> Do <$> traverse (plateStmt f) stmts <*> f ret
-    InfixE pairs l -> InfixE <$> traverse (\(e, op) -> (,op) <$> f e) pairs <*> f l
-    Function lhs rhs -> Function <$> f lhs <*> f rhs
-    Q q vis e binder body -> Q q vis e <$> plateBinder f binder <*> f body
-    VariantT row -> VariantT <$> traverse f row
-    RecordT row -> RecordT <$> traverse f row
-    Parens expr -> Parens <$> f expr
-    u@UniVar{} -> pure u
-    s@Skolem{} -> pure s
-    n@Name{} -> pure n
-    i@ImplicitVar{} -> pure i
-    r@RecordLens{} -> pure r
-    v@Variant{} -> pure v
-    l@Literal{} -> pure l
-  where
-    -- v@Var{} -> pure v
-
-    plateStmt :: Traversal' (DoStatement p) (Term p)
-    plateStmt f' = traverse \case
-        Bind pat expr -> Bind pat <$> uniplate f' expr
-        With pat expr -> With pat <$> uniplate f' expr
-        DoLet binding -> DoLet <$> plateBinding f' binding
-        Action expr -> Action <$> uniplate f' expr
-
-    plateBinding :: Traversal' (Binding p) (Term p)
-    plateBinding f' = \case
-        -- todo: once dependent types land, we wouldn't be able to ignore patterns-in-types
-        ValueB pat body -> ValueB pat <$> uniplate f' body
-        FunctionB name args body -> FunctionB name args <$> uniplate f' body
-
-    plateBinder :: Traversal' (VarBinder p) (Term p)
-    plateBinder f' binder = VarBinder binder.var <$> traverse (uniplate f') binder.kind
-
 {-
 -- >>> pretty $ Function (Var "a") (Record (fromList [("x", Name "Int"), ("x", Name "a")]) Nothing)
 -- >>> pretty $ Forall "a" $ Forall "b" $ Forall "c" $ Name "a" `Function` (Name "b" `Function` Name "c")
@@ -440,36 +391,4 @@ uniplate f = traverse \case
 -- (∀f. f) b -> c a (d e)
 -- {x : Bool | r}
 -- [E Unit | v]
-
-uniplate :: Traversal' (Type' p) (Type' p)
-uniplate = uniplate' id UniVar Skolem
-
-instance {-# OVERLAPPING #-} NameAt p ~ CT.Name => UniplateCast (Type' p) (Type' DuringTypecheck) where
-    uniplateCast = uniplate' id UniVar Skolem
-
-instance (NameAt p ~ NameAt q, p != DuringTypecheck, q != DuringTypecheck) => UniplateCast (Type' p) (Type' q) where
-    uniplateCast = uniplate' id undefined undefined -- we need some kind of `absurd` here
-
-instance (Cast Type' p q, NameAt p ~ NameAt q) => Cast VarBinder p q where
-    cast VarBinder{var, kind} = VarBinder{var, kind = fmap cast kind}
-
--- type-changing uniplate
-uniplate'
-    :: (NameAt p -> NameAt q)
-    -> (p ~ DuringTypecheck => Loc -> CT.UniVar -> Type' q)
-    -> (p ~ DuringTypecheck => CT.Skolem -> Type' q)
-    -> SelfTraversal Type' p q
-uniplate' castName castUni castSkolem recur = \case
-    App lhs rhs -> App <$> recur lhs <*> recur rhs
-    Function loc lhs rhs -> Function loc <$> recur lhs <*> recur rhs
-    Forall loc var body -> Forall loc <$> castBinder var <*> recur body
-    Exists loc var body -> Exists loc <$> castBinder var <*> recur body
-    Variant loc row -> Variant loc <$> traverse recur row
-    Record loc row -> Record loc <$> traverse recur row
-    Name name -> pure $ Name $ castName name
-    Var name -> pure $ Var $ castName name
-    UniVar loc uni -> pure $ castUni loc uni
-    Skolem skolem -> pure $ castSkolem skolem
-  where
-    castBinder (VarBinder name mbK) = VarBinder (castName name) <$> traverse recur mbK
 -}

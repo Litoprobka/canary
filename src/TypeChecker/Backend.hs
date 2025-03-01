@@ -26,7 +26,6 @@ import Error.Diagnose (Report (..))
 import Error.Diagnose qualified as M (Marker (..))
 import Interpreter (Value, ValueEnv)
 import Interpreter qualified as V
-import LensyUniplate hiding (cast)
 import NameGen
 import Prettyprinter (Pretty, pretty, (<+>))
 import Relude hiding (
@@ -78,19 +77,6 @@ data Monotype
 -- invariant: given a monotype arg, `body` evaluates to a monotype
 data MonoClosure = MonoClosure {var :: Name, variance :: Variance, ty :: Monotype, env :: HashMap Name Value, body :: CoreTerm}
 data Variance = In | Out | Inv
-
-uniplateMono :: Traversal' Monotype Monotype
-uniplateMono f = \case
-    MCon name args -> MCon name <$> traverse f args
-    MLambda _closure -> error "todo: uniplate monolambda" -- MLambda name \x -> f (body x)
-    MApp lhs rhs -> MApp <$> f lhs <*> f rhs
-    MFn loc lhs rhs -> MFn loc <$> f lhs <*> f rhs
-    MVariantT loc row -> MVariantT loc <$> traverse f row
-    MRecordT loc row -> MRecordT loc <$> traverse f row
-    MRecord row -> MRecord <$> traverse f row
-    MVariant name arg -> MVariant name <$> f arg
-    MCase arg matches -> MCase <$> f arg <*> (traverse . traverse) f matches
-    term -> pure term
 
 -- а type whose outer constructor is monomorphic
 data MonoLayer
