@@ -30,7 +30,7 @@ import Data.List.NonEmpty qualified as NE
 import Data.Traversable (for)
 import Diagnostic (Diagnose, internalError)
 import Effectful
-import Effectful.State.Static.Local (State, get, gets, modify)
+import Effectful.State.Static.Local (State, get, gets, modify, modifyM)
 import GHC.IsList qualified as IsList
 import Interpreter (ValueEnv)
 import Interpreter qualified as V
@@ -79,7 +79,7 @@ inferDecls decls = do
     composeMap bc !ab
         | Map.null bc = Map.empty
         | otherwise = Map.mapMaybe (`Map.lookup` bc) ab
-    updateTopLevel (Located loc decl) = case decl of
+    updateTopLevel decl'@(Located loc decl) = case decl of
         D.Signature name sig -> do
             sigV <- typeFromTerm sig
             declareTopLevel' name sigV
@@ -93,6 +93,7 @@ inferDecls decls = do
                 sigV <- typeFromTerm sig
                 declareTopLevel' con sigV
                 pure (con, sigV)
+            modifyM @ValueEnv $ flip V.modifyEnv [decl']
             pure (DList.singleton name, DList.fromList conSigs)
         D.GADT name mbKind constrs -> do
             modify @ValueEnv $ LMap.insert name (V.TyCon name)
@@ -102,6 +103,7 @@ inferDecls decls = do
                 conSig <- typeFromTerm con.sig
                 declareTopLevel' con.name conSig
                 pure (con.name, conSig)
+            modifyM @ValueEnv $ flip V.modifyEnv [decl']
             pure (DList.singleton name, DList.fromList conSigs)
     mkTypeKind loc = go
       where

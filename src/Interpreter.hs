@@ -302,6 +302,8 @@ modifyEnv env decls = do
         D.Value (T.ValueB (L (T.VarP name)) body) [] -> pure [(name, Right body)]
         D.Value (T.ValueB _ _) _ -> internalError loc "whoops, destructuring bindings are not supported yet"
         D.Value (T.FunctionB name args body) [] -> pure [(name, Right $ foldr (\x -> Located Blank . T.Lambda x) body args)]
+        -- todo: value constructors have to be in scope by the time we typecheck definitions that depend on them (say, GADTs)
+        -- the easiest way is to just apply `typecheck` and `modifyEnv` declaration-by-declaration
         D.Type _ _ constrs -> traverse mkConstr constrs
         D.GADT _ _ constrs -> traverse mkGadtConstr constrs
         D.Signature{} -> pure mempty
