@@ -4,16 +4,21 @@
 
 module Repl where
 
-import Common (Fixity (..), Loc (..), Name, Name_ (TypeName), Pass (..), SimpleName_ (Name'), cast)
+import Common (Fixity (..), Loc (..), Name, Name_ (TypeName), Pass (..), SimpleName_ (Name'), cast, noLoc)
 import Common qualified as C
+import Control.Exception qualified as Exception
 import Control.Monad.Combinators (choice)
+import Data.EnumMap.Lazy qualified as LMap
+import Data.EnumMap.Strict qualified as Map
 import Data.HashMap.Strict qualified as HashMap
 import Data.Text qualified as Text
 import Data.Text.Encoding (strictBuilderToText, textToStrictBuilder)
 import DependencyResolution (FixityMap, Op (..), SimpleOutput (..), resolveDependenciesSimplified')
-import Diagnostic (Diagnose, guardNoErrors, runDiagnose, fatal)
+import Diagnostic (Diagnose, fatal, guardNoErrors, runDiagnose)
 import Effectful
-import Effectful.State.Static.Local (runState)
+import Effectful.Labeled
+import Effectful.State.Static.Local (evalState, execState, modifyM, runState)
+import Error.Diagnose (Report (..))
 import Fixity qualified (parse, resolveFixity, run)
 import Interpreter (ValueEnv, eval, modifyEnv)
 import Interpreter qualified as V
@@ -23,19 +28,15 @@ import NameGen (NameGen, freshName)
 import NameResolution (Scope (..), resolveNames, resolveTerm)
 import NameResolution qualified
 import Parser qualified
-import Playground (noLoc)
 import Poset (Poset)
 import Poset qualified
 import Syntax
 import Syntax.Declaration qualified as D
 import Syntax.Term
 import Text.Megaparsec (takeRest, try)
-import TypeChecker (infer, normalise, typecheck)
+import TypeChecker (infer, inferDeclaration, normalise)
+import TypeChecker.Backend (withValues)
 import TypeChecker.Backend qualified as TC
-import Error.Diagnose (Report(..))
-import qualified Control.Exception as Exception
-import qualified Data.EnumMap.Strict as Map
-import qualified Data.EnumMap.Lazy as LMap
 
 data ReplCommand
     = Decls [Declaration 'Parse]
@@ -76,16 +77,18 @@ mkDefaultEnv = do
     depResOutput@SimpleOutput{fixityMap, operatorPriorities} <-
         resolveDependenciesSimplified' emptyEnv.fixityMap emptyEnv.operatorPriorities $ preDecls <> afterNameRes
     fixityDecls <- Fixity.resolveFixity fixityMap operatorPriorities depResOutput.declarations
-    (newTypes, envWithTypes) <- runState @ValueEnv emptyEnv.values $ typecheck emptyEnv.types fixityDecls
-    newValEnv <- modifyEnv envWithTypes fixityDecls
+    (types, values) <- runLabeled @"values" (runState emptyEnv.values) $ runLabeled @"types" (execState emptyEnv.types) $ TC.run do
+        for_ fixityDecls \decl -> do
+            inferDeclaration decl
+            withValues $ modifyM $ flip modifyEnv [decl]
     guardNoErrors
     let finalEnv =
             ReplEnv
-                { values = newValEnv
+                { values
                 , fixityMap
                 , operatorPriorities
                 , scope = newScope
-                , types = newTypes
+                , types
                 }
     pure finalEnv
   where
@@ -172,20 +175,20 @@ replStep env command = do
     case command of
         Decls decls -> processDecls env decls
         Expr expr -> do
-            ((checkedExpr, _), values) <- runState @ValueEnv env.values $ processExpr expr
+            ((checkedExpr, _), values) <- runLabeled @"values" (runState env.values) $ processExpr expr
             guardNoErrors
             print . pretty =<< eval values checkedExpr
             pure $ Just env{values}
         Type_ expr -> do
-            ((_, ty), values) <- runState @ValueEnv env.values $ processExpr expr
+            ((_, ty), values) <- runLabeled @"values" (runState env.values) $ processExpr expr
             print ty
             pure $ Just env{values}
         Load path -> do
             excOrFile <- liftIO $ Exception.try @SomeException (decodeUtf8 <$> readFileBS path)
             case excOrFile of
                 Right fileContents -> localDiagnose env (path, fileContents) do
-                  decls <- Parser.parseModule (path, fileContents)
-                  processDecls env decls
+                    decls <- Parser.parseModule (path, fileContents)
+                    processDecls env decls
                 Left exc -> do
                     putStrLn $ "An exception has occured while reading the file: " <> displayException exc
                     pure $ Just env
@@ -195,7 +198,7 @@ replStep env command = do
     processExpr expr = do
         afterNameRes <- NameResolution.run env.scope $ resolveTerm expr
         afterFixityRes <- Fixity.run env.fixityMap env.operatorPriorities $ Fixity.parse $ fmap cast afterNameRes
-        fmap (afterFixityRes,) $ TC.run env.types $ normalise $ infer afterFixityRes
+        fmap (afterFixityRes,) $ runLabeled @"types" (evalState env.types) $ TC.run $ normalise $ infer afterFixityRes
 
 localDiagnose :: IOE :> es => a -> (FilePath, Text) -> Eff (Diagnose : es) (Maybe a) -> Eff es (Maybe a)
 localDiagnose env file action =
@@ -209,16 +212,18 @@ processDecls env decls = do
     depResOutput@SimpleOutput{fixityMap, operatorPriorities} <-
         resolveDependenciesSimplified' env.fixityMap env.operatorPriorities afterNameRes
     fixityDecls <- Fixity.resolveFixity fixityMap operatorPriorities depResOutput.declarations
-    (newTypes, envWithTypes) <- runState @ValueEnv env.values $ typecheck env.types fixityDecls
-    newValEnv <- modifyEnv envWithTypes fixityDecls
+    (types, values) <- runLabeled @"values" (runState env.values) $ runLabeled @"types" (execState env.types) $ TC.run do
+        for_ fixityDecls \decl -> do
+            inferDeclaration decl
+            withValues $ modifyM $ flip modifyEnv [decl]
     guardNoErrors
     pure . Just $
         ReplEnv
-            { values = newValEnv
+            { values
             , fixityMap
             , operatorPriorities
             , scope = newScope
-            , types = newTypes <> env.types
+            , types
             }
 
 -- takes a line of input, or a bunch of lines in :{ }:

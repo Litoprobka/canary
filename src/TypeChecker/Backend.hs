@@ -1,38 +1,39 @@
 {-# LANGUAGE AllowAmbiguousTypes #-}
 {-# LANGUAGE DataKinds #-}
 {-# LANGUAGE DerivingStrategies #-}
+{-# LANGUAGE DuplicateRecordFields #-}
 {-# LANGUAGE GADTs #-}
 {-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE OverloadedRecordDot #-}
 {-# LANGUAGE TemplateHaskell #-}
 {-# LANGUAGE TypeFamilies #-}
 {-# LANGUAGE NoFieldSelectors #-}
-{-# LANGUAGE DuplicateRecordFields #-}
 {-# OPTIONS_GHC -Wno-missing-export-lists #-}
 
 module TypeChecker.Backend where
 
 import Common
+import Data.EnumMap.Strict qualified as Map
 import Data.HashSet qualified as HashSet
 import Data.Traversable (for)
 import Diagnostic (Diagnose, fatal, internalError)
 import Effectful
 import Effectful.Dispatch.Dynamic (interpret, reinterpret)
 import Effectful.Error.Static (runErrorNoCallStack, throwError)
-import Effectful.State.Static.Local (State, get, gets, modify, runState)
+import Effectful.State.Static.Local (State, evalState, get, gets, modify, runState)
 import Effectful.TH
 import Error.Diagnose (Report (..))
 import Error.Diagnose qualified as M (Marker (..))
 import Interpreter (Value, ValueEnv)
 import Interpreter qualified as V
+import LangPrelude hiding (break, cycle)
 import NameGen
 import Syntax
 import Syntax.Core qualified as C
 import Syntax.Row
 import Syntax.Row qualified as Row
-import Syntax.Term (Quantifier(..), Visibility (..), Erased (..))
-import LangPrelude hiding (cycle, break)
-import qualified Data.EnumMap.Strict as Map
+import Syntax.Term (Erased (..), Quantifier (..), Visibility (..))
+import Effectful.Labeled
 
 type Pat = Pattern 'Fixity
 type TypeDT = Value
@@ -102,12 +103,7 @@ instance HasLoc MonoLayer where
 
 data InfState = InfState
     { nextUniVarId :: Int
-    , nextTypeVar :: Char
     , currentScope :: Scope
-    , -- the types of top-level bindings should not contain metavars
-      -- this is not enforced at type level, though
-      topLevel :: EnumMap Name Type'
-    -- ^ top level bindings that may or may not have a type signature
     , locals :: EnumMap Name TypeDT -- local variables
     , vars :: EnumMap UniVar (Either Scope Monotype) -- contains either the scope of an unsolved var or a type
     , skolems :: EnumMap Skolem Scope -- skolem scopes
@@ -198,8 +194,16 @@ typeError =
                 )
                 []
 
-type InfEffs es = (NameGen :> es, State InfState :> es, Diagnose :> es, State ValueEnv :> es)
+-- the types of top-level bindings should not contain metavars
+-- this is not enforced at type level, though
+type TopLevel = EnumMap Name Type'
+type InfEffs es = (NameGen :> es, State InfState :> es, Diagnose :> es, Labeled "values" (State ValueEnv) :> es, Labeled "types" (State TopLevel) :> es)
 
+withTypes :: Labeled "types" (State TopLevel) :> es => Eff (State TopLevel : es) a -> Eff es a
+withTypes = labeled @"types"
+
+withValues :: Labeled "values" (State ValueEnv) :> es => Eff (State ValueEnv : es) a -> Eff es a
+withValues = labeled @"values"
 data Declare :: Effect where
     UpdateSig :: Name -> TypeDT -> Declare m ()
 
@@ -231,22 +235,18 @@ instance Pretty MonoLayer where
     pretty = pretty . unMonoLayer
 
 run
-    :: EnumMap Name Type'
-    -> Eff (Declare : State InfState : es) a
+    :: Eff (Declare : State InfState : es) a
     -> Eff es a
-run env = fmap fst . runWithFinalEnv env
+run = fmap fst . runWithFinalEnv
 
 runWithFinalEnv
-    :: EnumMap Name Type'
-    -> Eff (Declare : State InfState : es) a
+    :: Eff (Declare : State InfState : es) a
     -> Eff es (a, InfState)
-runWithFinalEnv env = do
+runWithFinalEnv = do
     runState
         InfState
             { nextUniVarId = 0
-            , nextTypeVar = 'a'
             , currentScope = Scope 0
-            , topLevel = env
             , locals = Map.empty
             , vars = Map.empty
             , skolems = Map.empty
@@ -274,15 +274,6 @@ freshSkolem name = do
     mkName (Located loc (Name' txtName)) = Located loc <$> freshName_ (Name' txtName)
     mkName _ = freshName (Located Blank $ Name' "what") -- why?
 
-freshTypeVar :: Loc -> InfEffs es => Eff es Name
-freshTypeVar loc = do
-    id' <- freshId
-    letter <- gets @InfState (.nextTypeVar) <* modify \s -> s{nextTypeVar = cycleChar s.nextTypeVar}
-    pure $ Located loc $ Name (one letter) id'
-  where
-    cycleChar 'z' = 'a'
-    cycleChar c = succ c
-
 lookupUniVar :: InfEffs es => UniVar -> Eff es (Either Scope Monotype)
 lookupUniVar uni = maybe (internalError Blank $ "missing univar" <+> pretty uni) pure . Map.lookup uni =<< gets @InfState (.vars)
 
@@ -302,12 +293,13 @@ data Cycle = DirectCycle | NoCycle deriving (Eq)
 alterUniVar :: InfEffs es => Bool -> UniVar -> Monotype -> Eff es ()
 alterUniVar override uni ty = do
     -- here comes the magic. If the new type contains other univars, we change their scope
-    mbScope <- lookupUniVar uni >>= \case
-        Right _
-            | not override ->
-                internalError Blank $ "Internal error (probably a bug): attempted to solve a solved univar " <> pretty uni
-        Right _ -> pure Nothing
-        Left scope -> pure $ Just scope
+    mbScope <-
+        lookupUniVar uni >>= \case
+            Right _
+                | not override ->
+                    internalError Blank $ "Internal error (probably a bug): attempted to solve a solved univar " <> pretty uni
+            Right _ -> pure Nothing
+            Left scope -> pure $ Just scope
     cycle <- cycleCheck mbScope (Direct, HashSet.singleton uni) ty
     when (cycle == NoCycle) $ modify \s -> s{vars = Map.insert uni (Right ty) s.vars}
   where
@@ -315,39 +307,40 @@ alterUniVar override uni ty = do
     -- returns False on direct univar cycles (i.e. a ~ b, b ~ c, c ~ a)
     -- returns True when there are no cycles
     -- todo: we can infer equirecursive types (mu) when a cycle goes through a record / variant
-    cycleCheck mbScope = go where
-     go (selfRefType, acc) = \case
-        MUniVar _ uni2 | HashSet.member uni2 acc -> case selfRefType of
-            Direct -> pure DirectCycle
-            Indirect -> do
-                unwrappedTy <- unMono <$> unwrap ty
-                typeError $ SelfReferential (getLoc $ unMono ty) uni unwrappedTy
-        MUniVar _ uni2 ->
-            lookupUniVar uni2 >>= \case
-                Right ty' -> go (selfRefType, HashSet.insert uni2 acc) ty'
-                Left scope' -> do
-                    case mbScope of
-                        Just scope | scope' > scope -> modify \s -> s{vars = Map.insert uni2 (Left scope') s.vars}
-                        _ -> pass
-                    pure NoCycle
-        MFn _ from to -> go (Indirect, acc) from >> go (Indirect, acc) to
-        MQ _ _q _e closure -> cycleCheckClosure acc closure
-        MCon _ args -> NoCycle <$ traverse_ (go (Indirect, acc)) args
-        MApp lhs rhs -> go (Indirect, acc) lhs >> go (Indirect, acc) rhs
-        MVariantT _ row -> NoCycle <$ traverse_ (go (Indirect, acc)) row
-        MRecordT _ row -> NoCycle <$ traverse_ (go (Indirect, acc)) row
-        MVariant _ val -> go (Indirect, acc) val
-        MRecord row -> NoCycle <$ traverse_ (go (Indirect, acc)) row
-        MLambda closure -> cycleCheckClosure acc closure
-        MCase arg matches -> go (Indirect, acc) arg <* (traverse_ . traverse_) (go (Indirect, acc)) matches
-        MTyCon{} -> pure NoCycle
-        MSkolem{} -> pure NoCycle
-        MPrim{} -> pure NoCycle
+    cycleCheck mbScope = go
+      where
+        go (selfRefType, acc) = \case
+            MUniVar _ uni2 | HashSet.member uni2 acc -> case selfRefType of
+                Direct -> pure DirectCycle
+                Indirect -> do
+                    unwrappedTy <- unMono <$> unwrap ty
+                    typeError $ SelfReferential (getLoc $ unMono ty) uni unwrappedTy
+            MUniVar _ uni2 ->
+                lookupUniVar uni2 >>= \case
+                    Right ty' -> go (selfRefType, HashSet.insert uni2 acc) ty'
+                    Left scope' -> do
+                        case mbScope of
+                            Just scope | scope' > scope -> modify \s -> s{vars = Map.insert uni2 (Left scope') s.vars}
+                            _ -> pass
+                        pure NoCycle
+            MFn _ from to -> go (Indirect, acc) from >> go (Indirect, acc) to
+            MQ _ _q _e closure -> cycleCheckClosure acc closure
+            MCon _ args -> NoCycle <$ traverse_ (go (Indirect, acc)) args
+            MApp lhs rhs -> go (Indirect, acc) lhs >> go (Indirect, acc) rhs
+            MVariantT _ row -> NoCycle <$ traverse_ (go (Indirect, acc)) row
+            MRecordT _ row -> NoCycle <$ traverse_ (go (Indirect, acc)) row
+            MVariant _ val -> go (Indirect, acc) val
+            MRecord row -> NoCycle <$ traverse_ (go (Indirect, acc)) row
+            MLambda closure -> cycleCheckClosure acc closure
+            MCase arg matches -> go (Indirect, acc) arg <* (traverse_ . traverse_) (go (Indirect, acc)) matches
+            MTyCon{} -> pure NoCycle
+            MSkolem{} -> pure NoCycle
+            MPrim{} -> pure NoCycle
 
-     cycleCheckClosure acc closure = do
-        void $ go (Indirect, acc) closure.ty
-        skolem <- freshSkolem $ toSimpleName closure.var
-        go (Indirect, acc) =<< appMono closure skolem
+        cycleCheckClosure acc closure = do
+            void $ go (Indirect, acc) closure.ty
+            skolem <- freshSkolem $ toSimpleName closure.var
+            go (Indirect, acc) =<< appMono closure skolem
 
     unwrap = \case
         uni2@(MUniVar _ var) ->
@@ -365,7 +358,8 @@ skolemScope skolem =
 -- looks up a type of a binding. Global bindings take precedence over local ones (should they?)
 lookupSig :: (InfEffs es, Declare :> es) => Name -> Eff es TypeDT
 lookupSig name = do
-    InfState{topLevel, locals} <- get @InfState
+    InfState{locals} <- get
+    topLevel <- labeled @"types" @(State TopLevel) get
     case (Map.lookup name topLevel, Map.lookup name locals) of
         (Just ty, _) -> pure ty
         (_, Just ty) -> pure ty
@@ -379,10 +373,10 @@ declareAll :: Declare :> es => EnumMap Name TypeDT -> Eff es ()
 declareAll = traverse_ (uncurry updateSig) . Map.toList
 
 declareTopLevel :: InfEffs es => EnumMap Name Type' -> Eff es ()
-declareTopLevel types = modify \s -> s{topLevel = types <> s.topLevel}
+declareTopLevel types = withTypes $ modify (types <>)
 
 declareTopLevel' :: InfEffs es => Name -> Type' -> Eff es ()
-declareTopLevel' name ty = declareTopLevel $ Map.singleton name ty
+declareTopLevel' name ty = withTypes $ modify $ Map.insert name ty
 
 generalise :: InfEffs es => Eff es TypeDT -> Eff es TypeDT
 generalise = fmap runIdentity . generaliseAll . fmap Identity
@@ -396,14 +390,14 @@ generaliseAll action = do
     traverse (generaliseOne outerScope) types
   where
     generaliseOne scope ty = do
-        (ty', vars) <- runState Map.empty $ go scope $ V.quote ty
+        (ty', vars) <- runState Map.empty $ evalState 'a' $ go scope $ V.quote ty
         let forallVars = hashNub . lefts $ toList vars
-        env <- get @ValueEnv
+        env <- withValues get
         pure $ V.evalCore env $ foldr (\var body -> C.Q (getLoc ty) Forall Implicit Erased var (type_ $ getLoc ty) body) ty' forallVars
     type_ loc = C.TyCon $ Located loc TypeName
 
     go
-        :: InfEffs es => Scope -> CoreTerm -> Eff (State (EnumMap UniVar (Either Name CoreTerm)) : es) CoreTerm
+        :: InfEffs es => Scope -> CoreTerm -> Eff (State Char : State (EnumMap UniVar (Either Name CoreTerm)) : es) CoreTerm
     go scope = \case
         C.UniVar loc uni -> do
             whenNothingM (fmap toTypeVar <$> gets @(EnumMap UniVar (Either Name CoreTerm)) (Map.lookup uni)) do
@@ -440,7 +434,17 @@ generaliseAll action = do
         C.Variant con -> pure $ C.Variant con
         C.Case arg matches -> C.Case arg <$> for matches \(pat, body) -> (pat,) <$> go scope body
         C.Let name _ _ -> internalError (getLoc name) "unexpected let in a quoted type"
+
     toTypeVar = either C.Name id
+
+    freshTypeVar :: (State Char :> es, NameGen :> es) => Loc -> Eff es Name
+    freshTypeVar loc = do
+        id' <- freshId
+        letter <- get <* modify cycleChar
+        pure $ Located loc $ Name (one letter) id'
+
+    cycleChar 'z' = 'a'
+    cycleChar c = succ c
 
 {- | converts a polytype to a monotype, instantiating / skolemizing depending on variance
 

@@ -39,6 +39,7 @@ module Common (
     toSimpleName,
     pattern L,
     unLoc,
+    noLoc,
 ) where
 
 import Data.Type.Bool (type (||))
@@ -259,6 +260,9 @@ class HasLoc a where
 
 unLoc :: Located a -> a
 unLoc (L x) = x
+
+noLoc :: a -> Located a
+noLoc = Located Blank
 
 zipLoc :: Loc -> Loc -> Loc
 zipLoc loc Blank = loc

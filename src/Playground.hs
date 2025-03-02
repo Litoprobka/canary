@@ -44,104 +44,22 @@ import Syntax.Term qualified as E
 import Syntax.Term qualified as T
 import Text.Megaparsec (errorBundlePretty, parse, pos1)
 import TypeChecker
-import TypeChecker.Backend (Type')
+import TypeChecker.Backend (Type', TopLevel)
 import qualified Data.EnumMap.Lazy as LMap
 import qualified Data.EnumMap as Map
+import qualified Repl
+import Repl (ReplEnv(..))
 
--- a lot of what is used here is only reasonable for interactive use
-
-runDefault
-    :: Eff '[Declare, State InfState, NameGen, Diagnose] a -> (Maybe a, Diagnostic (Doc AnsiStyle))
-runDefault action = runPureEff . runDiagnose' ("<none>", "") $ runNameGen do
-    (_, defaultEnv) <- mkDefaults
-    run defaultEnv action
-
-mkDefaults :: NameGen :> es => Eff es (Scope, EnumMap Name Type')
-mkDefaults = do
-    types <-
-        traverse (freshName . noLoc . Name') $
-            HashMap.fromList $
-                (\x -> (Name' x, x))
-                    <$> [ "Unit"
-                        , "Maybe"
-                        , "Tuple"
-                        ]
-    let scope =
-            types
-                <> HashMap.fromList
-                    ( fmap
-                        (bimap Name' noLoc)
-                        [ ("Bool", BoolName)
-                        , ("List", ListName)
-                        , ("Int", IntName)
-                        , ("Nat", NatName)
-                        , ("Text", TextName)
-                        , ("Char", CharName)
-                        , ("Lens", LensName)
-                        , ("Type", TypeName)
-                        ]
-                    )
-    -- this is a messy way to declare built-in stuff, I should do better
-    {-scope <-
-        (execState (Scope initScope) . fmap HashMap.fromList . NameResolution.runDeclare)
-            ( traverse
-                (\(name, ty) -> liftA2 (,) (declare $ noLoc $ Name' name) (resolveTerm ty))
-                [ ("()", "Unit")
-                , ("Nothing", T.Forall Blank "'a" $ "Maybe" $: "'a")
-                , ("Just", T.Forall Blank "'a" $ "'a" --> "Maybe" $: "'a")
-                , ("True", "Bool")
-                , ("False", "Bool")
-                , ("id", T.Forall Blank "'a" $ "'a" --> "'a")
-                , ("Cons", T.Forall Blank "'a" $ "'a" --> listT "'a" --> listT "'a")
-                , ("Nil", T.Forall Blank "'a" $ listT "'a")
-                , ("reverse", T.Forall Blank "'a" $ listT "'a" --> listT "'a")
-                ]
-            )-}
-    pure (Scope scope, Map.empty)
-
--- where
--- listT var = "List" $: var
-
-inferIO :: Expr 'Fixity -> IO ()
-inferIO = inferIO' $ snd <$> mkDefaults
-
-inferIO' :: Eff '[NameGen, Diagnose, IOE] (EnumMap Name Type') -> Expr 'Fixity -> IO ()
-inferIO' mkEnv expr = do
-    getTy >>= \case
-        Nothing -> pass
-        Just (ty, finalEnv) -> do
-            putDoc $ pretty ty <> line
-            for_ (Map.toList finalEnv.vars) \case
-                (name, Left _) -> putDoc $ pretty name <> line
-                (name, Right ty') -> putDoc $ pretty name <> ":" <+> pretty ty' <> line
-  where
-    getTy = runEff $ runDiagnose ("<none>", "") $ runNameGen do
-        env <- mkEnv
-        evalState @ValueEnv LMap.empty $ runWithFinalEnv env $ normalise $ infer expr
-
-parseInfer :: Text -> IO ()
-parseInfer input = void . runEff . runDiagnose ("cli", input) $ runNameGen
-    case input & parse (usingReaderT pos1 code) "cli" of
-        Left err -> putStrLn $ errorBundlePretty err
-        Right decls -> do
-            (scope, defaultEnv) <- mkDefaults
-            nameResolved <- NameResolution.run scope (resolveNames decls)
-            SimpleOutput{fixityMap, operatorPriorities, declarations} <- resolveDependenciesSimplified nameResolved
-            resolvedDecls <- resolveFixity fixityMap operatorPriorities declarations
-            types <- evalState @ValueEnv LMap.empty $ typecheck defaultEnv resolvedDecls
-            liftIO $ for_ types \ty -> putDoc $ pretty ty <> line
-
-parseInferIO :: IO ()
-parseInferIO = getLine >>= parseInfer
+-- some wrappers and syntactic niceties for testing
 
 testCheck
     :: Eff [NameResolution.Declare, State Scope, Diagnose, NameGen] resolved
-    -> (resolved -> Eff '[Declare, State InfState, Diagnose, NameGen] a)
+    -> (resolved -> Eff '[Declare, State InfState, State TopLevel, Diagnose, NameGen] a)
     -> Maybe a
 testCheck toResolve action = fst $ runPureEff $ runNameGen $ runDiagnose' ("<none>", "") do
-    (scope, env) <- mkDefaults
+    ReplEnv{scope, types} <- Repl.mkDefaultEnv
     resolved <- NameResolution.run scope toResolve
-    run env $ action resolved
+    evalState types $ run $ action resolved
 
 {-
 dummyFixity :: Diagnose :> es => Expr 'NameRes -> Eff es (Expr 'Fixity)
@@ -157,9 +75,6 @@ matchCase whenUpper whenLower str@(h : _)
 
 mkName :: Text -> SimpleName
 mkName = noLoc . Name'
-
-noLoc :: a -> Located a
-noLoc = Located Blank
 
 instance IsString (Pattern 'Parse) where
     fromString = noLoc . matchCase (\name -> ConstructorP (mkName name) []) (VarP . mkName)

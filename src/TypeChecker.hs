@@ -19,20 +19,19 @@ module TypeChecker (
     InfState (..),
     InfEffs,
     Declare,
-    typecheck,
+    inferDeclaration,
 ) where
 
 import Common (Name)
 import Common hiding (Name)
-import Data.DList qualified as DList
+import Data.EnumMap.Lazy qualified as LMap
+import Data.EnumMap.Strict qualified as Map
 import Data.Foldable1 (foldr1)
-import Data.List.NonEmpty qualified as NE
 import Data.Traversable (for)
-import Diagnostic (Diagnose, internalError)
+import Diagnostic (internalError)
 import Effectful
-import Effectful.State.Static.Local (State, get, gets, modify, modifyM)
+import Effectful.State.Static.Local (get, modify, modifyM)
 import GHC.IsList qualified as IsList
-import Interpreter (ValueEnv)
 import Interpreter qualified as V
 import LangPrelude hiding (bool)
 import NameGen
@@ -44,97 +43,58 @@ import Syntax.Row qualified as Row
 import Syntax.Term hiding (Record, Variant)
 import Syntax.Term qualified as E (Term_ (Record, Variant))
 import TypeChecker.Backend
-import Data.EnumMap.Strict qualified as Map
-import Data.EnumMap.Lazy qualified as LMap
 
-typecheck
-    :: (NameGen :> es, Diagnose :> es, State ValueEnv :> es)
-    => EnumMap Name Type' -- imports
-    -> [Declaration 'Fixity]
-    -> Eff es (EnumMap Name Type') -- type checking doesn't add anything new to the AST
-typecheck env decls = run env $ normaliseAll $ inferDecls decls
+-- todo: properly handle where clauses
+-- data Locality = Local | NonLocal
 
--- | check / infer types of a list of declarations that may reference each other
-inferDecls :: InfEffs es => [Declaration 'Fixity] -> Eff es (EnumMap Name TypeDT)
-inferDecls decls = do
-    -- ideally, all of this shuffling around should be moved to the dependency resolution pass
-    (typeNames, sigs) <- bimap toList (Map.fromList . toList) . fold <$> traverse updateTopLevel decls
-    let values = foldr getValueDecls [] decls
-    topLevel <- gets @InfState (.topLevel)
-    let types = composeMap topLevel $ Map.fromList $ (\x -> (x, x)) <$> typeNames
-    (types <>) . (<> sigs) . fold <$> for values \(binding, locals) ->
-        binding & collectNamesInBinding & listToMaybe >>= (`Map.lookup` sigs) & \case
-            Just ty -> do
-                checkBinding binding ty
-                pure $
-                    composeMap sigs $
-                        Map.fromList $
-                            (\x -> (x, x)) <$> collectNamesInBinding binding
-            Nothing -> scoped do
-                declareAll =<< inferDecls locals
-                typeMap <- normaliseAll $ inferBinding binding -- todo: true top level should be separated from the parent scopes
-                declareTopLevel typeMap
-                pure typeMap
-  where
-    composeMap bc !ab
-        | Map.null bc = Map.empty
-        | otherwise = Map.mapMaybe (`Map.lookup` bc) ab
-    updateTopLevel decl'@(Located loc decl) = case decl of
-        D.Signature name sig -> do
+inferDeclaration :: InfEffs es => Declaration 'Fixity -> Eff es ()
+inferDeclaration (Located loc decl) = case decl of
+    D.Signature name sig -> do
+        sigV <- typeFromTerm sig
+        declareTopLevel' name sigV
+    D.Type name binders constrs -> do
+        withValues $ modify $ LMap.insert name (V.TyCon name)
+        typeKind <- mkTypeKind binders
+        declareTopLevel' name typeKind
+        for_ (mkConstrSigs name binders constrs) \(con, sig) -> do
             sigV <- typeFromTerm sig
-            declareTopLevel' name sigV
-            pure (mempty, DList.singleton (name, sigV))
-        D.Value{} -> pure mempty
-        D.Type name binders constrs -> do
-            modify @ValueEnv $ LMap.insert name (V.TyCon name)
-            typeKind <- mkTypeKind loc binders
-            declareTopLevel' name typeKind
-            conSigs <- for (mkConstrSigs name binders constrs) \(con, sig) -> do
-                sigV <- typeFromTerm sig
-                declareTopLevel' con sigV
-                pure (con, sigV)
-            modifyM @ValueEnv $ flip V.modifyEnv [decl']
-            pure (DList.singleton name, DList.fromList conSigs)
-        D.GADT name mbKind constrs -> do
-            modify @ValueEnv $ LMap.insert name (V.TyCon name)
-            kind <- maybe (pure $ type_ loc) typeFromTerm mbKind
-            declareTopLevel' name kind
-            conSigs <- for constrs \con -> do
-                conSig <- typeFromTerm con.sig
-                declareTopLevel' con.name conSig
-                pure (con.name, conSig)
-            modifyM @ValueEnv $ flip V.modifyEnv [decl']
-            pure (DList.singleton name, DList.fromList conSigs)
-    mkTypeKind loc = go
-      where
-        go [] = pure $ type_ loc
-        go (binder : rest) = V.Function loc <$> typeFromTerm (binderKind binder) <*> go rest
-    type_ :: Loc -> Type'
-    type_ loc = V.TyCon (Located loc TypeName)
-
-    getValueDecls :: Declaration 'Fixity -> [(Binding 'Fixity, [Declaration 'Fixity])] -> [(Binding 'Fixity, [Declaration 'Fixity])]
-    getValueDecls (L decl) values = case decl of
-        D.Value binding locals -> (binding, locals) : values
-        D.Signature{} -> values
-        D.Type{} -> values
-        D.GADT{} -> values
+            declareTopLevel' con sigV
+    D.GADT name mbKind constrs -> do
+        withValues $ modify $ LMap.insert name (V.TyCon name)
+        kind <- maybe (pure type_) typeFromTerm mbKind
+        declareTopLevel' name kind
+        for_ constrs \con -> do
+            conSig <- typeFromTerm con.sig
+            declareTopLevel' con.name conSig
+    D.Value binding locals -> scoped do
+        for_ locals \local -> do
+            -- todo: what to do about type signatures
+            inferDeclaration local
+            withValues $ modifyM $ flip V.modifyEnv [local]
+        relevantSigs <- Map.filterWithKey (\k _ -> k `elem` collectNamesInBinding binding) <$> withTypes get
+        declareTopLevel =<< generaliseAll (checkBinding binding relevantSigs)
+  where
+    mkTypeKind = \case
+        [] -> pure type_
+        (binder : rest) -> V.Function loc <$> typeFromTerm (binderKind binder) <*> mkTypeKind rest
+    type_ = V.TyCon (Located loc TypeName)
 
     mkConstrSigs :: Name -> [VarBinder 'Fixity] -> [Constructor 'Fixity] -> [(Name, Type 'Fixity)]
     mkConstrSigs name binders constrs =
-        constrs <&> \(D.Constructor loc con params) ->
+        constrs <&> \(D.Constructor loc' con params) ->
             ( con
             , foldr
-                (\var -> Located loc . Q Forall Implicit Erased var)
-                (foldr (\lhs -> Located loc . Function lhs) (fullType loc) params)
+                (\var -> Located loc' . Q Forall Implicit Erased var)
+                (foldr (\lhs -> Located loc' . Function lhs) (fullType loc') params)
                 binders
             )
       where
-        fullType loc = foldl' (\lhs -> Located loc . App lhs) (Located (getLoc name) $ Name name) (Located loc . Name . (.var) <$> binders)
+        fullType loc' = foldl' (\lhs -> Located loc' . App lhs) (Located (getLoc name) $ Name name) (Located loc' . Name . (.var) <$> binders)
 
 typeFromTerm :: InfEffs es => Type 'Fixity -> Eff es Type'
 typeFromTerm term = do
     check term $ V.TyCon (Located (getLoc term) TypeName)
-    env <- get @ValueEnv
+    env <- withValues get
     V.eval env term
 
 subtype :: InfEffs es => TypeDT -> TypeDT -> Eff es ()
@@ -217,7 +177,7 @@ check (Located loc e) type_ = scoped $ match e type_
         (Lambda (L (VarP arg)) body) (V.Q _ Forall Visible Retained closure) -> scoped do
             updateSig arg closure.ty -- checkPattern arg closure.ty
             var <- freshSkolem (toSimpleName arg)
-            modify @ValueEnv $ LMap.insert arg var
+            withValues $ modify $ LMap.insert arg var
             check body (closure `V.app` var)
         (Lambda arg body) (V.Function _ from to) -> scoped do
             -- `checkPattern` updates signatures of all mentioned variables
@@ -286,10 +246,20 @@ getArgCount ((firstPats, _) : matches) = argCount <$ guard (all ((== argCount) .
   where
     argCount = length firstPats
 
-checkBinding :: InfEffs es => Binding 'Fixity -> TypeDT -> Eff es ()
-checkBinding binding ty = case binding of
-    FunctionB _ args body -> check (foldr (\var -> Located (getLoc binding) . Lambda var) body args) ty
-    ValueB pat body -> scoped $ checkPattern pat ty >> check body ty
+-- | given a map of related signatures, check or infer a declaration
+checkBinding :: InfEffs es => Binding 'Fixity -> EnumMap Name TypeDT -> Eff es (EnumMap Name TypeDT)
+checkBinding binding types = case binding of
+    _ | Map.null types -> inferBinding binding
+    FunctionB name args body -> case Map.lookup name types of
+        Just ty -> Map.singleton name ty <$ check (foldr (\var -> Located (getLoc binding) . Lambda var) body args) ty
+        Nothing -> inferBinding binding
+    ValueB (L (VarP name)) body -> case Map.lookup name types of
+        Just ty -> Map.singleton name ty <$ check body ty
+        Nothing -> inferBinding binding
+    ValueB pat _body -> do
+        internalError (getLoc pat) "todo: type check destructuring bindings with partial signatures"
+
+-- scoped $ checkPattern pat ty >> check body ty
 
 checkPattern :: (InfEffs es, Declare :> es) => Pat -> TypeDT -> Eff es ()
 checkPattern (Located ploc outerPat) ty = case outerPat of
@@ -332,9 +302,10 @@ infer (Located loc e) = scoped case e of
     Let binding body -> do
         declareAll =<< inferBinding binding
         infer body
-    LetRec bindings body -> do
+    LetRec _bindings _body -> internalError loc "todo: typecheck of recursive bindings is not supported yet"
+         {- do
         declareAll =<< (inferDecls . map (\b -> Located loc $ D.Value b []) . NE.toList) bindings
-        infer body
+        infer body -}
     Annotation expr ty -> do
         tyV <- typeFromTerm ty
         tyV <$ check expr tyV
@@ -412,15 +383,15 @@ inferApp appLoc fTy arg = do
         MLUniVar loc uni -> do
             from <- infer arg
             to <- freshUniVar loc
-            env <- get @ValueEnv
+            env <- withValues get
             var <- freshName $ Located loc $ Name' "x"
-            let closure = V.Closure { var, env, ty = from, body = V.quote to }
+            let closure = V.Closure{var, env, ty = from, body = V.quote to}
             to <$ subtype (V.UniVar loc uni) (V.Q loc Forall Visible Retained closure)
         MLFn _ from to -> do
             to <$ check arg from
         -- todo: special case for erased args
         MLQ _ Forall _e closure -> do
-            env <- get @ValueEnv
+            env <- withValues get
             argV <- V.eval env arg
             V.app closure argV <$ check arg closure.ty
         _ -> typeError $ NotAFunction appLoc fTy
@@ -429,7 +400,7 @@ inferTyApp :: InfEffs es => Expr 'Fixity -> TypeDT -> Type 'Fixity -> Eff es Typ
 inferTyApp expr ty tyArg = case ty of
     V.Q _ Forall Implicit _e closure -> do
         Subst{var, result} <- substitute' In closure
-        env <- get @ValueEnv
+        env <- withValues get
         tyArgV <- V.eval env tyArg
         subtype var tyArgV
         pure result
@@ -541,7 +512,7 @@ normaliseAll = generaliseAll >=> traverse (eval' <=< go . V.quote)
   where
     eval' :: InfEffs es => CoreTerm -> Eff es Type'
     eval' ty = do
-        env <- get @ValueEnv
+        env <- withValues get
         pure $ V.evalCore env ty
 
     go :: InfEffs es => CoreTerm -> Eff es CoreTerm
