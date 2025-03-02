@@ -32,7 +32,7 @@ import Diagnostic (internalError)
 import Effectful
 import Effectful.State.Static.Local (get, modify, modifyM)
 import GHC.IsList qualified as IsList
-import Interpreter qualified as V
+import Eval qualified as V
 import LangPrelude hiding (bool)
 import NameGen
 import Syntax
@@ -107,8 +107,8 @@ subtype lhs_ rhs_ = join $ match <$> monoLayer In lhs_ <*> monoLayer Out rhs_
         lhs (MLUniVar _ uni) -> solveOr (mono In $ unMonoLayer lhs) (subtype (unMonoLayer lhs) . unMono) uni
         (MLUniVar _ uni) rhs -> solveOr (mono Out $ unMonoLayer rhs) ((`subtype` unMonoLayer rhs) . unMono) uni
         (MLTyCon (L NatName)) (MLTyCon (L IntName)) -> pass
-        (MLCon lhs lhsArgs) (MLCon rhs rhsArgs) -> do
-            unless (lhs == rhs) $ typeError $ CannotUnify lhs rhs
+        lhs@(MLCon lhsCon lhsArgs) rhs@(MLCon rhsCon rhsArgs) -> do
+            unless (lhsCon == rhsCon) $ typeError $ CannotUnify (unMonoLayer lhs) (unMonoLayer rhs)
             -- we assume that the arg count is correct
             zipWithM_ subtype lhsArgs rhsArgs
         (MLFn _ inl outl) (MLFn _ inr outr) -> do
@@ -143,8 +143,6 @@ subtype lhs_ rhs_ = join $ match <$> monoLayer In lhs_ <*> monoLayer Out rhs_
             subtype rhs rhs'
         (MLVariantT locL lhs) (MLVariantT locR rhs) -> rowCase Variant (locL, lhs) (locR, rhs)
         (MLRecordT locL lhs) (MLRecordT locR rhs) -> rowCase Record (locL, lhs) (locR, rhs)
-        -- (MLVar var) _ -> internalError (getLoc var) $ "dangling type variable" <+> pretty var
-        -- _ (MLVar var) -> internalError (getLoc var) $ "dangling type variable" <+> pretty var
         lhs rhs -> typeError $ NotASubtype (unMonoLayer lhs) (unMonoLayer rhs) Nothing
 
     -- (forall a -> ty) <: (foreach a -> ty)
@@ -501,8 +499,6 @@ inferPattern (Located loc p) = case p of
                 MLCase{} -> internalError (getLoc name) $ "unexpected case" <+> "in a constructor type"
                 MLSkolem skolem -> pure (V.Skolem skolem, [])
 
--- MLVar var -> pure (Var var, [])
-
 normalise :: InfEffs es => Eff es TypeDT -> Eff es Type'
 normalise = fmap runIdentity . normaliseAll . fmap Identity
 
@@ -526,11 +522,12 @@ normaliseAll = generaliseAll >=> traverse (eval' <=< go . V.quote)
         C.App lhs rhs -> C.App <$> go lhs <*> go rhs
         C.Function loc lhs rhs -> C.Function loc <$> go lhs <*> go rhs
         -- this might produce incorrect results if we ever share a single forall in multiple places
+        -- todo: convert a pi type to a lambda if its arg doesn't occur in its body
+        -- I'm not sure whether there's a better way than traversing the entire body
         C.Q loc q v e var ty body -> C.Q loc q v e var <$> go ty <*> go body
         C.VariantT loc row -> C.VariantT loc <$> traverse go row
         C.RecordT loc row -> C.RecordT loc <$> traverse go row
-        -- expression-only constructors are unsupported for now
-        C.Lambda name ty body -> C.Lambda name <$> go ty <*> go body
+        C.Lambda name body -> C.Lambda name <$> go body
         C.Case arg matches -> C.Case <$> go arg <*> traverse (traverse go) matches
         C.Record row -> C.Record <$> traverse go row
         -- and these are just boilerplate

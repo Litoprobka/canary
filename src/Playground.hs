@@ -27,7 +27,7 @@ import Effectful.State.Static.Local (State, evalState, execState, runState)
 import Error.Diagnose (Diagnostic)
 import Fixity (resolveFixity)
 import Fixity qualified (parse)
-import Interpreter (ValueEnv)
+import Eval (ValueEnv)
 import LangPrelude
 import NameGen (NameGen, freshName, runNameGen)
 import NameResolution (Scope (..), declare, resolveNames, resolveTerm, runDeclare)

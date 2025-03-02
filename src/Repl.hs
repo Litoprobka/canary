@@ -6,7 +6,6 @@ module Repl where
 
 import Common (Fixity (..), Loc (..), Name, Name_ (TypeName), Pass (..), SimpleName_ (Name'), cast, noLoc)
 import Common qualified as C
-import Control.Exception qualified as Exception
 import Control.Monad.Combinators (choice)
 import Data.EnumMap.Lazy qualified as LMap
 import Data.EnumMap.Strict qualified as Map
@@ -14,14 +13,14 @@ import Data.HashMap.Strict qualified as HashMap
 import Data.Text qualified as Text
 import Data.Text.Encoding (strictBuilderToText, textToStrictBuilder)
 import DependencyResolution (FixityMap, Op (..), SimpleOutput (..), resolveDependenciesSimplified')
-import Diagnostic (Diagnose, fatal, guardNoErrors, runDiagnose)
+import Diagnostic (Diagnose, fatal, guardNoErrors, runDiagnose, reportExceptions)
 import Effectful
 import Effectful.Labeled
 import Effectful.State.Static.Local (evalState, execState, modifyM, runState)
 import Error.Diagnose (Report (..))
 import Fixity qualified (parse, resolveFixity, run)
-import Interpreter (ValueEnv, eval, modifyEnv)
-import Interpreter qualified as V
+import Eval (ValueEnv, eval, modifyEnv)
+import Eval qualified as V
 import LangPrelude
 import Lexer (Parser, keyword, symbol)
 import NameGen (NameGen, freshName)
@@ -43,6 +42,7 @@ data ReplCommand
     | Expr (Expr 'Parse)
     | Type_ (Expr 'Parse)
     | Load FilePath
+    | Env
     | Quit
     | UnknownCommand Text
 
@@ -184,14 +184,18 @@ replStep env command = do
             print ty
             pure $ Just env{values}
         Load path -> do
-            excOrFile <- liftIO $ Exception.try @SomeException (decodeUtf8 <$> readFileBS path)
-            case excOrFile of
-                Right fileContents -> localDiagnose env (path, fileContents) do
-                    decls <- Parser.parseModule (path, fileContents)
-                    processDecls env decls
-                Left exc -> do
-                    putStrLn $ "An exception has occured while reading the file: " <> displayException exc
-                    pure $ Just env
+            fileContents <- reportExceptions @SomeException (decodeUtf8 <$> readFileBS path)
+            localDiagnose env (path, fileContents) do
+                decls <- Parser.parseModule (path, fileContents)
+                processDecls env decls
+        Env -> do
+            -- since the to/from enum conversion is lossy, only ids are available here
+            -- perhaps I should write a custom wrapper for IntMap?..
+            for_ (Map.toList env.types) \(name, ty) ->
+                print $ pretty name <+> ":" <+> pretty ty
+            for_ (Map.toList env.values) \(name, value) ->
+                print $ pretty name <+> "=" <+> pretty value
+            pure $ Just env
         Quit -> pure Nothing
         UnknownCommand cmd -> fatal . one $ Err Nothing ("Unknown command:" <+> pretty cmd) [] []
   where
@@ -246,6 +250,7 @@ parseCommand =
         [ keyword ":t" *> fmap Type_ Parser.term
         , keyword ":q" $> Quit
         , keyword ":load" *> fmap (Load . Text.unpack) takeRest
+        , keyword ":env" $> Env
         , symbol ":" *> (UnknownCommand <$> takeRest)
         , try $ fmap Decls Parser.code
         , fmap Expr Parser.term

@@ -27,7 +27,7 @@ data CoreTerm
     = Name Name
     | TyCon Name
     | Con Name [CoreTerm] -- a fully-applied constructor. may only be produced by `quote`
-    | Lambda Name CoreTerm CoreTerm
+    | Lambda Name CoreTerm
     | App CoreTerm CoreTerm
     | Case CoreTerm [(CorePattern, CoreTerm)]
     | Let Name CoreTerm CoreTerm
@@ -55,7 +55,7 @@ instance Pretty CoreTerm where
             TyCon name -> pretty name
             Con name [] -> pretty name
             Con name args -> parensWhen 3 $ hsep (pretty name : map (go 3) args)
-            Lambda name _ty body -> parensWhen 1 $ "λ" <> pretty name {-parens (pretty name <+> ":" <+> pretty ty)-} <+> compressLambda body
+            Lambda name body -> parensWhen 1 $ "λ" <> pretty name <+> compressLambda body
             App lhs rhs -> parensWhen 3 $ go 2 lhs <+> go 3 rhs
             Record row -> braces . sep . punctuate comma . map recordField $ sortedRow row
             Variant name -> pretty name
@@ -84,7 +84,7 @@ instance Pretty CoreTerm where
             variantItem (name, ty) = pretty name <+> pretty ty
             recordTyField (name, ty) = pretty name <+> ":" <+> pretty ty
         compressLambda = \case
-            Lambda name ty body -> parens (pretty name <+> ":" <+> pretty ty) <+> compressLambda body
+            Lambda name body -> pretty name <+> compressLambda body
             other -> "->" <+> pretty other
         compressQ q vis e = \case
             Q _ q' vis' e' name ty body | q == q' && vis == vis' && e == e' ->

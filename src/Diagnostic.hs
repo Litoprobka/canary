@@ -5,17 +5,20 @@
 {-# LANGUAGE TemplateHaskell #-}
 {-# LANGUAGE TypeFamilies #-}
 {-# LANGUAGE ViewPatterns #-}
+{-# LANGUAGE ScopedTypeVariables #-}
+{-# LANGUAGE AllowAmbiguousTypes #-}
 
-module Diagnostic (Diagnose, runDiagnose, runDiagnose', dummy, nonFatal, fatal, noErrors, reportsFromBundle, internalError, guardNoErrors) where
+module Diagnostic (Diagnose, runDiagnose, runDiagnose', dummy, nonFatal, fatal, noErrors, reportsFromBundle, internalError, reportExceptions, guardNoErrors) where
 
 import Common (Loc, mkNotes)
 import Data.DList (DList)
 import Data.DList qualified as DList
 import Effectful
 import Effectful.Dispatch.Dynamic
-import Effectful.Error.Static (runErrorNoCallStack, throwError)
+import Effectful.Error.Static (runErrorNoCallStack, throwError_)
 import Effectful.State.Static.Local (gets, modify, runState)
 import Effectful.TH
+import Effectful.Exception (handle, ErrorCall)
 import Error.Diagnose
 import LangPrelude
 import Prettyprinter.Render.Terminal (AnsiStyle)
@@ -37,21 +40,26 @@ runDiagnose file action = do
 runDiagnose' :: (FilePath, Text) -> Eff (Diagnose : es) a -> Eff es (Maybe a, Diagnostic (Doc AnsiStyle))
 runDiagnose' (filePath, fileContents) = reinterpret
     (fmap (joinReports . second diagnosticFromReports) . runState DList.empty . runErrorNoCallStack)
-    \_ -> \case
+    (\_ -> \case
         NonFatal report -> modify (`DList.snoc` report)
-        Fatal reports -> throwError reports
+        Fatal reports -> throwError_ reports
         NoErrors ->
             gets @(DList (Report (Doc AnsiStyle)))
                 ( all \case
                     Err{} -> False
                     Warn{} -> True
                 )
+    ) . reportExceptions @ErrorCall
   where
     baseDiagnostic = addFile mempty filePath $ toString fileContents
     diagnosticFromReports = foldl' @DList addReport baseDiagnostic
     joinReports = \case
         (Left fatalErrors, diagnostic) -> (Nothing, foldl' @[] addReport diagnostic fatalErrors)
         (Right val, diagnostic) -> (Just val, diagnostic)
+
+-- apparently `withSync` catches internal exceptions that are used by the Error effect. meh.
+reportExceptions :: forall exc es a. (Diagnose :> es, Exception exc) => Eff es a -> Eff es a
+reportExceptions = handle @exc \exc -> fatal . one $ Err Nothing ("An exception has occured:" <+> pretty (displayException exc)) [] []
 
 dummy :: Doc style -> Report (Doc style)
 dummy msg = Err Nothing msg [] []

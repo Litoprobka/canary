@@ -14,18 +14,17 @@ module TypeChecker.Backend where
 
 import Common
 import Data.EnumMap.Strict qualified as Map
-import Data.HashSet qualified as HashSet
 import Data.Traversable (for)
 import Diagnostic (Diagnose, fatal, internalError)
 import Effectful
 import Effectful.Dispatch.Dynamic (interpret, reinterpret)
-import Effectful.Error.Static (runErrorNoCallStack, throwError)
+import Effectful.Error.Static (runErrorNoCallStack, throwError_)
 import Effectful.State.Static.Local (State, evalState, get, gets, modify, runState)
 import Effectful.TH
 import Error.Diagnose (Report (..))
 import Error.Diagnose qualified as M (Marker (..))
-import Interpreter (Value, ValueEnv)
-import Interpreter qualified as V
+import Eval (Value, ValueEnv)
+import Eval qualified as V
 import LangPrelude hiding (break, cycle)
 import NameGen
 import Syntax
@@ -34,6 +33,7 @@ import Syntax.Row
 import Syntax.Row qualified as Row
 import Syntax.Term (Erased (..), Quantifier (..), Visibility (..))
 import Effectful.Labeled
+import qualified Data.EnumSet as Set
 
 type Pat = Pattern 'Fixity
 type TypeDT = Value
@@ -42,13 +42,13 @@ type Type' = Value
 data Monotype
     = MCon Name [Monotype]
     | MTyCon Name
-    | MLambda MonoClosure
+    | MLambda (MonoClosure ())
     | MRecord (Row Monotype)
     | MVariant OpenName Monotype
     | MPrim Literal
     | -- types
       MFn Loc Monotype Monotype
-    | MQ Loc Quantifier Erased MonoClosure
+    | MQ Loc Quantifier Erased (MonoClosure Monotype)
     | MVariantT Loc (ExtRow Monotype)
     | MRecordT Loc (ExtRow Monotype)
     | -- stuck computations
@@ -59,21 +59,21 @@ data Monotype
     | MSkolem Skolem
 
 -- invariant: given a monotype arg, `body` evaluates to a monotype
-data MonoClosure = MonoClosure {var :: Name, variance :: Variance, ty :: Monotype, env :: EnumMap Name Value, body :: CoreTerm}
+data MonoClosure ty = MonoClosure {var :: Name, variance :: Variance, ty :: ty, env :: EnumMap Name Value, body :: CoreTerm}
 data Variance = In | Out | Inv
 
 -- а type whose outer constructor is monomorphic
 data MonoLayer
     = MLCon Name [Value]
     | MLTyCon Name
-    | MLLambda V.Closure
+    | MLLambda (V.Closure ())
     | MLRecord (Row Value)
     | MLVariant OpenName Value
     | MLPrim Literal
     | MLPrimFunc Name (Value -> Value)
     | -- types
       MLFn Loc TypeDT TypeDT
-    | MLQ Loc Quantifier Erased V.Closure
+    | MLQ Loc Quantifier Erased (V.Closure TypeDT)
     | MLVariantT Loc (ExtRow TypeDT)
     | MLRecordT Loc (ExtRow TypeDT)
     | -- stuck computations
@@ -110,7 +110,7 @@ data InfState = InfState
     }
 
 data TypeError
-    = CannotUnify Name Name
+    = CannotUnify TypeDT TypeDT
     | NotASubtype TypeDT TypeDT (Maybe OpenName)
     | MissingField TypeDT OpenName
     | MissingVariant TypeDT OpenName
@@ -226,7 +226,7 @@ data Break err :: Effect where
 makeEffect ''Break
 
 runBreak :: forall err a es. Eff (Break err : es) a -> Eff es (Either err a)
-runBreak = reinterpret (runErrorNoCallStack @err) \_ (Break val) -> throwError @err val
+runBreak = reinterpret (runErrorNoCallStack @err) \_ (Break val) -> throwError_ @err val
 
 instance Pretty Monotype where
     pretty = pretty . unMono
@@ -290,7 +290,7 @@ overrideUniVar = alterUniVar True
 data SelfRef = Direct | Indirect
 data Cycle = DirectCycle | NoCycle deriving (Eq)
 
-alterUniVar :: InfEffs es => Bool -> UniVar -> Monotype -> Eff es ()
+alterUniVar :: forall es. InfEffs es => Bool -> UniVar -> Monotype -> Eff es ()
 alterUniVar override uni ty = do
     -- here comes the magic. If the new type contains other univars, we change their scope
     mbScope <-
@@ -300,7 +300,7 @@ alterUniVar override uni ty = do
                     internalError Blank $ "Internal error (probably a bug): attempted to solve a solved univar " <> pretty uni
             Right _ -> pure Nothing
             Left scope -> pure $ Just scope
-    cycle <- cycleCheck mbScope (Direct, HashSet.singleton uni) ty
+    cycle <- cycleCheck mbScope (Direct, Set.singleton uni) ty
     when (cycle == NoCycle) $ modify \s -> s{vars = Map.insert uni (Right ty) s.vars}
   where
     -- errors out on indirect cycles (i.e. a ~ Maybe a)
@@ -310,21 +310,21 @@ alterUniVar override uni ty = do
     cycleCheck mbScope = go
       where
         go (selfRefType, acc) = \case
-            MUniVar _ uni2 | HashSet.member uni2 acc -> case selfRefType of
+            MUniVar _ uni2 | Set.member uni2 acc -> case selfRefType of
                 Direct -> pure DirectCycle
                 Indirect -> do
                     unwrappedTy <- unMono <$> unwrap ty
                     typeError $ SelfReferential (getLoc $ unMono ty) uni unwrappedTy
             MUniVar _ uni2 ->
                 lookupUniVar uni2 >>= \case
-                    Right ty' -> go (selfRefType, HashSet.insert uni2 acc) ty'
+                    Right ty' -> go (selfRefType, Set.insert uni2 acc) ty'
                     Left scope' -> do
                         case mbScope of
                             Just scope | scope' > scope -> modify \s -> s{vars = Map.insert uni2 (Left scope') s.vars}
                             _ -> pass
                         pure NoCycle
             MFn _ from to -> go (Indirect, acc) from >> go (Indirect, acc) to
-            MQ _ _q _e closure -> cycleCheckClosure acc closure
+            MQ _ _q _e closure -> go (Indirect, acc) closure.ty *> cycleCheckClosure acc closure
             MCon _ args -> NoCycle <$ traverse_ (go (Indirect, acc)) args
             MApp lhs rhs -> go (Indirect, acc) lhs >> go (Indirect, acc) rhs
             MVariantT _ row -> NoCycle <$ traverse_ (go (Indirect, acc)) row
@@ -337,8 +337,8 @@ alterUniVar override uni ty = do
             MSkolem{} -> pure NoCycle
             MPrim{} -> pure NoCycle
 
+        cycleCheckClosure :: EnumSet UniVar -> MonoClosure a -> Eff es Cycle
         cycleCheckClosure acc closure = do
-            void $ go (Indirect, acc) closure.ty
             skolem <- freshSkolem $ toSimpleName closure.var
             go (Indirect, acc) =<< appMono closure skolem
 
@@ -425,7 +425,7 @@ generaliseAll action = do
         C.VariantT loc row -> C.VariantT loc <$> traverse (go scope) row
         C.Record row -> C.Record <$> traverse (go scope) row
         C.Q loc q vis e var ty body -> C.Q loc q vis e var <$> go scope ty <*> go scope body
-        C.Lambda var ty body -> C.Lambda var <$> go scope ty <*> go scope body
+        C.Lambda var body -> C.Lambda var <$> go scope body
         C.Con name args -> C.Con name <$> traverse (go scope) args
         -- terminal cases
         C.Name name -> pure $ C.Name name
@@ -478,13 +478,11 @@ mono variance = \case
     V.Record row -> MRecord <$> traverse go row
     V.Variant name arg -> MVariant name <$> go arg
     V.Case arg matches -> MCase <$> go arg <*> traverse (bitraverse pure go) matches
-    V.Lambda closure -> do
-        ty <- go closure.ty
-        pure $ MLambda MonoClosure{var = closure.var, variance, env = closure.env, ty, body = closure.body}
+    V.Lambda closure -> pure $ MLambda MonoClosure{var = closure.var, variance, env = closure.env, ty = (), body = closure.body}
   where
     go = mono variance
 
-appMono :: InfEffs es => MonoClosure -> Value -> Eff es Monotype
+appMono :: InfEffs es => MonoClosure a -> Value -> Eff es Monotype
 appMono MonoClosure{var, variance, env, body} arg = mono variance $ V.evalCore (Map.insert var arg env) body
 
 flipVariance :: Variance -> Variance
@@ -505,7 +503,7 @@ unMono = \case
     MRecordT loc row -> V.RecordT loc $ fmap unMono row
     MVariant name val -> V.Variant name (unMono val)
     MRecord row -> V.Record (fmap unMono row)
-    MLambda MonoClosure{var, ty, env, body} -> V.Lambda V.Closure{var, ty = unMono ty, env, body}
+    MLambda MonoClosure{var, ty, env, body} -> V.Lambda V.Closure{var, ty, env, body}
     MQ loc q e MonoClosure{var, ty, env, body} -> V.Q loc q Visible e V.Closure{var, ty = unMono ty, env, body}
     MPrim val -> V.PrimValue val
     MCase arg matches -> V.Case (unMono arg) ((map . second) unMono matches)
@@ -563,13 +561,13 @@ unMonoLayer = \case
     MLCase arg matches -> V.Case arg matches
 
 -- WARN: substitute doesn't traverse univars at the moment
-substitute :: InfEffs es => Variance -> V.Closure -> Eff es TypeDT
+substitute :: InfEffs es => Variance -> V.Closure a -> Eff es TypeDT
 substitute variance closure = (.result) <$> substitute' variance closure
 
 data Subst = Subst {var :: TypeDT, result :: TypeDT}
 
 -- substitute a type variable with a univar / skolem dependening on variance
-substitute' :: InfEffs es => Variance -> V.Closure -> Eff es Subst
+substitute' :: InfEffs es => Variance -> V.Closure a -> Eff es Subst
 substitute' variance closure = do
     someVar <- freshSomething (toSimpleName closure.var) variance
     pure Subst{var = someVar, result = closure `V.app` someVar}

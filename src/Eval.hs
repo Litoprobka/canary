@@ -3,7 +3,7 @@
 {-# LANGUAGE OverloadedRecordDot #-}
 {-# LANGUAGE PatternSynonyms #-}
 
-module Interpreter where
+module Eval where
 
 import Common (
     HasLoc,
@@ -20,6 +20,7 @@ import Common (
     toSimpleName,
     pattern L,
  )
+import Data.EnumMap.Lazy qualified as LMap -- note that we use the lazy functions here
 import Data.Traversable (for)
 import Diagnostic
 import LangPrelude
@@ -29,11 +30,9 @@ import Syntax
 import Syntax.Core qualified as C
 import Syntax.Declaration qualified as D
 import Syntax.Row (ExtRow (..), OpenName)
+import Syntax.Term (Erased, Quantifier, Visibility (..))
 import Syntax.Term qualified as T
 import Prelude qualified (Show (..))
-import Syntax.Term (Visibility(..), Quantifier, Erased)
-import qualified Data.DList as DList
-import qualified Data.EnumMap.Lazy as LMap -- note that we use the lazy functions here
 
 type ValueEnv = EnumMap Name Value
 type Type' = Value
@@ -42,7 +41,7 @@ data Value
     = Var Name -- an unbound variable; seems like they are only used for quoting, hmmm
     | TyCon Name -- a type constructor. unlike value constructors, `Either a b` is represented as a stuck application Either `App` a `App` b
     | Con Name [Value] -- a fully-applied counstructor
-    | Lambda Closure
+    | Lambda (Closure ())
     | PrimFunction Name (Value -> Value) -- an escape hatch for interpreter primitives and similar stuff
     | Record (Row Value)
     | Variant OpenName Value
@@ -50,7 +49,7 @@ data Value
       PrimValue Literal -- the name 'Literal' is slightly misleading here
     | -- types
       Function Loc Type' Type'
-    | Q Loc Quantifier Visibility Erased Closure
+    | Q Loc Quantifier Visibility Erased (Closure Type')
     | VariantT Loc (ExtRow Type')
     | RecordT Loc (ExtRow Type')
     | -- stuck computations
@@ -60,7 +59,7 @@ data Value
       UniVar Loc UniVar
     | Skolem Skolem
 
-data Closure = Closure {var :: Name, ty :: Type', env :: ValueEnv, body :: CoreTerm}
+data Closure ty = Closure {var :: Name, ty :: ty, env :: ValueEnv, body :: CoreTerm}
 
 quote :: Value -> CoreTerm
 quote = \case
@@ -69,7 +68,7 @@ quote = \case
     Con con args -> C.Con con (map quote args)
     -- if we use quote for anything but pretty-printing,
     -- we'd probably need alpha conversion for all the function-like cases
-    Lambda closure -> C.Lambda closure.var (quote closure.ty) (quote $ closureBody closure)
+    Lambda closure -> C.Lambda closure.var (quote $ closureBody closure)
     PrimFunction name f -> quote $ f (Var name)
     Record vals -> C.Record $ fmap quote vals
     Variant name val -> C.App (C.Variant name) $ quote val
@@ -103,7 +102,7 @@ evalCore !env = \case
     C.Name name -> fromMaybe (error . show $ "whoopsie, out of scope" <+> pretty name) $ LMap.lookup name env
     C.TyCon name -> TyCon name
     C.Con name args -> Con name $ map (evalCore env) args
-    C.Lambda name ty body -> Lambda $ Closure{var = name, ty = evalCore env ty, env, body}
+    C.Lambda name body -> Lambda $ Closure{var = name, ty = (), env, body}
     C.App (C.Variant name) arg -> Variant name $ evalCore env arg -- this is a bit of an ugly case
     C.App lhs rhs -> case (evalCore env lhs, evalCore env rhs) of
         (Lambda closure, arg) -> closure `app` arg
@@ -127,21 +126,30 @@ evalCore !env = \case
     C.Skolem skolem -> Skolem skolem
     C.UniVar loc uni -> UniVar loc uni
   where
-    -- mbStuckCase arg _ = Nothing -- error $ "stuck case, too bad: " <> show arg
-    mbStuckCase (Var x) matches = Just $ Case (Var x) (map (second $ evalCore env) matches)
-    mbStuckCase (Skolem s) matches = Just $ Case (Skolem s) (map (second $ evalCore env) matches)
-    mbStuckCase (UniVar loc u) matches = Just $ Case (UniVar loc u) (map (second $ evalCore env) matches)
-    mbStuckCase (App lhs rhs) matches = Just $ Case (App lhs rhs) (map (second $ evalCore env) matches)
+    mbStuckCase (Var x) matches = Just $ Case (Var x) (mkStuckBranches matches)
+    mbStuckCase (Skolem s) matches = Just $ Case (Skolem s) (mkStuckBranches matches)
+    mbStuckCase (UniVar loc u) matches = Just $ Case (UniVar loc u) (mkStuckBranches matches)
+    mbStuckCase (App lhs rhs) matches = Just $ Case (App lhs rhs) (mkStuckBranches matches)
     mbStuckCase _ _ = Nothing
 
-app :: Closure -> Value -> Value
+    mkStuckBranches :: [(CorePattern, CoreTerm)] -> [(CorePattern, Value)]
+    mkStuckBranches = map \(pat, body) -> (pat, evalCore (stuckBranchEnv pat) body) 
+
+    stuckBranchEnv :: CorePattern -> ValueEnv
+    stuckBranchEnv = \case
+        (C.VarP name) -> LMap.insert name (Var name) env
+        (C.ConstructorP _ argNames) -> LMap.fromList (argNames <&> \arg -> (arg, Var arg)) <> env
+        (C.VariantP _ argName) -> LMap.insert argName (Var argName) env
+        _ -> env
+
+app :: Closure a -> Value -> Value
 app Closure{var, env, body} arg = evalCore (LMap.insert var arg env) body
 
 -- do we need a fresh name here?
-closureBody :: Closure -> Value
+closureBody :: Closure a -> Value
 closureBody closure = closure `app` Var closure.var
 
-closureBody' :: NameGen :> es => Closure -> Eff es Value
+closureBody' :: NameGen :> es => Closure a -> Eff es Value
 closureBody' closure = do
     var <- freshName $ toSimpleName closure.var
     pure $ closure `app` Var var
@@ -158,7 +166,7 @@ matchCore env = \cases
     (C.LiteralP lit) (PrimValue (L val)) -> env <$ guard (lit == val)
     _ _ -> Nothing
 
--- desugar *almost* could be pure, but unfortunately, we need name gen here
+-- desugar could *almost* be pure, but unfortunately, we need name gen here
 -- perhaps we should use something akin to locally nameless?
 -- TODO: properly handle recursive bindings (that is, don't infinitely loop on them)
 desugar :: forall es. (NameGen :> es, Diagnose :> es) => Term 'Fixity -> Eff es CoreTerm
@@ -170,12 +178,13 @@ desugar = go
         T.Literal lit -> pure $ C.Literal lit
         T.Annotation expr _ -> go expr
         T.App lhs rhs -> C.App <$> go lhs <*> go rhs
+        T.Lambda (L (T.VarP arg)) body -> C.Lambda arg <$> go body
         T.Lambda pat body -> do
             name <- freshName $ Located Blank $ Name' "lamArg"
-            C.Lambda name (placeholder loc) <$> go (Located loc $ T.Case (Located (getLoc name) $ T.Name name) [(pat, body)])
+            C.Lambda name <$> go (Located loc $ T.Case (Located (getLoc name) $ T.Name name) [(pat, body)])
         T.WildcardLambda args body -> do
             body' <- go body
-            pure $ foldr (`C.Lambda` placeholder loc) body' args
+            pure $ foldr C.Lambda body' args
         T.Let binding expr -> case binding of
             T.ValueB (L (T.VarP name)) body -> C.Let name <$> go body <*> go expr
             T.ValueB _ _ -> internalError loc "todo: desugar pattern bindings"
@@ -188,7 +197,7 @@ desugar = go
             matches' <- for matches \case
                 ([pat], body) -> bitraverse flattenPattern desugar (pat, body)
                 _ -> internalError loc "inconsistent pattern count in a match expression"
-            pure $ C.Lambda name (placeholder loc) $ C.Case (C.Name name) matches'
+            pure $ C.Lambda name $ C.Case (C.Name name) matches'
         T.Match _ -> internalError loc "todo: multi-arg match desugar"
         T.If cond true false -> do
             cond' <- go cond
@@ -209,7 +218,6 @@ desugar = go
         T.RecordT row -> C.RecordT loc <$> traverse go row
 
     type_ loc = pure $ C.TyCon $ Located loc TypeName
-    placeholder loc = C.TyCon $ Located loc TypeName
 
     -- we only support non-nested patterns for now
     flattenPattern :: Pattern 'Fixity -> Eff es CorePattern
@@ -228,59 +236,6 @@ desugar = go
 
 eval :: (Diagnose :> es, NameGen :> es) => ValueEnv -> Term 'Fixity -> Eff es Value
 eval env term = evalCore env <$> desugar term
-
-{- a pure version
-desugar :: InterpreterBuiltins Name -> Term 'Fixity -> CoreTerm
-desugar builtins = go
-  where
-    go :: Term 'Fixity -> CoreTerm
-    go = \case
-        T.Name name -> NameC name
-        T.Literal (L lit) -> LiteralC lit
-        T.Annotation expr _ -> go expr
-        T.App lhs rhs -> AppC (go lhs) (go rhs)
-        T.Lambda loc pat body ->
-            let name = _fresh
-            in LambdaC name $ go $ T.Case loc (T.Name name) [(pat, body)]
-        T.WildcardLambda loc args body -> foldr LambdaC (go body) args
-        T.Let loc binding expr -> case binding of
-            T.ValueB (T.VarP name) body -> LetC name (go body) (go expr)
-            T.ValueB _ _ -> error "todo: desugar pattern bindings"
-            T.FunctionB name args body -> LetC name (go $ foldr (T.Lambda loc) body args) (go expr)
-        T.LetRec _ _bindings _body -> error "todo: letrec desugar"
-        T.TypeApp expr _ -> go expr
-        T.Case _ arg matches -> CaseC (go arg) (bimap flattenPattern go <$> matches)
-        T.Match _ _ -> error "todo: match desugar"
-        T.If _ cond true false ->
-            CaseC
-                (go cond)
-                [ (ConstructorP builtins.true [], go true)
-                , (ConstructorP builtins.false [], go false)
-                ]
-        T.RecordLens{} -> error "todo: desugar RecordLens"
-        T.Variant name -> VariantC name
-        T.Record _ fields -> RecordC (fmap go fields)
-        T.List _ xs -> (foldr ((AppC . AppC (NameC builtins.cons)) . go) (NameC builtins.nil) xs)
-        T.Do{} -> error "todo: desugar do blocks"
-        T.Function _ from to -> FunctionC (go from) (go to)
-        T.Forall _ binder body -> ForallC binder.name (go body)
-        T.Exists _ binder body -> ExistsC binder.name (go body)
-        T.VariantT _ row -> VariantTC $ fmap go row
-        T.RecordT _ row -> RecordTC $ fmap go row
-
-    flattenPattern :: Pattern 'Fixity -> CorePattern
-    flattenPattern = \case
-        T.VarP name -> VarP name
-        T.WildcardP _ name -> WildcardP name
-        T.AnnotationP pat _ -> flattenPattern pat
-        T.ConstructorP name pats -> ConstructorP name $ asVar <$> pats
-        T.VariantP name pat -> VariantP name $ asVar pat
-        T.RecordP{} -> error "todo: record pattern desugaring"
-        T.ListP{} -> error "todo: list pattern desugaring"
-        T.LiteralP (L lit) -> LiteralP lit
-    asVar (T.VarP name) = name
-    asVar _ = error "todo: nested patterns"
--}
 
 evalAll :: (Diagnose :> es, NameGen :> es) => [Declaration 'Fixity] -> Eff es ValueEnv
 evalAll = modifyEnv LMap.empty
@@ -308,24 +263,29 @@ modifyEnv env decls = do
         D.GADT _ _ constrs -> traverse mkGadtConstr constrs
         D.Signature{} -> pure mempty
 
-    mkConstr con = do
-        argTypes <- traverse (eval env) con.args
-        (con.name,) . Left <$> mkConLambda argTypes con.name env
-    mkGadtConstr con = do
-        argTypes <- traverse (eval env) $ argsFromSig con.sig
-        (con.name,) . Left <$> mkConLambda argTypes con.name env
-    argsFromSig = DList.toList . go DList.empty
+    mkConstr con = (con.name,) . Left <$> mkConLambda (length con.args) con.name env
+    mkGadtConstr con = (con.name,) . Left <$> mkConLambda (argCount con.sig) con.name env
+    argCount = go 0
       where
         go acc (L e) = case e of
-            T.Function arg rhs -> go (DList.cons arg acc) rhs
-            T.Q T.Forall Visible _ binder body -> go (DList.cons (fromMaybe (Located Blank $ T.Name $ Located Blank TypeName) binder.kind) acc) body
+            T.Function _ rhs -> go (succ acc) rhs
+            T.Q T.Forall Visible _ _ body -> go (succ acc) body
             T.Q _ _ _ _ body -> go acc body
             _ -> acc
 
-mkConLambda :: NameGen :> es => [Type'] -> Name -> ValueEnv -> Eff es Value
-mkConLambda argTypes con env = do
-    namesAndTypes <- traverse (\ty -> (ty,) <$> freshName (Located Blank $ Name' "conArg")) argTypes
-    pure $ foldr (\(ty, var) body -> Lambda $ Closure{var, ty, env, body = quote body}) (Con con (map (Var . snd) namesAndTypes)) namesAndTypes
+mkConLambda :: NameGen :> es => Int -> Name -> ValueEnv -> Eff es Value
+mkConLambda n con env = do
+    names <- replicateM n (freshName (Located Blank $ Name' "conArg"))
+    -- fused foldl/foldr go brrr
+    pure $
+        foldr
+            ( \var bodyFromEnv env' ->
+                let newEnv = LMap.insert var (Var var) env'
+                 in Lambda $ Closure{var, ty = (), env = newEnv, body = quote $ bodyFromEnv newEnv}
+            )
+            (const $ Con con (map Var names))
+            names
+            env
 
 mkLambda' :: [Name] -> ([Value] -> Value) -> Value
 mkLambda' [] f = f []

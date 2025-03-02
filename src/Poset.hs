@@ -7,7 +7,7 @@ module Poset where
 import Common (Loc (Blank))
 import Data.Sequence qualified as Seq
 import Diagnostic (Diagnose, internalError)
-import Effectful.Error.Static (Error, runErrorNoCallStack, throwError)
+import Effectful.Error.Static (Error, runErrorNoCallStack, throwError_)
 import Effectful.Writer.Static.Local (Writer, tell)
 import LangPrelude hiding (cycle)
 import Relude.Extra (traverseToSnd)
@@ -42,11 +42,11 @@ empty =
         }
 
 lookup' :: (Error PosetError :> es, Enum k, Pretty k) => k -> EnumMap k v -> Eff es v
-lookup' k emap = maybe (throwError $ LookupError k) pure $ Map.lookup k emap
+lookup' k emap = maybe (throwError_ $ LookupError k) pure $ Map.lookup k emap
 
 -- | merge two equivalence classes. Error out if there was a relation between them
 mergeStrict :: (Ctx es, CycleErrors a es) => EqClass a -> EqClass a -> Poset a -> Eff es (Poset a)
-mergeStrict l r = mergeWith (const $ throwError $ Cycle l r) l r
+mergeStrict l r = mergeWith (const $ throwError_ $ Cycle l r) l r
 
 -- | merge two equvalience classes. If the classes already have a GT / LT relation, add a relation in the other direction instead
 mergeLenient :: (Ctx es, CycleWarnings a es) => EqClass a -> EqClass a -> Poset a -> Eff es (Poset a)
@@ -104,7 +104,7 @@ mergeWith onCycle classL classR Poset{classes, relations, nextClass} = do
 
 -- | add a relation between two classes, erroring out in case of a cycle
 addGtRel :: (Ctx es, CycleErrors a es) => EqClass a -> EqClass a -> Poset a -> Eff es (Poset a)
-addGtRel l r = addGreaterThanRel (const $ throwError $ Cycle l r) l r
+addGtRel l r = addGreaterThanRel (const $ throwError_ $ Cycle l r) l r
 
 -- | add a relation between two classes; merge them if the relation causes a cycle (i.e. A > B and B > A)
 addGteRel :: (Ctx es, Hashable a, Enum a) => a -> a -> Poset a -> Eff es (Poset a)
