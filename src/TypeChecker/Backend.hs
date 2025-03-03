@@ -369,6 +369,15 @@ lookupSig name = do
             uni <- freshUniVar (getLoc name)
             uni <$ updateSig name uni
 
+lookupSig' :: InfEffs es => Name -> Eff es TypeDT
+lookupSig' name = do
+    InfState{locals} <- get
+    topLevel <- labeled @"types" @(State TopLevel) get
+    case (Map.lookup name topLevel, Map.lookup name locals) of
+        (Just ty, _) -> pure ty
+        (_, Just ty) -> pure ty
+        (Nothing, Nothing) -> internalError (getLoc name) "unbound name"
+
 declareAll :: Declare :> es => EnumMap Name TypeDT -> Eff es ()
 declareAll = traverse_ (uncurry updateSig) . Map.toList
 

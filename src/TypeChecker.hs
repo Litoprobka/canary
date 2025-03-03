@@ -31,9 +31,9 @@ import Data.Traversable (for)
 import Diagnostic (internalError)
 import Effectful
 import Effectful.State.Static.Local (get, modify, modifyM)
-import GHC.IsList qualified as IsList
 import Eval qualified as V
-import LangPrelude hiding (bool)
+import GHC.IsList qualified as IsList
+import LangPrelude hiding (bool, unzip)
 import NameGen
 import Syntax
 import Syntax.Core qualified as C
@@ -179,7 +179,7 @@ check (Located loc e) type_ = scoped $ match e type_
             check body (closure `V.app` var)
         (Lambda arg body) (V.Function _ from to) -> scoped do
             -- `checkPattern` updates signatures of all mentioned variables
-            checkPattern arg from
+            declareAll =<< checkPattern arg from
             check body to
         (Annotation expr annTy) ty -> do
             annTyV <- typeFromTerm annTy
@@ -191,8 +191,8 @@ check (Located loc e) type_ = scoped $ match e type_
             check false ty
         (Case arg matches) ty -> do
             argTy <- infer arg
-            for_ matches \(pat, body) -> do
-                checkPattern pat argTy
+            for_ matches \(pat, body) -> scoped do
+                declareAll =<< checkPattern pat argTy
                 check body ty
         (Match matches) ty -> do
             n <- whenNothing (getArgCount matches) $ typeError $ ArgCountMismatch loc
@@ -257,25 +257,24 @@ checkBinding binding types = case binding of
     ValueB pat _body -> do
         internalError (getLoc pat) "todo: type check destructuring bindings with partial signatures"
 
--- scoped $ checkPattern pat ty >> check body ty
-
-checkPattern :: (InfEffs es, Declare :> es) => Pat -> TypeDT -> Eff es ()
+checkPattern :: (InfEffs es) => Pat -> TypeDT -> Eff es (EnumMap Name TypeDT)
 checkPattern (Located ploc outerPat) ty = case outerPat of
     -- we need this case, since inferPattern only infers monotypes for var patterns
-    VarP name -> updateSig name ty
+    VarP name -> pure $ Map.singleton name ty
     -- we probably do need a case for ConstructorP for the same reason
     VariantP name arg ->
         deepLookup Variant name ty >>= \case
             Nothing -> typeError $ MissingVariant ty name
             Just argTy -> checkPattern arg argTy
     RecordP patRow -> do
-        for_ (IsList.toList patRow) \(name, pat) ->
+        fold <$> for (IsList.toList patRow) \(name, pat) ->
             deepLookup Record name ty >>= \case
                 Nothing -> typeError $ MissingField ty name
                 Just fieldTy -> checkPattern pat fieldTy
     _ -> do
-        inferredTy <- inferPattern $ Located ploc outerPat
+        (typeMap, inferredTy) <- inferPattern $ Located ploc outerPat
         subtype inferredTy ty
+        pure typeMap
 
 infer :: InfEffs es => Expr 'Fixity -> Eff es TypeDT
 infer (Located loc e) = scoped case e of
@@ -292,7 +291,8 @@ infer (Located loc e) = scoped case e of
         ty <- infer expr
         inferTyApp expr ty tyArg
     Lambda arg body -> do
-        argTy <- inferPattern arg
+        (typeMap, argTy) <- inferPattern arg
+        declareAll typeMap
         V.Function loc argTy <$> infer body
     -- chances are, I'd want to add some specific error messages or context for wildcard lambdas
     -- for now, they are just desugared to normal lambdas before inference
@@ -301,9 +301,9 @@ infer (Located loc e) = scoped case e of
         declareAll =<< inferBinding binding
         infer body
     LetRec _bindings _body -> internalError loc "todo: typecheck of recursive bindings is not supported yet"
-         {- do
-        declareAll =<< (inferDecls . map (\b -> Located loc $ D.Value b []) . NE.toList) bindings
-        infer body -}
+    {- do
+    declareAll =<< (inferDecls . map (\b -> Located loc $ D.Value b []) . NE.toList) bindings
+    infer body -}
     Annotation expr ty -> do
         tyV <- typeFromTerm ty
         tyV <$ check expr tyV
@@ -315,8 +315,8 @@ infer (Located loc e) = scoped case e of
     Case arg matches -> do
         argTy <- infer arg
         result <- freshUniVar loc
-        for_ matches \(pat, body) -> do
-            checkPattern pat argTy
+        for_ matches \(pat, body) -> scoped do
+            declareAll =<< checkPattern pat argTy
             check body result
         pure result
     Match [] -> typeError $ EmptyMatch loc
@@ -414,24 +414,26 @@ inferTyApp expr ty tyArg = case ty of
 -- infers the type of a function / variables in a pattern
 -- does not implicitly declare anything
 inferBinding :: InfEffs es => Binding 'Fixity -> Eff es (EnumMap Name TypeDT)
-inferBinding =
-    scoped . \case
+inferBinding = \case
         ValueB pat body -> do
-            (patTy, bodyTy) <- do
-                patTy <- inferPattern pat
-                bodyTy <- infer body
-                pure (patTy, bodyTy)
+            (typeMap, patTy) <- inferPattern pat
+            -- we need the pattern itself to be in scope in case the binding is recursive
+            bodyTy <- scoped do
+                declareAll typeMap 
+                infer body
             subtype patTy bodyTy
-            checkPattern pat bodyTy
-            traverse lookupSig (Map.fromList $ (\x -> (x, x)) <$> collectNamesInPat pat)
-        binding@(FunctionB name args body) -> do
+            pure typeMap
+        binding@(FunctionB name args body) -> scoped do
             -- note: we can only infer monotypes for recursive functions
             -- while checking the body, the function itself is assigned a univar
             -- in the end, we check that the inferred type is compatible with the one in the univar (inferred from recursive calls)
             uni <- freshUniVar'
             updateSig name $ V.UniVar (getLoc binding) uni
-            argTypes <- traverse inferPattern args
-            bodyTy <- infer body
+            (typeMap, argTypes) <- traverseFold inferPattern args
+            bodyTy <- scoped do
+                declareAll typeMap
+                infer body
+            -- todo: infer dependent functions
             let ty = foldr (V.Function $ getLoc binding) bodyTy argTypes
             -- since we can still infer higher-rank types for non-recursive functions,
             -- we only need the subtype check when the univar is solved, i.e. when the
@@ -439,41 +441,47 @@ inferBinding =
             withUniVar uni (subtype ty . unMono)
             pure $ Map.singleton name ty
 
-inferPattern :: (InfEffs es, Declare :> es) => Pat -> Eff es TypeDT
+inferPattern :: (InfEffs es) => Pat -> Eff es (EnumMap Name TypeDT, TypeDT)
 inferPattern (Located loc p) = case p of
     VarP name -> do
         uni <- freshUniVar $ getLoc name
-        updateSig name uni
-        pure uni
-    WildcardP _ -> freshUniVar loc
+        pure (Map.singleton name uni, uni)
+    WildcardP _ -> (Map.empty,) <$> freshUniVar loc
     (AnnotationP pat ty) -> do
         tyV <- typeFromTerm ty
-        tyV <$ checkPattern pat tyV
+        (,tyV) <$> checkPattern pat tyV
     ConstructorP name args -> do
         (resultType, argTypes) <- conArgTypes name
         unless (length argTypes == length args) do
             typeError $ ArgCountMismatchPattern (Located loc p) (length argTypes) (length args)
-        zipWithM_ checkPattern args argTypes
-        pure resultType
+        typeMap <- fold <$> zipWithM checkPattern args argTypes
+        pure (typeMap, resultType)
     ListP pats -> do
         result <- freshUniVar loc
-        traverse_ (`checkPattern` result) pats
-        pure $ V.TyCon (Located loc ListName) `V.App` result
+        typeMap <- foldMapM (`checkPattern` result) pats
+        let listTy = V.TyCon (Located loc ListName) `V.App` result
+        pure (typeMap, listTy)
     VariantP name arg -> do
-        argTy <- inferPattern arg
-        V.VariantT loc . ExtRow (fromList [(name, argTy)]) <$> freshUniVar loc
+        (typeMap, argTy) <- inferPattern arg
+        ty <- V.VariantT loc . ExtRow (fromList [(name, argTy)]) <$> freshUniVar loc
+        pure (typeMap, ty)
     RecordP row -> do
-        typeRow <- traverse inferPattern row
-        V.RecordT loc . ExtRow typeRow <$> freshUniVar loc
-    LiteralP (L lit) -> pure $ V.TyCon . Located loc $ case lit of
-        IntLiteral num
-            | num >= 0 -> NatName
-            | otherwise -> IntName
-        TextLiteral _ -> TextName
-        CharLiteral _ -> CharName
+        (typeMap, typeRow) <- traverseFold inferPattern row
+        ty <- V.RecordT loc . ExtRow typeRow <$> freshUniVar loc
+        pure (typeMap, ty)
+    LiteralP (L lit) ->
+        pure
+            ( Map.empty
+            , V.TyCon . Located loc $ case lit of
+                IntLiteral num
+                    | num >= 0 -> NatName
+                    | otherwise -> IntName
+                TextLiteral _ -> TextName
+                CharLiteral _ -> CharName
+            )
   where
     -- conArgTypes and the zipM may be unified into a single function
-    conArgTypes name = lookupSig name >>= go
+    conArgTypes name = lookupSig' name >>= go
       where
         go =
             monoLayer In >=> \case

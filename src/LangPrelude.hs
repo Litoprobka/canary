@@ -1,4 +1,5 @@
-module LangPrelude (module Reexport, (.>)) where
+{-# LANGUAGE ApplicativeDo #-}
+module LangPrelude (module Reexport, (.>), traverseFold) where
 
 -- Relude becomes inconvenient the moment I want to use effectful over mtl
 
@@ -33,3 +34,8 @@ infixl 9 .>
 
 (.>) :: (a -> b) -> (b -> c) -> a -> c
 (.>) = flip (.)
+
+traverseFold :: (Traversable t, Applicative f, Monoid m) => (a -> f (m, b)) -> t a -> f (m, t b)
+traverseFold f t = do
+    t' <- traverse f t
+    pure (foldMap fst t', snd <$> t')
