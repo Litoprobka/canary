@@ -22,7 +22,7 @@ import Data.Type.Ord (type (<))
 import DependencyResolution (SimpleOutput (..), resolveDependenciesSimplified)
 import Diagnostic (Diagnose, runDiagnose, runDiagnose')
 import Effectful.Error.Static (Error)
-import Effectful.Reader.Static (Reader, runReader)
+import Effectful.Labeled.Reader (Reader)
 import Effectful.State.Static.Local (State, evalState, execState, runState)
 import Error.Diagnose (Diagnostic)
 import Fixity (resolveFixity)
@@ -43,23 +43,25 @@ import Syntax.Term (Pattern_ (..), Quantifier (..), Erased (..), Visibility (..)
 import Syntax.Term qualified as E
 import Syntax.Term qualified as T
 import Text.Megaparsec (errorBundlePretty, parse, pos1)
-import TypeChecker
+import TypeChecker (InfState)
+import TypeChecker qualified as TC (run)
 import TypeChecker.Backend (Type', TopLevel)
 import qualified Data.EnumMap.Lazy as LMap
 import qualified Data.EnumMap as Map
 import qualified Repl
 import Repl (ReplEnv(..))
+import Effectful.Labeled (Labeled)
 
 -- some wrappers and syntactic niceties for testing
 
 testCheck
     :: Eff [NameResolution.Declare, State Scope, Diagnose, NameGen] resolved
-    -> (resolved -> Eff '[Declare, State InfState, State TopLevel, Diagnose, NameGen] a)
+    -> (resolved -> Eff '[Labeled UniVar NameGen, Labeled "locals" (Reader (EnumMap Name Type')), State InfState, State TopLevel, Diagnose, NameGen] a)
     -> Maybe a
 testCheck toResolve action = fst $ runPureEff $ runNameGen $ runDiagnose' ("<none>", "") do
     ReplEnv{scope, types} <- Repl.mkDefaultEnv
     resolved <- NameResolution.run scope toResolve
-    evalState types $ run $ action resolved
+    evalState types $ TC.run $ action resolved
 
 {-
 dummyFixity :: Diagnose :> es => Expr 'NameRes -> Eff es (Expr 'Fixity)

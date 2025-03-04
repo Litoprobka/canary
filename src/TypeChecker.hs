@@ -72,7 +72,9 @@ inferDeclaration (Located loc decl) = case decl of
     D.Value binding (_:_) -> internalError (getLoc binding) "todo: proper support for where clauses"
     D.Value binding [] -> do
         relevantSigs <- gets $ Map.filterWithKey (\k _ -> k `elem` collectNamesInBinding binding)
-        (<>) <$> generaliseAll (checkBinding binding relevantSigs)
+        typeMap <- generaliseAll (checkBinding binding relevantSigs)
+        modify (typeMap <>)
+        pure id
   where
     mkTypeKind = \case
         [] -> pure type_

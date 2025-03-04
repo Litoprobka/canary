@@ -13,14 +13,15 @@ import Data.HashMap.Strict qualified as HashMap
 import Data.Text qualified as Text
 import Data.Text.Encoding (strictBuilderToText, textToStrictBuilder)
 import DependencyResolution (FixityMap, Op (..), SimpleOutput (..), resolveDependenciesSimplified')
-import Diagnostic (Diagnose, fatal, guardNoErrors, runDiagnose, reportExceptions)
+import Diagnostic (Diagnose, fatal, guardNoErrors, reportExceptions, runDiagnose)
 import Effectful
 import Effectful.Labeled
-import Effectful.State.Static.Local (evalState, execState, modifyM, runState)
+import Effectful.Labeled.Reader (runReader)
+import Effectful.State.Static.Local (evalState, runState)
 import Error.Diagnose (Report (..))
-import Fixity qualified (parse, resolveFixity, run)
 import Eval (ValueEnv, eval, modifyEnv)
 import Eval qualified as V
+import Fixity qualified (parse, resolveFixity, run)
 import LangPrelude
 import Lexer (Parser, keyword, symbol)
 import NameGen (NameGen, freshName)
@@ -76,21 +77,22 @@ mkDefaultEnv = do
     depResOutput@SimpleOutput{fixityMap, operatorPriorities} <-
         resolveDependenciesSimplified' emptyEnv.fixityMap emptyEnv.operatorPriorities $ preDecls <> afterNameRes
     fixityDecls <- Fixity.resolveFixity fixityMap operatorPriorities depResOutput.declarations
-    (types, values) <- runLabeled @"values" (runState emptyEnv.values) $ runLabeled @"types" (execState emptyEnv.types) $ TC.run do
-        for_ fixityDecls \decl -> do
-            inferDeclaration decl
-            withValues $ modifyM $ flip modifyEnv [decl]
+    (values, types) <- runState emptyEnv.types $ TC.run do
+        foldlM addDecl emptyEnv.values fixityDecls
     guardNoErrors
-    let finalEnv =
-            ReplEnv
-                { values
-                , fixityMap
-                , operatorPriorities
-                , scope = newScope
-                , types
-                }
-    pure finalEnv
+    pure $
+        ReplEnv
+            { values
+            , fixityMap
+            , operatorPriorities
+            , scope = newScope
+            , types
+            }
   where
+    addDecl env decl = do
+        envDiff <- runReader @"values" env $ inferDeclaration decl
+        modifyEnv (envDiff env) [decl]
+
     mkPreprelude :: NameGen :> es => Eff es ([Declaration 'NameRes], Scope)
     mkPreprelude = do
         true <- freshName' "True"
@@ -174,14 +176,14 @@ replStep env command = do
     case command of
         Decls decls -> processDecls env decls
         Expr expr -> do
-            ((checkedExpr, _), values) <- runLabeled @"values" (runState env.values) $ processExpr expr
+            (checkedExpr, _) <- runReader @"values" env.values $ processExpr env.types expr
             guardNoErrors
-            print . pretty =<< eval values checkedExpr
-            pure $ Just env{values}
+            print . pretty =<< eval env.values checkedExpr
+            pure $ Just env
         Type_ expr -> do
-            ((_, ty), values) <- runLabeled @"values" (runState env.values) $ processExpr expr
+            (_, ty) <- runReader @"values" env.values $ processExpr env.types expr
             print ty
-            pure $ Just env{values}
+            pure $ Just env
         Load path -> do
             fileContents <- reportExceptions @SomeException (decodeUtf8 <$> readFileBS path)
             localDiagnose env (path, fileContents) do
@@ -198,7 +200,7 @@ replStep env command = do
         Quit -> pure Nothing
         UnknownCommand cmd -> fatal . one $ Err Nothing ("Unknown command:" <+> pretty cmd) [] []
   where
-    processExpr expr = do
+    processExpr types expr = evalState types do
         afterNameRes <- NameResolution.run env.scope $ resolveTerm expr
         afterFixityRes <- Fixity.run env.fixityMap env.operatorPriorities $ Fixity.parse $ fmap cast afterNameRes
         fmap (afterFixityRes,) $ runLabeled @"types" (evalState env.types) $ TC.run $ normalise $ infer afterFixityRes
@@ -215,10 +217,8 @@ processDecls env decls = do
     depResOutput@SimpleOutput{fixityMap, operatorPriorities} <-
         resolveDependenciesSimplified' env.fixityMap env.operatorPriorities afterNameRes
     fixityDecls <- Fixity.resolveFixity fixityMap operatorPriorities depResOutput.declarations
-    (types, values) <- runLabeled @"values" (runState env.values) $ runLabeled @"types" (execState env.types) $ TC.run do
-        for_ fixityDecls \decl -> do
-            inferDeclaration decl
-            withValues $ modifyM $ flip modifyEnv [decl]
+    (values, types) <- runState env.types $ TC.run do
+        foldlM addDecl env.values fixityDecls
     guardNoErrors
     pure . Just $
         ReplEnv
@@ -228,6 +228,13 @@ processDecls env decls = do
             , scope = newScope
             , types
             }
+  where
+    addDecl values decl = do
+        envDiff <- runReader @"values" values $ inferDeclaration decl
+        modifyEnv (envDiff values) [decl]
+{-
+
+-}
 
 -- takes a line of input, or a bunch of lines in :{ }:
 takeInputChunk :: IO Text
