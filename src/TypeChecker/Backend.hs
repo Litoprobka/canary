@@ -18,7 +18,7 @@ import Data.EnumSet qualified as Set
 import Data.Traversable (for)
 import Diagnostic (Diagnose, fatal, internalError)
 import Effectful
-import Effectful.Dispatch.Dynamic (interpret, reinterpret)
+import Effectful.Dispatch.Dynamic (reinterpret)
 import Effectful.Error.Static (runErrorNoCallStack, throwError_)
 import Effectful.Labeled
 import Effectful.State.Static.Local (State, evalState, get, gets, modify, runState)
@@ -34,6 +34,7 @@ import Syntax.Core qualified as C
 import Syntax.Row
 import Syntax.Row qualified as Row
 import Syntax.Term (Erased (..), Quantifier (..), Visibility (..))
+import Effectful.Labeled.Reader (Reader, ask, runReader)
 
 type Pat = Pattern 'Fixity
 type TypeDT = Value
@@ -102,7 +103,6 @@ instance HasLoc MonoLayer where
 
 data InfState = InfState
     { currentScope :: Scope
-    , locals :: EnumMap Name TypeDT -- local variables
     , vars :: EnumMap UniVar (Either Scope Monotype) -- contains either the scope of an unsolved var or a type
     , skolems :: EnumMap Skolem Scope -- skolem scopes
     }
@@ -200,30 +200,10 @@ type InfEffs es =
     , Labeled UniVar NameGen :> es
     , State InfState :> es
     , Diagnose :> es
-    , Labeled "values" (State ValueEnv) :> es
-    , Labeled "types" (State TopLevel) :> es
+    , Labeled "values" (Reader ValueEnv) :> es
+    , Labeled "locals" (Reader (EnumMap Name TypeDT)) :> es
+    , State TopLevel :> es
     )
-
-withTypes :: Labeled "types" (State TopLevel) :> es => Eff (State TopLevel : es) a -> Eff es a
-withTypes = labeled @"types"
-
-withValues :: Labeled "values" (State ValueEnv) :> es => Eff (State ValueEnv : es) a -> Eff es a
-withValues = labeled @"values"
-data Declare :: Effect where
-    UpdateSig :: Name -> TypeDT -> Declare m ()
-
-makeEffect ''Declare
-
--- | run the given action and discard signature updates
-scoped :: InfEffs es => Eff (Declare : es) a -> Eff es a
-scoped action =
-    runDeclare action & \action' -> do
-        locals <- gets @InfState (.locals)
-        action' <* modify (\s -> s{locals})
-
--- | interpret `updateSig` as an update of InfState
-runDeclare :: State InfState :> es => Eff (Declare : es) a -> Eff es a
-runDeclare = interpret \_ (UpdateSig name ty) -> modify \s -> s{locals = Map.insert name ty s.locals}
 
 data Break err :: Effect where
     Break :: err -> Break err m a
@@ -240,23 +220,22 @@ instance Pretty MonoLayer where
     pretty = pretty . unMonoLayer
 
 run
-    :: Eff (Declare : Labeled UniVar NameGen : State InfState : es) a
+    :: Eff (Labeled UniVar NameGen : Labeled "locals" (Reader (EnumMap Name TypeDT)) : State InfState : es) a
     -> Eff es a
 run = fmap fst . runWithFinalEnv
 
 runWithFinalEnv
-    :: Eff (Declare : Labeled UniVar NameGen : State InfState : es) a
+    :: Eff (Labeled UniVar NameGen : Labeled "locals" (Reader (EnumMap Name TypeDT)) : State InfState : es) a
     -> Eff es (a, InfState)
 runWithFinalEnv = do
     runState
         InfState
             { currentScope = Scope 0
-            , locals = Map.empty
             , vars = Map.empty
             , skolems = Map.empty
             }
+        . runReader @"locals" Map.empty
         . runLabeled @UniVar runNameGen
-        . runDeclare
 
 freshUniVar :: InfEffs es => Loc -> Eff es TypeDT
 freshUniVar loc = V.UniVar loc <$> freshUniVar'
@@ -264,7 +243,7 @@ freshUniVar loc = V.UniVar loc <$> freshUniVar'
 freshUniVar' :: (InfEffs es) => Eff es UniVar
 freshUniVar' = do
     -- c'mon effectful
-    var <- UniVar <$> labeled @UniVar (freshId @(NameGen ': _))
+    var <- UniVar <$> labeled @UniVar @NameGen freshId
     scope <- gets @InfState (.currentScope)
     modify \s -> s{vars = Map.insert var (Left scope) s.vars}
     pure var
@@ -362,36 +341,25 @@ skolemScope skolem =
         =<< gets @InfState (.skolems)
 
 -- looks up a type of a binding. Global bindings take precedence over local ones (should they?)
-lookupSig :: (InfEffs es, Declare :> es) => Name -> Eff es TypeDT
+lookupSig :: (InfEffs es) => Name -> Eff es TypeDT
 lookupSig name = do
-    InfState{locals} <- get
-    topLevel <- labeled @"types" @(State TopLevel) get
+    locals <- ask @"locals"
+    topLevel <- get
     case (Map.lookup name topLevel, Map.lookup name locals) of
         (Just ty, _) -> pure ty
         (_, Just ty) -> pure ty
         (Nothing, Nothing) -> do
             -- assuming that type checking is performed after name resolution,
             -- we may just treat unbound names as holes
-            uni <- freshUniVar (getLoc name)
-            uni <$ updateSig name uni
-
-lookupSig' :: InfEffs es => Name -> Eff es TypeDT
-lookupSig' name = do
-    InfState{locals} <- get
-    topLevel <- labeled @"types" @(State TopLevel) get
-    case (Map.lookup name topLevel, Map.lookup name locals) of
-        (Just ty, _) -> pure ty
-        (_, Just ty) -> pure ty
-        (Nothing, Nothing) -> internalError (getLoc name) "unbound name"
-
-declareAll :: Declare :> es => EnumMap Name TypeDT -> Eff es ()
-declareAll = traverse_ (uncurry updateSig) . Map.toList
+            freshUniVar (getLoc name)
+            -- every occurence of an unbound name should get a new UniVar
+            -- (even then, unbound names are supposed to have unique ids)
 
 declareTopLevel :: InfEffs es => EnumMap Name Type' -> Eff es ()
-declareTopLevel types = withTypes $ modify (types <>)
+declareTopLevel types = modify (types <>)
 
 declareTopLevel' :: InfEffs es => Name -> Type' -> Eff es ()
-declareTopLevel' name ty = withTypes $ modify $ Map.insert name ty
+declareTopLevel' name ty = modify $ Map.insert name ty
 
 generalise :: InfEffs es => Eff es TypeDT -> Eff es TypeDT
 generalise = fmap runIdentity . generaliseAll . fmap Identity
@@ -407,7 +375,7 @@ generaliseAll action = do
     generaliseOne scope ty = do
         (ty', vars) <- runState Map.empty $ evalState 'a' $ go scope $ V.quote ty
         let forallVars = hashNub . lefts $ toList vars
-        env <- withValues get
+        env <- ask @"values"
         pure $ V.evalCore env $ foldr (\var body -> C.Q (getLoc ty) Forall Implicit Erased var (type_ $ getLoc ty) body) ty' forallVars
     type_ loc = C.TyCon $ Located loc TypeName
 

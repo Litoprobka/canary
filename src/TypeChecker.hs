@@ -18,7 +18,6 @@ module TypeChecker (
     normalise,
     InfState (..),
     InfEffs,
-    Declare,
     inferDeclaration,
 ) where
 
@@ -30,7 +29,9 @@ import Data.Foldable1 (foldr1)
 import Data.Traversable (for)
 import Diagnostic (internalError)
 import Effectful
-import Effectful.State.Static.Local (get, modify, modifyM)
+import Effectful.Labeled.Reader (local, ask)
+import Effectful.State.Static.Local (modify, gets)
+import Eval (ValueEnv)
 import Eval qualified as V
 import GHC.IsList qualified as IsList
 import LangPrelude hiding (bool, unzip)
@@ -47,32 +48,31 @@ import TypeChecker.Backend
 -- todo: properly handle where clauses
 -- data Locality = Local | NonLocal
 
-inferDeclaration :: InfEffs es => Declaration 'Fixity -> Eff es ()
+inferDeclaration :: InfEffs es => Declaration 'Fixity -> Eff es (ValueEnv -> ValueEnv)
 inferDeclaration (Located loc decl) = case decl of
     D.Signature name sig -> do
         sigV <- typeFromTerm sig
-        declareTopLevel' name sigV
+        pure $ Map.insert name sigV
     D.Type name binders constrs -> do
-        withValues $ modify $ LMap.insert name (V.TyCon name)
-        typeKind <- mkTypeKind binders
-        declareTopLevel' name typeKind
-        for_ (mkConstrSigs name binders constrs) \(con, sig) -> do
-            sigV <- typeFromTerm sig
-            declareTopLevel' con sigV
+        local @"values" (LMap.insert name (V.TyCon name)) do
+            typeKind <- mkTypeKind binders
+            modify $ Map.insert name typeKind
+            for_ (mkConstrSigs name binders constrs) \(con, sig) -> do
+                sigV <- typeFromTerm sig
+                modify $ Map.insert con sigV
+        pure $ LMap.insert name (V.TyCon name)
     D.GADT name mbKind constrs -> do
-        withValues $ modify $ LMap.insert name (V.TyCon name)
-        kind <- maybe (pure type_) typeFromTerm mbKind
-        declareTopLevel' name kind
-        for_ constrs \con -> do
-            conSig <- typeFromTerm con.sig
-            declareTopLevel' con.name conSig
-    D.Value binding locals -> scoped do
-        for_ locals \local -> do
-            -- todo: what to do about type signatures
-            inferDeclaration local
-            withValues $ modifyM $ flip V.modifyEnv [local]
-        relevantSigs <- Map.filterWithKey (\k _ -> k `elem` collectNamesInBinding binding) <$> withTypes get
-        declareTopLevel =<< generaliseAll (checkBinding binding relevantSigs)
+        local @"values" (LMap.insert name (V.TyCon name)) do
+            kind <- maybe (pure type_) typeFromTerm mbKind
+            modify $ Map.insert name kind
+            for_ constrs \con -> do
+                conSig <- typeFromTerm con.sig
+                modify $ Map.insert con.name conSig
+        pure $ LMap.insert name (V.TyCon name)
+    D.Value binding (_:_) -> internalError (getLoc binding) "todo: proper support for where clauses"
+    D.Value binding [] -> do
+        relevantSigs <- gets $ Map.filterWithKey (\k _ -> k `elem` collectNamesInBinding binding)
+        (<>) <$> generaliseAll (checkBinding binding relevantSigs)
   where
     mkTypeKind = \case
         [] -> pure type_
@@ -94,7 +94,7 @@ inferDeclaration (Located loc decl) = case decl of
 typeFromTerm :: InfEffs es => Type 'Fixity -> Eff es Type'
 typeFromTerm term = do
     check term $ V.TyCon (Located (getLoc term) TypeName)
-    env <- withValues get
+    env <- ask @"values"
     V.eval env term
 
 subtype :: InfEffs es => TypeDT -> TypeDT -> Eff es ()
@@ -167,20 +167,21 @@ subtype lhs_ rhs_ = join $ match <$> monoLayer In lhs_ <*> monoLayer Out rhs_
     solveOr solveWith whenSolved uni = lookupUniVar uni >>= either (const $ solveUniVar uni =<< solveWith) whenSolved
 
 check :: InfEffs es => Expr 'Fixity -> TypeDT -> Eff es ()
-check (Located loc e) type_ = scoped $ match e type_
+check (Located loc e) = match e
   where
     match = \cases
         -- the case for E.Name is redundant, since
         -- `infer` just looks up its type anyway
-        (Lambda (L (VarP arg)) body) (V.Q _ Forall Visible Retained closure) -> scoped do
-            updateSig arg closure.ty -- checkPattern arg closure.ty
+        (Lambda (L (VarP arg)) body) (V.Q _ Forall Visible Retained closure) -> 
+          local @"locals" (Map.insert arg closure.ty) do
+            -- checkPattern arg closure.ty
             var <- freshSkolem (toSimpleName arg)
-            withValues $ modify $ LMap.insert arg var
-            check body (closure `V.app` var)
-        (Lambda arg body) (V.Function _ from to) -> scoped do
+            -- should we add the var to the global scope? I'm not sure
+            local @"values" (LMap.insert arg var) $ check body (closure `V.app` var)
+        (Lambda arg body) (V.Function _ from to) -> do
             -- `checkPattern` updates signatures of all mentioned variables
-            declareAll =<< checkPattern arg from
-            check body to
+            newTypes <- checkPattern arg from
+            local @"locals" (newTypes <>) $ check body to
         (Annotation expr annTy) ty -> do
             annTyV <- typeFromTerm annTy
             check expr annTyV
@@ -191,9 +192,9 @@ check (Located loc e) type_ = scoped $ match e type_
             check false ty
         (Case arg matches) ty -> do
             argTy <- infer arg
-            for_ matches \(pat, body) -> scoped do
-                declareAll =<< checkPattern pat argTy
-                check body ty
+            for_ matches \(pat, body) -> do
+                typeMap <- checkPattern pat argTy
+                local @"locals" (typeMap <>) $ check body ty
         (Match matches) ty -> do
             n <- whenNothing (getArgCount matches) $ typeError $ ArgCountMismatch loc
             (patTypes, bodyTy) <- unwrapFn n ty
@@ -257,7 +258,7 @@ checkBinding binding types = case binding of
     ValueB pat _body -> do
         internalError (getLoc pat) "todo: type check destructuring bindings with partial signatures"
 
-checkPattern :: (InfEffs es) => Pat -> TypeDT -> Eff es (EnumMap Name TypeDT)
+checkPattern :: InfEffs es => Pat -> TypeDT -> Eff es (EnumMap Name TypeDT)
 checkPattern (Located ploc outerPat) ty = case outerPat of
     -- we need this case, since inferPattern only infers monotypes for var patterns
     VarP name -> pure $ Map.singleton name ty
@@ -277,7 +278,7 @@ checkPattern (Located ploc outerPat) ty = case outerPat of
         pure typeMap
 
 infer :: InfEffs es => Expr 'Fixity -> Eff es TypeDT
-infer (Located loc e) = scoped case e of
+infer (Located loc e) = case e of
     Name name -> lookupSig name
     E.Variant name -> do
         var <- freshUniVar loc
@@ -292,14 +293,13 @@ infer (Located loc e) = scoped case e of
         inferTyApp expr ty tyArg
     Lambda arg body -> do
         (typeMap, argTy) <- inferPattern arg
-        declareAll typeMap
-        V.Function loc argTy <$> infer body
+        local @"locals" (typeMap <>) $ V.Function loc argTy <$> infer body
     -- chances are, I'd want to add some specific error messages or context for wildcard lambdas
     -- for now, they are just desugared to normal lambdas before inference
     WildcardLambda args body -> infer $ foldr (\var -> Located loc . Lambda (Located (getLoc var) $ VarP var)) body args
     Let binding body -> do
-        declareAll =<< inferBinding binding
-        infer body
+        typeMap <- inferBinding binding
+        local @"locals" (typeMap <>) $ infer body
     LetRec _bindings _body -> internalError loc "todo: typecheck of recursive bindings is not supported yet"
     {- do
     declareAll =<< (inferDecls . map (\b -> Located loc $ D.Value b []) . NE.toList) bindings
@@ -315,9 +315,9 @@ infer (Located loc e) = scoped case e of
     Case arg matches -> do
         argTy <- infer arg
         result <- freshUniVar loc
-        for_ matches \(pat, body) -> scoped do
-            declareAll =<< checkPattern pat argTy
-            check body result
+        for_ matches \(pat, body) -> do
+            typeMap <- checkPattern pat argTy
+            local @"locals" (<> typeMap) $ check body result
         pure result
     Match [] -> typeError $ EmptyMatch loc
     Match matches@(_ : _) -> do
@@ -362,8 +362,7 @@ infer (Located loc e) = scoped case e of
         pure type_ -- alpha-conversion?
     Q _ _ _ binder body -> do
         tyV <- maybe (freshUniVar loc) typeFromTerm binder.kind
-        updateSig binder.var tyV
-        check body type_
+        local @"locals" (Map.insert binder.var tyV) $ check body type_
         pure type_
     VariantT row -> do
         traverse_ (`check` type_) row
@@ -381,7 +380,7 @@ inferApp appLoc fTy arg = do
         MLUniVar loc uni -> do
             from <- infer arg
             to <- freshUniVar loc
-            env <- withValues get
+            env <- ask @"values"
             var <- freshName $ Located loc $ Name' "x"
             let closure = V.Closure{var, env, ty = from, body = V.quote to}
             to <$ subtype (V.UniVar loc uni) (V.Q loc Forall Visible Retained closure)
@@ -389,7 +388,7 @@ inferApp appLoc fTy arg = do
             to <$ check arg from
         -- todo: special case for erased args
         MLQ _ Forall _e closure -> do
-            env <- withValues get
+            env <- ask @"values"
             argV <- V.eval env arg
             V.app closure argV <$ check arg closure.ty
         _ -> typeError $ NotAFunction appLoc fTy
@@ -398,7 +397,7 @@ inferTyApp :: InfEffs es => Expr 'Fixity -> TypeDT -> Type 'Fixity -> Eff es Typ
 inferTyApp expr ty tyArg = case ty of
     V.Q _ Forall Implicit _e closure -> do
         Subst{var, result} <- substitute' In closure
-        env <- withValues get
+        env <- ask @"values"
         tyArgV <- V.eval env tyArg
         subtype var tyArgV
         pure result
@@ -412,36 +411,32 @@ inferTyApp expr ty tyArg = case ty of
         Exists -> Out
 
 -- infers the type of a function / variables in a pattern
--- does not implicitly declare anything
 inferBinding :: InfEffs es => Binding 'Fixity -> Eff es (EnumMap Name TypeDT)
 inferBinding = \case
-        ValueB pat body -> do
-            (typeMap, patTy) <- inferPattern pat
-            -- we need the pattern itself to be in scope in case the binding is recursive
-            bodyTy <- scoped do
-                declareAll typeMap 
-                infer body
-            subtype patTy bodyTy
-            pure typeMap
-        binding@(FunctionB name args body) -> scoped do
-            -- note: we can only infer monotypes for recursive functions
-            -- while checking the body, the function itself is assigned a univar
-            -- in the end, we check that the inferred type is compatible with the one in the univar (inferred from recursive calls)
-            uni <- freshUniVar'
-            updateSig name $ V.UniVar (getLoc binding) uni
-            (typeMap, argTypes) <- traverseFold inferPattern args
-            bodyTy <- scoped do
-                declareAll typeMap
-                infer body
-            -- todo: infer dependent functions
-            let ty = foldr (V.Function $ getLoc binding) bodyTy argTypes
-            -- since we can still infer higher-rank types for non-recursive functions,
-            -- we only need the subtype check when the univar is solved, i.e. when the
-            -- function contains any recursive calls at all
-            withUniVar uni (subtype ty . unMono)
-            pure $ Map.singleton name ty
+    ValueB pat body -> do
+        (typeMap, patTy) <- inferPattern pat
+        -- we need the pattern itself to be in scope in case the binding is recursive
+        bodyTy <- local @"locals" (typeMap <>) $ infer body
+        subtype patTy bodyTy
+        pure typeMap
+    binding@(FunctionB name args body) -> do
+        -- note: we can only infer monotypes for recursive functions
+        -- while checking the body, the function itself is assigned a univar
+        -- in the end, we check that the inferred type is compatible with the one in the univar (inferred from recursive calls)
+        uni <- freshUniVar'
+        local @"locals" (Map.insert name $ V.UniVar (getLoc binding) uni) do
+          (typeMap, argTypes) <- traverseFold inferPattern args
+          bodyTy <- local @"locals" (typeMap <>) $ infer body
+            
+          -- todo: infer dependent functions
+          let ty = foldr (V.Function $ getLoc binding) bodyTy argTypes
+          -- since we can still infer higher-rank types for non-recursive functions,
+          -- we only need the subtype check when the univar is solved, i.e. when the
+          -- function contains any recursive calls at all
+          withUniVar uni (subtype ty . unMono)
+          pure $ Map.singleton name ty
 
-inferPattern :: (InfEffs es) => Pat -> Eff es (EnumMap Name TypeDT, TypeDT)
+inferPattern :: InfEffs es => Pat -> Eff es (EnumMap Name TypeDT, TypeDT)
 inferPattern (Located loc p) = case p of
     VarP name -> do
         uni <- freshUniVar $ getLoc name
@@ -481,7 +476,7 @@ inferPattern (Located loc p) = case p of
             )
   where
     -- conArgTypes and the zipM may be unified into a single function
-    conArgTypes name = lookupSig' name >>= go
+    conArgTypes name = lookupSig name >>= go
       where
         go =
             monoLayer In >=> \case
@@ -516,7 +511,7 @@ normaliseAll = generaliseAll >=> traverse (eval' <=< go . V.quote)
   where
     eval' :: InfEffs es => CoreTerm -> Eff es Type'
     eval' ty = do
-        env <- withValues get
+        env <- ask @"values"
         pure $ V.evalCore env ty
 
     go :: InfEffs es => CoreTerm -> Eff es CoreTerm

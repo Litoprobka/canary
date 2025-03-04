@@ -34,7 +34,6 @@ import Syntax.Declaration qualified as D
 import Syntax.Term
 import Text.Megaparsec (takeRest, try)
 import TypeChecker (infer, inferDeclaration, normalise)
-import TypeChecker.Backend (withValues)
 import TypeChecker.Backend qualified as TC
 
 data ReplCommand
