@@ -14,11 +14,13 @@ module TypeChecker.Backend where
 
 import Common
 import Data.EnumMap.Strict qualified as Map
+import Data.EnumSet qualified as Set
 import Data.Traversable (for)
 import Diagnostic (Diagnose, fatal, internalError)
 import Effectful
 import Effectful.Dispatch.Dynamic (interpret, reinterpret)
 import Effectful.Error.Static (runErrorNoCallStack, throwError_)
+import Effectful.Labeled
 import Effectful.State.Static.Local (State, evalState, get, gets, modify, runState)
 import Effectful.TH
 import Error.Diagnose (Report (..))
@@ -32,8 +34,6 @@ import Syntax.Core qualified as C
 import Syntax.Row
 import Syntax.Row qualified as Row
 import Syntax.Term (Erased (..), Quantifier (..), Visibility (..))
-import Effectful.Labeled
-import qualified Data.EnumSet as Set
 
 type Pat = Pattern 'Fixity
 type TypeDT = Value
@@ -58,7 +58,6 @@ data Monotype
       MUniVar Loc UniVar
     | MSkolem Skolem
 
--- invariant: given a monotype arg, `body` evaluates to a monotype
 data MonoClosure ty = MonoClosure {var :: Name, variance :: Variance, ty :: ty, env :: EnumMap Name Value, body :: CoreTerm}
 data Variance = In | Out | Inv
 
@@ -102,8 +101,7 @@ instance HasLoc MonoLayer where
         MLSkolem skolem -> getLoc skolem
 
 data InfState = InfState
-    { nextUniVarId :: Int
-    , currentScope :: Scope
+    { currentScope :: Scope
     , locals :: EnumMap Name TypeDT -- local variables
     , vars :: EnumMap UniVar (Either Scope Monotype) -- contains either the scope of an unsolved var or a type
     , skolems :: EnumMap Skolem Scope -- skolem scopes
@@ -197,7 +195,14 @@ typeError =
 -- the types of top-level bindings should not contain metavars
 -- this is not enforced at type level, though
 type TopLevel = EnumMap Name Type'
-type InfEffs es = (NameGen :> es, State InfState :> es, Diagnose :> es, Labeled "values" (State ValueEnv) :> es, Labeled "types" (State TopLevel) :> es)
+type InfEffs es =
+    ( NameGen :> es
+    , Labeled UniVar NameGen :> es
+    , State InfState :> es
+    , Diagnose :> es
+    , Labeled "values" (State ValueEnv) :> es
+    , Labeled "types" (State TopLevel) :> es
+    )
 
 withTypes :: Labeled "types" (State TopLevel) :> es => Eff (State TopLevel : es) a -> Eff es a
 withTypes = labeled @"types"
@@ -235,37 +240,38 @@ instance Pretty MonoLayer where
     pretty = pretty . unMonoLayer
 
 run
-    :: Eff (Declare : State InfState : es) a
+    :: Eff (Declare : Labeled UniVar NameGen : State InfState : es) a
     -> Eff es a
 run = fmap fst . runWithFinalEnv
 
 runWithFinalEnv
-    :: Eff (Declare : State InfState : es) a
+    :: Eff (Declare : Labeled UniVar NameGen : State InfState : es) a
     -> Eff es (a, InfState)
 runWithFinalEnv = do
     runState
         InfState
-            { nextUniVarId = 0
-            , currentScope = Scope 0
+            { currentScope = Scope 0
             , locals = Map.empty
             , vars = Map.empty
             , skolems = Map.empty
             }
+        . runLabeled @UniVar runNameGen
         . runDeclare
 
 freshUniVar :: InfEffs es => Loc -> Eff es TypeDT
 freshUniVar loc = V.UniVar loc <$> freshUniVar'
 
-freshUniVar' :: InfEffs es => Eff es UniVar
+freshUniVar' :: (InfEffs es) => Eff es UniVar
 freshUniVar' = do
-    -- and this is where I wish I had lens
-    var <- UniVar <$> gets @InfState (.nextUniVarId) <* modify @InfState \s -> s{nextUniVarId = succ s.nextUniVarId}
+    -- c'mon effectful
+    var <- UniVar <$> labeled @UniVar (freshId @(NameGen ': _))
     scope <- gets @InfState (.currentScope)
     modify \s -> s{vars = Map.insert var (Left scope) s.vars}
     pure var
 
 freshSkolem :: InfEffs es => SimpleName -> Eff es TypeDT
 freshSkolem name = do
+    -- skolems are generally derived from type variables, so they have names
     skolem <- Skolem <$> mkName name
     scope <- gets @InfState (.currentScope)
     modify \s -> s{skolems = Map.insert skolem scope s.skolems}
@@ -297,7 +303,7 @@ alterUniVar override uni ty = do
         lookupUniVar uni >>= \case
             Right _
                 | not override ->
-                    internalError Blank $ "Internal error (probably a bug): attempted to solve a solved univar " <> pretty uni
+                    internalError Blank $ "attempted to solve a solved univar " <> pretty uni
             Right _ -> pure Nothing
             Left scope -> pure $ Just scope
     cycle <- cycleCheck mbScope (Direct, Set.singleton uni) ty
