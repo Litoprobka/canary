@@ -125,10 +125,10 @@ instance Pretty (NameAt p) => Pretty (Binding p) where
 instance Pretty (NameAt p) => Pretty (Expr_ p) where
     pretty = go (0 :: Int) . Located Blank
       where
-        go n (Located _ e) = case e of
+        go n (L e) = case e of
             Lambda arg body -> parensWhen 1 $ "λ" <> pretty arg <+> compressLambda body
-            WildcardLambda _ l@(Located _ List{}) -> pretty l
-            WildcardLambda _ r@(Located _ Record{}) -> pretty r
+            WildcardLambda _ l@(L List{}) -> pretty l
+            WildcardLambda _ r@(L Record{}) -> pretty r
             WildcardLambda _ body -> "(" <> pretty body <> ")"
             App lhs rhs -> parensWhen 3 $ go 2 lhs <+> go 3 rhs
             TypeApp f ty -> parensWhen 3 $ go 2 f <+> "@" <> go 3 ty
@@ -171,8 +171,9 @@ instance Pretty (NameAt p) => Pretty (Expr_ p) where
                 other -> "->" <+> pretty other
 
             compressQ q vis er (L term) = case term of
-                Q q' vis' er' binder body | q == q' && vis == vis' && er == er' ->
-                    parens (prettyBinder binder) <+> compressQ q vis er body
+                Q q' vis' er' binder body
+                    | q == q' && vis == vis' && er == er' ->
+                        parens (prettyBinder binder) <+> compressQ q vis er body
                 other -> arrOrDot q vis <+> pretty other
 
             arrOrDot Forall Visible = "->"
@@ -318,7 +319,7 @@ instance (NameAt p ~ NameAt q, Cast Term_ p q) => Cast Pattern_ p q where
 collectReferencedNames :: Type p -> [NameAt p]
 collectReferencedNames = go
   where
-    go (Located _ inner) = case inner of
+    go (L inner) = case inner of
         Name name -> [name]
         ImplicitVar var -> [var]
         Parens expr -> go expr

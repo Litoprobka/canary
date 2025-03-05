@@ -6,3 +6,8 @@ type Vec : Peano -> Type -> Type where
 
 head : forall (n : Peano) a. Vec (S n) a -> a
 head (VCons x _) = x
+
+replicate : forall a. foreach (n : Peano) -> a -> Vec n a
+replicate n x = case n of
+    Z -> VNil
+    S n' -> VCons x (replicate n' x)

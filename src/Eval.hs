@@ -34,7 +34,10 @@ import Syntax.Term (Erased, Quantifier, Visibility (..))
 import Syntax.Term qualified as T
 import Prelude qualified (Show (..))
 
-type ValueEnv = EnumMap Name Value
+data ValueEnv = ValueEnv
+    { values :: EnumMap Name Value
+    , skolems :: EnumMap Skolem Value
+    }
 type Type' = Value
 
 data Value
@@ -99,7 +102,7 @@ instance HasLoc Value where
 evalCore :: ValueEnv -> CoreTerm -> Value
 evalCore !env = \case
     -- note that env is a lazy hashmap, so we only force the outer structure here
-    C.Name name -> fromMaybe (error . show $ "whoopsie, out of scope" <+> pretty name) $ LMap.lookup name env
+    C.Name name -> fromMaybe (error . show $ "whoopsie, out of scope" <+> pretty name) $ LMap.lookup name env.values
     C.TyCon name -> TyCon name
     C.Con name args -> Con name $ map (evalCore env) args
     C.Lambda name body -> Lambda $ Closure{var = name, ty = (), env, body}
@@ -114,7 +117,9 @@ evalCore !env = \case
                 . (<|> mbStuckCase val matches)
                 . asum
                 $ matches <&> \(pat, body) -> evalCore <$> matchCore env pat val <*> pure body
-    C.Let name expr body -> evalCore (LMap.insert name (evalCore env expr) env) body
+    C.Let name expr body ->
+        let newEnv = env{values = LMap.insert name (evalCore env expr) env.values}
+         in evalCore newEnv body
     C.Literal lit -> PrimValue lit
     C.Record row -> Record $ evalCore env <$> row
     C.Variant _name -> error "todo: seems like evalCore needs namegen" -- Lambda (Located Blank $ Name' "x") $ C.Variant name `C.App`
@@ -133,17 +138,17 @@ evalCore !env = \case
     mbStuckCase _ _ = Nothing
 
     mkStuckBranches :: [(CorePattern, CoreTerm)] -> [(CorePattern, Value)]
-    mkStuckBranches = map \(pat, body) -> (pat, evalCore (stuckBranchEnv pat) body) 
+    mkStuckBranches = map \(pat, body) -> (pat, evalCore (stuckBranchEnv pat) body)
 
     stuckBranchEnv :: CorePattern -> ValueEnv
     stuckBranchEnv = \case
-        (C.VarP name) -> LMap.insert name (Var name) env
-        (C.ConstructorP _ argNames) -> LMap.fromList (argNames <&> \arg -> (arg, Var arg)) <> env
-        (C.VariantP _ argName) -> LMap.insert argName (Var argName) env
+        (C.VarP name) -> env{values = LMap.insert name (Var name) env.values}
+        (C.ConstructorP _ argNames) -> env{values = LMap.fromList (argNames <&> \arg -> (arg, Var arg)) <> env.values}
+        (C.VariantP _ argName) -> env{values = LMap.insert argName (Var argName) env.values}
         _ -> env
 
 app :: Closure a -> Value -> Value
-app Closure{var, env, body} arg = evalCore (LMap.insert var arg env) body
+app Closure{var, env, body} arg = evalCore (env{values = LMap.insert var arg env.values}) body
 
 -- do we need a fresh name here?
 closureBody :: Closure a -> Value
@@ -156,13 +161,13 @@ closureBody' closure = do
 
 matchCore :: ValueEnv -> CorePattern -> Value -> Maybe ValueEnv
 matchCore env = \cases
-    (C.VarP name) val -> Just $ LMap.insert name val env
+    (C.VarP name) val -> Just $ env{values = LMap.insert name val env.values}
     C.WildcardP{} _ -> Just env
     (C.ConstructorP pname argNames) (Con name args)
         | pname == name && length argNames == length args ->
-            Just $ foldr (uncurry LMap.insert) env (zip argNames args)
+            Just $ env{values = foldr (uncurry LMap.insert) env.values (zip argNames args)}
     (C.VariantP pname argName) (Variant name val)
-        | pname == name -> Just $ LMap.insert argName val env
+        | pname == name -> Just $ env{values = LMap.insert argName val env.values}
     (C.LiteralP lit) (PrimValue (L val)) -> env <$ guard (lit == val)
     _ _ -> Nothing
 
@@ -238,7 +243,7 @@ eval :: (Diagnose :> es, NameGen :> es) => ValueEnv -> Term 'Fixity -> Eff es Va
 eval env term = evalCore env <$> desugar term
 
 evalAll :: (Diagnose :> es, NameGen :> es) => [Declaration 'Fixity] -> Eff es ValueEnv
-evalAll = modifyEnv LMap.empty
+evalAll = modifyEnv ValueEnv{values = LMap.empty, skolems = LMap.empty}
 
 modifyEnv
     :: forall es
@@ -248,7 +253,7 @@ modifyEnv
     -> Eff es ValueEnv
 modifyEnv env decls = do
     desugared <- (traverse . traverse) desugar . LMap.fromList =<< foldMapM collectBindings decls
-    let newEnv = fmap (either id (evalCore newEnv)) desugared <> env
+    let newEnv = env{values = fmap (either id (evalCore newEnv)) desugared <> env.values}
     pure newEnv
   where
     collectBindings :: Declaration 'Fixity -> Eff es [(Name, Either Value (Term 'Fixity))]
@@ -280,7 +285,7 @@ mkConLambda n con env = do
     pure $
         foldr
             ( \var bodyFromEnv env' ->
-                let newEnv = LMap.insert var (Var var) env'
+                let newEnv = env'{values = LMap.insert var (Var var) env'.values}
                  in Lambda $ Closure{var, ty = (), env = newEnv, body = quote $ bodyFromEnv newEnv}
             )
             (const $ Con con (map Var names))

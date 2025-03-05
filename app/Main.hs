@@ -6,6 +6,7 @@ import Common
 import Data.EnumMap.Strict qualified as Map
 import Data.Traversable (for)
 import Diagnostic
+import Eval (ValueEnv (..))
 import NameGen (runNameGen)
 import NameResolution
 import Parser (parseModule)
@@ -33,7 +34,7 @@ runFile debug fileName input = do
         mbNewEnv <- Repl.replStep env $ Repl.Decls decls
         for mbNewEnv \newEnv -> do
             nameOfMain <- NameResolution.run newEnv.scope $ resolve $ Located Blank $ Name' "main"
-            pure case Map.lookup nameOfMain newEnv.values of
+            pure case Map.lookup nameOfMain newEnv.values.values of
                 Nothing -> putTextLn "there is no main function"
                 Just mainExpr -> putDoc $ (<> line) $ pretty mainExpr
     sequence_ eval'

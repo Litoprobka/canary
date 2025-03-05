@@ -94,8 +94,8 @@ scoped action' =
 runDeclare :: NameResCtx es => Eff (Declare : es) a -> Eff es a
 runDeclare = interpret \_ -> \case
     -- each wildcard gets a unique id
-    Declare w@(Located _ Wildcard'{}) -> freshName w
-    Declare name@(Located _ name_) -> do
+    Declare w@(L Wildcard'{}) -> freshName w
+    Declare name@(L name_) -> do
         scope <- get @Scope
         disambiguatedName <- freshName name
         case Map.lookup name_ scope.table of
@@ -114,7 +114,7 @@ resolve :: NameResCtx es => SimpleName -> Eff es Name
 resolve name@(Located loc name_) = do
     scope <- get @Scope
     case scope.table & Map.lookup name_ of
-        Just (Located _ id') -> pure $ Located loc id'
+        Just (L id') -> pure $ Located loc id'
         Nothing -> do
             error (UnboundVar name)
             -- this gives a unique id to every occurance of the same unbound name
@@ -138,7 +138,7 @@ resolveNames decls = do
     mkGlobalScope :: (NameResCtx es, Declare :> es) => Eff es ()
     mkGlobalScope = collectNames decls
 
-    isValueDecl (Located _ D.Value{}) = True
+    isValueDecl (L D.Value{}) = True
     isValueDecl _ = False
 
 {- | adds declarations to the current scope

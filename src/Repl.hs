@@ -19,7 +19,7 @@ import Effectful.Labeled
 import Effectful.Labeled.Reader (runReader)
 import Effectful.State.Static.Local (evalState, runState)
 import Error.Diagnose (Report (..))
-import Eval (ValueEnv, eval, modifyEnv)
+import Eval (ValueEnv (..), eval, modifyEnv)
 import Eval qualified as V
 import Fixity qualified (parse, resolveFixity, run)
 import LangPrelude
@@ -63,7 +63,7 @@ type ReplCtx es =
 emptyEnv :: ReplEnv
 emptyEnv = ReplEnv{..}
   where
-    values = LMap.singleton (noLoc TypeName) (V.TyCon (noLoc TypeName))
+    values = ValueEnv{values = LMap.singleton (noLoc TypeName) (V.TyCon (noLoc TypeName)), skolems = Map.empty}
     fixityMap = Map.singleton AppOp InfixL
     types = Map.singleton (noLoc TypeName) (V.TyCon (noLoc TypeName))
     scope = Scope $ HashMap.singleton (Name' "Type") (noLoc TypeName)
@@ -194,7 +194,7 @@ replStep env command = do
             -- perhaps I should write a custom wrapper for IntMap?..
             for_ (Map.toList env.types) \(name, ty) ->
                 print $ pretty name <+> ":" <+> pretty ty
-            for_ (Map.toList env.values) \(name, value) ->
+            for_ (Map.toList env.values.values) \(name, value) ->
                 print $ pretty name <+> "=" <+> pretty value
             pure $ Just env
         Quit -> pure Nothing
@@ -232,6 +232,7 @@ processDecls env decls = do
     addDecl values decl = do
         envDiff <- runReader @"values" values $ inferDeclaration decl
         modifyEnv (envDiff values) [decl]
+
 {-
 
 -}

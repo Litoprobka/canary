@@ -21,6 +21,7 @@ import Effectful
 import Effectful.Dispatch.Dynamic (reinterpret)
 import Effectful.Error.Static (runErrorNoCallStack, throwError_)
 import Effectful.Labeled
+import Effectful.Labeled.Reader (Reader, ask, runReader)
 import Effectful.State.Static.Local (State, evalState, get, gets, modify, runState)
 import Effectful.TH
 import Error.Diagnose (Report (..))
@@ -34,7 +35,6 @@ import Syntax.Core qualified as C
 import Syntax.Row
 import Syntax.Row qualified as Row
 import Syntax.Term (Erased (..), Quantifier (..), Visibility (..))
-import Effectful.Labeled.Reader (Reader, ask, runReader)
 
 type Pat = Pattern 'Fixity
 type TypeDT = Value
@@ -59,7 +59,7 @@ data Monotype
       MUniVar Loc UniVar
     | MSkolem Skolem
 
-data MonoClosure ty = MonoClosure {var :: Name, variance :: Variance, ty :: ty, env :: EnumMap Name Value, body :: CoreTerm}
+data MonoClosure ty = MonoClosure {var :: Name, variance :: Variance, ty :: ty, env :: ValueEnv, body :: CoreTerm}
 data Variance = In | Out | Inv
 
 -- а type whose outer constructor is monomorphic
@@ -240,7 +240,7 @@ runWithFinalEnv = do
 freshUniVar :: InfEffs es => Loc -> Eff es TypeDT
 freshUniVar loc = V.UniVar loc <$> freshUniVar'
 
-freshUniVar' :: (InfEffs es) => Eff es UniVar
+freshUniVar' :: InfEffs es => Eff es UniVar
 freshUniVar' = do
     -- c'mon effectful
     var <- UniVar <$> labeled @UniVar @NameGen freshId
@@ -341,7 +341,7 @@ skolemScope skolem =
         =<< gets @InfState (.skolems)
 
 -- looks up a type of a binding. Global bindings take precedence over local ones (should they?)
-lookupSig :: (InfEffs es) => Name -> Eff es TypeDT
+lookupSig :: InfEffs es => Name -> Eff es TypeDT
 lookupSig name = do
     locals <- ask @"locals"
     topLevel <- get
@@ -352,8 +352,9 @@ lookupSig name = do
             -- assuming that type checking is performed after name resolution,
             -- we may just treat unbound names as holes
             freshUniVar (getLoc name)
-            -- every occurence of an unbound name should get a new UniVar
-            -- (even then, unbound names are supposed to have unique ids)
+
+-- every occurence of an unbound name should get a new UniVar
+-- (even then, unbound names are supposed to have unique ids)
 
 declareTopLevel :: InfEffs es => EnumMap Name Type' -> Eff es ()
 declareTopLevel types = modify (types <>)
@@ -466,7 +467,7 @@ mono variance = \case
     go = mono variance
 
 appMono :: InfEffs es => MonoClosure a -> Value -> Eff es Monotype
-appMono MonoClosure{var, variance, env, body} arg = mono variance $ V.evalCore (Map.insert var arg env) body
+appMono MonoClosure{var, variance, env, body} arg = mono variance $ V.evalCore (env{V.values = Map.insert var arg env.values}) body
 
 flipVariance :: Variance -> Variance
 flipVariance = \case
