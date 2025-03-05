@@ -13,6 +13,7 @@
 module TypeChecker.Backend where
 
 import Common
+import Data.EnumMap.Lazy qualified as LMap
 import Data.EnumMap.Strict qualified as Map
 import Data.EnumSet qualified as Set
 import Data.Traversable (for)
@@ -21,7 +22,6 @@ import Effectful
 import Effectful.Dispatch.Dynamic (reinterpret)
 import Effectful.Error.Static (runErrorNoCallStack, throwError_)
 import Effectful.Labeled
-import Effectful.Labeled.Reader (Reader, ask, runReader)
 import Effectful.State.Static.Local (State, evalState, get, gets, modify, runState)
 import Effectful.TH
 import Error.Diagnose (Report (..))
@@ -102,9 +102,9 @@ instance HasLoc MonoLayer where
         MLSkolem skolem -> getLoc skolem
 
 data InfState = InfState
-    { currentScope :: Scope
-    , vars :: EnumMap UniVar (Either Scope Monotype) -- contains either the scope of an unsolved var or a type
-    , skolems :: EnumMap Skolem Scope -- skolem scopes
+    { scope :: Scope
+    , values :: ValueEnv
+    , locals :: EnumMap Name TypeDT
     }
 
 data TypeError
@@ -195,14 +195,14 @@ typeError =
 -- the types of top-level bindings should not contain metavars
 -- this is not enforced at type level, though
 type TopLevel = EnumMap Name Type'
+type UniVars = EnumMap UniVar (Either Scope Monotype)
 type InfEffs es =
     ( NameGen :> es
     , Labeled UniVar NameGen :> es
-    , State InfState :> es
-    , Diagnose :> es
-    , Labeled "values" (Reader ValueEnv) :> es
-    , Labeled "locals" (Reader (EnumMap Name TypeDT)) :> es
+    , State UniVars :> es
+    , State (EnumMap Skolem Scope) :> es
     , State TopLevel :> es
+    , Diagnose :> es
     )
 
 data Break err :: Effect where
@@ -220,47 +220,41 @@ instance Pretty MonoLayer where
     pretty = pretty . unMonoLayer
 
 run
-    :: Eff (Labeled UniVar NameGen : Labeled "locals" (Reader (EnumMap Name TypeDT)) : State InfState : es) a
+    :: ValueEnv
+    -> (InfState -> Eff (Labeled UniVar NameGen : es) a)
     -> Eff es a
-run = fmap fst . runWithFinalEnv
-
-runWithFinalEnv
-    :: Eff (Labeled UniVar NameGen : Labeled "locals" (Reader (EnumMap Name TypeDT)) : State InfState : es) a
-    -> Eff es (a, InfState)
-runWithFinalEnv = do
-    runState
+run values action =
+    runLabeled @UniVar runNameGen $ action initState
+  where
+    initState =
         InfState
-            { currentScope = Scope 0
-            , vars = Map.empty
-            , skolems = Map.empty
+            { scope = Scope 0
+            , values
+            , locals = Map.empty
             }
-        . runReader @"locals" Map.empty
-        . runLabeled @UniVar runNameGen
 
-freshUniVar :: InfEffs es => Loc -> Eff es TypeDT
-freshUniVar loc = V.UniVar loc <$> freshUniVar'
+freshUniVar :: InfEffs es => InfState -> Loc -> Eff es TypeDT
+freshUniVar env loc = V.UniVar loc <$> freshUniVar' env
 
-freshUniVar' :: InfEffs es => Eff es UniVar
-freshUniVar' = do
+freshUniVar' :: InfEffs es => InfState -> Eff es UniVar
+freshUniVar' env = do
     -- c'mon effectful
     var <- UniVar <$> labeled @UniVar @NameGen freshId
-    scope <- gets @InfState (.currentScope)
-    modify \s -> s{vars = Map.insert var (Left scope) s.vars}
+    modify @UniVars $ Map.insert var (Left env.scope)
     pure var
 
-freshSkolem :: InfEffs es => SimpleName -> Eff es TypeDT
-freshSkolem name = do
+freshSkolem :: InfEffs es => InfState -> SimpleName -> Eff es TypeDT
+freshSkolem env name = do
     -- skolems are generally derived from type variables, so they have names
     skolem <- Skolem <$> mkName name
-    scope <- gets @InfState (.currentScope)
-    modify \s -> s{skolems = Map.insert skolem scope s.skolems}
+    modify $ Map.insert skolem env.scope
     pure $ V.Skolem skolem
   where
     mkName (Located loc (Name' txtName)) = Located loc <$> freshName_ (Name' txtName)
     mkName _ = freshName (Located Blank $ Name' "what") -- why?
 
 lookupUniVar :: InfEffs es => UniVar -> Eff es (Either Scope Monotype)
-lookupUniVar uni = maybe (internalError Blank $ "missing univar" <+> pretty uni) pure . Map.lookup uni =<< gets @InfState (.vars)
+lookupUniVar uni = maybe (internalError Blank $ "missing univar" <+> pretty uni) pure . Map.lookup uni =<< get @UniVars
 
 withUniVar :: InfEffs es => UniVar -> (Monotype -> Eff es a) -> Eff es ()
 withUniVar uni f =
@@ -268,15 +262,15 @@ withUniVar uni f =
         Left _ -> pass
         Right ty -> void $ f ty
 
-solveUniVar, overrideUniVar :: InfEffs es => UniVar -> Monotype -> Eff es ()
-solveUniVar = alterUniVar False
-overrideUniVar = alterUniVar True
+solveUniVar, overrideUniVar :: InfEffs es => InfState -> UniVar -> Monotype -> Eff es ()
+solveUniVar env = alterUniVar env False
+overrideUniVar env = alterUniVar env True
 
 data SelfRef = Direct | Indirect
 data Cycle = DirectCycle | NoCycle deriving (Eq)
 
-alterUniVar :: forall es. InfEffs es => Bool -> UniVar -> Monotype -> Eff es ()
-alterUniVar override uni ty = do
+alterUniVar :: forall es. InfEffs es => InfState -> Bool -> UniVar -> Monotype -> Eff es ()
+alterUniVar env override uni ty = do
     -- here comes the magic. If the new type contains other univars, we change their scope
     mbScope <-
         lookupUniVar uni >>= \case
@@ -286,7 +280,7 @@ alterUniVar override uni ty = do
             Right _ -> pure Nothing
             Left scope -> pure $ Just scope
     cycle <- cycleCheck mbScope (Direct, Set.singleton uni) ty
-    when (cycle == NoCycle) $ modify \s -> s{vars = Map.insert uni (Right ty) s.vars}
+    when (cycle == NoCycle) $ modify @UniVars $ Map.insert uni (Right ty)
   where
     -- errors out on indirect cycles (i.e. a ~ Maybe a)
     -- returns False on direct univar cycles (i.e. a ~ b, b ~ c, c ~ a)
@@ -305,7 +299,7 @@ alterUniVar override uni ty = do
                     Right ty' -> go (selfRefType, Set.insert uni2 acc) ty'
                     Left scope' -> do
                         case mbScope of
-                            Just scope | scope' > scope -> modify \s -> s{vars = Map.insert uni2 (Left scope') s.vars}
+                            Just scope | scope' > scope -> modify @UniVars $ Map.insert uni2 (Left scope')
                             _ -> pass
                         pure NoCycle
             MFn _ from to -> go (Indirect, acc) from >> go (Indirect, acc) to
@@ -324,9 +318,8 @@ alterUniVar override uni ty = do
 
         cycleCheckClosure :: EnumSet UniVar -> MonoClosure a -> Eff es Cycle
         cycleCheckClosure acc closure = do
-            skolem <- freshSkolem $ toSimpleName closure.var
-            go (Indirect, acc) =<< appMono closure skolem
-
+            skolem <- freshSkolem env $ toSimpleName closure.var
+            go (Indirect, acc) =<< appMono env closure skolem -- is it ok to use the top-level env here?
     unwrap = \case
         uni2@(MUniVar _ var) ->
             lookupUniVar var >>= \case
@@ -338,20 +331,19 @@ skolemScope :: InfEffs es => Skolem -> Eff es Scope
 skolemScope skolem =
     maybe (internalError (getLoc skolem) $ "missing skolem" <+> pretty skolem) pure
         . Map.lookup skolem
-        =<< gets @InfState (.skolems)
+        =<< get @(_ Skolem _)
 
 -- looks up a type of a binding. Global bindings take precedence over local ones (should they?)
-lookupSig :: InfEffs es => Name -> Eff es TypeDT
-lookupSig name = do
-    locals <- ask @"locals"
+lookupSig :: InfEffs es => InfState -> Name -> Eff es TypeDT
+lookupSig env name = do
     topLevel <- get
-    case (Map.lookup name topLevel, Map.lookup name locals) of
+    case (Map.lookup name topLevel, Map.lookup name env.locals) of
         (Just ty, _) -> pure ty
         (_, Just ty) -> pure ty
         (Nothing, Nothing) -> do
             -- assuming that type checking is performed after name resolution,
             -- we may just treat unbound names as holes
-            freshUniVar (getLoc name)
+            freshUniVar env (getLoc name)
 
 -- every occurence of an unbound name should get a new UniVar
 -- (even then, unbound names are supposed to have unique ids)
@@ -362,22 +354,32 @@ declareTopLevel types = modify (types <>)
 declareTopLevel' :: InfEffs es => Name -> Type' -> Eff es ()
 declareTopLevel' name ty = modify $ Map.insert name ty
 
-generalise :: InfEffs es => Eff es TypeDT -> Eff es TypeDT
-generalise = fmap runIdentity . generaliseAll . fmap Identity
+declare :: Name -> TypeDT -> InfState -> InfState
+declare name ty env = env{locals = LMap.insert name ty env.locals}
 
-generaliseAll :: (Traversable t, InfEffs es) => Eff es (t TypeDT) -> Eff es (t TypeDT)
-generaliseAll action = do
-    modify \s@InfState{currentScope = Scope n} -> s{currentScope = Scope $ succ n}
-    types <- action
-    modify \s@InfState{currentScope = Scope n} -> s{currentScope = Scope $ pred n}
-    outerScope <- gets @InfState (.currentScope)
-    traverse (generaliseOne outerScope) types
+declareMany :: EnumMap Name TypeDT -> InfState -> InfState
+declareMany typeMap env = env{locals = typeMap <> env.locals}
+
+define :: Name -> Value -> InfState -> InfState
+define name val env = env{values = env.values{V.values = LMap.insert name val env.values.values}}
+
+-- defineMany :: EnumMap Name Value -> InfState -> InfState
+-- defineMany vals env = env{values = env.values{V.values = vals <> env.values.values}}
+
+generalise :: InfEffs es => InfState -> (InfState -> Eff es TypeDT) -> Eff es TypeDT
+generalise env = fmap runIdentity . generaliseAll env . (fmap . fmap) Identity
+
+generaliseAll :: (Traversable t, InfEffs es) => InfState -> (InfState -> Eff es (t TypeDT)) -> Eff es (t TypeDT)
+generaliseAll env@InfState{scope = Scope n} action = do
+    types <- action (env{scope = Scope $ succ n})
+    traverse (generaliseOne env.scope) types
   where
     generaliseOne scope ty = do
         (ty', vars) <- runState Map.empty $ evalState 'a' $ go scope $ V.quote ty
         let forallVars = hashNub . lefts $ toList vars
-        env <- ask @"values"
-        pure $ V.evalCore env $ foldr (\var body -> C.Q (getLoc ty) Forall Implicit Erased var (type_ $ getLoc ty) body) ty' forallVars
+        pure $
+            V.evalCore env.values $
+                foldr (\var body -> C.Q (getLoc ty) Forall Implicit Erased var (type_ $ getLoc ty) body) ty' forallVars
     type_ loc = C.TyCon $ Located loc TypeName
 
     go
@@ -441,22 +443,22 @@ generaliseAll action = do
 > mono Out (forall a. (forall b. b -> a) -> a)
 > -- (#b -> ?a) -> ?a
 -}
-mono :: InfEffs es => Variance -> TypeDT -> Eff es Monotype
-mono variance = \case
+mono :: InfEffs es => InfState -> Variance -> TypeDT -> Eff es Monotype
+mono env variance = \case
     V.Var var -> internalError (getLoc var) $ "mono: dangling var" <+> pretty var
     V.Con name args -> MCon name <$> traverse go args
     V.TyCon name -> pure $ MTyCon name
     V.Skolem skolem -> pure $ MSkolem skolem
     V.UniVar loc uni -> pure $ MUniVar loc uni
     V.App lhs rhs -> MApp <$> go lhs <*> go rhs
-    V.Function loc from to -> MFn loc <$> mono (flipVariance variance) from <*> go to
+    V.Function loc from to -> MFn loc <$> mono env (flipVariance variance) from <*> go to
     V.VariantT loc row -> MVariantT loc <$> traverse go row
     V.RecordT loc row -> MRecordT loc <$> traverse go row
     V.Q loc q Visible e closure -> do
         ty <- go closure.ty
         pure $ MQ loc q e MonoClosure{var = closure.var, variance, env = closure.env, ty, body = closure.body}
-    V.Q _ Forall _ _ closure -> go =<< substitute variance closure
-    V.Q _ Exists _ _ closure -> go =<< substitute (flipVariance variance) closure
+    V.Q _ Forall _ _ closure -> go =<< substitute env variance closure
+    V.Q _ Exists _ _ closure -> go =<< substitute env (flipVariance variance) closure
     V.PrimFunction{} -> internalError Blank "mono: prim function"
     V.PrimValue val -> pure $ MPrim val
     V.Record row -> MRecord <$> traverse go row
@@ -464,10 +466,10 @@ mono variance = \case
     V.Case arg matches -> MCase <$> go arg <*> traverse (bitraverse pure go) matches
     V.Lambda closure -> pure $ MLambda MonoClosure{var = closure.var, variance, env = closure.env, ty = (), body = closure.body}
   where
-    go = mono variance
+    go = mono env variance
 
-appMono :: InfEffs es => MonoClosure a -> Value -> Eff es Monotype
-appMono MonoClosure{var, variance, env, body} arg = mono variance $ V.evalCore (env{V.values = Map.insert var arg env.values}) body
+appMono :: InfEffs es => InfState -> MonoClosure a -> Value -> Eff es Monotype
+appMono infState MonoClosure{var, variance, env, body} arg = mono infState variance $ V.evalCore (env{V.values = Map.insert var arg env.values}) body
 
 flipVariance :: Variance -> Variance
 flipVariance = \case
@@ -503,8 +505,8 @@ unMono = \case
 > monoLayer Out (forall a. (forall b. b -> a) -> a)
 > -- (forall b. b -> ?a) -> ?a
 -}
-monoLayer :: InfEffs es => Variance -> TypeDT -> Eff es MonoLayer
-monoLayer variance = \case
+monoLayer :: InfEffs es => InfState -> Variance -> TypeDT -> Eff es MonoLayer
+monoLayer env variance = \case
     V.Var var -> internalError (getLoc var) $ "monoLayer: dangling var" <+> pretty var
     V.Con name args -> pure $ MLCon name args
     V.TyCon name -> pure $ MLTyCon name
@@ -517,8 +519,8 @@ monoLayer variance = \case
     V.Q loc q Visible e closure -> pure $ MLQ loc q e closure
     -- todo: I'm not sure how to handle erased vs retained vars yet
     -- in theory, no value may depend on an erased var
-    V.Q _ Forall _ _e closure -> monoLayer variance =<< substitute variance closure
-    V.Q _ Exists _ _e closure -> monoLayer variance =<< substitute (flipVariance variance) closure
+    V.Q _ Forall _ _e closure -> monoLayer env variance =<< substitute env variance closure
+    V.Q _ Exists _ _e closure -> monoLayer env variance =<< substitute env (flipVariance variance) closure
     V.PrimFunction{} -> internalError Blank "monoLayer: prim function"
     V.Lambda closure -> pure $ MLLambda closure
     V.Record row -> pure $ MLRecord row
@@ -545,14 +547,14 @@ unMonoLayer = \case
     MLCase arg matches -> V.Case arg matches
 
 -- WARN: substitute doesn't traverse univars at the moment
-substitute :: InfEffs es => Variance -> V.Closure a -> Eff es TypeDT
-substitute variance closure = (.result) <$> substitute' variance closure
+substitute :: InfEffs es => InfState -> Variance -> V.Closure a -> Eff es TypeDT
+substitute env variance closure = (.result) <$> substitute' env variance closure
 
 data Subst = Subst {var :: TypeDT, result :: TypeDT}
 
 -- substitute a type variable with a univar / skolem dependening on variance
-substitute' :: InfEffs es => Variance -> V.Closure a -> Eff es Subst
-substitute' variance closure = do
+substitute' :: InfEffs es => InfState -> Variance -> V.Closure a -> Eff es Subst
+substitute' env variance closure = do
     someVar <- freshSomething (toSimpleName closure.var) variance
     pure Subst{var = someVar, result = closure `V.app` someVar}
   where
@@ -562,9 +564,9 @@ substitute' variance closure = do
     -- out: forall a. Int -> a
     -- in: forall a. a -> Int
     freshSomething name = \case
-        In -> freshUniVar (getLoc closure.var)
-        Out -> freshSkolem name
-        Inv -> freshSkolem name
+        In -> freshUniVar env (getLoc closure.var)
+        Out -> freshSkolem env name
+        Inv -> freshSkolem env name
 
 -- what to match
 data RecordOrVariant = Record | Variant deriving (Eq)
@@ -580,8 +582,8 @@ conOf Variant = V.VariantT
 --
 -- Note: repetitive calls of deepLookup on an open row turn it into a chain of singular extensions
 -- you should probably call `compress` after that
-deepLookup :: InfEffs es => RecordOrVariant -> Row.OpenName -> TypeDT -> Eff es (Maybe TypeDT)
-deepLookup whatToMatch k = mono In >=> go >=> pure . fmap unMono -- todo: monoLayer instead of mono
+deepLookup :: InfEffs es => InfState -> RecordOrVariant -> Row.OpenName -> TypeDT -> Eff es (Maybe TypeDT)
+deepLookup env whatToMatch k = mono env In >=> go >=> pure . fmap unMono -- todo: monoLayer instead of mono
   where
     go :: InfEffs es => Monotype -> Eff es (Maybe Monotype)
     go = \case
@@ -595,12 +597,12 @@ deepLookup whatToMatch k = mono In >=> go >=> pure . fmap unMono -- todo: monoLa
             lookupUniVar uni >>= \case
                 Right ty -> go ty
                 Left _ -> do
-                    fieldType <- MUniVar loc <$> freshUniVar'
-                    rowVar <- MUniVar loc <$> freshUniVar'
+                    fieldType <- MUniVar loc <$> freshUniVar' env
+                    rowVar <- MUniVar loc <$> freshUniVar' env
                     let con = case whatToMatch of
                             Variant -> MVariantT
                             Record -> MRecordT
-                    solveUniVar uni $ con loc $ ExtRow (one (k, fieldType)) rowVar
+                    solveUniVar env uni $ con loc $ ExtRow (one (k, fieldType)) rowVar
                     pure $ Just fieldType
 
         -- there's no point in explicitly listing all of the cases, since
@@ -618,12 +620,12 @@ deepLookup whatToMatch k = mono In >=> go >=> pure . fmap unMono -- todo: monoLa
 
 @{ x : Int | y : Double | z : Char | r } -> { x : Int, y : Double, z : Char | r }@
 -}
-compress :: InfEffs es => RecordOrVariant -> ExtRow TypeDT -> Eff es (ExtRow TypeDT)
-compress _ row@NoExtRow{} = pure row
-compress whatToMatch r@(ExtRow row ext) = go ext
+compress :: InfEffs es => InfState -> RecordOrVariant -> ExtRow TypeDT -> Eff es (ExtRow TypeDT)
+compress _ _ row@NoExtRow{} = pure row
+compress env whatToMatch r@(ExtRow row ext) = go ext
   where
     go =
-        mono In >=> \case
+        mono env In >=> \case
             MRecordT loc nextRow
                 | whatToMatch == Record -> Row.extend row <$> go (V.RecordT loc $ unMono <$> nextRow)
                 | otherwise -> pure r
@@ -637,7 +639,7 @@ compress whatToMatch r@(ExtRow row ext) = go ext
             _ -> pure r
 
 -- first record minus fields that match with the second one
-diff :: InfEffs es => RecordOrVariant -> ExtRow TypeDT -> Row TypeDT -> Eff es (ExtRow TypeDT)
-diff whatToMatch lhsUncompressed rhs = do
-    lhs <- compress whatToMatch lhsUncompressed
+diff :: InfEffs es => InfState -> RecordOrVariant -> ExtRow TypeDT -> Row TypeDT -> Eff es (ExtRow TypeDT)
+diff env whatToMatch lhsUncompressed rhs = do
+    lhs <- compress env whatToMatch lhsUncompressed
     pure $ lhs{row = Row.diff lhs.row rhs}
