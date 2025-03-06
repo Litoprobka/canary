@@ -221,10 +221,13 @@ instance Pretty MonoLayer where
 
 run
     :: ValueEnv
-    -> (InfState -> Eff (Labeled UniVar NameGen : es) a)
+    -> (InfState -> Eff (State UniVars : State (EnumMap Skolem Scope) : Labeled UniVar NameGen : es) a)
     -> Eff es a
 run values action =
-    runLabeled @UniVar runNameGen $ action initState
+    runLabeled @UniVar runNameGen
+        . evalState Map.empty
+        . evalState @UniVars Map.empty
+        $ action initState
   where
     initState =
         InfState

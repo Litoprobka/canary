@@ -1,8 +1,6 @@
 {-# LANGUAGE DataKinds #-}
 {-# LANGUAGE ExplicitNamespaces #-}
-{-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE MonoLocalBinds #-}
-{-# LANGUAGE OverloadedRecordDot #-}
 {-# LANGUAGE UndecidableInstances #-}
 {-# OPTIONS_GHC -Wno-incomplete-patterns #-}
 {-# OPTIONS_GHC -Wno-missing-export-lists #-}
@@ -15,19 +13,23 @@ module Playground where
 -- :load this module into a repl
 
 import Common hiding (Scope)
+import Common qualified (Scope)
 import Data.Char (isUpperCase)
+import Data.EnumMap qualified as Map
+import Data.EnumMap.Lazy qualified as LMap
 import Data.HashMap.Strict qualified as HashMap
 import Data.HashSet qualified as HashSet
 import Data.Type.Ord (type (<))
 import DependencyResolution (SimpleOutput (..), resolveDependenciesSimplified)
 import Diagnostic (Diagnose, runDiagnose, runDiagnose')
 import Effectful.Error.Static (Error)
+import Effectful.Labeled (Labeled)
 import Effectful.Labeled.Reader (Reader)
 import Effectful.State.Static.Local (State, evalState, execState, runState)
 import Error.Diagnose (Diagnostic)
+import Eval (ValueEnv)
 import Fixity (resolveFixity)
 import Fixity qualified (parse)
-import Eval (ValueEnv)
 import LangPrelude
 import NameGen (NameGen, freshName, runNameGen)
 import NameResolution (Scope (..), declare, resolveNames, resolveTerm, runDeclare)
@@ -36,37 +38,32 @@ import Parser hiding (run)
 import Prettyprinter hiding (list)
 import Prettyprinter.Render.Terminal (AnsiStyle)
 import Prettyprinter.Render.Text (putDoc)
+import Repl (ReplEnv (..))
+import Repl qualified
 import Syntax
 import Syntax.Declaration qualified as D
 import Syntax.Row
-import Syntax.Term (Pattern_ (..), Quantifier (..), Erased (..), Visibility (..))
+import Syntax.Term (Erased (..), Pattern_ (..), Quantifier (..), Visibility (..))
 import Syntax.Term qualified as E
 import Syntax.Term qualified as T
 import Text.Megaparsec (errorBundlePretty, parse, pos1)
 import TypeChecker (InfState)
 import TypeChecker qualified as TC (run)
-import TypeChecker.Backend (Type', TopLevel)
-import qualified Data.EnumMap.Lazy as LMap
-import qualified Data.EnumMap as Map
-import qualified Repl
-import Repl (ReplEnv(..))
-import Effectful.Labeled (Labeled)
+import TypeChecker.Backend (TopLevel, Type', UniVars)
 
 -- some wrappers and syntactic niceties for testing
 
 testCheck
     :: Eff [NameResolution.Declare, State Scope, Diagnose, NameGen] resolved
-    -> (resolved -> Eff '[Labeled UniVar NameGen, Labeled "locals" (Reader (EnumMap Name Type')), State InfState, State TopLevel, Diagnose, NameGen] a)
+    -> ( resolved
+         -> InfState
+         -> Eff '[State UniVars, State (EnumMap Skolem Common.Scope), Labeled UniVar NameGen, State TopLevel, Diagnose, NameGen] a
+       )
     -> Maybe a
 testCheck toResolve action = fst $ runPureEff $ runNameGen $ runDiagnose' ("<none>", "") do
-    ReplEnv{scope, types} <- Repl.mkDefaultEnv
+    ReplEnv{scope, types, values} <- Repl.mkDefaultEnv
     resolved <- NameResolution.run scope toResolve
-    evalState types $ TC.run $ action resolved
-
-{-
-dummyFixity :: Diagnose :> es => Expr 'NameRes -> Eff es (Expr 'Fixity)
-dummyFixity expr = runReader testGraph $ Fixity.parse expr
--}
+    evalState types $ TC.run values $ action resolved
 
 -- convenient definitions for testing
 

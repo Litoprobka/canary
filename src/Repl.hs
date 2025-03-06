@@ -77,12 +77,12 @@ mkDefaultEnv = do
     depResOutput@SimpleOutput{fixityMap, operatorPriorities} <-
         resolveDependenciesSimplified' emptyEnv.fixityMap emptyEnv.operatorPriorities $ preDecls <> afterNameRes
     fixityDecls <- Fixity.resolveFixity fixityMap operatorPriorities depResOutput.declarations
-    (values, types) <- runState emptyEnv.types $ TC.run do
-        foldlM addDecl emptyEnv.values fixityDecls
+    (env, types) <- runState emptyEnv.types $ TC.run emptyEnv.values \env -> do
+        foldlM addDecl env fixityDecls
     guardNoErrors
     pure $
         ReplEnv
-            { values
+            { values = env.values
             , fixityMap
             , operatorPriorities
             , scope = newScope
@@ -90,8 +90,9 @@ mkDefaultEnv = do
             }
   where
     addDecl env decl = do
-        envDiff <- runReader @"values" env $ inferDeclaration decl
-        modifyEnv (envDiff env) [decl]
+        envDiff <- inferDeclaration env decl
+        newValues <- modifyEnv (envDiff env.values) [decl]
+        pure env{TC.values = newValues}
 
     mkPreprelude :: NameGen :> es => Eff es ([Declaration 'NameRes], Scope)
     mkPreprelude = do
@@ -203,7 +204,7 @@ replStep env command = do
     processExpr types expr = evalState types do
         afterNameRes <- NameResolution.run env.scope $ resolveTerm expr
         afterFixityRes <- Fixity.run env.fixityMap env.operatorPriorities $ Fixity.parse $ fmap cast afterNameRes
-        fmap (afterFixityRes,) $ runLabeled @"types" (evalState env.types) $ TC.run $ normalise $ infer afterFixityRes
+        fmap (afterFixityRes,) $ runLabeled @"types" (evalState env.types) $ TC.run env.values \tenv -> normalise tenv $ flip infer afterFixityRes
 
 localDiagnose :: IOE :> es => a -> (FilePath, Text) -> Eff (Diagnose : es) (Maybe a) -> Eff es (Maybe a)
 localDiagnose env file action =
@@ -217,24 +218,35 @@ processDecls env decls = do
     depResOutput@SimpleOutput{fixityMap, operatorPriorities} <-
         resolveDependenciesSimplified' env.fixityMap env.operatorPriorities afterNameRes
     fixityDecls <- Fixity.resolveFixity fixityMap operatorPriorities depResOutput.declarations
-    (values, types) <- runState env.types $ TC.run do
-        foldlM addDecl env.values fixityDecls
+    (newEnv, types) <- runState emptyEnv.types $ TC.run emptyEnv.values \tenv -> do
+        foldlM addDecl tenv fixityDecls
     guardNoErrors
     pure . Just $
         ReplEnv
-            { values
+            { values = newEnv.values
             , fixityMap
             , operatorPriorities
             , scope = newScope
             , types
             }
   where
-    addDecl values decl = do
-        envDiff <- runReader @"values" values $ inferDeclaration decl
-        modifyEnv (envDiff values) [decl]
+    addDecl tenv decl = do
+        envDiff <- inferDeclaration tenv decl
+        newValues <- modifyEnv (envDiff tenv.values) [decl]
+        pure tenv{TC.values = newValues}
 
 {-
-
+(env, types) <- runState emptyEnv.types $ TC.run emptyEnv.values \env -> do
+        foldlM addDecl env fixityDecls
+    guardNoErrors
+    pure $
+        ReplEnv
+            { values = env.values
+            , fixityMap
+            , operatorPriorities
+            , scope = newScope
+            , types
+            }
 -}
 
 -- takes a line of input, or a bunch of lines in :{ }:
