@@ -62,45 +62,6 @@ data Monotype
 data MonoClosure ty = MonoClosure {var :: Name, variance :: Variance, ty :: ty, env :: ValueEnv, body :: CoreTerm}
 data Variance = In | Out | Inv
 
--- а type whose outer constructor is monomorphic
-data MonoLayer
-    = MLCon Name [Value]
-    | MLTyCon Name
-    | MLLambda (V.Closure ())
-    | MLRecord (Row Value)
-    | MLVariant OpenName Value
-    | MLPrim Literal
-    | MLPrimFunc Name (Value -> Value)
-    | -- types
-      MLFn Loc TypeDT TypeDT
-    | MLQ Loc Quantifier Erased (V.Closure TypeDT)
-    | MLVariantT Loc (ExtRow TypeDT)
-    | MLRecordT Loc (ExtRow TypeDT)
-    | -- stuck computations
-      MLApp Value ~Value
-    | MLCase Value [(CorePattern, Value)]
-    | -- typechecking metavars
-      MLUniVar Loc UniVar
-    | MLSkolem Skolem
-
-instance HasLoc MonoLayer where
-    getLoc = \case
-        MLCon name _ -> getLoc name
-        MLTyCon name -> getLoc name
-        MLLambda closure -> getLoc closure.var -- fixme
-        MLRecord _ -> Blank --
-        MLVariant{} -> Blank --
-        MLPrim val -> getLoc val
-        MLPrimFunc name _ -> getLoc name -- to fix?
-        MLFn loc _ _ -> loc
-        MLQ loc _ _ _ -> loc
-        MLVariantT loc _ -> loc
-        MLRecordT loc _ -> loc
-        MLApp{} -> Blank
-        MLCase{} -> Blank
-        MLUniVar loc _ -> loc
-        MLSkolem skolem -> getLoc skolem
-
 data InfState = InfState
     { scope :: Scope
     , values :: ValueEnv
@@ -215,9 +176,6 @@ runBreak = reinterpret (runErrorNoCallStack @err) \_ (Break val) -> throwError_ 
 
 instance Pretty Monotype where
     pretty = pretty . unMono
-
-instance Pretty MonoLayer where
-    pretty = pretty . unMonoLayer
 
 run
     :: ValueEnv
@@ -508,46 +466,15 @@ unMono = \case
 > monoLayer Out (forall a. (forall b. b -> a) -> a)
 > -- (forall b. b -> ?a) -> ?a
 -}
-monoLayer :: InfEffs es => InfState -> Variance -> TypeDT -> Eff es MonoLayer
+monoLayer :: InfEffs es => InfState -> Variance -> TypeDT -> Eff es TypeDT
 monoLayer env variance = \case
     V.Var var -> internalError (getLoc var) $ "monoLayer: dangling var" <+> pretty var
-    V.Con name args -> pure $ MLCon name args
-    V.TyCon name -> pure $ MLTyCon name
-    V.Skolem skolem -> pure $ MLSkolem skolem
-    V.UniVar loc uni -> pure $ MLUniVar loc uni
-    V.App lhs rhs -> pure $ MLApp lhs rhs
-    V.Function loc from to -> pure $ MLFn loc from to
-    V.VariantT loc row -> pure $ MLVariantT loc row
-    V.RecordT loc row -> pure $ MLRecordT loc row
-    V.Q loc q Visible e closure -> pure $ MLQ loc q e closure
+    V.Q loc q Visible e closure -> pure $ V.Q loc q Visible e closure
     -- todo: I'm not sure how to handle erased vs retained vars yet
     -- in theory, no value may depend on an erased var
     V.Q _ Forall _ _e closure -> monoLayer env variance =<< substitute env variance closure
     V.Q _ Exists _ _e closure -> monoLayer env variance =<< substitute env (flipVariance variance) closure
-    V.PrimFunction{} -> internalError Blank "monoLayer: prim function"
-    V.Lambda closure -> pure $ MLLambda closure
-    V.Record row -> pure $ MLRecord row
-    V.Variant con arg -> pure $ MLVariant con arg
-    V.PrimValue val -> pure $ MLPrim val
-    V.Case arg matches -> pure $ MLCase arg matches
-
-unMonoLayer :: MonoLayer -> TypeDT
-unMonoLayer = \case
-    MLCon name args -> V.Con name args
-    MLTyCon name -> V.TyCon name
-    MLLambda closure -> V.Lambda closure
-    MLSkolem skolem -> V.Skolem skolem
-    MLUniVar loc uni -> V.UniVar loc uni
-    MLApp lhs rhs -> V.App lhs rhs
-    MLFn loc lhs rhs -> V.Function loc lhs rhs
-    MLQ loc q e closure -> V.Q loc q Visible e closure
-    MLVariantT loc row -> V.VariantT loc row
-    MLRecordT loc row -> V.RecordT loc row
-    MLVariant name val -> V.Variant name val
-    MLRecord row -> V.Record row
-    MLPrim val -> V.PrimValue val
-    MLPrimFunc name f -> V.PrimFunction name f
-    MLCase arg matches -> V.Case arg matches
+    other -> pure other
 
 -- WARN: substitute doesn't traverse univars at the moment
 substitute :: InfEffs es => InfState -> Variance -> V.Closure a -> Eff es TypeDT

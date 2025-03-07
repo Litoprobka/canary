@@ -105,46 +105,46 @@ subtype :: InfEffs es => InfState -> TypeDT -> TypeDT -> Eff es ()
 subtype env lhs_ rhs_ = join $ match <$> monoLayer env In lhs_ <*> monoLayer env Out rhs_
   where
     match = \cases
-        (MLTyCon lhs) (MLTyCon rhs) | lhs == rhs -> pass
-        (MLUniVar _ lhs) (MLUniVar _ rhs) | lhs == rhs -> pass
-        (MLSkolem lhs) (MLSkolem rhs) | lhs == rhs -> pass
-        lhs (MLUniVar _ uni) -> solveOr (mono env In $ unMonoLayer lhs) (subtype env (unMonoLayer lhs) . unMono) uni
-        (MLUniVar _ uni) rhs -> solveOr (mono env Out $ unMonoLayer rhs) ((\l -> subtype env l (unMonoLayer rhs)) . unMono) uni
-        lhs rhs@(MLSkolem skolem) -> do
+        (V.TyCon lhs) (V.TyCon rhs) | lhs == rhs -> pass
+        (V.UniVar _ lhs) (V.UniVar _ rhs) | lhs == rhs -> pass
+        (V.Skolem lhs) (V.Skolem rhs) | lhs == rhs -> pass
+        lhs (V.UniVar _ uni) -> solveOr (mono env In lhs) (subtype env lhs . unMono) uni
+        (V.UniVar _ uni) rhs -> solveOr (mono env Out rhs) ((\l -> subtype env l rhs) . unMono) uni
+        lhs rhs@(V.Skolem skolem) -> do
             case LMap.lookup skolem env.values.skolems of
-                Nothing -> typeError $ NotASubtype (unMonoLayer lhs) (unMonoLayer rhs) Nothing
-                Just skolemTy -> subtype env (unMonoLayer lhs) skolemTy
-        lhs@(MLSkolem skolem) rhs -> do
+                Nothing -> typeError $ NotASubtype lhs rhs Nothing
+                Just skolemTy -> subtype env lhs skolemTy
+        lhs@(V.Skolem skolem) rhs -> do
             case LMap.lookup skolem env.values.skolems of
-                Nothing -> typeError $ NotASubtype (unMonoLayer lhs) (unMonoLayer rhs) Nothing
-                Just skolemTy -> subtype env skolemTy (unMonoLayer rhs)
-        (MLTyCon (L NatName)) (MLTyCon (L IntName)) -> pass
-        lhs@(MLCon lhsCon lhsArgs) rhs@(MLCon rhsCon rhsArgs) -> do
-            unless (lhsCon == rhsCon) $ typeError $ CannotUnify (unMonoLayer lhs) (unMonoLayer rhs)
+                Nothing -> typeError $ NotASubtype lhs rhs Nothing
+                Just skolemTy -> subtype env skolemTy rhs
+        (V.TyCon (L NatName)) (V.TyCon (L IntName)) -> pass
+        lhs@(V.Con lhsCon lhsArgs) rhs@(V.Con rhsCon rhsArgs) -> do
+            unless (lhsCon == rhsCon) $ typeError $ CannotUnify lhs rhs
             -- we assume that the arg count is correct
             zipWithM_ (subtype env) lhsArgs rhsArgs
-        (MLFn _ inl outl) (MLFn _ inr outr) -> do
+        (V.Function _ inl outl) (V.Function _ inr outr) -> do
             subtype env inr inl
             subtype env outl outr
         -- I'm not sure whether the subtyping between erased and non-erased arguments is right, since
         -- those types would have different runtime representations
-        (MLQ _ Forall erasedl closurel) (MLQ _ Forall erasedr closurer) | subErased erasedr erasedl -> do
+        (V.Q _ Forall Visible erasedl closurel) (V.Q _ Forall Visible erasedr closurer) | subErased erasedr erasedl -> do
             subtype env closurer.ty closurel.ty
             skolem <- freshSkolem env $ toSimpleName closurel.var
             subtype env (V.app closurel skolem) (V.app closurer skolem)
-        (MLQ _ Exists erasedl closurel) (MLQ _ Exists erasedr closurer) | subErased erasedl erasedr -> do
+        (V.Q _ Exists Visible erasedl closurel) (V.Q _ Exists Visible erasedr closurer) | subErased erasedl erasedr -> do
             subtype env closurel.ty closurer.ty
             skolem <- freshSkolem env $ toSimpleName closurel.var
             subtype env (V.app closurel skolem) (V.app closurer skolem)
-        (MLFn _ inl outl) (MLQ _ Forall Retained closure) -> do
+        (V.Function _ inl outl) (V.Q _ Forall Visible Retained closure) -> do
             subtype env closure.ty inl
             skolem <- freshSkolem env $ toSimpleName closure.var
             subtype env outl (V.app closure skolem)
-        (MLQ _ Forall Retained closure) (MLFn _ inr outr) -> do
+        (V.Q _ Forall Visible Retained closure) (V.Function _ inr outr) -> do
             subtype env inr closure.ty
             skolem <- freshSkolem env $ toSimpleName closure.var
             subtype env (V.app closure skolem) outr
-        (MLApp lhs rhs) (MLApp lhs' rhs') -> do
+        (V.App lhs rhs) (V.App lhs' rhs') -> do
             -- note that we assume the same variance for all type parameters
             -- seems like we need to track variance in kinds for this to work properly
             -- higher-kinded types are also problematic when it comes to variance, i.e.
@@ -153,9 +153,9 @@ subtype env lhs_ rhs_ = join $ match <$> monoLayer env In lhs_ <*> monoLayer env
             -- QuickLook just assumes that all constructors are invariant and -> is a special case
             subtype env lhs lhs'
             subtype env rhs rhs'
-        (MLVariantT locL lhs) (MLVariantT locR rhs) -> rowCase Variant (locL, lhs) (locR, rhs)
-        (MLRecordT locL lhs) (MLRecordT locR rhs) -> rowCase Record (locL, lhs) (locR, rhs)
-        lhs rhs -> typeError $ NotASubtype (unMonoLayer lhs) (unMonoLayer rhs) Nothing
+        (V.VariantT locL lhs) (V.VariantT locR rhs) -> rowCase Variant (locL, lhs) (locR, rhs)
+        (V.RecordT locL lhs) (V.RecordT locR rhs) -> rowCase Record (locL, lhs) (locR, rhs)
+        lhs rhs -> typeError $ NotASubtype lhs rhs Nothing
 
     -- (forall a -> ty) <: (foreach a -> ty)
     -- (some a ** ty) <: (exists a ** ty)
@@ -224,9 +224,9 @@ check env (Located loc e) = match e
             unwrapFn n =
                 monoLayer env Out >=> \case
                     -- todo: this should support Pi and dependent pattern matching
-                    -- MLQ{} -> uhhh
-                    MLFn _ from to -> first (from :) <$> unwrapFn (pred n) to
-                    MLUniVar loc' uni ->
+                    -- V.Q{} -> uhhh
+                    V.Function _ from to -> first (from :) <$> unwrapFn (pred n) to
+                    V.UniVar loc' uni ->
                         lookupUniVar uni >>= \case
                             Right ty' -> unwrapFn n $ unMono ty'
                             Left _ -> do
@@ -435,16 +435,16 @@ inferApp :: InfEffs es => InfState -> Loc -> TypeDT -> Expr 'Fixity -> Eff es Ty
 inferApp env appLoc fTy arg = do
     monoLayer env In fTy >>= \case
         -- todo: this case is not ideal if the univar is already solved with a concrete function type
-        MLUniVar loc uni -> do
+        V.UniVar loc uni -> do
             from <- infer env arg
             to <- freshUniVar env loc
             var <- freshName $ Located loc $ Name' "x"
             let closure = V.Closure{var, env = env.values, ty = from, body = V.quote to}
             to <$ subtype env (V.UniVar loc uni) (V.Q loc Forall Visible Retained closure)
-        MLFn _ from to -> do
+        V.Function _ from to -> do
             to <$ check env arg from
         -- todo: special case for erased args
-        MLQ _ Forall _e closure -> do
+        V.Q _ Forall Visible _e closure -> do
             argV <- V.eval env.values arg
             V.app closure argV <$ check env arg closure.ty
         _ -> typeError $ NotAFunction appLoc fTy
@@ -536,27 +536,28 @@ inferPattern env (Located loc p) = case p of
       where
         go =
             monoLayer env In >=> \case
-                MLFn _ arg rest -> second (arg :) <$> go rest
-                MLQ loc' _ _ _ -> internalError loc' "dependent constructor types are not supported yet"
+                V.Function _ arg rest -> second (arg :) <$> go rest
+                V.Q loc' _ _ _ _ -> internalError loc' "dependent constructor types are not supported yet"
                 -- MLQ _loc Forall _e closure -> second (closure.ty :) <$> go (V.closureBody closure) -- alpha-conversion?
                 -- univars should never appear as the rightmost argument of a value constructor type
                 -- i.e. types of value constructors have the shape `a -> b -> c -> d -> ConcreteType a b c d`
                 --
                 -- solved univars cannot appear here either, since `lookupSig` on a pattern returns a type with no univars
-                MLUniVar loc' uni -> internalError loc' $ "unexpected univar" <+> pretty uni <+> "in a constructor type"
+                V.UniVar loc' uni -> internalError loc' $ "unexpected univar" <+> pretty uni <+> "in a constructor type"
                 -- this kind of repetition is necessary to retain missing pattern warnings
-                MLCon cname args -> pure (V.Con cname args, [])
-                MLTyCon cname -> pure (V.TyCon cname, [])
-                MLApp lhs rhs -> pure (V.App lhs rhs, [])
-                MLVariantT loc' _ -> internalError loc' $ "unexpected variant type" <+> "in a constructor type"
-                MLRecordT loc' _ -> internalError loc' $ "unexpected record type" <+> "in a constructor type"
-                MLVariant{} -> internalError (getLoc name) $ "unexpected variant constructor" <+> "in a constructor type"
-                MLRecord{} -> internalError (getLoc name) $ "unexpected record value" <+> "in a constructor type"
-                MLLambda{} -> internalError (getLoc name) $ "unexpected lambda" <+> "in a constructor type"
-                MLPrim{} -> internalError (getLoc name) $ "unexpected value" <+> "in a constructor type"
-                MLPrimFunc{} -> internalError (getLoc name) $ "unexpected primitive function" <+> "in a constructor type"
-                MLCase{} -> internalError (getLoc name) $ "unexpected case" <+> "in a constructor type"
-                MLSkolem skolem -> pure (V.Skolem skolem, [])
+                V.Con cname args -> pure (V.Con cname args, [])
+                V.TyCon cname -> pure (V.TyCon cname, [])
+                V.App lhs rhs -> pure (V.App lhs rhs, [])
+                V.VariantT loc' _ -> internalError loc' $ "unexpected variant type" <+> "in a constructor type"
+                V.RecordT loc' _ -> internalError loc' $ "unexpected record type" <+> "in a constructor type"
+                V.Variant{} -> internalError (getLoc name) $ "unexpected variant constructor" <+> "in a constructor type"
+                V.Record{} -> internalError (getLoc name) $ "unexpected record value" <+> "in a constructor type"
+                V.Lambda{} -> internalError (getLoc name) $ "unexpected lambda" <+> "in a constructor type"
+                V.PrimValue{} -> internalError (getLoc name) $ "unexpected value" <+> "in a constructor type"
+                V.PrimFunction{} -> internalError (getLoc name) $ "unexpected primitive function" <+> "in a constructor type"
+                V.Case{} -> internalError (getLoc name) $ "unexpected case" <+> "in a constructor type"
+                V.Skolem skolem -> pure (V.Skolem skolem, [])
+                V.Var var -> internalError (getLoc var) $ "unbound var" <+> pretty var <+> "in a constructor type"
 
 normalise :: InfEffs es => InfState -> (InfState -> Eff es TypeDT) -> Eff es Type'
 normalise env = fmap runIdentity . normaliseAll env . (fmap . fmap) Identity
