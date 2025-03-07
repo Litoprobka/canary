@@ -17,6 +17,7 @@ import Diagnostic (Diagnose, fatal, guardNoErrors, reportExceptions, runDiagnose
 import Effectful
 import Effectful.Labeled
 import Effectful.Labeled.Reader (runReader)
+import Effectful.Reader.Static (ask)
 import Effectful.State.Static.Local (evalState, runState)
 import Error.Diagnose (Report (..))
 import Eval (ValueEnv (..), eval, modifyEnv)
@@ -77,7 +78,8 @@ mkDefaultEnv = do
     depResOutput@SimpleOutput{fixityMap, operatorPriorities} <-
         resolveDependenciesSimplified' emptyEnv.fixityMap emptyEnv.operatorPriorities $ preDecls <> afterNameRes
     fixityDecls <- Fixity.resolveFixity fixityMap operatorPriorities depResOutput.declarations
-    (env, types) <- runState emptyEnv.types $ TC.run emptyEnv.values \env -> do
+    (env, types) <- runState emptyEnv.types $ TC.run emptyEnv.values do
+        env <- ask @TC.InfState
         foldlM addDecl env fixityDecls
     guardNoErrors
     pure $
@@ -89,8 +91,8 @@ mkDefaultEnv = do
             , types
             }
   where
-    addDecl env decl = do
-        envDiff <- inferDeclaration env decl
+    addDecl env decl = TC.local' (const env) do
+        envDiff <- inferDeclaration decl
         newValues <- modifyEnv (envDiff env.values) [decl]
         pure env{TC.values = newValues}
 
@@ -204,7 +206,7 @@ replStep env command = do
     processExpr types expr = evalState types do
         afterNameRes <- NameResolution.run env.scope $ resolveTerm expr
         afterFixityRes <- Fixity.run env.fixityMap env.operatorPriorities $ Fixity.parse $ fmap cast afterNameRes
-        fmap (afterFixityRes,) $ runLabeled @"types" (evalState env.types) $ TC.run env.values \tenv -> normalise tenv $ flip infer afterFixityRes
+        fmap (afterFixityRes,) $ runLabeled @"types" (evalState env.types) $ TC.run env.values $ normalise $ infer afterFixityRes
 
 localDiagnose :: IOE :> es => a -> (FilePath, Text) -> Eff (Diagnose : es) (Maybe a) -> Eff es (Maybe a)
 localDiagnose env file action =
@@ -218,7 +220,8 @@ processDecls env decls = do
     depResOutput@SimpleOutput{fixityMap, operatorPriorities} <-
         resolveDependenciesSimplified' env.fixityMap env.operatorPriorities afterNameRes
     fixityDecls <- Fixity.resolveFixity fixityMap operatorPriorities depResOutput.declarations
-    (newEnv, types) <- runState emptyEnv.types $ TC.run emptyEnv.values \tenv -> do
+    (newEnv, types) <- runState emptyEnv.types $ TC.run emptyEnv.values do
+        tenv <- ask @TC.InfState
         foldlM addDecl tenv fixityDecls
     guardNoErrors
     pure . Just $
@@ -230,8 +233,8 @@ processDecls env decls = do
             , types
             }
   where
-    addDecl tenv decl = do
-        envDiff <- inferDeclaration tenv decl
+    addDecl tenv decl = TC.local' (const tenv) do
+        envDiff <- inferDeclaration decl
         newValues <- modifyEnv (envDiff tenv.values) [decl]
         pure tenv{TC.values = newValues}
 

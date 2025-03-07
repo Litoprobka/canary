@@ -25,6 +25,7 @@ import Diagnostic (Diagnose, runDiagnose, runDiagnose')
 import Effectful.Error.Static (Error)
 import Effectful.Labeled (Labeled)
 import Effectful.Labeled.Reader (Reader)
+import Effectful.Reader.Static qualified as S
 import Effectful.State.Static.Local (State, evalState, execState, runState)
 import Error.Diagnose (Diagnostic)
 import Eval (ValueEnv)
@@ -56,8 +57,16 @@ import TypeChecker.Backend (TopLevel, Type', UniVars)
 testCheck
     :: Eff [NameResolution.Declare, State Scope, Diagnose, NameGen] resolved
     -> ( resolved
-         -> InfState
-         -> Eff '[State UniVars, State (EnumMap Skolem Common.Scope), Labeled UniVar NameGen, State TopLevel, Diagnose, NameGen] a
+         -> Eff
+                '[ S.Reader InfState
+                 , State UniVars
+                 , State (EnumMap Skolem Common.Scope)
+                 , Labeled UniVar NameGen
+                 , State TopLevel
+                 , Diagnose
+                 , NameGen
+                 ]
+                a
        )
     -> Maybe a
 testCheck toResolve action = fst $ runPureEff $ runNameGen $ runDiagnose' ("<none>", "") do

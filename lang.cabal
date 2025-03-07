@@ -44,6 +44,7 @@ library
       Syntax.Term
       TypeChecker
       TypeChecker.Backend
+      TypeChecker.TypeError
   other-modules:
       Paths_lang
   hs-source-dirs:

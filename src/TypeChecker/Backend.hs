@@ -17,15 +17,14 @@ import Data.EnumMap.Lazy qualified as LMap
 import Data.EnumMap.Strict qualified as Map
 import Data.EnumSet qualified as Set
 import Data.Traversable (for)
-import Diagnostic (Diagnose, fatal, internalError)
+import Diagnostic (Diagnose, internalError)
 import Effectful
 import Effectful.Dispatch.Dynamic (reinterpret)
 import Effectful.Error.Static (runErrorNoCallStack, throwError_)
 import Effectful.Labeled
+import Effectful.Reader.Static (Reader, ask, asks, local, runReader)
 import Effectful.State.Static.Local (State, evalState, get, gets, modify, runState)
 import Effectful.TH
-import Error.Diagnose (Report (..))
-import Error.Diagnose qualified as M (Marker (..))
 import Eval (Value, ValueEnv)
 import Eval qualified as V
 import LangPrelude hiding (break, cycle)
@@ -35,6 +34,7 @@ import Syntax.Core qualified as C
 import Syntax.Row
 import Syntax.Row qualified as Row
 import Syntax.Term (Erased (..), Quantifier (..), Visibility (..))
+import TypeChecker.TypeError
 
 type Pat = Pattern 'Fixity
 type TypeDT = Value
@@ -68,90 +68,12 @@ data InfState = InfState
     , locals :: EnumMap Name TypeDT
     }
 
-data TypeError
-    = CannotUnify TypeDT TypeDT
-    | NotASubtype TypeDT TypeDT (Maybe OpenName)
-    | MissingField TypeDT OpenName
-    | MissingVariant TypeDT OpenName
-    | EmptyMatch Loc -- empty match expression
-    | ArgCountMismatch Loc -- "different amount of arguments in a match statement"
-    | ArgCountMismatchPattern Pat Int Int
-    | NotAFunction Loc TypeDT -- pretty fTy <+> "is not a function type"
-    | SelfReferential Loc UniVar TypeDT
-    | NoVisibleTypeArgument (Expr 'Fixity) (Type 'Fixity) TypeDT
+-- | `local` monomorphised to `InfState`
+local' :: Reader InfState :> es => (InfState -> InfState) -> Eff es a -> Eff es a
+local' = local
 
-typeError :: Diagnose :> es => TypeError -> Eff es a
-typeError =
-    fatal . one . \case
-        CannotUnify lhs rhs ->
-            Err
-                Nothing
-                ("cannot unify" <+> pretty lhs <+> "with" <+> pretty rhs)
-                (mkNotes [(getLoc lhs, M.This $ pretty lhs <+> "originates from"), (getLoc rhs, M.This $ pretty rhs <+> "originates from")])
-                []
-        NotASubtype lhs rhs mbField ->
-            Err
-                Nothing
-                (pretty lhs <+> "is not a subtype of" <+> pretty rhs <> fieldMsg)
-                (mkNotes [(getLoc lhs, M.This "lhs"), (getLoc rhs, M.This "rhs")])
-                []
-          where
-            fieldMsg = case mbField of
-                Nothing -> ""
-                Just field -> ": right hand side does not contain" <+> pretty field
-        MissingField ty field ->
-            Err
-                Nothing
-                (pretty ty <+> "does not contain field" <+> pretty field)
-                (mkNotes [(getLoc ty, M.This "type arising from"), (getLoc field, M.This "field arising from")])
-                []
-        MissingVariant ty variant ->
-            Err
-                Nothing
-                (pretty ty <+> "does not contain variant" <+> pretty variant)
-                (mkNotes [(getLoc ty, M.This "type arising from"), (getLoc variant, M.This "variant arising from")])
-                []
-        EmptyMatch loc ->
-            Err
-                Nothing
-                "empty match expression"
-                (mkNotes [(loc, M.This "")])
-                []
-        ArgCountMismatch loc ->
-            Err
-                Nothing
-                "different amount of arguments in a match statement"
-                (mkNotes [(loc, M.This "")])
-                []
-        ArgCountMismatchPattern pat expected got ->
-            Err
-                Nothing
-                ("incorrect arg count (" <> pretty got <> ") in pattern" <+> pretty pat <> ". Expected" <+> pretty expected)
-                (mkNotes [(getLoc pat, M.This "")])
-                []
-        NotAFunction loc ty ->
-            Err
-                Nothing
-                (pretty ty <+> "is not a function type")
-                (mkNotes [(loc, M.This "arising from function application")])
-                []
-        SelfReferential loc var ty ->
-            Err
-                Nothing
-                ("self-referential type" <+> pretty var <+> "~" <+> pretty ty)
-                (mkNotes [(loc, M.This "arising from"), (getLoc ty, M.Where "and from")])
-                []
-        NoVisibleTypeArgument expr tyArg ty ->
-            Err
-                Nothing
-                "no visible type argument"
-                ( mkNotes
-                    [ (getLoc expr, M.This "when applying this expression")
-                    , (getLoc tyArg, M.This "to this type")
-                    , (getLoc ty, M.Where $ "where the expression has type" <+> pretty ty)
-                    ]
-                )
-                []
+localVal :: Reader InfState :> es => (ValueEnv -> ValueEnv) -> Eff es a -> Eff es a
+localVal f = local \env -> env{values = f env.values}
 
 -- the types of top-level bindings should not contain metavars
 -- this is not enforced at type level, though
@@ -163,6 +85,7 @@ type InfEffs es =
     , State UniVars :> es
     , State (EnumMap Skolem Scope) :> es
     , State TopLevel :> es
+    , Reader InfState :> es
     , Diagnose :> es
     )
 
@@ -179,13 +102,13 @@ instance Pretty Monotype where
 
 run
     :: ValueEnv
-    -> (InfState -> Eff (State UniVars : State (EnumMap Skolem Scope) : Labeled UniVar NameGen : es) a)
+    -> Eff (Reader InfState : State UniVars : State (EnumMap Skolem Scope) : Labeled UniVar NameGen : es) a
     -> Eff es a
 run values action =
     runLabeled @UniVar runNameGen
         . evalState Map.empty
         . evalState @UniVars Map.empty
-        $ action initState
+        $ runReader initState action
   where
     initState =
         InfState
@@ -194,21 +117,23 @@ run values action =
             , locals = Map.empty
             }
 
-freshUniVar :: InfEffs es => InfState -> Loc -> Eff es TypeDT
-freshUniVar env loc = V.UniVar loc <$> freshUniVar' env
+freshUniVar :: InfEffs es => Loc -> Eff es TypeDT
+freshUniVar loc = V.UniVar loc <$> freshUniVar'
 
-freshUniVar' :: InfEffs es => InfState -> Eff es UniVar
-freshUniVar' env = do
+freshUniVar' :: InfEffs es => Eff es UniVar
+freshUniVar' = do
     -- c'mon effectful
     var <- UniVar <$> labeled @UniVar @NameGen freshId
-    modify @UniVars $ Map.insert var (Left env.scope)
+    scope <- asks @InfState (.scope)
+    modify @UniVars $ Map.insert var (Left scope)
     pure var
 
-freshSkolem :: InfEffs es => InfState -> SimpleName -> Eff es TypeDT
-freshSkolem env name = do
+freshSkolem :: InfEffs es => SimpleName -> Eff es TypeDT
+freshSkolem name = do
     -- skolems are generally derived from type variables, so they have names
+    scope <- asks @InfState (.scope)
     skolem <- Skolem <$> mkName name
-    modify $ Map.insert skolem env.scope
+    modify $ Map.insert skolem scope
     pure $ V.Skolem skolem
   where
     mkName (Located loc (Name' txtName)) = Located loc <$> freshName_ (Name' txtName)
@@ -223,15 +148,15 @@ withUniVar uni f =
         Left _ -> pass
         Right ty -> void $ f ty
 
-solveUniVar, overrideUniVar :: InfEffs es => InfState -> UniVar -> Monotype -> Eff es ()
-solveUniVar env = alterUniVar env False
-overrideUniVar env = alterUniVar env True
+solveUniVar, overrideUniVar :: InfEffs es => UniVar -> Monotype -> Eff es ()
+solveUniVar = alterUniVar False
+overrideUniVar = alterUniVar True
 
 data SelfRef = Direct | Indirect
 data Cycle = DirectCycle | NoCycle deriving (Eq)
 
-alterUniVar :: forall es. InfEffs es => InfState -> Bool -> UniVar -> Monotype -> Eff es ()
-alterUniVar env override uni ty = do
+alterUniVar :: forall es. InfEffs es => Bool -> UniVar -> Monotype -> Eff es ()
+alterUniVar override uni ty = do
     -- here comes the magic. If the new type contains other univars, we change their scope
     mbScope <-
         lookupUniVar uni >>= \case
@@ -279,8 +204,8 @@ alterUniVar env override uni ty = do
 
         cycleCheckClosure :: EnumSet UniVar -> MonoClosure a -> Eff es Cycle
         cycleCheckClosure acc closure = do
-            skolem <- freshSkolem env $ toSimpleName closure.var
-            go (Indirect, acc) =<< appMono env closure skolem -- is it ok to use the top-level env here?
+            skolem <- freshSkolem $ toSimpleName closure.var
+            go (Indirect, acc) =<< appMono closure skolem -- is it ok to use the top-level env here?
     unwrap = \case
         uni2@(MUniVar _ var) ->
             lookupUniVar var >>= \case
@@ -295,16 +220,17 @@ skolemScope skolem =
         =<< get @(_ Skolem _)
 
 -- looks up a type of a binding. Global bindings take precedence over local ones (should they?)
-lookupSig :: InfEffs es => InfState -> Name -> Eff es TypeDT
-lookupSig env name = do
+lookupSig :: InfEffs es => Name -> Eff es TypeDT
+lookupSig name = do
     topLevel <- get
-    case (Map.lookup name topLevel, Map.lookup name env.locals) of
+    locals <- asks @InfState (.locals)
+    case (Map.lookup name topLevel, Map.lookup name locals) of
         (Just ty, _) -> pure ty
         (_, Just ty) -> pure ty
         (Nothing, Nothing) -> do
             -- assuming that type checking is performed after name resolution,
             -- we may just treat unbound names as holes
-            freshUniVar env (getLoc name)
+            freshUniVar (getLoc name)
 
 -- every occurence of an unbound name should get a new UniVar
 -- (even then, unbound names are supposed to have unique ids)
@@ -327,16 +253,18 @@ define name val env = env{values = env.values{V.values = LMap.insert name val en
 -- defineMany :: EnumMap Name Value -> InfState -> InfState
 -- defineMany vals env = env{values = env.values{V.values = vals <> env.values.values}}
 
-generalise :: InfEffs es => InfState -> (InfState -> Eff es TypeDT) -> Eff es TypeDT
-generalise env = fmap runIdentity . generaliseAll env . (fmap . fmap) Identity
+generalise :: InfEffs es => Eff es TypeDT -> Eff es TypeDT
+generalise = fmap runIdentity . generaliseAll . fmap Identity
 
-generaliseAll :: (Traversable t, InfEffs es) => InfState -> (InfState -> Eff es (t TypeDT)) -> Eff es (t TypeDT)
-generaliseAll env@InfState{scope = Scope n} action = do
-    types <- action (env{scope = Scope $ succ n})
-    traverse (generaliseOne env.scope) types
+generaliseAll :: (Traversable t, InfEffs es) => Eff es (t TypeDT) -> Eff es (t TypeDT)
+generaliseAll action = do
+    Scope n <- asks @InfState (.scope)
+    types <- local' (\e -> e{scope = Scope $ succ n}) action
+    traverse generaliseOne types
   where
-    generaliseOne scope ty = do
-        (ty', vars) <- runState Map.empty $ evalState 'a' $ go scope $ V.quote ty
+    generaliseOne ty = do
+        env <- ask @InfState
+        (ty', vars) <- runState Map.empty $ evalState 'a' $ go env.scope $ V.quote ty
         let forallVars = hashNub . lefts $ toList vars
         pure $
             V.evalCore env.values $
@@ -404,22 +332,22 @@ generaliseAll env@InfState{scope = Scope n} action = do
 > mono Out (forall a. (forall b. b -> a) -> a)
 > -- (#b -> ?a) -> ?a
 -}
-mono :: InfEffs es => InfState -> Variance -> TypeDT -> Eff es Monotype
-mono env variance = \case
+mono :: InfEffs es => Variance -> TypeDT -> Eff es Monotype
+mono variance = \case
     V.Var var -> internalError (getLoc var) $ "mono: dangling var" <+> pretty var
     V.Con name args -> MCon name <$> traverse go args
     V.TyCon name -> pure $ MTyCon name
     V.Skolem skolem -> pure $ MSkolem skolem
     V.UniVar loc uni -> pure $ MUniVar loc uni
     V.App lhs rhs -> MApp <$> go lhs <*> go rhs
-    V.Function loc from to -> MFn loc <$> mono env (flipVariance variance) from <*> go to
+    V.Function loc from to -> MFn loc <$> mono (flipVariance variance) from <*> go to
     V.VariantT loc row -> MVariantT loc <$> traverse go row
     V.RecordT loc row -> MRecordT loc <$> traverse go row
     V.Q loc q Visible e closure -> do
         ty <- go closure.ty
         pure $ MQ loc q e MonoClosure{var = closure.var, variance, env = closure.env, ty, body = closure.body}
-    V.Q _ Forall _ _ closure -> go =<< substitute env variance closure
-    V.Q _ Exists _ _ closure -> go =<< substitute env (flipVariance variance) closure
+    V.Q _ Forall _ _ closure -> go =<< substitute variance closure
+    V.Q _ Exists _ _ closure -> go =<< substitute (flipVariance variance) closure
     V.PrimFunction{} -> internalError Blank "mono: prim function"
     V.PrimValue val -> pure $ MPrim val
     V.Record row -> MRecord <$> traverse go row
@@ -427,10 +355,10 @@ mono env variance = \case
     V.Case arg matches -> MCase <$> go arg <*> traverse (bitraverse pure go) matches
     V.Lambda closure -> pure $ MLambda MonoClosure{var = closure.var, variance, env = closure.env, ty = (), body = closure.body}
   where
-    go = mono env variance
+    go = mono variance
 
-appMono :: InfEffs es => InfState -> MonoClosure a -> Value -> Eff es Monotype
-appMono infState MonoClosure{var, variance, env, body} arg = mono infState variance $ V.evalCore (env{V.values = Map.insert var arg env.values}) body
+appMono :: InfEffs es => MonoClosure a -> Value -> Eff es Monotype
+appMono MonoClosure{var, variance, env, body} arg = mono variance $ V.evalCore (env{V.values = Map.insert var arg env.values}) body
 
 flipVariance :: Variance -> Variance
 flipVariance = \case
@@ -466,25 +394,25 @@ unMono = \case
 > monoLayer Out (forall a. (forall b. b -> a) -> a)
 > -- (forall b. b -> ?a) -> ?a
 -}
-monoLayer :: InfEffs es => InfState -> Variance -> TypeDT -> Eff es TypeDT
-monoLayer env variance = \case
+monoLayer :: InfEffs es => Variance -> TypeDT -> Eff es TypeDT
+monoLayer variance = \case
     V.Var var -> internalError (getLoc var) $ "monoLayer: dangling var" <+> pretty var
     V.Q loc q Visible e closure -> pure $ V.Q loc q Visible e closure
     -- todo: I'm not sure how to handle erased vs retained vars yet
     -- in theory, no value may depend on an erased var
-    V.Q _ Forall _ _e closure -> monoLayer env variance =<< substitute env variance closure
-    V.Q _ Exists _ _e closure -> monoLayer env variance =<< substitute env (flipVariance variance) closure
+    V.Q _ Forall _ _e closure -> monoLayer variance =<< substitute variance closure
+    V.Q _ Exists _ _e closure -> monoLayer variance =<< substitute (flipVariance variance) closure
     other -> pure other
 
 -- WARN: substitute doesn't traverse univars at the moment
-substitute :: InfEffs es => InfState -> Variance -> V.Closure a -> Eff es TypeDT
-substitute env variance closure = (.result) <$> substitute' env variance closure
+substitute :: InfEffs es => Variance -> V.Closure a -> Eff es TypeDT
+substitute variance closure = (.result) <$> substitute' variance closure
 
 data Subst = Subst {var :: TypeDT, result :: TypeDT}
 
 -- substitute a type variable with a univar / skolem dependening on variance
-substitute' :: InfEffs es => InfState -> Variance -> V.Closure a -> Eff es Subst
-substitute' env variance closure = do
+substitute' :: InfEffs es => Variance -> V.Closure a -> Eff es Subst
+substitute' variance closure = do
     someVar <- freshSomething (toSimpleName closure.var) variance
     pure Subst{var = someVar, result = closure `V.app` someVar}
   where
@@ -494,9 +422,9 @@ substitute' env variance closure = do
     -- out: forall a. Int -> a
     -- in: forall a. a -> Int
     freshSomething name = \case
-        In -> freshUniVar env (getLoc closure.var)
-        Out -> freshSkolem env name
-        Inv -> freshSkolem env name
+        In -> freshUniVar (getLoc closure.var)
+        Out -> freshSkolem name
+        Inv -> freshSkolem name
 
 -- what to match
 data RecordOrVariant = Record | Variant deriving (Eq)
@@ -512,8 +440,8 @@ conOf Variant = V.VariantT
 --
 -- Note: repetitive calls of deepLookup on an open row turn it into a chain of singular extensions
 -- you should probably call `compress` after that
-deepLookup :: InfEffs es => InfState -> RecordOrVariant -> Row.OpenName -> TypeDT -> Eff es (Maybe TypeDT)
-deepLookup env whatToMatch k = mono env In >=> go >=> pure . fmap unMono -- todo: monoLayer instead of mono
+deepLookup :: InfEffs es => RecordOrVariant -> Row.OpenName -> TypeDT -> Eff es (Maybe TypeDT)
+deepLookup whatToMatch k = mono In >=> go >=> pure . fmap unMono -- todo: monoLayer instead of mono
   where
     go :: InfEffs es => Monotype -> Eff es (Maybe Monotype)
     go = \case
@@ -527,12 +455,12 @@ deepLookup env whatToMatch k = mono env In >=> go >=> pure . fmap unMono -- todo
             lookupUniVar uni >>= \case
                 Right ty -> go ty
                 Left _ -> do
-                    fieldType <- MUniVar loc <$> freshUniVar' env
-                    rowVar <- MUniVar loc <$> freshUniVar' env
+                    fieldType <- MUniVar loc <$> freshUniVar'
+                    rowVar <- MUniVar loc <$> freshUniVar'
                     let con = case whatToMatch of
                             Variant -> MVariantT
                             Record -> MRecordT
-                    solveUniVar env uni $ con loc $ ExtRow (one (k, fieldType)) rowVar
+                    solveUniVar uni $ con loc $ ExtRow (one (k, fieldType)) rowVar
                     pure $ Just fieldType
 
         -- there's no point in explicitly listing all of the cases, since
@@ -550,12 +478,12 @@ deepLookup env whatToMatch k = mono env In >=> go >=> pure . fmap unMono -- todo
 
 @{ x : Int | y : Double | z : Char | r } -> { x : Int, y : Double, z : Char | r }@
 -}
-compress :: InfEffs es => InfState -> RecordOrVariant -> ExtRow TypeDT -> Eff es (ExtRow TypeDT)
-compress _ _ row@NoExtRow{} = pure row
-compress env whatToMatch r@(ExtRow row ext) = go ext
+compress :: InfEffs es => RecordOrVariant -> ExtRow TypeDT -> Eff es (ExtRow TypeDT)
+compress _ row@NoExtRow{} = pure row
+compress whatToMatch r@(ExtRow row ext) = go ext
   where
     go =
-        mono env In >=> \case
+        mono In >=> \case
             MRecordT loc nextRow
                 | whatToMatch == Record -> Row.extend row <$> go (V.RecordT loc $ unMono <$> nextRow)
                 | otherwise -> pure r
@@ -569,7 +497,7 @@ compress env whatToMatch r@(ExtRow row ext) = go ext
             _ -> pure r
 
 -- first record minus fields that match with the second one
-diff :: InfEffs es => InfState -> RecordOrVariant -> ExtRow TypeDT -> Row TypeDT -> Eff es (ExtRow TypeDT)
-diff env whatToMatch lhsUncompressed rhs = do
-    lhs <- compress env whatToMatch lhsUncompressed
+diff :: InfEffs es => RecordOrVariant -> ExtRow TypeDT -> Row TypeDT -> Eff es (ExtRow TypeDT)
+diff whatToMatch lhsUncompressed rhs = do
+    lhs <- compress whatToMatch lhsUncompressed
     pure $ lhs{row = Row.diff lhs.row rhs}

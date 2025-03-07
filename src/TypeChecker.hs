@@ -28,6 +28,7 @@ import Data.Foldable1 (foldr1)
 import Data.Traversable (for)
 import Diagnostic (internalError)
 import Effectful
+import Effectful.Reader.Static (ask, asks)
 import Effectful.State.Static.Local (State, get, modify, runState)
 import Eval (ValueEnv)
 import Eval qualified as V
@@ -42,46 +43,46 @@ import Syntax.Row qualified as Row
 import Syntax.Term hiding (Record, Variant)
 import Syntax.Term qualified as E (Term_ (Record, Variant))
 import TypeChecker.Backend
+import TypeChecker.TypeError
 
 -- todo: properly handle where clauses
 -- data Locality = Local | NonLocal
 
-inferDeclaration :: InfEffs es => InfState -> Declaration 'Fixity -> Eff es (ValueEnv -> ValueEnv)
-inferDeclaration env (Located loc decl) = case decl of
+inferDeclaration :: InfEffs es => Declaration 'Fixity -> Eff es (ValueEnv -> ValueEnv)
+inferDeclaration (Located loc decl) = case decl of
     D.Signature name sig -> do
-        sigV <- typeFromTerm env sig
+        sigV <- typeFromTerm sig
         modify $ Map.insert name sigV
         pure id
     D.Type name binders constrs -> do
-        let envWithTy = define name (V.TyCon name) env
-        typeKind <- mkTypeKind envWithTy binders
-        modify $ Map.insert name typeKind
-        for_ (mkConstrSigs name binders constrs) \(con, sig) -> do
-            sigV <- typeFromTerm envWithTy sig
-            modify $ Map.insert con sigV
-        pure $ insertVal name (V.TyCon name)
+        local' (define name (V.TyCon name)) do
+            typeKind <- mkTypeKind binders
+            modify $ Map.insert name typeKind
+            for_ (mkConstrSigs name binders constrs) \(con, sig) -> do
+                sigV <- typeFromTerm sig
+                modify $ Map.insert con sigV
+            pure $ insertVal name (V.TyCon name)
     D.GADT name mbKind constrs -> do
-        let envWithTy = define name (V.TyCon name) env
-        do
-            kind <- maybe (pure type_) (typeFromTerm envWithTy) mbKind
+        local' (define name (V.TyCon name)) do
+            kind <- maybe (pure type_) typeFromTerm mbKind
             modify $ Map.insert name kind
             for_ constrs \con -> do
-                conSig <- typeFromTerm envWithTy con.sig
+                conSig <- typeFromTerm con.sig
                 modify $ Map.insert con.name conSig
         pure $ insertVal name (V.TyCon name)
     D.Value binding (_ : _) -> internalError (getLoc binding) "todo: proper support for where clauses"
     D.Value binding [] -> do
         sigs <- get
         let relevantSigs = collectNamesInBinding binding & mapMaybe (\k -> (k,) <$> Map.lookup k sigs) & Map.fromList
-        typeMap <- generaliseAll env (\e -> checkBinding e binding relevantSigs)
+        typeMap <- generaliseAll (checkBinding binding relevantSigs)
         modify (typeMap <>)
         pure id
   where
     insertVal name val venv = venv{V.values = LMap.insert name val venv.values}
 
-    mkTypeKind env' = \case
+    mkTypeKind = \case
         [] -> pure type_
-        (binder : rest) -> V.Function loc <$> typeFromTerm env' (binderKind binder) <*> mkTypeKind env' rest
+        (binder : rest) -> V.Function loc <$> typeFromTerm (binderKind binder) <*> mkTypeKind rest
     type_ = V.TyCon (Located loc TypeName)
 
     mkConstrSigs :: Name -> [VarBinder 'Fixity] -> [Constructor 'Fixity] -> [(Name, Type 'Fixity)]
@@ -96,54 +97,57 @@ inferDeclaration env (Located loc decl) = case decl of
       where
         fullType loc' = foldl' (\lhs -> Located loc' . App lhs) (Located (getLoc name) $ Name name) (Located loc' . Name . (.var) <$> binders)
 
-typeFromTerm :: InfEffs es => InfState -> Type 'Fixity -> Eff es Type'
-typeFromTerm env term = do
-    check env term $ V.TyCon (Located (getLoc term) TypeName)
-    V.eval env.values term
+typeFromTerm :: InfEffs es => Type 'Fixity -> Eff es Type'
+typeFromTerm term = do
+    values <- asks @InfState (.values)
+    check term $ V.TyCon (Located (getLoc term) TypeName)
+    V.eval values term
 
-subtype :: InfEffs es => InfState -> TypeDT -> TypeDT -> Eff es ()
-subtype env lhs_ rhs_ = join $ match <$> monoLayer env In lhs_ <*> monoLayer env Out rhs_
+subtype :: InfEffs es => TypeDT -> TypeDT -> Eff es ()
+subtype lhs_ rhs_ = join $ match <$> monoLayer In lhs_ <*> monoLayer Out rhs_
   where
     match = \cases
         (V.TyCon lhs) (V.TyCon rhs) | lhs == rhs -> pass
         (V.UniVar _ lhs) (V.UniVar _ rhs) | lhs == rhs -> pass
         (V.Skolem lhs) (V.Skolem rhs) | lhs == rhs -> pass
-        lhs (V.UniVar _ uni) -> solveOr (mono env In lhs) (subtype env lhs . unMono) uni
-        (V.UniVar _ uni) rhs -> solveOr (mono env Out rhs) ((\l -> subtype env l rhs) . unMono) uni
+        lhs (V.UniVar _ uni) -> solveOr (mono In lhs) (subtype lhs . unMono) uni
+        (V.UniVar _ uni) rhs -> solveOr (mono Out rhs) ((`subtype` rhs) . unMono) uni
         lhs rhs@(V.Skolem skolem) -> do
-            case LMap.lookup skolem env.values.skolems of
+            skolems <- asks @InfState ((.skolems) . (.values))
+            case LMap.lookup skolem skolems of
                 Nothing -> typeError $ NotASubtype lhs rhs Nothing
-                Just skolemTy -> subtype env lhs skolemTy
+                Just skolemTy -> subtype lhs skolemTy
         lhs@(V.Skolem skolem) rhs -> do
-            case LMap.lookup skolem env.values.skolems of
+            skolems <- asks @InfState ((.skolems) . (.values))
+            case LMap.lookup skolem skolems of
                 Nothing -> typeError $ NotASubtype lhs rhs Nothing
-                Just skolemTy -> subtype env skolemTy rhs
+                Just skolemTy -> subtype skolemTy rhs
         (V.TyCon (L NatName)) (V.TyCon (L IntName)) -> pass
         lhs@(V.Con lhsCon lhsArgs) rhs@(V.Con rhsCon rhsArgs) -> do
             unless (lhsCon == rhsCon) $ typeError $ CannotUnify lhs rhs
             -- we assume that the arg count is correct
-            zipWithM_ (subtype env) lhsArgs rhsArgs
+            zipWithM_ subtype lhsArgs rhsArgs
         (V.Function _ inl outl) (V.Function _ inr outr) -> do
-            subtype env inr inl
-            subtype env outl outr
+            subtype inr inl
+            subtype outl outr
         -- I'm not sure whether the subtyping between erased and non-erased arguments is right, since
         -- those types would have different runtime representations
         (V.Q _ Forall Visible erasedl closurel) (V.Q _ Forall Visible erasedr closurer) | subErased erasedr erasedl -> do
-            subtype env closurer.ty closurel.ty
-            skolem <- freshSkolem env $ toSimpleName closurel.var
-            subtype env (V.app closurel skolem) (V.app closurer skolem)
+            subtype closurer.ty closurel.ty
+            skolem <- freshSkolem $ toSimpleName closurel.var
+            subtype (V.app closurel skolem) (V.app closurer skolem)
         (V.Q _ Exists Visible erasedl closurel) (V.Q _ Exists Visible erasedr closurer) | subErased erasedl erasedr -> do
-            subtype env closurel.ty closurer.ty
-            skolem <- freshSkolem env $ toSimpleName closurel.var
-            subtype env (V.app closurel skolem) (V.app closurer skolem)
+            subtype closurel.ty closurer.ty
+            skolem <- freshSkolem $ toSimpleName closurel.var
+            subtype (V.app closurel skolem) (V.app closurer skolem)
         (V.Function _ inl outl) (V.Q _ Forall Visible Retained closure) -> do
-            subtype env closure.ty inl
-            skolem <- freshSkolem env $ toSimpleName closure.var
-            subtype env outl (V.app closure skolem)
+            subtype closure.ty inl
+            skolem <- freshSkolem $ toSimpleName closure.var
+            subtype outl (V.app closure skolem)
         (V.Q _ Forall Visible Retained closure) (V.Function _ inr outr) -> do
-            subtype env inr closure.ty
-            skolem <- freshSkolem env $ toSimpleName closure.var
-            subtype env (V.app closure skolem) outr
+            subtype inr closure.ty
+            skolem <- freshSkolem $ toSimpleName closure.var
+            subtype (V.app closure skolem) outr
         (V.App lhs rhs) (V.App lhs' rhs') -> do
             -- note that we assume the same variance for all type parameters
             -- seems like we need to track variance in kinds for this to work properly
@@ -151,8 +155,8 @@ subtype env lhs_ rhs_ = join $ match <$> monoLayer env In lhs_ <*> monoLayer env
             -- is `f a` a subtype of `f b` when a is `a` subtype of `b` or the other way around?
             --
             -- QuickLook just assumes that all constructors are invariant and -> is a special case
-            subtype env lhs lhs'
-            subtype env rhs rhs'
+            subtype lhs lhs'
+            subtype rhs rhs'
         (V.VariantT locL lhs) (V.VariantT locR rhs) -> rowCase Variant (locL, lhs) (locR, rhs)
         (V.RecordT locL lhs) (V.RecordT locR rhs) -> rowCase Record (locL, lhs) (locR, rhs)
         lhs rhs -> typeError $ NotASubtype lhs rhs Nothing
@@ -169,60 +173,65 @@ subtype env lhs_ rhs_ = join $ match <$> monoLayer env In lhs_ <*> monoLayer env
     rowCase whatToMatch (locL, lhsRow) (locR, rhsRow) = do
         let con = conOf whatToMatch
         for_ (IsList.toList lhsRow.row) \(name, lhsTy) ->
-            deepLookup env whatToMatch name (con locR rhsRow) >>= \case
+            deepLookup whatToMatch name (con locR rhsRow) >>= \case
                 Nothing -> typeError $ NotASubtype (con locL lhsRow) (con locR rhsRow) (Just name)
-                Just rhsTy -> subtype env lhsTy rhsTy
+                Just rhsTy -> subtype lhsTy rhsTy
         -- if the lhs has an extension, it should be compatible with rhs without the already matched fields
-        for_ (Row.extension lhsRow) \ext -> subtype env ext . con locL =<< diff env whatToMatch rhsRow lhsRow.row
+        for_ (Row.extension lhsRow) \ext -> subtype ext . con locL =<< diff whatToMatch rhsRow lhsRow.row
 
     -- turns out it's different enough from `withUniVar`
     solveOr :: InfEffs es => Eff es Monotype -> (Monotype -> Eff es ()) -> UniVar -> Eff es ()
-    solveOr solveWith whenSolved uni = lookupUniVar uni >>= either (const $ solveUniVar env uni =<< solveWith) whenSolved
+    solveOr solveWith whenSolved uni = lookupUniVar uni >>= either (const $ solveUniVar uni =<< solveWith) whenSolved
 
-check :: InfEffs es => InfState -> Expr 'Fixity -> TypeDT -> Eff es ()
-check env (Located loc e) = match e
+check :: InfEffs es => Expr 'Fixity -> TypeDT -> Eff es ()
+check (Located loc e) = match e
   where
     match = \cases
         -- the case for E.Name is redundant, since
         -- `infer` just looks up its type anyway
         (Lambda (L (VarP arg)) body) (V.Q _ Forall Visible Retained closure) -> do
             -- checkPattern arg closure.ty
-            var <- freshSkolem env (toSimpleName arg)
-            check (define arg var $ declare arg closure.ty env) body (closure `V.app` var)
+            var <- freshSkolem (toSimpleName arg)
+            local' (define arg var . declare arg closure.ty) do
+                check body (closure `V.app` var)
         (Lambda arg body) (V.Function _ from to) -> do
-            newTypes <- checkPattern env arg from
-            check (env{locals = newTypes <> env.locals}) body to
+            newTypes <- checkPattern arg from
+            local' (\env -> (env{locals = newTypes <> env.locals})) do
+                check body to
         (Annotation expr annTy) ty -> do
-            annTyV <- typeFromTerm env annTy
-            check env expr annTyV
-            subtype env annTyV ty
+            annTyV <- typeFromTerm annTy
+            check expr annTyV
+            subtype annTyV ty
         (If cond true false) ty -> do
-            check env cond $ V.TyCon (Located (getLoc cond) BoolName)
-            check env true ty
-            check env false ty
+            check cond $ V.TyCon (Located (getLoc cond) BoolName)
+            check true ty
+            check false ty
         (Case arg matches) ty -> do
-            argTy <- infer env arg
+            argTy <- infer arg
             for_ matches \(pat, body) -> do
-                typeMap <- checkPattern env pat argTy
-                newValues <- case mbArgV of
-                    Just argV -> localEquality (declareMany typeMap env) argV pat
-                    Nothing -> pure env.values
-                check (declareMany typeMap env{values = newValues}) body ty
+                typeMap <- checkPattern pat argTy
+                local' (declareMany typeMap) do
+                    env <- ask @InfState
+                    newValues <- case mbArgV env of
+                        Just argV -> localEquality argV pat
+                        Nothing -> asks @InfState (.values)
+                    local' (\infState -> infState{values = newValues}) do
+                        check body ty
           where
             -- a special case for matching on a var seems janky, but apparently that's how Idris does this
-            mbArgV = case arg of
+            mbArgV env = case arg of
                 L (Name name) -> Map.lookup name env.values.values
                 _ -> Nothing
         (Match matches) ty -> do
             n <- whenNothing (getArgCount matches) $ typeError $ ArgCountMismatch loc
             (patTypes, bodyTy) <- unwrapFn n ty
             for_ matches \(pats, body) -> do
-                typeMap <- fold <$> zipWithM (checkPattern env) pats patTypes
-                check (declareMany typeMap env) body bodyTy
+                typeMap <- fold <$> zipWithM checkPattern pats patTypes
+                local' (declareMany typeMap) $ check body bodyTy
           where
             unwrapFn 0 = pure . ([],)
             unwrapFn n =
-                monoLayer env Out >=> \case
+                monoLayer Out >=> \case
                     -- todo: this should support Pi and dependent pattern matching
                     -- V.Q{} -> uhhh
                     V.Function _ from to -> first (from :) <$> unwrapFn (pred n) to
@@ -230,32 +239,32 @@ check env (Located loc e) = match e
                         lookupUniVar uni >>= \case
                             Right ty' -> unwrapFn n $ unMono ty'
                             Left _ -> do
-                                argVars <- replicateM n (freshUniVar' env)
-                                bodyVar <- freshUniVar' env
-                                solveUniVar env uni $ foldr (MFn loc' . MUniVar loc') (MUniVar loc' bodyVar) argVars
+                                argVars <- replicateM n freshUniVar'
+                                bodyVar <- freshUniVar'
+                                solveUniVar uni $ foldr (MFn loc' . MUniVar loc') (MUniVar loc' bodyVar) argVars
                                 pure (V.UniVar loc' <$> argVars, V.UniVar loc' bodyVar)
                     other -> typeError $ ArgCountMismatch $ getLoc other
-        (List items) (V.TyCon (L ListName) `V.App` itemTy) -> for_ items \item -> check env item itemTy
+        (List items) (V.TyCon (L ListName) `V.App` itemTy) -> for_ items (`check` itemTy)
         (E.Record row) ty -> do
             for_ (IsList.toList row) \(name, expr) ->
-                deepLookup env Record name ty >>= \case
+                deepLookup Record name ty >>= \case
                     Nothing -> typeError $ MissingField ty name
-                    Just fieldTy -> check env expr fieldTy
+                    Just fieldTy -> check expr fieldTy
         expr (V.UniVar _ uni) ->
             lookupUniVar uni >>= \case
-                Right ty -> check env (Located loc expr) $ unMono ty
+                Right ty -> check (Located loc expr) $ unMono ty
                 Left _ -> do
-                    newTy <- mono env In =<< infer env (Located loc expr)
+                    newTy <- mono In =<< infer (Located loc expr)
                     lookupUniVar uni >>= \case
-                        Left _ -> solveUniVar env uni newTy
+                        Left _ -> solveUniVar uni newTy
                         Right _ -> pass
         _expr (V.Q _ Exists Visible _e _closure) -> internalError loc "dependent pairs are not supported yet"
-        expr (V.Q _ Forall _vis _e closure) -> check env (Located loc expr) =<< substitute env Out closure
-        expr (V.Q _ Exists _vis _e closure) -> check env (Located loc expr) =<< substitute env In closure
+        expr (V.Q _ Forall _vis _e closure) -> check (Located loc expr) =<< substitute Out closure
+        expr (V.Q _ Exists _vis _e closure) -> check (Located loc expr) =<< substitute In closure
         -- todo: a case for do-notation
         expr ty -> do
-            inferredTy <- infer env (Located loc expr)
-            subtype env inferredTy ty
+            inferredTy <- infer (Located loc expr)
+            subtype inferredTy ty
 
 -- a helper function for matches
 getArgCount :: [([Pat], Expr 'Fixity)] -> Maybe Int
@@ -265,8 +274,9 @@ getArgCount ((firstPats, _) : matches) = argCount <$ guard (all ((== argCount) .
     argCount = length firstPats
 
 -- an implementation of depedendent pattern matching, pretty much
-localEquality :: InfEffs es => InfState -> V.Value -> Pat -> Eff es ValueEnv
-localEquality env val pat = do
+localEquality :: InfEffs es => V.Value -> Pat -> Eff es ValueEnv
+localEquality val pat = do
+    env <- ask @InfState
     case val of
         V.Skolem skolem
             -- for now, we don't do anything if the skolem is already locally solved
@@ -279,10 +289,10 @@ localEquality env val pat = do
     patToVal :: InfEffs es => Pat -> Eff (State ValueEnv : es) V.Value
     patToVal (Located loc pat') = case pat' of
         VarP name -> do
-            valToDefine <- freshSkolem env $ toSimpleName name
-            modify \venv -> venv{V.values = LMap.insert name valToDefine env.values.values}
+            valToDefine <- freshSkolem $ toSimpleName name
+            modify \venv -> venv{V.values = LMap.insert name valToDefine venv.values}
             pure valToDefine
-        WildcardP name -> freshSkolem env $ Located loc $ Name' name -- todo: use SimpleName in WildcardP
+        WildcardP name -> freshSkolem $ Located loc $ Name' name -- todo: use SimpleName in WildcardP
         AnnotationP innerPat _ -> patToVal innerPat
         ConstructorP con args -> V.Con con <$> traverse patToVal args
         ListP args -> do
@@ -294,86 +304,89 @@ localEquality env val pat = do
         LiteralP lit -> pure $ V.PrimValue lit
 
 -- | given a map of related signatures, check or infer a declaration
-checkBinding :: InfEffs es => InfState -> Binding 'Fixity -> EnumMap Name TypeDT -> Eff es (EnumMap Name TypeDT)
-checkBinding env binding types = case binding of
-    _ | Map.null types -> inferBinding env binding
+checkBinding :: InfEffs es => Binding 'Fixity -> EnumMap Name TypeDT -> Eff es (EnumMap Name TypeDT)
+checkBinding binding types = case binding of
+    _ | Map.null types -> inferBinding binding
     FunctionB name args body -> case Map.lookup name types of
-        Just ty -> Map.singleton name ty <$ check env (foldr (\var -> Located (getLoc binding) . Lambda var) body args) ty
-        Nothing -> inferBinding env binding
+        Just ty -> Map.singleton name ty <$ check (foldr (\var -> Located (getLoc binding) . Lambda var) body args) ty
+        Nothing -> inferBinding binding
     ValueB (L (VarP name)) body -> case Map.lookup name types of
-        Just ty -> Map.singleton name ty <$ check env body ty
-        Nothing -> inferBinding env binding
+        Just ty -> Map.singleton name ty <$ check body ty
+        Nothing -> inferBinding binding
     ValueB pat _body -> do
         internalError (getLoc pat) "todo: type check destructuring bindings with partial signatures"
 
 -- check a pattern, returning all of the newly bound vars
-checkPattern :: InfEffs es => InfState -> Pat -> TypeDT -> Eff es (EnumMap Name TypeDT)
-checkPattern env (Located ploc outerPat) ty = case outerPat of
+checkPattern :: InfEffs es => Pat -> TypeDT -> Eff es (EnumMap Name TypeDT)
+checkPattern (Located ploc outerPat) ty = case outerPat of
     -- we need this case, since inferPattern only infers monotypes for var patterns
     VarP name -> pure $ Map.singleton name ty
     -- we probably do need a case for ConstructorP for the same reason
     VariantP name arg ->
-        deepLookup env Variant name ty >>= \case
+        deepLookup Variant name ty >>= \case
             Nothing -> typeError $ MissingVariant ty name
-            Just argTy -> checkPattern env arg argTy
+            Just argTy -> checkPattern arg argTy
     RecordP patRow -> do
         fold <$> for (IsList.toList patRow) \(name, pat) ->
-            deepLookup env Record name ty >>= \case
+            deepLookup Record name ty >>= \case
                 Nothing -> typeError $ MissingField ty name
-                Just fieldTy -> checkPattern env pat fieldTy
+                Just fieldTy -> checkPattern pat fieldTy
     _ -> do
-        (typeMap, inferredTy) <- inferPattern env $ Located ploc outerPat
-        subtype env inferredTy ty
+        (typeMap, inferredTy) <- inferPattern $ Located ploc outerPat
+        subtype inferredTy ty
         pure typeMap
 
-infer :: InfEffs es => InfState -> Expr 'Fixity -> Eff es TypeDT
-infer env (Located loc e) = case e of
-    Name name -> lookupSig env name
+infer :: InfEffs es => Expr 'Fixity -> Eff es TypeDT
+infer (Located loc e) = case e of
+    Name name -> lookupSig name
     E.Variant name -> do
-        var <- freshUniVar env loc
-        rowVar <- freshUniVar env loc
+        var <- freshUniVar loc
+        rowVar <- freshUniVar loc
         -- #a -> [Name #a | #r]
         pure $ V.Function loc var (V.VariantT loc $ ExtRow (fromList [(name, var)]) rowVar)
     App f x -> do
-        fTy <- infer env f
-        inferApp env loc fTy x
+        fTy <- infer f
+        inferApp loc fTy x
     TypeApp expr tyArg -> do
-        ty <- infer env expr
-        inferTyApp env expr ty tyArg
+        ty <- infer expr
+        inferTyApp expr ty tyArg
     Lambda arg body -> do
-        (typeMap, argTy) <- inferPattern env arg
-        V.Function loc argTy <$> infer (declareMany typeMap env) body
+        (typeMap, argTy) <- inferPattern arg
+        V.Function loc argTy <$> local' (declareMany typeMap) (infer body)
     -- chances are, I'd want to add some specific error messages or context for wildcard lambdas
     -- for now, they are just desugared to normal lambdas before inference
-    WildcardLambda args body -> infer env $ foldr (\var -> Located loc . Lambda (Located (getLoc var) $ VarP var)) body args
+    WildcardLambda args body -> infer $ foldr (\var -> Located loc . Lambda (Located (getLoc var) $ VarP var)) body args
     Let binding body -> do
-        typeMap <- inferBinding env binding
-        infer (declareMany typeMap env) body
+        typeMap <- inferBinding binding
+        local' (declareMany typeMap) $ infer body
     LetRec _bindings _body -> internalError loc "todo: typecheck of recursive bindings is not supported yet"
     {- do
     declareAll =<< (inferDecls . map (\b -> Located loc $ D.Value b []) . NE.toList) bindings
     infer body -}
     Annotation expr ty -> do
-        tyV <- typeFromTerm env ty
-        tyV <$ check env expr tyV
+        tyV <- typeFromTerm ty
+        tyV <$ check expr tyV
     If cond true false -> do
-        check env cond $ V.TyCon (Located loc BoolName)
-        result <- fmap unMono . mono env In =<< infer env true
-        check env false result
+        check cond $ V.TyCon (Located loc BoolName)
+        result <- fmap unMono . mono In =<< infer true
+        check false result
         pure result
     Case arg matches -> do
-        argTy <- infer env arg
-        result <- freshUniVar env loc
+        argTy <- infer arg
+        result <- freshUniVar loc
         for_ matches \(pat, body) -> do
-            typeMap <- checkPattern env pat argTy
             -- inferring dependent pattern matching is probably unnecessary, but we do it anyway
-            newValues <- case mbArgV of
-                Just argV -> localEquality (declareMany typeMap env) argV pat
-                Nothing -> pure env.values
-            check (declareMany typeMap env{values = newValues}) body result
+            typeMap <- checkPattern pat argTy
+            local' (declareMany typeMap) do
+                env <- ask @InfState
+                newValues <- case mbArgV env of
+                    Just argV -> localEquality argV pat
+                    Nothing -> asks @InfState (.values)
+                local' (\infState -> infState{values = newValues}) do
+                    check body result
         pure result
       where
-        mbArgV = case arg of
+        mbArgV env = case arg of
             L (Name name) -> Map.lookup name env.values.values
             _ -> Nothing
     Match [] -> typeError $ EmptyMatch loc
@@ -381,24 +394,24 @@ infer env (Located loc e) = case e of
         argCount <- case getArgCount matches of
             Just argCount -> pure argCount
             Nothing -> typeError $ ArgCountMismatch loc
-        result <- freshUniVar env loc
-        patTypes <- replicateM argCount (freshUniVar env loc)
+        result <- freshUniVar loc
+        patTypes <- replicateM argCount (freshUniVar loc)
         for_ matches \(pats, body) -> do
-            typeMap <- fold <$> zipWithM (checkPattern env) pats patTypes
-            check (declareMany typeMap env) body result
+            typeMap <- fold <$> zipWithM checkPattern pats patTypes
+            local' (declareMany typeMap) $ check body result
         pure $ foldr (V.Function loc) result patTypes
     List items -> do
-        itemTy <- freshUniVar env loc
-        traverse_ (\item -> check env item itemTy) items
+        itemTy <- freshUniVar loc
+        traverse_ (`check` itemTy) items
         pure $ V.TyCon (Located loc ListName) `V.App` itemTy
-    E.Record row -> V.RecordT loc . NoExtRow <$> traverse (infer env) row
+    E.Record row -> V.RecordT loc . NoExtRow <$> traverse infer row
     RecordLens fields -> do
         recordParts <- for fields \field -> do
-            rowVar <- freshUniVar env loc
+            rowVar <- freshUniVar loc
             pure \nested -> V.RecordT loc $ ExtRow (one (field, nested)) rowVar
         let mkNestedRecord = foldr1 (.) recordParts
-        a <- freshUniVar env loc
-        b <- freshUniVar env loc
+        a <- freshUniVar loc
+        b <- freshUniVar loc
         pure $
             V.TyCon
                 (Located loc LensName)
@@ -414,51 +427,54 @@ infer env (Located loc e) = case e of
         TextLiteral _ -> TextName
         CharLiteral _ -> CharName
     Function lhs rhs -> do
-        check env lhs type_
-        check env rhs type_
+        check lhs type_
+        check rhs type_
         pure type_ -- alpha-conversion?
     Q _ _ _ binder body -> do
-        tyV <- maybe (freshUniVar env loc) (typeFromTerm env) binder.kind
-        check (define binder.var tyV env) body type_
+        tyV <- maybe (freshUniVar loc) typeFromTerm binder.kind
+        local' (define binder.var tyV) $ check body type_
 
         pure type_
     VariantT row -> do
-        traverse_ (\v -> check env v type_) row
+        traverse_ (`check` type_) row
         pure type_
     RecordT row -> do
-        traverse_ (\field -> check env field type_) row
+        traverse_ (`check` type_) row
         pure type_
   where
     type_ = V.TyCon (Located loc TypeName)
 
-inferApp :: InfEffs es => InfState -> Loc -> TypeDT -> Expr 'Fixity -> Eff es TypeDT
-inferApp env appLoc fTy arg = do
-    monoLayer env In fTy >>= \case
+inferApp :: InfEffs es => Loc -> TypeDT -> Expr 'Fixity -> Eff es TypeDT
+inferApp appLoc fTy arg = do
+    monoLayer In fTy >>= \case
         -- todo: this case is not ideal if the univar is already solved with a concrete function type
         V.UniVar loc uni -> do
-            from <- infer env arg
-            to <- freshUniVar env loc
+            from <- infer arg
+            to <- freshUniVar loc
             var <- freshName $ Located loc $ Name' "x"
-            let closure = V.Closure{var, env = env.values, ty = from, body = V.quote to}
-            to <$ subtype env (V.UniVar loc uni) (V.Q loc Forall Visible Retained closure)
+            values <- asks @InfState (.values)
+            let closure = V.Closure{var, env = values, ty = from, body = V.quote to}
+            to <$ subtype (V.UniVar loc uni) (V.Q loc Forall Visible Retained closure)
         V.Function _ from to -> do
-            to <$ check env arg from
+            to <$ check arg from
         -- todo: special case for erased args
         V.Q _ Forall Visible _e closure -> do
-            argV <- V.eval env.values arg
-            V.app closure argV <$ check env arg closure.ty
+            values <- asks @InfState (.values)
+            argV <- V.eval values arg
+            V.app closure argV <$ check arg closure.ty
         _ -> typeError $ NotAFunction appLoc fTy
 
-inferTyApp :: InfEffs es => InfState -> Expr 'Fixity -> TypeDT -> Type 'Fixity -> Eff es TypeDT
-inferTyApp env expr ty tyArg = case ty of
+inferTyApp :: InfEffs es => Expr 'Fixity -> TypeDT -> Type 'Fixity -> Eff es TypeDT
+inferTyApp expr ty tyArg = case ty of
     V.Q _ Forall Implicit _e closure -> do
-        Subst{var, result} <- substitute' env In closure
-        tyArgV <- V.eval env.values tyArg
-        subtype env var tyArgV
+        Subst{var, result} <- substitute' In closure
+        values <- asks @InfState (.values)
+        tyArgV <- V.eval values tyArg
+        subtype var tyArgV
         pure result
     V.Q _ q Hidden _e closure -> do
-        Subst{result} <- substitute' env (qVariance q) closure
-        inferTyApp env expr result tyArg
+        Subst{result} <- substitute' (qVariance q) closure
+        inferTyApp expr result tyArg
     _ -> typeError $ NoVisibleTypeArgument expr tyArg ty
   where
     qVariance = \case
@@ -466,59 +482,58 @@ inferTyApp env expr ty tyArg = case ty of
         Exists -> Out
 
 -- infers the type of a function / variables in a pattern
-inferBinding :: InfEffs es => InfState -> Binding 'Fixity -> Eff es (EnumMap Name TypeDT)
-inferBinding env = \case
+inferBinding :: InfEffs es => Binding 'Fixity -> Eff es (EnumMap Name TypeDT)
+inferBinding = \case
     ValueB pat body -> do
-        (typeMap, patTy) <- inferPattern env pat
+        (typeMap, patTy) <- inferPattern pat
         -- we need the pattern itself to be in scope in case the binding is recursive
-        bodyTy <- infer (declareMany typeMap env) body
-        subtype env patTy bodyTy
+        bodyTy <- local' (declareMany typeMap) $ infer body
+        subtype patTy bodyTy
         pure typeMap
     binding@(FunctionB name args body) -> do
         -- note: we can only infer monotypes for recursive functions
         -- while checking the body, the function itself is assigned a univar
         -- in the end, we check that the inferred type is compatible with the one in the univar (inferred from recursive calls)
-        uni <- freshUniVar' env
-        let envWithName = declare name (V.UniVar (getLoc binding) uni) env
+        uni <- freshUniVar'
+        local' (declare name (V.UniVar (getLoc binding) uni)) do
+            (typeMap, argTypes) <- traverseFold inferPattern args
+            bodyTy <- local' (declareMany typeMap) $ infer body
 
-        (typeMap, argTypes) <- traverseFold (inferPattern envWithName) args
-        bodyTy <- infer (declareMany typeMap envWithName) body
+            -- todo: infer dependent functions
+            let ty = foldr (V.Function $ getLoc binding) bodyTy argTypes
+            -- since we can still infer higher-rank types for non-recursive functions,
+            -- we only need the subtype check when the univar is solved, i.e. when the
+            -- function contains any recursive calls at all
+            withUniVar uni (subtype ty . unMono)
+            pure $ Map.singleton name ty
 
-        -- todo: infer dependent functions
-        let ty = foldr (V.Function $ getLoc binding) bodyTy argTypes
-        -- since we can still infer higher-rank types for non-recursive functions,
-        -- we only need the subtype check when the univar is solved, i.e. when the
-        -- function contains any recursive calls at all
-        withUniVar uni (subtype envWithName ty . unMono)
-        pure $ Map.singleton name ty
-
-inferPattern :: InfEffs es => InfState -> Pat -> Eff es (EnumMap Name TypeDT, TypeDT)
-inferPattern env (Located loc p) = case p of
+inferPattern :: InfEffs es => Pat -> Eff es (EnumMap Name TypeDT, TypeDT)
+inferPattern (Located loc p) = case p of
     VarP name -> do
-        uni <- freshUniVar env $ getLoc name
+        uni <- freshUniVar $ getLoc name
         pure (Map.singleton name uni, uni)
-    WildcardP _ -> (Map.empty,) <$> freshUniVar env loc
+    WildcardP _ -> (Map.empty,) <$> freshUniVar loc
     (AnnotationP pat ty) -> do
-        tyV <- typeFromTerm env ty
-        (,tyV) <$> checkPattern env pat tyV
+        tyV <- typeFromTerm ty
+        (,tyV) <$> checkPattern pat tyV
     ConstructorP name args -> do
         (resultType, argTypes) <- conArgTypes name
         unless (length argTypes == length args) do
             typeError $ ArgCountMismatchPattern (Located loc p) (length argTypes) (length args)
-        typeMap <- fold <$> zipWithM (checkPattern env) args argTypes
+        typeMap <- fold <$> zipWithM checkPattern args argTypes
         pure (typeMap, resultType)
     ListP pats -> do
-        result <- freshUniVar env loc
-        typeMap <- foldMapM (\item -> checkPattern env item result) pats
+        result <- freshUniVar loc
+        typeMap <- foldMapM (`checkPattern` result) pats
         let listTy = V.TyCon (Located loc ListName) `V.App` result
         pure (typeMap, listTy)
     VariantP name arg -> do
-        (typeMap, argTy) <- inferPattern env arg
-        ty <- V.VariantT loc . ExtRow (fromList [(name, argTy)]) <$> freshUniVar env loc
+        (typeMap, argTy) <- inferPattern arg
+        ty <- V.VariantT loc . ExtRow (fromList [(name, argTy)]) <$> freshUniVar loc
         pure (typeMap, ty)
     RecordP row -> do
-        (typeMap, typeRow) <- traverseFold (inferPattern env) row
-        ty <- V.RecordT loc . ExtRow typeRow <$> freshUniVar env loc
+        (typeMap, typeRow) <- traverseFold inferPattern row
+        ty <- V.RecordT loc . ExtRow typeRow <$> freshUniVar loc
         pure (typeMap, ty)
     LiteralP (L lit) ->
         pure
@@ -532,10 +547,10 @@ inferPattern env (Located loc p) = case p of
             )
   where
     -- conArgTypes and the zipM may be unified into a single function
-    conArgTypes name = lookupSig env name >>= go
+    conArgTypes name = lookupSig name >>= go
       where
         go =
-            monoLayer env In >=> \case
+            monoLayer In >=> \case
                 V.Function _ arg rest -> second (arg :) <$> go rest
                 V.Q loc' _ _ _ _ -> internalError loc' "dependent constructor types are not supported yet"
                 -- MLQ _loc Forall _e closure -> second (closure.ty :) <$> go (V.closureBody closure) -- alpha-conversion?
@@ -559,13 +574,17 @@ inferPattern env (Located loc p) = case p of
                 V.Skolem skolem -> pure (V.Skolem skolem, [])
                 V.Var var -> internalError (getLoc var) $ "unbound var" <+> pretty var <+> "in a constructor type"
 
-normalise :: InfEffs es => InfState -> (InfState -> Eff es TypeDT) -> Eff es Type'
-normalise env = fmap runIdentity . normaliseAll env . (fmap . fmap) Identity
+normalise :: InfEffs es => Eff es TypeDT -> Eff es Type'
+normalise = fmap runIdentity . normaliseAll . fmap Identity
 
 -- gets rid of all univars
-normaliseAll :: (Traversable t, InfEffs es) => InfState -> (InfState -> Eff es (t TypeDT)) -> Eff es (t Type')
-normaliseAll env = generaliseAll env >=> traverse (pure . V.evalCore env.values <=< go . V.quote)
+normaliseAll :: (Traversable t, InfEffs es) => Eff es (t TypeDT) -> Eff es (t Type')
+normaliseAll = generaliseAll >=> traverse (eval' <=< go . V.quote)
   where
+    eval' :: InfEffs es => CoreTerm -> Eff es V.Value
+    eval' term = do
+        values <- asks @InfState (.values)
+        pure $ V.evalCore values term
     go :: InfEffs es => CoreTerm -> Eff es CoreTerm
     go = \case
         C.UniVar loc uni ->
