@@ -164,6 +164,7 @@ subtype env lhs_ rhs_ = join $ match <$> monoLayer env In lhs_ <*> monoLayer env
     subErased Retained Retained = True
     subErased Erased Retained = False
 
+    -- todo: this is absolute jank. We don't want {a, b} <: {a}
     rowCase :: InfEffs es => RecordOrVariant -> (Loc, ExtRow TypeDT) -> (Loc, ExtRow TypeDT) -> Eff es ()
     rowCase whatToMatch (locL, lhsRow) (locR, rhsRow) = do
         let con = conOf whatToMatch
@@ -199,19 +200,19 @@ check env (Located loc e) = match e
             check env cond $ V.TyCon (Located (getLoc cond) BoolName)
             check env true ty
             check env false ty
-        -- a special case for matching on a var seems janky, but apparently that's how Idris does this
-        (Case arg@(Located argLoc (Name name)) matches) ty -> do
-            argTy <- infer env arg
-            argV <- maybe (internalError argLoc "unbound var") pure $ Map.lookup name env.values.values
-            for_ matches \(pat, body) -> do
-                typeMap <- checkPattern env pat argTy
-                newValues <- localEquality (declareMany typeMap env) argV pat
-                check (declareMany typeMap env{values = newValues}) body ty
         (Case arg matches) ty -> do
             argTy <- infer env arg
             for_ matches \(pat, body) -> do
                 typeMap <- checkPattern env pat argTy
-                check (declareMany typeMap env) body ty
+                newValues <- case mbArgV of
+                    Just argV -> localEquality (declareMany typeMap env) argV pat
+                    Nothing -> pure env.values
+                check (declareMany typeMap env{values = newValues}) body ty
+          where
+            -- a special case for matching on a var seems janky, but apparently that's how Idris does this
+            mbArgV = case arg of
+                L (Name name) -> Map.lookup name env.values.values
+                _ -> Nothing
         (Match matches) ty -> do
             n <- whenNothing (getArgCount matches) $ typeError $ ArgCountMismatch loc
             (patTypes, bodyTy) <- unwrapFn n ty
@@ -305,6 +306,7 @@ checkBinding env binding types = case binding of
     ValueB pat _body -> do
         internalError (getLoc pat) "todo: type check destructuring bindings with partial signatures"
 
+-- check a pattern, returning all of the newly bound vars
 checkPattern :: InfEffs es => InfState -> Pat -> TypeDT -> Eff es (EnumMap Name TypeDT)
 checkPattern env (Located ploc outerPat) ty = case outerPat of
     -- we need this case, since inferPattern only infers monotypes for var patterns
@@ -359,20 +361,27 @@ infer env (Located loc e) = case e of
         result <- fmap unMono . mono env In =<< infer env true
         check env false result
         pure result
-    -- todo: add dependent pattern matching here as well
     Case arg matches -> do
         argTy <- infer env arg
         result <- freshUniVar env loc
         for_ matches \(pat, body) -> do
             typeMap <- checkPattern env pat argTy
-            check (declareMany typeMap env) body result
+            -- inferring dependent pattern matching is probably unnecessary, but we do it anyway
+            newValues <- case mbArgV of
+                Just argV -> localEquality (declareMany typeMap env) argV pat
+                Nothing -> pure env.values
+            check (declareMany typeMap env{values = newValues}) body result
         pure result
+      where
+        mbArgV = case arg of
+            L (Name name) -> Map.lookup name env.values.values
+            _ -> Nothing
     Match [] -> typeError $ EmptyMatch loc
     Match matches@(_ : _) -> do
         argCount <- case getArgCount matches of
             Just argCount -> pure argCount
             Nothing -> typeError $ ArgCountMismatch loc
-        result <- freshUniVar env loc -- alpha-conversion?
+        result <- freshUniVar env loc
         patTypes <- replicateM argCount (freshUniVar env loc)
         for_ matches \(pats, body) -> do
             typeMap <- fold <$> zipWithM (checkPattern env) pats patTypes
