@@ -2,7 +2,23 @@
 {-# LANGUAGE TypeFamilies #-}
 {-# LANGUAGE NoFieldSelectors #-}
 
-module Syntax.Row (OpenName, Row, ExtRow (..), empty, lookup, has, sortedRow, extension, visible, extend, diff, unionWithM) where
+module Syntax.Row (
+    OpenName,
+    Row,
+    ExtRow (..),
+    empty,
+    lookup,
+    has,
+    sortedRow,
+    extension,
+    visible,
+    extend,
+    diff,
+    unionWithM,
+    zipRows,
+    indexDuplicates,
+    isEmpty,
+) where
 
 import Common (SimpleName)
 import Data.HashMap.Strict qualified as HashMap
@@ -24,6 +40,9 @@ data ExtRow a
 
 empty :: Row a
 empty = Row HashMap.empty
+
+isEmpty :: Row a -> Bool
+isEmpty (Row fields) = HashMap.null fields
 
 lookup :: OpenName -> Row a -> Maybe a
 lookup k (Row fields) = HashMap.lookup k fields <&> NESeq.head
@@ -51,12 +70,41 @@ unionWithM f (Row lhs) (Row rhs) = Row <$> sequence (HashMap.unionWith unionSeq 
         rhsSeq <- pureRhs
         sequence $ NESeq.zipWith f lhsSeq rhsSeq
 
+-- convert two rows into a row of matching fields,
+-- a row of fields present only in the first and only in the second rows
+zipRows :: Row a -> Row b -> (Row (a, b), Row a, Row b)
+zipRows (Row lhs) (Row rhs) =
+    (\(both, l, r) -> (Row both, Row l, Row r)) $
+        ( HashMap.intersectionWith f lhs rhs & \isect ->
+            ( fst3 <$> isect
+            , HashMap.mapMaybe (NESeq.nonEmptySeq . snd3) isect
+            , HashMap.mapMaybe (NESeq.nonEmptySeq . thd) isect
+            )
+        )
+            <> (mempty, HashMap.difference lhs rhs, mempty)
+            <> (mempty, mempty, HashMap.difference rhs lhs)
+  where
+    f seq1 seq2 =
+        ( NESeq.zip seq1 seq2
+        , NESeq.drop (NESeq.length seq2) seq1
+        , NESeq.drop (NESeq.length seq1) seq2
+        )
+    fst3 (x, _, _) = x
+    snd3 (_, x, _) = x
+    thd (_, _, x) = x
+
 extension :: ExtRow a -> Maybe a
 extension (ExtRow _ ext) = Just ext
 extension (NoExtRow _) = Nothing
 
 visible :: Row a -> [(OpenName, a)]
 visible (Row fields) = fields & HashMap.toList & map (second NESeq.head)
+
+indexDuplicates :: Row a -> [(OpenName, (Int, a))]
+indexDuplicates (Row fields) = fields & HashMap.toList >>= \(key, s) -> (key,) <$> zip [0 ..] (toList s)
+
+-- fromIndexed :: [(OpenName, (Int, a))] -> Row a
+-- fromIndexed = Row . fmap (NESeq.fromList . fmap snd . NE.sortOn fst) . HashMap.fromListWith (<>) . map (second (:| []))
 
 sortedRow :: Row a -> [(OpenName, a)]
 sortedRow (Row fields) = fields & HashMap.toList & sortOn fst & concatMap \(k, vs) -> (k,) <$> toList vs
@@ -76,23 +124,3 @@ instance IsList (Row a) where
 -- Row (fromList [("a",fromList (1 :| [2,7])),("b",fromList (1 :| [4]))])
 instance Semigroup (Row a) where
     Row lhs <> Row rhs = Row $ HashMap.unionWith (<>) lhs rhs
-
-{-
-data PlatePair k v = PlatePair k v
-newtype ListWrapper a = ListWrapper { unListWrapper :: [a] }
-pp = uncurry PlatePair
-unPP (PlatePair k v) = (k, v)
-
-instance (Biplate from to, Uniplate to) => Biplate (ListWrapper from) to where
-  biplate (ListWrapper xs) = plate ListWrapper ||+ xs
-instance Uniplate v => Biplate (PlatePair k v) v where
-  biplate (PlatePair k v) = plate (PlatePair k) |* v
-
-instance Uniplate a => Biplate (Row a) a where
-  biplate = plateProject (ListWrapper . map pp . IsList.toList) (IsList.fromList . map unPP . (.unListWrapper))
-
-instance (Uniplate a, Biplate (Row a) a) => Biplate (ExtRow a) a where
-  biplate = \case
-    NoExtRow r -> plate NoExtRow |+ r
-    ExtRow r ext -> plate ExtRow |+ r |* ext
--}

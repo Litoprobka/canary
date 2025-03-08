@@ -34,7 +34,6 @@ library
       NameGen
       NameResolution
       Parser
-      Playground
       Poset
       Repl
       Syntax
@@ -121,6 +120,7 @@ test-suite lang-test
   main-is: Spec.hs
   other-modules:
       ParserSpec
+      Playground
       TypeCheckerSpec
       Paths_lang
   hs-source-dirs:

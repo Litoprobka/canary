@@ -8,7 +8,6 @@
 {-# LANGUAGE TypeFamilies #-}
 {-# LANGUAGE UndecidableInstances #-}
 {-# LANGUAGE NoFieldSelectors #-}
-{-# OPTIONS_GHC -Wno-partial-fields #-}
 
 module Common (
     Name,
@@ -140,15 +139,16 @@ instance Enum Name_ where
         CharName -> -18
         LensName -> -19
         TypeName -> -20
+
     -- I don't think we ever care about retrieving name keys from an EnumMap
     toEnum = \case
         -10 -> BoolName
         -11 -> TrueName
         -12 -> ListName
         -13 -> ConsName
-        -14 -> NilName 
-        -15 -> IntName 
-        -16 -> NatName 
+        -14 -> NilName
+        -15 -> IntName
+        -16 -> NatName
         -17 -> TextName
         -18 -> CharName
         -19 -> LensName

@@ -70,6 +70,8 @@ emptyEnv = ReplEnv{..}
     scope = Scope $ HashMap.singleton (Name' "Type") (noLoc TypeName)
     (_, operatorPriorities) = Poset.eqClass AppOp Poset.empty
 
+-- this function uis 90% the same as `processDecls`
+-- I don't see a clean way to factor out the repetition, though
 mkDefaultEnv :: (Diagnose :> es, NameGen :> es) => Eff es ReplEnv
 mkDefaultEnv = do
     (preDecls, scope) <- mkPreprelude
@@ -220,7 +222,7 @@ processDecls env decls = do
     depResOutput@SimpleOutput{fixityMap, operatorPriorities} <-
         resolveDependenciesSimplified' env.fixityMap env.operatorPriorities afterNameRes
     fixityDecls <- Fixity.resolveFixity fixityMap operatorPriorities depResOutput.declarations
-    (newEnv, types) <- runState emptyEnv.types $ TC.run emptyEnv.values do
+    (newEnv, types) <- runState env.types $ TC.run env.values do
         tenv <- ask @TC.InfState
         foldlM addDecl tenv fixityDecls
     guardNoErrors

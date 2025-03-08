@@ -62,18 +62,11 @@ data Monotype
 data MonoClosure ty = MonoClosure {var :: Name, variance :: Variance, ty :: ty, env :: ValueEnv, body :: CoreTerm}
 data Variance = In | Out | Inv
 
-data InfState = InfState
+data InfState = InfState -- rename to Env since that's how I refer to it anyway
     { scope :: Scope
     , values :: ValueEnv
     , locals :: EnumMap Name TypeDT
     }
-
--- | `local` monomorphised to `InfState`
-local' :: Reader InfState :> es => (InfState -> InfState) -> Eff es a -> Eff es a
-local' = local
-
-localVal :: Reader InfState :> es => (ValueEnv -> ValueEnv) -> Eff es a -> Eff es a
-localVal f = local \env -> env{values = f env.values}
 
 -- the types of top-level bindings should not contain metavars
 -- this is not enforced at type level, though
@@ -230,10 +223,13 @@ lookupSig name = do
         (Nothing, Nothing) -> do
             -- assuming that type checking is performed after name resolution,
             -- we may just treat unbound names as holes
+            -- every occurence of an unbound name should get a new UniVar
+            -- (even then, unbound names are supposed to have unique ids)
             freshUniVar (getLoc name)
 
--- every occurence of an unbound name should get a new UniVar
--- (even then, unbound names are supposed to have unique ids)
+-- | `local` monomorphised to `InfState`
+local' :: Reader InfState :> es => (InfState -> InfState) -> Eff es a -> Eff es a
+local' = local
 
 declareTopLevel :: InfEffs es => EnumMap Name Type' -> Eff es ()
 declareTopLevel types = modify (types <>)
@@ -289,6 +285,8 @@ generaliseAll action = do
                 then do
                     -- if the skolem would escape its scope, we just convert it to an existential
                     -- i.e. \x -> runST (newSTRef x) : forall a. a -> STRef (exists s. s) a
+                    -- wait, a skolem may occur to the left of a function arrow, so such a conversion
+                    -- is not always correct
                     let loc = getLoc skolem
                     var <- freshTypeVar loc
                     pure $ C.Q loc Exists Implicit Erased var (type_ loc) $ C.Name var
@@ -389,8 +387,8 @@ unMono = \case
 > -- ?a -> ?a
 > monoLayer In (forall a. a -> a)
 > -- #a -> #a
-> monoLayer Out (forall a. forall b. a -> b -> a)
-> -- forall b. ?a -> b -> ?a -- wait, this is not quite right
+> monoLayer Out (forall a. a -> forall b. b -> a)
+> -- ?a -> forall b. b -> ?a
 > monoLayer Out (forall a. (forall b. b -> a) -> a)
 > -- (forall b. b -> ?a) -> ?a
 -}
@@ -432,42 +430,40 @@ conOf :: RecordOrVariant -> Loc -> ExtRow TypeDT -> TypeDT
 conOf Record = V.RecordT
 conOf Variant = V.VariantT
 
--- lookup a field in a type, assuming that the type is a row type
+{- | lookup a field in a type, assuming that the type is a row type
 -- if a univar is encountered, it's solved to a row type
---
--- I'm not sure how to handle polymorphism here yet, so I'll go
--- with Inv just in case
 --
 -- Note: repetitive calls of deepLookup on an open row turn it into a chain of singular extensions
 -- you should probably call `compress` after that
+-}
 deepLookup :: InfEffs es => RecordOrVariant -> Row.OpenName -> TypeDT -> Eff es (Maybe TypeDT)
-deepLookup whatToMatch k = mono In >=> go >=> pure . fmap unMono -- todo: monoLayer instead of mono
+deepLookup whatToMatch k = go
   where
-    go :: InfEffs es => Monotype -> Eff es (Maybe Monotype)
-    go = \case
-        MRecordT _ nextRow
-            | whatToMatch == Record -> deepLookup' nextRow
-            | otherwise -> pure Nothing
-        MVariantT _ nextRow
-            | whatToMatch == Variant -> deepLookup' nextRow
-            | otherwise -> pure Nothing
-        MUniVar loc uni ->
-            lookupUniVar uni >>= \case
-                Right ty -> go ty
-                Left _ -> do
-                    fieldType <- MUniVar loc <$> freshUniVar'
-                    rowVar <- MUniVar loc <$> freshUniVar'
-                    let con = case whatToMatch of
-                            Variant -> MVariantT
-                            Record -> MRecordT
-                    solveUniVar uni $ con loc $ ExtRow (one (k, fieldType)) rowVar
-                    pure $ Just fieldType
+    go :: InfEffs es => TypeDT -> Eff es (Maybe TypeDT)
+    go =
+        monoLayer Out >=> \case
+            V.RecordT _ nextRow
+                | whatToMatch == Record -> deepLookup' nextRow
+            V.VariantT _ nextRow
+                | whatToMatch == Variant -> deepLookup' nextRow
+            V.UniVar loc uni ->
+                lookupUniVar uni >>= \case
+                    Right ty -> go $ unMono ty
+                    Left _ -> do
+                        fieldType <- MUniVar loc <$> freshUniVar'
+                        rowVar <- MUniVar loc <$> freshUniVar'
+                        let con = case whatToMatch of
+                                Variant -> MVariantT
+                                Record -> MRecordT
+                        solveUniVar uni $ con loc $ ExtRow (one (k, fieldType)) rowVar
+                        pure $ Just $ unMono fieldType
+            -- V.Skolem{} -> _ -- todo: handle solved skolems?
 
-        -- there's no point in explicitly listing all of the cases, since
-        -- deepLookup only looks at records, variants and univars
-        _ -> pure Nothing
+            -- there's no point in explicitly listing all of the cases, since
+            -- deepLookup only looks at records, variants and univars
+            _ -> pure Nothing
 
-    deepLookup' :: InfEffs es => ExtRow Monotype -> Eff es (Maybe Monotype)
+    deepLookup' :: InfEffs es => ExtRow TypeDT -> Eff es (Maybe TypeDT)
     deepLookup' extRow = case Row.lookup k extRow.row of
         Just v -> pure $ Just v
         Nothing -> case Row.extension extRow of
@@ -478,26 +474,18 @@ deepLookup whatToMatch k = mono In >=> go >=> pure . fmap unMono -- todo: monoLa
 
 @{ x : Int | y : Double | z : Char | r } -> { x : Int, y : Double, z : Char | r }@
 -}
-compress :: InfEffs es => RecordOrVariant -> ExtRow TypeDT -> Eff es (ExtRow TypeDT)
-compress _ row@NoExtRow{} = pure row
-compress whatToMatch r@(ExtRow row ext) = go ext
+compress :: InfEffs es => RecordOrVariant -> Variance -> ExtRow TypeDT -> Eff es (ExtRow TypeDT)
+compress _ _ row@NoExtRow{} = pure row
+compress whatToMatch variance (ExtRow row ext) = Row.extend row <$> go ext
   where
     go =
-        mono In >=> \case
-            MRecordT loc nextRow
-                | whatToMatch == Record -> Row.extend row <$> go (V.RecordT loc $ unMono <$> nextRow)
-                | otherwise -> pure r
-            MVariantT loc nextRow
-                | whatToMatch == Variant -> Row.extend row <$> go (V.VariantT loc $ unMono <$> nextRow)
-                | otherwise -> pure r
-            MUniVar _ uni ->
+        monoLayer variance >=> \case
+            V.RecordT _ nextRow
+                | whatToMatch == Record -> compress whatToMatch variance nextRow
+            V.VariantT _ nextRow
+                | whatToMatch == Variant -> compress whatToMatch variance nextRow
+            v@(V.UniVar _ uni) ->
                 lookupUniVar uni >>= \case
                     Right ty -> go $ unMono ty
-                    Left _ -> pure r
-            _ -> pure r
-
--- first record minus fields that match with the second one
-diff :: InfEffs es => RecordOrVariant -> ExtRow TypeDT -> Row TypeDT -> Eff es (ExtRow TypeDT)
-diff whatToMatch lhsUncompressed rhs = do
-    lhs <- compress whatToMatch lhsUncompressed
-    pure $ lhs{row = Row.diff lhs.row rhs}
+                    Left _ -> pure $ ExtRow Row.empty v
+            other -> pure $ ExtRow Row.empty other

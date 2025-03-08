@@ -169,7 +169,7 @@ list xs = Located loc $ E.List xs
         _ -> Blank
 
 match :: [([Pattern p], Expr p)] -> Expr p
-match = noLoc . E.Match
+match = noLoc . E.Matchw
 
 case_ :: Expr p -> [(Pattern p, Expr p)] -> Expr p
 case_ m = noLoc . E.Case m

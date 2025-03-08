@@ -4,13 +4,14 @@ import Common (Literal, Literal_, Loc, Name, Skolem, UniVar)
 import LangPrelude
 import Prettyprinter
 import Syntax.Row (ExtRow (..), OpenName, Row, extension, sortedRow)
-import Syntax.Term (Quantifier (..), Visibility (..), Erased (..))
+import Syntax.Term (Erased (..), Quantifier (..), Visibility (..))
 
 data CorePattern
     = VarP Name
     | WildcardP Text
     | ConstructorP Name [Name]
     | VariantP OpenName Name
+    | RecordP (Row Name)
     | LiteralP Literal_
 
 instance Pretty CorePattern where
@@ -19,7 +20,10 @@ instance Pretty CorePattern where
         WildcardP txt -> "_" <> pretty txt
         ConstructorP name args -> parens $ hsep (pretty name : map pretty args)
         VariantP name arg -> parens $ pretty name <+> pretty arg
+        RecordP row -> braces . sep . punctuate comma . map recordField $ sortedRow row
         LiteralP lit -> pretty lit
+      where
+        recordField (name, pat) = pretty name <+> "=" <+> pretty pat
 
 type CoreType = CoreTerm
 
@@ -87,8 +91,9 @@ instance Pretty CoreTerm where
             Lambda name body -> pretty name <+> compressLambda body
             other -> "->" <+> pretty other
         compressQ q vis e = \case
-            Q _ q' vis' e' name ty body | q == q' && vis == vis' && e == e' ->
-              parens (pretty name <+> ":" <+> pretty ty) <+> compressQ q vis e body
+            Q _ q' vis' e' name ty body
+                | q == q' && vis == vis' && e == e' ->
+                    parens (pretty name <+> ":" <+> pretty ty) <+> compressQ q vis e body
             other -> arrOrDot q vis <+> pretty other
 
         arrOrDot Forall Visible = "->"

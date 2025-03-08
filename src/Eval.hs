@@ -30,6 +30,7 @@ import Syntax
 import Syntax.Core qualified as C
 import Syntax.Declaration qualified as D
 import Syntax.Row (ExtRow (..), OpenName)
+import Syntax.Row qualified as Row
 import Syntax.Term (Erased, Quantifier, Visibility (..))
 import Syntax.Term qualified as T
 import Prelude qualified (Show (..))
@@ -101,7 +102,7 @@ instance HasLoc Value where
 
 evalCore :: ValueEnv -> CoreTerm -> Value
 evalCore !env = \case
-    -- note that env is a lazy hashmap, so we only force the outer structure here
+    -- note that env is a lazy enummap, so we only force the outer structure here
     C.Name name -> fromMaybe (error . show $ "whoopsie, out of scope" <+> pretty name) $ LMap.lookup name env.values
     C.TyCon name -> TyCon name
     C.Con name args -> Con name $ map (evalCore env) args
@@ -165,9 +166,12 @@ matchCore env = \cases
     C.WildcardP{} _ -> Just env
     (C.ConstructorP pname argNames) (Con name args)
         | pname == name && length argNames == length args ->
-            Just $ env{values = foldr (uncurry LMap.insert) env.values (zip argNames args)}
+            Just $ env{values = foldl' (flip $ uncurry LMap.insert) env.values (zip argNames args)}
     (C.VariantP pname argName) (Variant name val)
         | pname == name -> Just $ env{values = LMap.insert argName val env.values}
+    (C.RecordP varRow) (Record row) ->
+        let (pairs, _, _) = Row.zipRows varRow row
+         in Just $ env{values = foldl' (flip $ uncurry LMap.insert) env.values pairs}
     (C.LiteralP lit) (PrimValue (L val)) -> env <$ guard (lit == val)
     _ _ -> Nothing
 
@@ -232,7 +236,7 @@ desugar = go
         T.AnnotationP pat _ -> flattenPattern pat
         T.ConstructorP name pats -> C.ConstructorP name <$> traverse asVar pats
         T.VariantP name pat -> C.VariantP name <$> asVar pat
-        T.RecordP _ -> internalError loc "todo: record pattern desugaring"
+        T.RecordP row -> C.RecordP <$> traverse asVar row
         T.ListP _ -> internalError loc "todo: list pattern desugaring"
         T.LiteralP (L lit) -> pure $ C.LiteralP lit
     asVar (L (T.VarP name)) = pure name

@@ -108,8 +108,12 @@ varBinder =
 typeVariable :: Parser (Type_ 'Parse)
 typeVariable = Name <$> termName <|> ImplicitVar <$> implicitVariable
 
-someRecord :: Text -> Parser value -> Maybe (SimpleName -> value) -> Parser (Row value)
-someRecord delim valueP missingValue = braces (fromList <$> commaSep recordItem)
+someRecord :: Text -> Parser value -> Maybe (SimpleName -> value) -> Parser (ExtRow value)
+someRecord delim valueP missingValue = braces do
+    row <- fromList <$> commaSep recordItem
+    optional (specialSymbol "|" *> valueP) <&> \case
+        Just ext -> ExtRow row ext
+        Nothing -> NoExtRow row
   where
     onMissing name = case missingValue of
         Nothing -> id
@@ -118,6 +122,13 @@ someRecord delim valueP missingValue = braces (fromList <$> commaSep recordItem)
         recordLabel <- termName
         valuePattern <- onMissing recordLabel $ specialSymbol delim *> valueP
         pure (recordLabel, valuePattern)
+
+noExtRecord :: Text -> Parser value -> Maybe (SimpleName -> value) -> Parser (Row value)
+noExtRecord delim valueP missingValue =
+    someRecord delim valueP missingValue
+        >>= \case
+            NoExtRow row -> pure row
+            ExtRow{} -> fail "unexpected row extension"
 
 lambda' :: Parser (Expr 'Parse)
 lambda' = withLoc do
@@ -129,20 +140,20 @@ lambda' = withLoc do
 
 quantifier :: Parser (Type 'Parse)
 quantifier = withLoc do
-    (q, erased) <- choice
-        [ (Forall, Erased) <$ forallKeyword 
-        , (Exists, Erased) <$ existsKeyword
-        , (Forall, Retained) <$ piKeyword
-        , (Exists, Retained) <$ sigmaKeyword
-        ]
+    (q, erased) <-
+        choice
+            [ (Forall, Erased) <$ forallKeyword
+            , (Exists, Erased) <$ existsKeyword
+            , (Forall, Retained) <$ piKeyword
+            , (Exists, Retained) <$ sigmaKeyword
+            ]
     binders <- NE.some varBinder
     let arrOrStar = specialSymbol case q of
-         Forall -> "->"
-         Exists -> "**"
+            Forall -> "->"
+            Exists -> "**"
     visibility <- Implicit <$ specialSymbol "." <|> Visible <$ arrOrStar
     body <- term
     pure \loc -> foldr (\binder acc -> Located loc $ Q q visibility erased binder acc) body binders
-  
 
 pattern' :: Parser (Pattern 'Parse)
 pattern' =
@@ -158,7 +169,8 @@ function definitions and match expressions
 -}
 patternParens :: Parser (Pattern 'Parse)
 patternParens = located do
-    pat <- located . choice $
+    pat <-
+        located . choice $
             [ VarP <$> termName
             , lexeme $ WildcardP <$> string "_" <* option "" termName'
             , record
@@ -173,7 +185,7 @@ patternParens = located do
         specialSymbol ":"
         AnnotationP pat <$> term
   where
-    record = RecordP <$> someRecord "=" pattern' (Just $ \n -> Located (getLoc n) $ VarP n)
+    record = RecordP <$> noExtRecord "=" pattern' (Just $ \n -> Located (getLoc n) $ VarP n)
     unit = Located Blank $ RecordP Row.empty
 
 binding :: Parser (Binding 'Parse)
@@ -290,9 +302,9 @@ termParens :: Parser (Expr 'Parse)
 termParens =
     located $
         choice
-            [ record
+            [ try record
             , recordType -- todo: ambiguity with empty record value
-            , List <$> brackets (commaSep term)
+            , try $ List <$> brackets (commaSep term)
             , variantType -- todo: ambiguity with empty list; unit sugar ambiguity
             , Name <$> operatorInParens
             , parens $ unLoc <$> term
@@ -305,9 +317,9 @@ termParens =
             ]
   where
     variantItem = (,) <$> variantConstructor <*> option (Located Blank $ RecordT $ NoExtRow Row.empty) termParens
-    record = Record <$> someRecord "=" term (Just $ \n -> Located (getLoc n) $ Name n)
-    recordType = RecordT . NoExtRow <$> someRecord ":" term Nothing
-    variantType = VariantT . NoExtRow <$> brackets (fromList <$> commaSep variantItem)
+    record = Record <$> noExtRecord "=" term (Just $ \n -> Located (getLoc n) $ Name n)
+    recordType = RecordT <$> someRecord ":" term Nothing
+    variantType = VariantT . NoExtRow <$> brackets (fromList <$> commaSep variantItem) -- todo: row extensions
     constructor = lexeme do
         name <- constructorName
         optional (located record) <&> \case

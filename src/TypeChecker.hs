@@ -157,8 +157,8 @@ subtype lhs_ rhs_ = join $ match <$> monoLayer In lhs_ <*> monoLayer Out rhs_
             -- QuickLook just assumes that all constructors are invariant and -> is a special case
             subtype lhs lhs'
             subtype rhs rhs'
-        (V.VariantT locL lhs) (V.VariantT locR rhs) -> rowCase Variant (locL, lhs) (locR, rhs)
-        (V.RecordT locL lhs) (V.RecordT locR rhs) -> rowCase Record (locL, lhs) (locR, rhs)
+        (V.VariantT locL lhs) (V.VariantT locR rhs) -> subtypeRows Variant (locL, lhs) (locR, rhs)
+        (V.RecordT locL lhs) (V.RecordT locR rhs) -> subtypeRows Record (locL, lhs) (locR, rhs)
         lhs rhs -> typeError $ NotASubtype lhs rhs Nothing
 
     -- (forall a -> ty) <: (foreach a -> ty)
@@ -168,16 +168,22 @@ subtype lhs_ rhs_ = join $ match <$> monoLayer In lhs_ <*> monoLayer Out rhs_
     subErased Retained Retained = True
     subErased Erased Retained = False
 
-    -- todo: this is absolute jank. We don't want {a, b} <: {a}
-    rowCase :: InfEffs es => RecordOrVariant -> (Loc, ExtRow TypeDT) -> (Loc, ExtRow TypeDT) -> Eff es ()
-    rowCase whatToMatch (locL, lhsRow) (locR, rhsRow) = do
-        let con = conOf whatToMatch
-        for_ (IsList.toList lhsRow.row) \(name, lhsTy) ->
-            deepLookup whatToMatch name (con locR rhsRow) >>= \case
-                Nothing -> typeError $ NotASubtype (con locL lhsRow) (con locR rhsRow) (Just name)
-                Just rhsTy -> subtype lhsTy rhsTy
-        -- if the lhs has an extension, it should be compatible with rhs without the already matched fields
-        for_ (Row.extension lhsRow) \ext -> subtype ext . con locL =<< diff whatToMatch rhsRow lhsRow.row
+    subtypeRows :: InfEffs es => RecordOrVariant -> (Loc, ExtRow TypeDT) -> (Loc, ExtRow TypeDT) -> Eff es ()
+    subtypeRows whatToMatch (locL, lhs) (locR, rhs) = do
+        lhsRow <- compress whatToMatch In lhs
+        rhsRow <- compress whatToMatch Out rhs
+        let (intersection, onlyL, onlyR) = Row.zipRows lhsRow.row rhsRow.row
+        traverse_ (uncurry subtype) intersection
+        -- we delegate the handling of univar row extensions to `subtype`
+        -- by this point, any other extension would be factored out by `compress`
+        newExt <- freshUniVar locL
+        subtype (con locL onlyL newExt) (extensionOrEmpty locL rhsRow)
+        subtype (extensionOrEmpty locL lhsRow) (con locR onlyR newExt)
+      where
+        con loc row ext
+            | Row.isEmpty row = ext
+            | otherwise = conOf whatToMatch loc $ ExtRow row ext
+        extensionOrEmpty loc = fromMaybe (conOf whatToMatch loc $ NoExtRow Row.empty) . Row.extension
 
     -- turns out it's different enough from `withUniVar`
     solveOr :: InfEffs es => Eff es Monotype -> (Monotype -> Eff es ()) -> UniVar -> Eff es ()
@@ -274,7 +280,7 @@ getArgCount ((firstPats, _) : matches) = argCount <$ guard (all ((== argCount) .
     argCount = length firstPats
 
 -- an implementation of depedendent pattern matching, pretty much
-localEquality :: InfEffs es => V.Value -> Pat -> Eff es ValueEnv
+localEquality :: InfEffs es => V.Value -> Pat -> Eff es ValueEnv -- should produce a (InfState -> InfState) instead of a ValueEnv
 localEquality val pat = do
     env <- ask @InfState
     case val of
@@ -286,6 +292,7 @@ localEquality val pat = do
                 pure venv{V.skolems = LMap.insert skolem solvedTo $ V.skolems venv}
         _ -> pure env.values
   where
+    -- convert a pattern to a new skolemized value
     patToVal :: InfEffs es => Pat -> Eff (State ValueEnv : es) V.Value
     patToVal (Located loc pat') = case pat' of
         VarP name -> do
