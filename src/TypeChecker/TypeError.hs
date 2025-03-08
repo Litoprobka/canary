@@ -13,7 +13,7 @@ type TypeDT = Value
 data TypeError
     = CannotUnify TypeDT TypeDT
     | NotASubtype TypeDT TypeDT (Maybe OpenName)
-    | MissingField TypeDT OpenName
+    | MissingField (Either TypeDT (Term 'Fixity)) OpenName
     | MissingVariant TypeDT OpenName
     | EmptyMatch Loc -- empty match expression
     | ArgCountMismatch Loc -- "different amount of arguments in a match statement"
@@ -41,11 +41,11 @@ typeError =
             fieldMsg = case mbField of
                 Nothing -> ""
                 Just field -> ": right hand side does not contain" <+> pretty field
-        MissingField ty field ->
+        MissingField row field ->
             Err
                 Nothing
-                (pretty ty <+> "does not contain field" <+> pretty field)
-                (mkNotes [(getLoc ty, This "type arising from"), (getLoc field, This "field arising from")])
+                (either pretty pretty row <+> "does not contain field" <+> pretty field)
+                (mkNotes [(either getLoc getLoc row, This "row arising from"), (getLoc field, This "field arising from")])
                 []
         MissingVariant ty variant ->
             Err

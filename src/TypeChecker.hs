@@ -251,11 +251,19 @@ check (Located loc e) = match e
                                 pure (V.UniVar loc' <$> argVars, V.UniVar loc' bodyVar)
                     other -> typeError $ ArgCountMismatch $ getLoc other
         (List items) (V.TyCon (L ListName) `V.App` itemTy) -> for_ items (`check` itemTy)
-        (E.Record row) ty -> do
-            for_ (IsList.toList row) \(name, expr) ->
-                deepLookup Record name ty >>= \case
-                    Nothing -> typeError $ MissingField ty name
-                    Just fieldTy -> check expr fieldTy
+        (E.Record row) ty@(V.RecordT _ tyRowUncompressed) -> do
+            tyRow <- compress Record Out tyRowUncompressed
+            let (inBoth, onlyVal, onlyTy) = Row.zipRows row tyRow.row
+
+            for_ (IsList.toList onlyTy) \(name, _) -> typeError $ MissingField (Right $ Located loc e) name
+            traverse_ (uncurry check) inBoth
+
+            -- since the row is compressed, we care only about the unsolved univar case here
+            -- in any other cases, missing fields are truly missing
+            case Row.extension tyRow of
+                -- solved skolems?
+                Just v@V.UniVar{} -> check (Located loc e) v
+                _ -> for_ (IsList.toList onlyVal) \(name, _) -> typeError $ MissingField (Left ty) name
         expr (V.UniVar _ uni) ->
             lookupUniVar uni >>= \case
                 Right ty -> check (Located loc expr) $ unMono ty
@@ -336,7 +344,7 @@ checkPattern (Located ploc outerPat) ty = case outerPat of
     RecordP patRow -> do
         fold <$> for (IsList.toList patRow) \(name, pat) ->
             deepLookup Record name ty >>= \case
-                Nothing -> typeError $ MissingField ty name
+                Nothing -> typeError $ MissingField (Left ty) name
                 Just fieldTy -> checkPattern pat fieldTy
     _ -> do
         (typeMap, inferredTy) <- inferPattern $ Located ploc outerPat
