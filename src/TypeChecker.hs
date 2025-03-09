@@ -258,8 +258,8 @@ check (Located loc e) = match e
             for_ (IsList.toList onlyTy) \(name, _) -> typeError $ MissingField (Right $ Located loc e) name
             traverse_ (uncurry check) inBoth
 
-            -- since the row is compressed, we care only about the unsolved univar case here
-            -- in any other cases, missing fields are truly missing
+            -- since the row is compressed, we only care about the unsolved univar case here
+            -- in any other case, missing fields are truly missing
             case Row.extension tyRow of
                 -- solved skolems?
                 Just v@V.UniVar{} -> check (Located loc e) v
@@ -273,7 +273,8 @@ check (Located loc e) = match e
                         Left _ -> solveUniVar uni newTy
                         Right _ -> pass
         _expr (V.Q _ Exists Visible _e _closure) -> internalError loc "dependent pairs are not supported yet"
-        expr (V.Q _ Forall _vis _e closure) -> check (Located loc expr) =<< substitute Out closure
+        expr (V.Q _ Forall Implicit _e closure) -> check (Located loc expr) =<< substitute Out closure
+        expr (V.Q _ Forall Hidden _e closure) -> check (Located loc expr) =<< substitute Out closure
         expr (V.Q _ Exists _vis _e closure) -> check (Located loc expr) =<< substitute In closure
         -- todo: a case for do-notation
         expr ty -> do

@@ -394,7 +394,6 @@ unMono = \case
 -}
 monoLayer :: InfEffs es => Variance -> TypeDT -> Eff es TypeDT
 monoLayer variance = \case
-    V.Var var -> internalError (getLoc var) $ "monoLayer: dangling var" <+> pretty var
     V.Q loc q Visible e closure -> pure $ V.Q loc q Visible e closure
     -- todo: I'm not sure how to handle erased vs retained vars yet
     -- in theory, no value may depend on an erased var
