@@ -1,6 +1,6 @@
 module Syntax.Core where
 
-import Common (Literal, Literal_, Loc, Name, Skolem, UniVar)
+import Common (Literal, Literal_, Loc, Name, Name_ (TypeName), Skolem, UniVar, pattern L)
 import LangPrelude
 import Prettyprinter
 import Syntax.Row (ExtRow (..), OpenName, Row, extension, sortedRow)
@@ -68,7 +68,7 @@ instance Pretty CoreTerm where
             Let name body expr -> "let" <+> pretty name <+> "=" <+> pretty body <> ";" <+> pretty expr
             Literal lit -> pretty lit
             Function _ from to -> parensWhen 2 $ go 2 from <+> "->" <+> pretty to
-            Q _ q vis er name ty body -> parensWhen 1 $ kw q er <+> parens (pretty name <+> ":" <+> pretty ty) <+> compressQ q vis er body
+            Q _ q vis er name ty body -> parensWhen 1 $ kw q er <+> prettyBinder name ty <+> compressQ q vis er body
             VariantT _ row -> brackets . withExt row . sep . punctuate comma . map variantItem $ sortedRow row.row
             RecordT _ row -> braces . withExt row . sep . punctuate comma . map recordTyField $ sortedRow row.row
             Skolem skolem -> pretty skolem
@@ -87,14 +87,18 @@ instance Pretty CoreTerm where
 
             variantItem (name, ty) = pretty name <+> pretty ty
             recordTyField (name, ty) = pretty name <+> ":" <+> pretty ty
+
         compressLambda = \case
             Lambda name body -> pretty name <+> compressLambda body
             other -> "->" <+> pretty other
         compressQ q vis e = \case
             Q _ q' vis' e' name ty body
                 | q == q' && vis == vis' && e == e' ->
-                    parens (pretty name <+> ":" <+> pretty ty) <+> compressQ q vis e body
+                    prettyBinder name ty <+> compressQ q vis e body
             other -> arrOrDot q vis <+> pretty other
+
+        prettyBinder name (TyCon (L TypeName)) = pretty name
+        prettyBinder name ty = parens $ pretty name <+> ":" <+> pretty ty
 
         arrOrDot Forall Visible = "->"
         arrOrDot Exists Visible = "**"
