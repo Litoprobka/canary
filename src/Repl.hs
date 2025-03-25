@@ -43,6 +43,7 @@ data ReplCommand
     | Expr (Expr 'Parse)
     | Type_ (Expr 'Parse)
     | Load FilePath
+    | Reload
     | Env
     | Quit
     | UnknownCommand Text
@@ -53,6 +54,7 @@ data ReplEnv = ReplEnv
     , operatorPriorities :: Poset Op
     , scope :: Scope
     , types :: EnumMap Name TC.Type'
+    , lastLoadedFile :: Maybe FilePath
     -- , inputHistory :: Zipper Text? -- todo: remember previous commands
     }
 
@@ -69,6 +71,7 @@ emptyEnv = ReplEnv{..}
     types = Map.singleton (noLoc TypeName) (V.TyCon (noLoc TypeName))
     scope = Scope $ HashMap.singleton (Name' "Type") (noLoc TypeName)
     (_, operatorPriorities) = Poset.eqClass AppOp Poset.empty
+    lastLoadedFile = Nothing
 
 -- this function uis 90% the same as `processDecls`
 -- I don't see a clean way to factor out the repetition, though
@@ -91,6 +94,7 @@ mkDefaultEnv = do
             , operatorPriorities
             , scope = newScope
             , types
+            , lastLoadedFile = Nothing
             }
   where
     addDecl env decl = TC.local' (const env) do
@@ -193,7 +197,12 @@ replStep env command = do
             fileContents <- reportExceptions @SomeException (decodeUtf8 <$> readFileBS path)
             localDiagnose env (path, fileContents) do
                 decls <- Parser.parseModule (path, fileContents)
-                processDecls env decls
+                processDecls (env{lastLoadedFile = Just path}) decls
+        Reload -> do
+            defaultEnv <- mkDefaultEnv
+            case env.lastLoadedFile of
+                Nothing -> pure $ Just defaultEnv
+                Just path -> replStep defaultEnv (Load path)
         Env -> do
             -- since the to/from enum conversion is lossy, only ids are available here
             -- perhaps I should write a custom wrapper for IntMap?..
@@ -233,26 +242,13 @@ processDecls env decls = do
             , operatorPriorities
             , scope = newScope
             , types
+            , lastLoadedFile = env.lastLoadedFile
             }
   where
     addDecl tenv decl = TC.local' (const tenv) do
         envDiff <- inferDeclaration decl
         newValues <- modifyEnv (envDiff tenv.values) [decl]
         pure tenv{TC.values = newValues}
-
-{-
-(env, types) <- runState emptyEnv.types $ TC.run emptyEnv.values \env -> do
-        foldlM addDecl env fixityDecls
-    guardNoErrors
-    pure $
-        ReplEnv
-            { values = env.values
-            , fixityMap
-            , operatorPriorities
-            , scope = newScope
-            , types
-            }
--}
 
 -- takes a line of input, or a bunch of lines in :{ }:
 takeInputChunk :: IO Text
@@ -273,6 +269,7 @@ parseCommand =
     choice @[]
         [ keyword ":t" *> fmap Type_ Parser.term
         , keyword ":q" $> Quit
+        , keyword ":r" $> Reload
         , keyword ":load" *> fmap (Load . Text.unpack) takeRest
         , keyword ":env" $> Env
         , symbol ":" *> (UnknownCommand <$> takeRest)
