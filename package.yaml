@@ -1,6 +1,6 @@
-name:                lang
+name:                canary
 version:             0.1.0.0
-github:              "Litoprobka/lang"
+github:              "Litoprobka/canary"
 license:             BSD2
 author:              "Peter Burtsev"
 copyright:           "2024 Peter Burtsev"
@@ -15,7 +15,7 @@ extra-source-files:
 # To avoid duplicated efforts in documentation and dealing with the
 # complications of embedding Haddock markup inside cabal files, it is
 # common to point users to the README.md file.
-description:         Please see the README on GitHub at <https://github.com/Litoprobka/lang#readme>
+description:         Please see the README on GitHub at <https://github.com/Litoprobka/canary#readme>
 
 language: GHC2021
 
@@ -62,7 +62,7 @@ library:
   source-dirs: src
 
 executables:
-  lang-exe:
+  canary-exe:
     main:                Main.hs
     source-dirs:         app
     ghc-options:
@@ -70,10 +70,10 @@ executables:
     - -rtsopts
     - -with-rtsopts=-N
     dependencies:
-    - lang
+    - canary
 
 tests:
-  lang-test:
+  canary-test:
     main:                Spec.hs
     source-dirs:         test
     ghc-options:
@@ -82,5 +82,5 @@ tests:
     - -with-rtsopts=-N
     defaults: hspec/hspec@master
     dependencies:
-    - lang
+    - canary
     - neat-interpolation
