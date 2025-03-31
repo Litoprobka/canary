@@ -7,9 +7,12 @@ module Repl where
 import Common (Fixity (..), Loc (..), Name, Name_ (TypeName), Pass (..), SimpleName_ (Name'), cast, noLoc)
 import Common qualified as C
 import Control.Monad.Combinators (choice)
+import Data.Char (isSpace)
+import Data.EnumMap qualified as EnumMap
 import Data.EnumMap.Lazy qualified as LMap
 import Data.EnumMap.Strict qualified as Map
 import Data.HashMap.Strict qualified as HashMap
+import Data.HashSet qualified as HashSet
 import Data.Text qualified as Text
 import Data.Text.Encoding (strictBuilderToText, textToStrictBuilder)
 import DependencyResolution (FixityMap, Op (..), SimpleOutput (..), resolveDependenciesSimplified')
@@ -24,7 +27,7 @@ import Eval (ValueEnv (..), eval, modifyEnv)
 import Eval qualified as V
 import Fixity qualified (parse, resolveFixity, run)
 import LangPrelude
-import Lexer (Parser, keyword, symbol)
+import Lexer (Parser, keyword, keywords, specialSymbols, symbol)
 import NameGen (NameGen, freshName)
 import NameResolution (Scope (..), resolveNames, resolveTerm)
 import NameResolution qualified
@@ -34,6 +37,7 @@ import Poset qualified
 import Syntax
 import Syntax.Declaration qualified as D
 import Syntax.Term
+import System.Console.Isocline
 import Text.Megaparsec (takeRest, try)
 import TypeChecker (infer, inferDeclaration, normalise)
 import TypeChecker.Backend qualified as TC
@@ -55,7 +59,6 @@ data ReplEnv = ReplEnv
     , scope :: Scope
     , types :: EnumMap Name TC.Type'
     , lastLoadedFile :: Maybe FilePath
-    -- , inputHistory :: Zipper Text? -- todo: remember previous commands
     }
 
 type ReplCtx es =
@@ -173,8 +176,7 @@ app = foldl' App
 
 run :: ReplCtx es => ReplEnv -> Eff es ()
 run env = do
-    putText ">> "
-    input <- liftIO takeInputChunk
+    input <- liftIO $ fromString <$> readlineEx ">>" (Just $ completer env) (Just keywordHighlighter)
     newEnv <- localDiagnose env ("<interactive>", input) do
         replStep env =<< Parser.run ("<interactive>", input) parseCommand
     traverse_ run newEnv
@@ -276,3 +278,32 @@ parseCommand =
         , try $ fmap Decls Parser.code
         , fmap Expr Parser.term
         ]
+
+completer :: ReplEnv -> CompletionEnv -> String -> IO ()
+completer env cenv input = completeWord cenv input Nothing wordCompletion
+  where
+    wordCompletion word =
+        filter (isPrefix word) . fmap toCompletion $ HashMap.keys env.scope.table
+    toCompletion name = Completion prettyName (prettyName <> maybe "" (" : " <>) mbSig) ""
+      where
+        prettyName = show $ pretty name
+        mbSig = do
+            id' <- HashMap.lookup name env.scope.table
+            ty <- EnumMap.lookup id' env.types
+            pure $ show $ pretty ty
+
+-- perhaps we *should* have a separate lexer pass after all?..
+keywordHighlighter :: String -> Fmt
+keywordHighlighter "" = ""
+keywordHighlighter str@(c : _)
+    | isSpace c =
+        let (space, rest) = span isSpace str
+         in space <> keywordHighlighter rest
+    | otherwise =
+        let (word, rest) = break isSpace str
+         in highlight word <> keywordHighlighter rest
+  where
+    highlight word
+        | fromString word `HashSet.member` keywords = style "purple" word
+        | fromString word `HashSet.member` specialSymbols = style "green" word
+        | otherwise = word

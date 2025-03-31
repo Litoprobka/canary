@@ -11,3 +11,8 @@ replicate : forall a. foreach (n : Peano) -> a -> Vec n a
 replicate n x = case n of
     Z -> VNil
     S n' -> VCons x (replicate n' x)
+
+vmap : forall (n : Peano) a b. (a -> b) -> Vec n a -> Vec n b
+vmap f vec = case vec of
+  VNil -> VNil
+  VCons x xs -> VCons (f x) (vmap f xs)
