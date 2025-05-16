@@ -66,6 +66,7 @@ library
     , effectful >=2.3 && <3
     , effectful-th
     , enummapset
+    , flatparse
     , isocline
     , megaparsec >=9.5.0 && <10
     , nonempty-containers
@@ -104,6 +105,7 @@ executable canary-exe
     , effectful >=2.3 && <3
     , effectful-th
     , enummapset
+    , flatparse
     , isocline
     , megaparsec >=9.5.0 && <10
     , nonempty-containers
@@ -146,6 +148,7 @@ test-suite canary-test
     , effectful >=2.3 && <3
     , effectful-th
     , enummapset
+    , flatparse
     , hspec ==2.*
     , isocline
     , megaparsec >=9.5.0 && <10

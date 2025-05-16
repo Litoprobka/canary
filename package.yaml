@@ -36,6 +36,7 @@ dependencies:
 - dlist
 - effectful >= 2.3 && < 3
 - effectful-th
+- flatparse
 - enummapset
 - isocline
 - relude >= 1.2.1.0 && < 2

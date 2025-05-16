@@ -246,7 +246,7 @@ data Literal_
     = IntLiteral Int
     | TextLiteral Text
     | CharLiteral Text
-    deriving (Eq)
+    deriving (Eq, Ord)
 
 instance Pretty Literal_ where
     pretty = \case
