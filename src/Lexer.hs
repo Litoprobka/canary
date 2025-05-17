@@ -1,31 +1,39 @@
+{-# LANGUAGE TemplateHaskell #-}
 {-# HLINT ignore "Use <$>" #-}
 {-# LANGUAGE TypeFamilies #-}
+{-# OPTIONS_GHC -Wno-name-shadowing #-}
 {-# OPTIONS_GHC -Wno-unrecognised-pragmas #-}
 
 module Lexer where
 
-import Common (Literal, Literal_ (..), Loc (..), Located (..), SimpleName, SimpleName_ (..), locFromSourcePos)
+import Common (Literal, Literal_ (..), Loc (..), Located (..), SimpleName, SimpleName_ (..), locFromSourcePos, unLoc, pattern L)
 import Control.Monad.Combinators.NonEmpty qualified as NE
-import Data.Char (isAlphaNum, isSpace, isUpperCase)
+import Data.Char (isLetter, isSpace, isUpperCase)
 import Data.HashSet qualified as Set
 import Data.Text qualified as Text
 import Data.Vector (Vector)
 import Data.Vector qualified as V
-import LangPrelude
+import LangPrelude hiding (optional, (<|>))
 import Relude.Monad (ask, local)
-import Text.Megaparsec hiding (Token, token)
-import Text.Megaparsec qualified as MP (Stream (..))
-import Text.Megaparsec.Char hiding (newline, space)
+
+-- import Text.Megaparsec hiding (Token, token)
+import Text.Megaparsec qualified as MP
+
+-- import Text.Megaparsec.Char hiding (newline, space)
+
+import Control.Monad.Combinators (choice, skipManyTill)
+import FlatParse.Basic hiding (Parser, Pos)
+import FlatParse.Basic qualified as FP
+import Syntax.Token
 import Text.Megaparsec.Char qualified as C (newline, space1)
 import Text.Megaparsec.Char.Lexer qualified as L
-import Prelude qualified (show)
 
-type Parser = Parsec Void Text
-type Lexer = ReaderT Pos (Parsec Void Text)
+type Parser = MP.Parsec Void Text
+type Lexer = FP.Parser ()
 
-data TokenStream = TokenStream Text (Vector (Loc, Token))
+data TokenStream = TokenStream Text (Vector (Located Token))
 
-instance Stream TokenStream where
+instance MP.Stream TokenStream where
     type Token TokenStream = Token
     type Tokens TokenStream = Vector Token
 
@@ -34,131 +42,69 @@ instance Stream TokenStream where
     chunkLength _ = length
     chunkEmpty _ = null
     take1_ (TokenStream inp v) =
-        V.uncons v <&> \((_, tok), v') ->
+        V.uncons v <&> \(L tok, v') ->
             (tok, TokenStream inp v')
     takeN_ n (TokenStream inp v)
         | V.null v = Nothing
         | otherwise =
             let (toks, v') = V.splitAt n v
-             in Just (fmap snd toks, TokenStream inp v')
+             in Just (fmap unLoc toks, TokenStream inp v')
     takeWhile_ p (TokenStream inp v) =
-        let (toks, v') = V.span (p . snd) v
-         in (fmap snd toks, TokenStream inp v')
-
-data Token
-    = LowerName Text
-    | UpperName Text
-    | Wildcard Text
-    | Keyword Keyword
-    | SpecialSymbol SpecialSymbol
-    | Op Text
-    | Literal Literal
-    | LParen
-    | RParen
-    | LBrace
-    | RBrace
-    | LBracket
-    | RBracket
-    | Comma
-    | Whitespace -- some constructs are whitespace-sensitive, so we have to track of the existence of whitespace
-    | Newline
-    | Indent -- there are multiple options: we can make the token parser return multiple tokens and continue parsing until a dedent
-    | Outdent -- or we can just use State instead of Reader and store an indent stack
-    -- option three is to insert meaningful indent/dedent/newline tokens after parsing
-    deriving (Eq, Ord)
-
--- 'above', 'below', 'equals' and 'application' are conditional keywords - that is, they are allowed to be used as identifiers
-data Keyword = If | Then | Else | Type | Case | Where | Let | Rec | Match | Of | Forall | Foreach | Exists | Some | Do | With | Infix
-    deriving (Eq, Ord, Enum, Bounded)
-
-instance Show Keyword where
-    show = \case
-        If -> "if"
-        Then -> "then"
-        Else -> "else"
-        Type -> "type"
-        Case -> "case"
-        Where -> "where"
-        Let -> "let"
-        Rec -> "rec"
-        Match -> "match"
-        Of -> "of"
-        Forall -> "forall"
-        Foreach -> "foreach"
-        Exists -> "exists"
-        Some -> "some"
-        Do -> "do"
-        With -> "with"
-        Infix -> "infix"
-
-data SpecialSymbol = Eq | Bar | Colon | Dot | Lambda | Arrow | FatArrow | BackArrow | At | Tilde | DepPair
-    deriving (Eq, Ord)
-
-instance Show SpecialSymbol where
-    show = \case
-        Eq -> "="
-        Bar -> "|"
-        Colon -> ":"
-        Dot -> "."
-        Lambda -> "λ"
-        Arrow -> "->"
-        FatArrow -> "=>"
-        BackArrow -> "<-"
-        At -> "@"
-        Tilde -> "~"
-        DepPair -> "**"
+        let (toks, v') = V.span (p . unLoc) v
+         in (fmap unLoc toks, TokenStream inp v')
 
 token :: Lexer Token
 token =
     choice
-        [ Whitespace <$ space
-        , keyword'
-        , altKeyword
+        [ Whitespace <$ space'
+        , Keyword <$> keyword'
+        , $( switch
+                [|
+                    case _ of
+                        "∀" -> pure $ Keyword Forall
+                        "Π" -> pure $ Keyword Foreach -- todo: probably needs a notFollowedBy check
+                        "∃" -> pure $ Keyword Exists
+                        "Σ" -> pure $ Keyword Some
+                        "\\" -> pure $ SpecialSymbol Lambda
+                        "(" -> pure LParen
+                        ")" -> pure RParen
+                        "{" -> pure LBrace
+                        "}" -> pure RBrace
+                        "[" -> pure LBracket
+                        "]" -> pure RBracket
+                        "," -> pure Comma
+                        ";" -> pure Semicolon
+                    |]
+           )
         , identifier'
-        , specialSymbol'
+        , SpecialSymbol <$> specialSymbol'
         , operator'
         , Literal <$> literal
-        , LParen <$ symbol "("
-        , RParen <$ symbol ")"
-        , LBrace <$ symbol "{"
-        , RBrace <$ symbol "}"
-        , LBracket <$ symbol "["
-        , RBracket <$ symbol "]"
-        , Comma <$ symbol ","
         , Newline <$ newline
-        , Indent <$ error "todo"
-        , Outdent <$ error "todo"
         ]
   where
     -- it might be cleaner to parse an identifier and then check whether it's a keyword
     keyword' =
-        choice $
-            [minBound .. maxBound] <&> \kw ->
-                Keyword kw <$ do
-                    void $ string (show kw)
-                    notFollowedBy (satisfy isIdentifierChar)
-    altKeyword =
-        choice
-            [ Keyword Forall <$ symbol "∀"
-            , Keyword Foreach <$ symbol "Π"
-            , Keyword Exists <$ symbol "∃"
-            , Keyword Some <$ symbol "Σ"
-            , SpecialSymbol Lambda <$ symbol "\\"
-            ]
+        $(rawSwitchWithPost Nothing (parseTable @Keyword) Nothing)
+            `notFollowedBy` satisfy isIdentifierChar
     specialSymbol' =
-        choice $
-            [minBound .. maxBound] <&> \sym ->
-                SpecialSymbol sym <$ do
-                    void $ string (show sym)
-                    notFollowedBy (satisfy isOperatorChar)
+        $(rawSwitchWithPost Nothing (parseTable @SpecialSymbol) Nothing)
+            `notFollowedBy` satisfy isOperatorChar
     -- todo: should operators in parens be identifiers?
     identifier' = do
-        ident <- takeWhile1P (Just "identifier") isIdentifierChar
-        pure case Text.head ident of
+        firstChar <- satisfy isLetter <|> ('_' <$ $(char '_'))
+        ident <- Text.pack . (firstChar :) <$> many (satisfy isIdentifierChar)
+        pure case firstChar of
             '_' -> Wildcard ident
             c | isUpperCase c -> UpperName ident
             _ -> LowerName ident
-    operator' = Op <$> takeWhile1P (Just "operator") isOperatorChar
+    operator' = Op . Text.pack <$> some (satisfy isOperatorChar)
+    space' =
+        choice
+            [ skipSome (satisfy isSpace)
+            , $(string "---") <* skipAnyChar `skipManyTill` $(string "---")
+            , $(string "--") <* takeLine
+            ]
 
 -- |  the usual space parser. Doesn't consume newlines
 space :: Lexer ()
@@ -413,12 +359,6 @@ someOperator = lexeme $ mkName $ try do
 -- (+), (<$>), etc.
 -- operatorInParens :: Parser SimpleName
 -- operatorInParens = try $ parens someOperator
-
-isOperatorChar :: Char -> Bool
-isOperatorChar = (`elem` ("+-*/%^=><&.~!?|@#$:" :: String))
-
-isIdentifierChar :: Char -> Bool
-isIdentifierChar c = isAlphaNum c || c == '_' || c == '\''
 
 {- todo: it might be a good idea to ignore strict newlines when inside the brackets
 i.e. that would allow

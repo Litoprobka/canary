@@ -41,6 +41,7 @@ library
       Syntax.Declaration
       Syntax.Row
       Syntax.Term
+      Syntax.Token
       TypeChecker
       TypeChecker.Backend
       TypeChecker.TypeError
