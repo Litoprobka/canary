@@ -28,13 +28,14 @@ import Syntax.Declaration qualified as D
 import Syntax.Row
 import Syntax.Row qualified as Row
 import Syntax.Term
-import Text.Megaparsec
-import Text.Megaparsec.Char (string)
+import Syntax.Token (SpecialSymbol)
+import Syntax.Token qualified as Token
+import Text.Megaparsec hiding (token)
 
 run :: Diagnose :> es => (FilePath, Text) -> Parser a -> Eff es a
 run (fileName, fileContents) parser =
     either (fatal . NE.toList . reportsFromBundle) pure $
-        parse (usingReaderT pos1 $ parser <* eof) fileName fileContents
+        parse (usingReaderT pos1 $ parser <* eof) fileName _fileContents
 
 parseModule :: Diagnose :> es => (FilePath, Text) -> Eff es [Declaration 'Parse]
 parseModule input = run input code
@@ -46,24 +47,24 @@ declaration :: Parser (Declaration 'Parse)
 declaration = located $ choice [typeDec, fixityDec, signature, valueDec]
   where
     valueDec = D.Value <$> binding <*> whereBlock
-    whereBlock = option [] $ block "where" (located valueDec)
+    whereBlock = option [] $ block Token.Where (located valueDec)
 
     typeDec = do
-        keyword "type"
+        keyword Token.Type
         name <- typeName
         simpleTypeDec name <|> gadtDec name
 
     simpleTypeDec name = do
         vars <- many varBinder
-        specialSymbol "="
-        D.Type name vars <$> typePattern `sepBy` specialSymbol "|"
+        specialSymbol Token.Eq
+        D.Type name vars <$> typePattern `sepBy` specialSymbol Token.Bar
 
     gadtDec :: SimpleName -> Parser (Declaration_ 'Parse)
     gadtDec name = do
-        mbKind <- optional $ specialSymbol ":" *> term
-        constrs <- block "where" $ withLoc do
+        mbKind <- optional $ specialSymbol Token.Colon *> term
+        constrs <- block Token.Where $ withLoc do
             con <- typeName
-            specialSymbol ":"
+            specialSymbol Token.Colon
             sig <- term
             pure \loc -> D.GadtConstructor loc con sig
         pure $ D.GADT name mbKind constrs
@@ -75,43 +76,43 @@ declaration = located $ choice [typeDec, fixityDec, signature, valueDec]
         pure \loc -> D.Constructor loc name args
 
     signature = do
-        name <- try $ (operatorInParens <|> termName) <* specialSymbol ":"
+        name <- try $ termName <* specialSymbol Token.Colon
         D.Signature name <$> term
 
     fixityDec = do
-        keyword "infix"
+        keyword Token.Infix
         fixity <-
             choice
-                [ InfixL <$ keyword "left"
-                , InfixR <$ keyword "right"
-                , InfixChain <$ keyword "chain"
+                [ InfixL <$ _keyword "left"
+                , InfixR <$ _keyword "right"
+                , InfixChain <$ _keyword "chain"
                 , pure Infix
                 ]
-        op <- someOperator
+        op <- operator
         above <- option [] do
-            keyword "above"
-            commaSep (Just <$> someOperator <|> Nothing <$ keyword "application")
+            _keyword "above"
+            commaSep (Just <$> operator <|> Nothing <$ _keyword "application")
         below <- option [] do
-            keyword "below"
-            commaSep someOperator
+            _keyword "below"
+            commaSep operator
         equal <- option [] do
-            keyword "equals"
-            commaSep someOperator
+            _keyword "equals"
+            commaSep operator
         pure $ D.Fixity fixity op PriorityRelation{above, below, equal}
 
 varBinder :: Parser (VarBinder 'Parse)
 varBinder =
-    parens (VarBinder <$> termName <* specialSymbol ":" <*> fmap Just term)
+    parens (VarBinder <$> termName <* specialSymbol Token.Colon <*> fmap Just term)
         <|> flip VarBinder Nothing
         <$> termName
 
 typeVariable :: Parser (Type_ 'Parse)
 typeVariable = Name <$> termName <|> ImplicitVar <$> implicitVariable
 
-someRecord :: Text -> Parser value -> Maybe (SimpleName -> value) -> Parser (ExtRow value)
+someRecord :: SpecialSymbol -> Parser value -> Maybe (SimpleName -> value) -> Parser (ExtRow value)
 someRecord delim valueP missingValue = braces do
     row <- fromList <$> commaSep recordItem
-    optional (specialSymbol "|" *> valueP) <&> \case
+    optional (specialSymbol Token.Bar *> valueP) <&> \case
         Just ext -> ExtRow row ext
         Nothing -> NoExtRow row
   where
@@ -123,7 +124,7 @@ someRecord delim valueP missingValue = braces do
         valuePattern <- onMissing recordLabel $ specialSymbol delim *> valueP
         pure (recordLabel, valuePattern)
 
-noExtRecord :: Text -> Parser value -> Maybe (SimpleName -> value) -> Parser (Row value)
+noExtRecord :: SpecialSymbol -> Parser value -> Maybe (SimpleName -> value) -> Parser (Row value)
 noExtRecord delim valueP missingValue =
     someRecord delim valueP missingValue
         >>= \case
@@ -132,9 +133,9 @@ noExtRecord delim valueP missingValue =
 
 lambda' :: Parser (Expr 'Parse)
 lambda' = withLoc do
-    lambda
+    specialSymbol Token.Lambda
     args <- NE.some patternParens
-    specialSymbol "->"
+    specialSymbol Token.Arrow
     body <- term
     pure \loc -> foldr (\var -> Located loc . Lambda var) body args
 
@@ -142,16 +143,16 @@ quantifier :: Parser (Type 'Parse)
 quantifier = withLoc do
     (q, erased) <-
         choice
-            [ (Forall, Erased) <$ forallKeyword
-            , (Exists, Erased) <$ existsKeyword
-            , (Forall, Retained) <$ piKeyword
-            , (Exists, Retained) <$ sigmaKeyword
+            [ (Forall, Erased) <$ keyword Token.Forall
+            , (Exists, Erased) <$ keyword Token.Exists
+            , (Forall, Retained) <$ keyword Token.Foreach
+            , (Exists, Retained) <$ keyword Token.Exists
             ]
     binders <- NE.some varBinder
     let arrOrStar = specialSymbol case q of
-            Forall -> "->"
-            Exists -> "**"
-    visibility <- Implicit <$ specialSymbol "." <|> Visible <$ arrOrStar
+            Forall -> Token.Arrow
+            Exists -> Token.DepPair
+    visibility <- Implicit <$ specialSymbol Token.Dot <|> Visible <$ arrOrStar
     body <- term
     pure \loc -> foldr (\binder acc -> Located loc $ Q q visibility erased binder acc) body binders
 
@@ -172,20 +173,20 @@ patternParens = located do
     pat <-
         located . choice $
             [ VarP <$> termName
-            , lexeme $ WildcardP <$> string "_" <* option "" termName'
+            , lexeme $ WildcardP <$> (do Token.Wildcard w <- anySingle; pure w)
             , record
             , ListP <$> brackets (commaSep pattern')
-            , LiteralP <$> literal
+            , LiteralP . _loc <$> literal
             , -- a constructor without arguments or with a tightly-bound record pattern
               lexeme $ ConstructorP <$> constructorName <*> option [] (one <$> located record)
             , flip VariantP unit <$> variantConstructor -- some sugar for variants with a unit payload
             , unLoc <$> parens pattern'
             ]
     option (unLoc pat) do
-        specialSymbol ":"
+        specialSymbol Token.Colon
         AnnotationP pat <$> term
   where
-    record = RecordP <$> noExtRecord "=" pattern' (Just $ \n -> Located (getLoc n) $ VarP n)
+    record = RecordP <$> noExtRecord Token.Eq pattern' (Just $ \n -> Located (getLoc n) $ VarP n)
     unit = Located Blank $ RecordP Row.empty
 
 binding :: Parser (Binding 'Parse)
@@ -195,12 +196,12 @@ binding = do
         -- for cleaner parse errors
         try (FunctionB <$> funcName <*> NE.some patternParens)
             <|> (ValueB <$> pattern')
-    specialSymbol "="
+    specialSymbol Token.Eq
     f <$> term
   where
     -- we might want to support infix operator declarations in the future
     -- > f $ x = f x
-    funcName = operatorInParens <|> termName
+    funcName = termName
 
 -- an expression with infix operators and unresolved priorities
 -- the `E.Infix` constructor is only used when there is more than one operator
@@ -209,7 +210,7 @@ term :: Parser (Expr 'Parse)
 term = located do
     expr <- nonAnn
     option (unLoc expr) do
-        specialSymbol ":"
+        specialSymbol Token.Colon
         Annotation expr <$> term
   where
     -- second lowest level of precedence, 'anything but annotations'
@@ -217,7 +218,7 @@ term = located do
     nonAnn = located do
         (Located loc (firstExpr, pairs)) <- located do
             firstExpr <- noPrec
-            pairs <- many $ (,) <$> optional someOperator <*> noPrec
+            pairs <- many $ (,) <$> optional operator <*> noPrec
             pure (firstExpr, pairs)
         let expr = case pairs of
                 [] -> unLoc firstExpr
@@ -225,7 +226,7 @@ term = located do
                 [(Just op, secondExpr)] -> Located (zipLocOf firstExpr op) (Located (getLoc op) (Name op) `App` firstExpr) `App` secondExpr -- todo: a separate AST node for an infix application?
                 (_ : _ : _) -> uncurry InfixE $ shift firstExpr pairs
         option expr do
-            specialSymbol "->"
+            specialSymbol Token.Arrow
             rhs <- nonAnn
             pure $ Function (Located loc expr) rhs
     -- type application precedence level
@@ -234,7 +235,7 @@ term = located do
         -- type applications bind tighther than anything else
         -- this might not work well with higher-than-application precedence operators, though
         apps <- many do
-            void $ single '@'
+            specialSymbol Token.At
             termParens
         pure $ foldl' (\e app -> Located (zipLocOf e app) $ TypeApp e app) expr apps
     -- x [(+, y), (*, z), (+, w)] --> [(x, +), (y, *), (z, +)] w
@@ -250,8 +251,8 @@ term = located do
             choice
                 [ unLoc <$> lambda'
                 , unLoc <$> quantifier
-                , letRecBlock (try $ keyword "let" *> keyword "rec") LetRec binding term
-                , letBlock "let" Let binding term
+                , letRecBlock (try $ keyword Token.Let *> keyword Token.Rec) LetRec binding term
+                , letBlock Token.Let Let binding term
                 , case'
                 , match'
                 , if'
@@ -260,31 +261,31 @@ term = located do
 
 case' :: Parser (Expr_ Parse)
 case' = do
-    keyword "case"
+    keyword Token.Case
     arg <- term
-    matches <- block "of" $ (,) <$> pattern' <* specialSymbol "->" <*> term
+    matches <- block Token.Of $ (,) <$> pattern' <* specialSymbol Token.Arrow <*> term
     pure $ Case arg matches
 
 match' :: Parser (Expr_ Parse)
-match' = Match <$> block "match" ((,) <$> some patternParens <* specialSymbol "->" <*> term)
+match' = Match <$> block Token.Match ((,) <$> some patternParens <* specialSymbol Token.Arrow <*> term)
 
 if' :: Parser (Expr_ Parse)
 if' = do
-    keyword "if"
+    keyword Token.If
     cond <- term
-    keyword "then"
+    keyword Token.Then
     true <- term
-    keyword "else"
+    keyword Token.Else
     false <- term
     pure $ If cond true false
 
 doBlock :: Parser (Expr_ Parse)
 doBlock = do
     stmts <-
-        block "do" . located . choice $
-            [ try $ Bind <$> pattern' <* specialSymbol "<-" <*> term
-            , With <$ keyword "with" <*> pattern' <* specialSymbol "<-" <*> term
-            , keyword "let" *> fmap DoLet binding
+        block Token.Do . located . choice $
+            [ try $ Bind <$> pattern' <* specialSymbol Token.BackArrow <*> term
+            , With <$ keyword Token.With <*> pattern' <* specialSymbol Token.BackArrow <*> term
+            , keyword Token.Let *> fmap DoLet binding
             , Action <$> term
             ]
     case unsnoc stmts of
@@ -306,19 +307,19 @@ termParens =
             , recordType -- todo: ambiguity with empty record value
             , try $ List <$> brackets (commaSep term)
             , variantType -- todo: ambiguity with empty list; unit sugar ambiguity
-            , Name <$> operatorInParens
+            , try $ Name <$> parens operator
             , parens $ unLoc <$> term
-            , RecordLens <$> recordLens
+            , RecordLens <$> _recordLens
             , constructor
             , Variant <$> variantConstructor
-            , Literal <$> literal
+            , Literal . _loc <$> literal
             , Name <$> termName
             , typeVariable
             ]
   where
     variantItem = (,) <$> variantConstructor <*> option (Located Blank $ RecordT $ NoExtRow Row.empty) termParens
-    record = Record <$> noExtRecord "=" term (Just $ \n -> Located (getLoc n) $ Name n)
-    recordType = RecordT <$> someRecord ":" term Nothing
+    record = Record <$> noExtRecord Token.Eq term (Just $ \n -> Located (getLoc n) $ Name n)
+    recordType = RecordT <$> someRecord Token.Colon term Nothing
     variantType = VariantT . NoExtRow <$> brackets (fromList <$> commaSep variantItem) -- todo: row extensions
     constructor = lexeme do
         name <- constructorName

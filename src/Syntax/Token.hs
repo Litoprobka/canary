@@ -3,7 +3,7 @@
 
 module Syntax.Token where
 
-import Common (Literal)
+import Common (Literal_)
 import Data.Char (isAlphaNum)
 import LangPrelude
 import Language.Haskell.TH.Syntax (Exp, Lift, Q)
@@ -12,11 +12,13 @@ import Prelude qualified
 data Token
     = LowerName Text
     | UpperName Text
+    | VariantName Text
+    | ImplicitName Text
     | Wildcard Text
     | Keyword Keyword
     | SpecialSymbol SpecialSymbol
     | Op Text
-    | Literal Literal
+    | Literal Literal_
     | LParen
     | RParen
     | LBrace

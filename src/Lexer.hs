@@ -6,14 +6,13 @@
 
 module Lexer where
 
-import Common (Literal, Literal_ (..), Loc (..), Located (..), SimpleName, SimpleName_ (..), locFromSourcePos, unLoc, pattern L)
+import Common (Literal_ (..), Loc (..), Located (..), SimpleName, SimpleName_ (..), locFromSourcePos, unLoc, pattern L)
 import Control.Monad.Combinators.NonEmpty qualified as NE
 import Data.Char (isLetter, isSpace, isUpperCase)
-import Data.HashSet qualified as Set
 import Data.Text qualified as Text
 import Data.Vector (Vector)
 import Data.Vector qualified as V
-import LangPrelude hiding (optional, (<|>))
+import LangPrelude hiding (optional)
 import Relude.Monad (ask, local)
 
 -- import Text.Megaparsec hiding (Token, token)
@@ -21,14 +20,13 @@ import Text.Megaparsec qualified as MP
 
 -- import Text.Megaparsec.Char hiding (newline, space)
 
-import Control.Monad.Combinators (choice, skipManyTill)
-import FlatParse.Basic hiding (Parser, Pos)
+import Control.Monad.Combinators (between, choice, skipManyTill)
+import FlatParse.Basic hiding (Parser, Pos, try, (<|>))
 import FlatParse.Basic qualified as FP
 import Syntax.Token
-import Text.Megaparsec.Char qualified as C (newline, space1)
 import Text.Megaparsec.Char.Lexer qualified as L
 
-type Parser = MP.Parsec Void Text
+type Parser = ReaderT MP.Pos (MP.Parsec Void TokenStream)
 type Lexer = FP.Parser ()
 
 data TokenStream = TokenStream Text (Vector (Located Token))
@@ -53,10 +51,11 @@ instance MP.Stream TokenStream where
         let (toks, v') = V.span (p . unLoc) v
          in (fmap unLoc toks, TokenStream inp v')
 
-token :: Lexer Token
-token =
+token' :: Lexer Token
+token' =
     choice
-        [ Whitespace <$ space'
+        [ Newline <$ $(char '\n')
+        , Whitespace <$ space'
         , Keyword <$> keyword'
         , $( switch
                 [|
@@ -77,19 +76,17 @@ token =
                     |]
            )
         , identifier'
+        , quotedIdent
         , SpecialSymbol <$> specialSymbol'
         , operator'
         , Literal <$> literal
-        , Newline <$ newline
         ]
   where
     -- it might be cleaner to parse an identifier and then check whether it's a keyword
     keyword' =
-        $(rawSwitchWithPost Nothing (parseTable @Keyword) Nothing)
-            `notFollowedBy` satisfy isIdentifierChar
+        $(rawSwitchWithPost (Just [|fails (satisfy isIdentifierChar)|]) (parseTable @Keyword) Nothing)
     specialSymbol' =
-        $(rawSwitchWithPost Nothing (parseTable @SpecialSymbol) Nothing)
-            `notFollowedBy` satisfy isOperatorChar
+        $(rawSwitchWithPost (Just [|fails (satisfy isOperatorChar)|]) (parseTable @SpecialSymbol) Nothing)
     -- todo: should operators in parens be identifiers?
     identifier' = do
         firstChar <- satisfy isLetter <|> ('_' <$ $(char '_'))
@@ -98,6 +95,12 @@ token =
             '_' -> Wildcard ident
             c | isUpperCase c -> UpperName ident
             _ -> LowerName ident
+    quotedIdent = do
+        $(char '\'')
+        ident <- Text.pack . ('\'' :) <$> some (satisfy isIdentifierChar)
+        pure case Text.head ident of
+            c | isUpperCase c -> VariantName ident
+            _ -> ImplicitName ident
     operator' = Op . Text.pack <$> some (satisfy isOperatorChar)
     space' =
         choice
@@ -106,84 +109,42 @@ token =
             , $(string "--") <* takeLine
             ]
 
--- |  the usual space parser. Doesn't consume newlines
-space :: Lexer ()
-space = L.space nonNewlineSpace lineComment blockComment
+token :: Token -> Parser ()
+token = void . lexeme . MP.single
 
 {- | any non-zero amount of newlines and any amount of whitespace
   i.e. it skips lines of whitespace entirely
   should never be used outside of the block-parsing functions
 -}
-newlines :: Lexer ()
-newlines = C.newline *> L.space C.space1 lineComment blockComment
-
--- helper functions for @space@ and @newlines@
--- they're not in a where block, because monomorphism restriction
-nonNewlineSpace, lineComment, blockComment :: Lexer ()
-nonNewlineSpace = void $ takeWhile1P (Just "space") \c -> isSpace c && c /= '\n' -- we can ignore \r here
-lineComment =
-    try $
-        string "--"
-            *> notFollowedBy (satisfy isOperatorChar)
-            *> void (takeWhileP (Just "character") (/= '\n'))
-            *> void (optional newline)
-blockComment = L.skipBlockComment "---" "---" -- this syntax doesn't work well with nested comments; it does look neat though
+newlines :: Parser ()
+newlines = MP.skipMany $ token Newline
 
 -- | space or a newline with increased indentation
-spaceOrLineWrap :: Lexer ()
-spaceOrLineWrap = void $ space `sepBy` newlineWithIndent
+spaceOrLineWrap :: Parser ()
+spaceOrLineWrap = void $ MP.single Whitespace `MP.sepBy` newlineWithIndent
   where
-    newlineWithIndent = try do
+    newlineWithIndent = MP.try do
         baseIndent <- ask
         void $ L.indentGuard newlines GT baseIndent
 
 {- | parses a statement separator
 a \\n should have the same indent as previous blocks. A semicolon always works
 -}
-newline :: Lexer ()
-newline = label "separator" $ void (symbol ";") <|> eqIndent
+newline :: Parser ()
+newline = MP.label "separator" $ token Semicolon <|> eqIndent
   where
-    eqIndent = try do
+    eqIndent = MP.try do
         indent <- ask
         void $ L.indentGuard newlines EQ indent
 
-lexeme :: Lexer a -> Lexer a
+lexeme :: Parser a -> Parser a
 lexeme = L.lexeme spaceOrLineWrap
-
-symbol :: Text -> Lexer Text
-symbol = L.symbol spaceOrLineWrap
-
-keywords :: HashSet Text
-keywords =
-    Set.fromList
-        []
-
--- | punctuation that has a special meaning, like keywords
-specialSymbols :: HashSet Text
-specialSymbols = Set.fromList ["=", "|", ":", ".", "λ", "\\", "∀", "∃", "->", "=>", "<-", "@", "~", "**"]
-
--- lambda, forall and exists all have an ASCII and a unicode version
-
-lambda :: Parser ()
-lambda = void $ specialSymbol "\\" <|> specialSymbol "λ" -- should we allow `λx -> expr` without a space after λ?
-
-forallKeyword :: Parser ()
-forallKeyword = keyword "forall" <|> specialSymbol "∀"
-
-piKeyword :: Parser ()
-piKeyword = keyword "foreach" <|> specialSymbol "Π"
-
-existsKeyword :: Parser ()
-existsKeyword = keyword "exists" <|> specialSymbol "∃"
-
-sigmaKeyword :: Parser ()
-sigmaKeyword = keyword "some" <|> specialSymbol "Σ"
 
 -- | a helper for `block` and `block1`.
 block'
     :: (forall b. Parser a -> Parser b -> Parser out)
     -- ^ `sep` parser. Intended uses are `sepEndBy` and `sepEndBy1`
-    -> Text
+    -> Keyword
     -- ^ keyword
     -> Parser a
     -- ^ statement parser
@@ -204,17 +165,17 @@ block' sep kw p = do
     blockIndent <- L.indentLevel
     local (const blockIndent) (p `sep` newline)
 
-block :: Text -> Parser a -> Parser [a]
-block = block' sepEndBy
+block :: Keyword -> Parser a -> Parser [a]
+block = block' MP.sepEndBy
 
-block1 :: Text -> Parser a -> Parser (NonEmpty a)
+block1 :: Keyword -> Parser a -> Parser (NonEmpty a)
 block1 = block' NE.sepEndBy1
 
 {- | a newline-delimited expression
 > let x = y
 > z
 -}
-letBlock :: Text -> (a -> b -> c) -> Parser a -> Parser b -> Parser c
+letBlock :: Keyword -> (a -> b -> c) -> Parser a -> Parser b -> Parser c
 letBlock kw f declaration expression = do
     blockIndent <- L.indentLevel
     keyword kw
@@ -235,46 +196,45 @@ letRecBlock kw f declaration expression = do
         f decls <$> expression
 
 topLevelBlock :: Parser a -> Parser [a]
-topLevelBlock p = optional newlines *> L.nonIndented spaceOrLineWrap (p `sepEndBy` newline <* eof)
+topLevelBlock p = MP.optional newlines *> L.nonIndented spaceOrLineWrap (p `MP.sepEndBy` newline <* MP.eof)
 
 -- | intended to be called with one of `specialSymbols`
-specialSymbol :: Text -> Parser ()
-specialSymbol sym = label (toString sym) $ try $ lexeme $ string sym *> notFollowedBy (satisfy isOperatorChar) -- note that `symbol` isn't used here, since the whitespace matters in this case
+specialSymbol :: SpecialSymbol -> Parser ()
+specialSymbol = token . SpecialSymbol
 
--- | an alias for `symbol`. Intended to be used with commmas, parens, brackets and braces (i.e. punctuation that can't be used in operators)
-punctuation :: Text -> Parser ()
-punctuation = void . symbol
+-- | an alias for `token`. Intended to be used with commmas, parens, brackets and braces (i.e. punctuation that can't be used in operators)
+punctuation :: Token -> Parser ()
+punctuation = token
 
 {- | parses a keyword, i.e. a symbol not followed by an alphanum character
 it is assumed that `kw` appears in the `keywords` list
 -}
-keyword :: Text -> Parser ()
-keyword kw = label (toString kw) $ try $ lexeme $ string kw *> notFollowedBy (satisfy isIdentifierChar)
+keyword :: Keyword -> Parser ()
+keyword = token . Keyword
 
 -- | an identifier that doesn't start with an uppercase letter
 termName' :: Parser Text
-termName' = do
-    void $ lookAhead (satisfy $ not . isUpperCase)
-    void $ lookAhead (anySingleBut '_') <|> fail "unexpected wildcard"
-    lexeme identifier
+termName' = lexeme do
+    LowerName name <- MP.anySingle
+    pure name
 
 -- | an identifier that doesn't start with an uppercase letter or a parenthesised operator
 termName :: Parser SimpleName
-termName = try (parens someOperator) <|> mkName termName'
+termName = parens operator <|> mkName termName'
 
-{- | a termName that starts with an underscore
-note: the current implementation forbids `_1`, `_1abc`, etc. That may be undesired
--}
+-- | a termName that starts with an underscore
 wildcard :: Parser ()
-wildcard = single '_' *> void identifier
+wildcard = lexeme do
+    Wildcard _ <- MP.anySingle
+    pass
 
 {- | an identifier that starts with an uppercase letter
 this is not a lexeme
 -}
 typeName' :: Parser Text
 typeName' = do
-    void $ lookAhead (satisfy isUpperCase)
-    identifier
+    UpperName name <- MP.anySingle
+    pure name
 
 {- | an identifier that starts with an uppercase letter
 unlike `typeName'`, this /is/ a lexeme
@@ -290,42 +250,45 @@ constructorName = mkName typeName'
 
 -- | an identifier that starts with a ' and a lowercase letter, i.e. 'acc
 implicitVariable :: Parser SimpleName
-implicitVariable = try $ mkName $ liftA2 Text.cons (single '\'') termName'
+implicitVariable = lexeme $ mkName do
+    ImplicitName name <- MP.anySingle
+    pure name
 
 {- | an identifier that starts with a ' and an uppercase letter, i.e. 'Some
 this is not a lexeme
 -}
 variantConstructor :: Parser SimpleName
-variantConstructor = try $ mkName $ liftA2 Text.cons (single '\'') typeName'
+variantConstructor = mkName do
+    VariantName name <- MP.anySingle
+    pure name
 
 {- | a helper for other identifier parsers
 note that it's not a lexeme, i.e. it doesn't consume trailing whitespace
 -}
-identifier :: Lexer Text
-identifier = try do
-    ident <- Text.cons <$> (letterChar <|> char '_') <*> takeWhileP (Just "identifier") isIdentifierChar
-    when (ident `Set.member` keywords) (fail $ "unexpected keyword '" <> toString ident <> "'")
-    pure ident
+identifier :: Parser Text
+identifier = do
+    ident <- MP.anySingle
+    case ident of
+        UpperName name -> pure name
+        LowerName name -> pure name
+        _ -> fail "expected an identifier"
 
 {- | a record lens, i.e. .field.otherField.thirdField
 Chances are, this parser will only ever be used with E.RecordLens
 -}
-recordLens :: Lexer (NonEmpty SimpleName)
-recordLens = label "record lens" $ lexeme $ single '.' *> mkName identifier `NE.sepBy1` single '.'
+
+-- recordLens :: Parser (NonEmpty SimpleName)
+-- recordLens = label "record lens" $ lexeme $ single '.' *> mkName identifier `NE.sepBy1` single '.'
 
 -- for anybody wondering, `empty` is *not* a noop parser
-intLiteral :: Lexer Literal
-intLiteral = label "int literal" $ try $ lexeme $ located $ fmap IntLiteral $ L.signed pass L.decimal
+intLiteral :: Lexer Literal_
+intLiteral = IntLiteral <$> anyAsciiDecimalInt
 
 -- todo: handle escape sequences and interpolation
-textLiteral :: Lexer Literal
-textLiteral =
-    label "text literal" $
-        located $
-            fmap TextLiteral $
-                between (symbol "\"") (symbol "\"") $
-                    takeWhileP (Just "text literal body") (/= '"')
+textLiteral :: Lexer Literal_
+textLiteral = fmap (TextLiteral . Text.pack) $ between $(char '\'') $(char '\'') $ many (satisfy (/= '"'))
 
+{-
 textLiteral' :: Lexer Literal
 textLiteral' = located do
     void $ single '"'
@@ -337,16 +300,24 @@ textLiteral' = located do
     interp = do
         void $ single "$"
         between (single "{") (single "}") $ many token
+-}
 
-charLiteral :: Lexer Literal
-charLiteral = label "char literal" $ try $ located $ fmap CharLiteral $ one <$> between (single '\'') (symbol "'") anySingle
+charLiteral :: Lexer Literal_
+charLiteral = CharLiteral . one <$> between $(char '\'') $(char '\'') anyChar
 
 -- | any literal
-literal :: Lexer Literal
-literal = choice [intLiteral, textLiteral, charLiteral]
+literal' :: Lexer Literal_
+literal' = choice [intLiteral, textLiteral, charLiteral]
 
-operator :: Text -> Lexer Loc
-operator sym = label "operator" $ lexeme $ withLoc' const $ string sym *> notFollowedBy (satisfy isOperatorChar)
+literal :: Parser Literal_
+literal = lexeme do
+    Literal lit <- MP.anySingle
+    pure lit
+
+operator :: Parser SimpleName
+operator = do
+    Op op <- MP.anySingle
+    mkName $ pure op
 
 {-
 someOperator :: Parser SimpleName
@@ -378,18 +349,18 @@ using anythinging indentation-sensitve, i.e. do notation, reintroduces strict ne
 > ]
 -}
 parens, brackets, braces :: Parser a -> Parser a
-parens = between (punctuation "(") (punctuation ")")
-brackets = between (punctuation "[") (punctuation "]")
-braces = between (punctuation "{") (punctuation "}")
+parens = between (punctuation LParen) (punctuation RParen)
+brackets = between (punctuation RBracket) (punctuation RBracket)
+braces = between (punctuation LBrace) (punctuation RBrace)
 
 -- leading commas, trailing commas, anything goes
 commaSep :: Parser a -> Parser [a]
-commaSep p = optional (punctuation ",") *> p `sepEndBy` punctuation ","
+commaSep p = MP.optional (token Comma) *> p `MP.sepEndBy` punctuation ","
 
 {- | parses an AST node with location info
 todo: don't include trailing whitespace where possible
 -}
-withLoc :: Lexer (Loc -> a) -> Lexer a
+withLoc :: Parser (Loc -> a) -> Parser a
 withLoc p = do
     start <- getSourcePos
     f <- p
@@ -397,11 +368,11 @@ withLoc p = do
     let loc = if start == end then Blank else locFromSourcePos start end
     pure $ f loc
 
-withLoc' :: (Loc -> a -> b) -> Lexer a -> Lexer b
+withLoc' :: (Loc -> a -> b) -> Parser a -> Parser b
 withLoc' f p = withLoc $ flip f <$> p
 
-located :: Lexer a -> Lexer (Located a)
+located :: Parser a -> Parser (Located a)
 located p = withLoc $ flip Located <$> p
 
-mkName :: Lexer Text -> Lexer SimpleName
+mkName :: Parser Text -> Parser SimpleName
 mkName = located . fmap Name'
