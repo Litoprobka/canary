@@ -45,22 +45,22 @@ code = topLevelBlock declaration
 declaration :: Parser (Declaration 'Parse)
 declaration = located $ choice [typeDec, fixityDec, signature, valueDec]
   where
-    valueDec = D.Value <$> binding <*> whereBlock
-    whereBlock = option [] $ block "where" (located valueDec)
+    valueDec = D.Value <$> binding <*> option [] whereBlock
+    whereBlock = block "where" (located valueDec)
 
     typeDec = do
         keyword "type"
         name <- typeName
-        simpleTypeDec name <|> gadtDec name
+        gadtDec name <|> simpleTypeDec name
 
     simpleTypeDec name = do
         vars <- many varBinder
-        specialSymbol "="
-        D.Type name vars <$> typePattern `sepBy` specialSymbol "|"
+        pats <- option [] $ specialSymbol "=" *> typePattern `sepBy1` specialSymbol "|"
+        pure $ D.Type name vars pats
 
     gadtDec :: SimpleName -> Parser (Declaration_ 'Parse)
     gadtDec name = do
-        mbKind <- optional $ specialSymbol ":" *> term
+        mbKind <- try $ optional $ specialSymbol ":" *> term
         constrs <- block "where" $ withLoc do
             con <- typeName
             specialSymbol ":"
@@ -75,7 +75,7 @@ declaration = located $ choice [typeDec, fixityDec, signature, valueDec]
         pure \loc -> D.Constructor loc name args
 
     signature = do
-        name <- try $ (operatorInParens <|> termName) <* specialSymbol ":"
+        name <- try $ termName <* specialSymbol ":"
         D.Signature name <$> term
 
     fixityDec = do
@@ -90,13 +90,13 @@ declaration = located $ choice [typeDec, fixityDec, signature, valueDec]
         op <- someOperator
         above <- option [] do
             keyword "above"
-            commaSep (Just <$> someOperator <|> Nothing <$ keyword "application")
+            commaSep1 (Just <$> someOperator <|> Nothing <$ keyword "application")
         below <- option [] do
             keyword "below"
-            commaSep someOperator
+            commaSep1 someOperator
         equal <- option [] do
             keyword "equals"
-            commaSep someOperator
+            commaSep1 someOperator
         pure $ D.Fixity fixity op PriorityRelation{above, below, equal}
 
 varBinder :: Parser (VarBinder 'Parse)
@@ -200,7 +200,7 @@ binding = do
   where
     -- we might want to support infix operator declarations in the future
     -- > f $ x = f x
-    funcName = operatorInParens <|> termName
+    funcName = termName
 
 -- an expression with infix operators and unresolved priorities
 -- the `E.Infix` constructor is only used when there is more than one operator
@@ -240,7 +240,7 @@ term = located do
     -- x [(+, y), (*, z), (+, w)] --> [(x, +), (y, *), (z, +)] w
     shift expr [] = ([], expr)
     shift lhs ((op, rhs) : rest) = first ((lhs, op) :) $ shift rhs rest
-    noPrec = typeApp <|> keywordBased <|> termParens
+    noPrec = keywordBased <|> typeApp
 
     -- expression forms that have a leading keyword/symbol
     -- most of them also consume all trailing terms
@@ -306,20 +306,23 @@ termParens =
             , recordType -- todo: ambiguity with empty record value
             , try $ List <$> brackets (commaSep term)
             , variantType -- todo: ambiguity with empty list; unit sugar ambiguity
-            , Name <$> operatorInParens
-            , parens $ unLoc <$> term
             , RecordLens <$> recordLens
             , constructor
             , Variant <$> variantConstructor
             , Literal <$> literal
             , Name <$> termName
+            , parens $ unLoc <$> term
             , typeVariable
             ]
   where
     variantItem = (,) <$> variantConstructor <*> option (Located Blank $ RecordT $ NoExtRow Row.empty) termParens
     record = Record <$> noExtRecord "=" term (Just $ \n -> Located (getLoc n) $ Name n)
     recordType = RecordT <$> someRecord ":" term Nothing
-    variantType = VariantT . NoExtRow <$> brackets (fromList <$> commaSep variantItem) -- todo: row extensions
+    variantType = brackets do
+        items <- fromList <$> commaSep variantItem
+        VariantT <$> option (NoExtRow items) do
+            specialSymbol "|"
+            ExtRow items <$> term
     constructor = lexeme do
         name <- constructorName
         optional (located record) <&> \case

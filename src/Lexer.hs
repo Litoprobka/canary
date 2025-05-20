@@ -194,7 +194,7 @@ termName' = do
 
 -- | an identifier that doesn't start with an uppercase letter or a parenthesised operator
 termName :: Parser SimpleName
-termName = try (parens someOperator) <|> mkName termName'
+termName = operatorInParens <|> mkName termName'
 
 {- | a termName that starts with an underscore
 note: the current implementation forbids `_1`, `_1abc`, etc. That may be undesired
@@ -311,6 +311,10 @@ braces = between (punctuation "{") (punctuation "}")
 -- leading commas, trailing commas, anything goes
 commaSep :: Parser a -> Parser [a]
 commaSep p = optional (punctuation ",") *> p `sepEndBy` punctuation ","
+
+-- like 'commaSep', but parses one or more items
+commaSep1 :: Parser a -> Parser [a]
+commaSep1 p = optional (punctuation ",") *> p `sepEndBy1` punctuation ","
 
 {- | parses an AST node with location info
 todo: don't include trailing whitespace where possible
