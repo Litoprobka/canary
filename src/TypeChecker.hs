@@ -29,7 +29,7 @@ import Data.Traversable (for)
 import Diagnostic (internalError)
 import Effectful
 import Effectful.Reader.Static (ask, asks)
-import Effectful.State.Static.Local (State, get, modify, runState)
+import Effectful.State.Static.Local (State, execState, get, modify, put, runState)
 import Eval (ValueEnv)
 import Eval qualified as V
 import GHC.IsList qualified as IsList
@@ -209,7 +209,7 @@ check (Located loc e) = match e
             check expr annTyV
             subtype annTyV ty
         (If cond true false) ty -> do
-            check cond $ V.TyCon (Located (getLoc cond) BoolName)
+            check cond $ V.TyCon (Located loc BoolName)
             check true ty
             check false ty
         (Case arg matches) ty -> do
@@ -218,16 +218,19 @@ check (Located loc e) = match e
                 typeMap <- checkPattern pat argTy
                 local' (declareMany typeMap) do
                     env <- ask @InfState
-                    newValues <- case mbArgV env of
-                        Just argV -> localEquality argV pat
-                        Nothing -> asks @InfState (.values)
+                    newValues <- execState env.values do
+                        argValue <- V.eval env.values arg
+                        patValue <- skolemizePattern pat
+                        localEquality argValue patValue
                     local' (\infState -> infState{values = newValues}) do
                         check body ty
           where
-            -- a special case for matching on a var seems janky, but apparently that's how Idris does this
-            mbArgV env = case arg of
-                L (Name name) -> Map.lookup name env.values.values
-                _ -> Nothing
+
+        -- a special case for matching on a var seems janky, but apparently that's how Idris does this
+        -- we can do better: eval the arg with the current scope, which would yield a skolem for unbound vars anyway
+        -- mbArgV env = case arg of
+        --    L (Name name) -> Map.lookup name env.values.values
+        --    _ -> Nothing
         (Match matches) ty -> do
             n <- whenNothing (getArgCount matches) $ typeError $ ArgCountMismatch loc
             (patTypes, bodyTy) <- unwrapFn n ty
@@ -288,36 +291,71 @@ getArgCount ((firstPats, _) : matches) = argCount <$ guard (all ((== argCount) .
   where
     argCount = length firstPats
 
+{- Local equality in dependent pattern matching
+
+Dependent pattern matching is performed in two ways
+
+The first one is on the value level, where we refine the
+value of a variable in each of the branches
+
+> case n of
+>   Z -> VNil -- we know that `n ~ Z` here
+>   S m -> VCons 0 (something m) -- we know that `n ~ S m` for some unknown m here
+
+The second is GADT pattern matching as it is in Haskell
+This time, we only match type level information - unknown variables in
+the type of `vec` are refined with the types of the patterns
+
+> vec : Vec n a
+> case vec of
+>   VNil -> VNil
+>   VCons x xs -> VCons (f x) (map f xs)
+
+If we look closely, the mechanism is actually the same: we zip lhs and rhs types,
+and lhs skolems are solved to the rhs where possible. The only difference is
+\*what* are the lhs and rhs in each case - the matched var and a pattern in the first case
+vs the type of the var and the type of the pattern in the second
+
+To perform the refinement, we have to
+- first case: turn the pattern into a skolemized value
+- second case: figure out the type of the pattern
+-}
+
 -- an implementation of depedendent pattern matching, pretty much
-localEquality :: InfEffs es => V.Value -> Pat -> Eff es ValueEnv -- should produce a (InfState -> InfState) instead of a ValueEnv
-localEquality val pat = do
-    env <- ask @InfState
-    case val of
-        V.Skolem skolem
-            -- for now, we don't do anything if the skolem is already locally solved
-            | LMap.member skolem env.values.skolems -> pure env.values
-            | otherwise -> do
-                (solvedTo, venv) <- runState env.values $ patToVal pat
-                pure venv{V.skolems = LMap.insert skolem solvedTo $ V.skolems venv}
-        _ -> pure env.values
-  where
-    -- convert a pattern to a new skolemized value
-    patToVal :: InfEffs es => Pat -> Eff (State ValueEnv : es) V.Value
-    patToVal (Located loc pat') = case pat' of
-        VarP name -> do
-            valToDefine <- freshSkolem $ toSimpleName name
-            modify \venv -> venv{V.values = LMap.insert name valToDefine venv.values}
-            pure valToDefine
-        WildcardP name -> freshSkolem $ Located loc $ Name' name -- todo: use SimpleName in WildcardP
-        AnnotationP innerPat _ -> patToVal innerPat
-        ConstructorP con args -> V.Con con <$> traverse patToVal args
-        ListP args -> do
-            argVs <- traverse patToVal args
-            -- this is not the first time I write out the List desugaring, is it?
-            pure $ foldr (\h t -> V.Con (Located loc ConsName) [h, t]) (V.Con (Located loc NilName) []) argVs
-        VariantP con arg -> V.Variant con <$> patToVal arg
-        RecordP row -> V.Record <$> traverse patToVal row
-        LiteralP lit -> pure $ V.PrimValue lit
+localEquality :: InfEffs es => V.Value -> V.Value -> Eff (State ValueEnv : es) ()
+localEquality argVal patVal = do
+    venv <- get
+    case argVal of
+        V.Skolem skolem -> case LMap.lookup skolem venv.skolems of
+            Just val' -> localEquality val' patVal
+            Nothing -> put venv{V.skolems = LMap.insert skolem patVal $ V.skolems venv}
+        -- this doesn't seem right. We should recur and attempt to zip the pattern type with the value
+        _ -> put venv
+
+-- convert a pattern to a new skolemized value
+skolemizePattern :: InfEffs es => Pat -> Eff (State ValueEnv : es) V.Value
+skolemizePattern (Located loc pat') = case pat' of
+    VarP name -> do
+        valToDefine <- freshSkolem $ toSimpleName name
+        modify \venv -> venv{V.values = LMap.insert name valToDefine venv.values}
+        pure valToDefine
+    WildcardP name -> freshSkolem $ Located loc $ Name' name -- todo: use SimpleName in WildcardP
+    AnnotationP innerPat _ -> skolemizePattern innerPat
+    ConstructorP con args -> V.Con con <$> traverse skolemizePattern args
+    ListP args -> do
+        argVs <- traverse skolemizePattern args
+        -- this is not the first time I write out the List desugaring, is it?
+        pure $ foldr (\h t -> V.Con (Located loc ConsName) [h, t]) (V.Con (Located loc NilName) []) argVs
+    VariantP con arg -> V.Variant con <$> skolemizePattern arg
+    RecordP row -> V.Record <$> traverse skolemizePattern row
+    LiteralP lit -> pure $ V.PrimValue lit
+
+-- | zip the type of a pattern matching argument with the type of a pattern, refining the type parameters on the go
+refine :: InfEffs es => TypeDT -> Pat -> Eff es InfState
+refine ty pat = zip (_typeParams ty) (_typeParams $ patTy pat)
+
+-- Vec @ n @ a     Vec @ Z @ a
+--
 
 -- | given a map of related signatures, check or infer a declaration
 checkBinding :: InfEffs es => Binding 'Fixity -> EnumMap Name TypeDT -> Eff es (EnumMap Name TypeDT)
@@ -565,6 +603,7 @@ inferPattern (Located loc p) = case p of
     -- conArgTypes and the zipM may be unified into a single function
     conArgTypes name = lookupSig name >>= go
       where
+        errorAtName = internalError (getLoc name)
         go =
             monoLayer In >=> \case
                 V.Function _ arg rest -> second (arg :) <$> go rest
@@ -581,12 +620,12 @@ inferPattern (Located loc p) = case p of
                 V.App lhs rhs -> pure (V.App lhs rhs, [])
                 V.VariantT loc' _ -> internalError loc' $ "unexpected variant type" <+> "in a constructor type"
                 V.RecordT loc' _ -> internalError loc' $ "unexpected record type" <+> "in a constructor type"
-                V.Variant{} -> internalError (getLoc name) $ "unexpected variant constructor" <+> "in a constructor type"
-                V.Record{} -> internalError (getLoc name) $ "unexpected record value" <+> "in a constructor type"
-                V.Lambda{} -> internalError (getLoc name) $ "unexpected lambda" <+> "in a constructor type"
-                V.PrimValue{} -> internalError (getLoc name) $ "unexpected value" <+> "in a constructor type"
-                V.PrimFunction{} -> internalError (getLoc name) $ "unexpected primitive function" <+> "in a constructor type"
-                V.Case{} -> internalError (getLoc name) $ "unexpected case" <+> "in a constructor type"
+                V.Variant{} -> errorAtName $ "unexpected variant constructor" <+> "in a constructor type"
+                V.Record{} -> errorAtName $ "unexpected record value" <+> "in a constructor type"
+                V.Lambda{} -> errorAtName $ "unexpected lambda" <+> "in a constructor type"
+                V.PrimValue{} -> errorAtName $ "unexpected value" <+> "in a constructor type"
+                V.PrimFunction{} -> errorAtName $ "unexpected primitive function" <+> "in a constructor type"
+                V.Case{} -> errorAtName $ "unexpected case" <+> "in a constructor type"
                 V.Skolem skolem -> pure (V.Skolem skolem, [])
                 V.Var var -> internalError (getLoc var) $ "unbound var" <+> pretty var <+> "in a constructor type"
 
