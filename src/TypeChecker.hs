@@ -9,7 +9,7 @@
 module TypeChecker (
     run,
     infer,
-    inferPattern,
+    -- inferPattern,
     inferBinding,
     check,
     checkPattern,
@@ -29,7 +29,7 @@ import Data.Traversable (for)
 import Diagnostic (internalError)
 import Effectful
 import Effectful.Reader.Static (ask, asks)
-import Effectful.State.Static.Local (State, execState, get, modify, put, runState)
+import Effectful.State.Static.Local (State, execState, get, modify, put)
 import Eval (ValueEnv)
 import Eval qualified as V
 import GHC.IsList qualified as IsList
@@ -215,27 +215,27 @@ check (Located loc e) = match e
         (Case arg matches) ty -> do
             argTy <- infer arg
             for_ matches \(pat, body) -> do
-                typeMap <- checkPattern pat argTy
+                typeMap <- checkPatternRelaxed pat argTy
                 local' (declareMany typeMap) do
                     env <- ask @InfState
                     newValues <- execState env.values do
-                        argValue <- V.eval env.values arg
                         patValue <- skolemizePattern pat
-                        localEquality argValue patValue
+                        truePatTy <- snd <$> inferPattern pat
+                        localEquality argTy truePatTy
+                        traverse_ (`localEquality` patValue) (mbArgV env)
                     local' (\infState -> infState{values = newValues}) do
                         check body ty
           where
-
-        -- a special case for matching on a var seems janky, but apparently that's how Idris does this
-        -- we can do better: eval the arg with the current scope, which would yield a skolem for unbound vars anyway
-        -- mbArgV env = case arg of
-        --    L (Name name) -> Map.lookup name env.values.values
-        --    _ -> Nothing
+            -- a special case for matching on a var seems janky, but apparently that's how Idris does this
+            -- we can do better: eval the arg with the current scope, which would yield a skolem for unbound vars anyway
+            mbArgV env = case arg of
+                L (Name name) -> Map.lookup name env.values.values
+                _ -> Nothing
         (Match matches) ty -> do
             n <- whenNothing (getArgCount matches) $ typeError $ ArgCountMismatch loc
             (patTypes, bodyTy) <- unwrapFn n ty
             for_ matches \(pats, body) -> do
-                typeMap <- fold <$> zipWithM checkPattern pats patTypes
+                typeMap <- fold <$> zipWithM checkPatternRelaxed pats patTypes
                 local' (declareMany typeMap) $ check body bodyTy
           where
             unwrapFn 0 = pure . ([],)
@@ -322,15 +322,32 @@ To perform the refinement, we have to
 -}
 
 -- an implementation of depedendent pattern matching, pretty much
+-- invariant: two arguments are pattern-matching-compatible
 localEquality :: InfEffs es => V.Value -> V.Value -> Eff (State ValueEnv : es) ()
 localEquality argVal patVal = do
     venv <- get
-    case argVal of
-        V.Skolem skolem -> case LMap.lookup skolem venv.skolems of
+    case (argVal, patVal) of
+        (V.Skolem skolem, _) -> case LMap.lookup skolem venv.skolems of
             Just val' -> localEquality val' patVal
             Nothing -> put venv{V.skolems = LMap.insert skolem patVal $ V.skolems venv}
-        -- this doesn't seem right. We should recur and attempt to zip the pattern type with the value
-        _ -> put venv
+        (_, V.Skolem skolem) -> case LMap.lookup skolem venv.skolems of
+            Just val' -> localEquality argVal val'
+            Nothing -> pass
+        (lhsF `V.App` lhsArg, rhsF `V.App` rhsArg) -> do
+            localEquality lhsF rhsF
+            localEquality lhsArg rhsArg
+        (V.Con lhsName lhsVals, V.Con rhsName rhsVals)
+            | lhsName == rhsName ->
+                zipWithM_ localEquality lhsVals rhsVals
+        (V.Record lhs, V.Record rhs) -> void $ Row.unionWithM (\l r -> l <$ localEquality l r) lhs rhs
+        (V.Variant lhsName lhsArg, V.Variant rhsName rhsArg) | lhsName == rhsName -> localEquality lhsArg rhsArg
+        (V.Function _ lhsFrom lhsTo, V.Function _ rhsFrom rhsTo) -> do
+            localEquality lhsFrom rhsFrom
+            localEquality lhsTo rhsTo
+        -- todo: the rest of the cases
+        -- RecordT and VariantT are complicated because of row extensions
+        -- it's not clear whether we should touch UniVars at all
+        _ -> pass
 
 -- convert a pattern to a new skolemized value
 skolemizePattern :: InfEffs es => Pat -> Eff (State ValueEnv : es) V.Value
@@ -350,10 +367,6 @@ skolemizePattern (Located loc pat') = case pat' of
     RecordP row -> V.Record <$> traverse skolemizePattern row
     LiteralP lit -> pure $ V.PrimValue lit
 
--- | zip the type of a pattern matching argument with the type of a pattern, refining the type parameters on the go
-refine :: InfEffs es => TypeDT -> Pat -> Eff es InfState
-refine ty pat = zip (_typeParams ty) (_typeParams $ patTy pat)
-
 -- Vec @ n @ a     Vec @ Z @ a
 --
 
@@ -369,26 +382,6 @@ checkBinding binding types = case binding of
         Nothing -> inferBinding binding
     ValueB pat _body -> do
         internalError (getLoc pat) "todo: type check destructuring bindings with partial signatures"
-
--- check a pattern, returning all of the newly bound vars
-checkPattern :: InfEffs es => Pat -> TypeDT -> Eff es (EnumMap Name TypeDT)
-checkPattern (Located ploc outerPat) ty = case outerPat of
-    -- we need this case, since inferPattern only infers monotypes for var patterns
-    VarP name -> pure $ Map.singleton name ty
-    -- we probably do need a case for ConstructorP for the same reason
-    VariantP name arg ->
-        deepLookup Variant name ty >>= \case
-            Nothing -> typeError $ MissingVariant ty name
-            Just argTy -> checkPattern arg argTy
-    RecordP patRow -> do
-        fold <$> for (IsList.toList patRow) \(name, pat) ->
-            deepLookup Record name ty >>= \case
-                Nothing -> typeError $ MissingField (Left ty) name
-                Just fieldTy -> checkPattern pat fieldTy
-    _ -> do
-        (typeMap, inferredTy) <- inferPattern $ Located ploc outerPat
-        subtype inferredTy ty
-        pure typeMap
 
 infer :: InfEffs es => Expr 'Fixity -> Eff es TypeDT
 infer (Located loc e) = case e of
@@ -429,17 +422,19 @@ infer (Located loc e) = case e of
         argTy <- infer arg
         result <- freshUniVar loc
         for_ matches \(pat, body) -> do
-            -- inferring dependent pattern matching is probably unnecessary, but we do it anyway
-            typeMap <- checkPattern pat argTy
+            typeMap <- checkPatternRelaxed pat argTy
             local' (declareMany typeMap) do
                 env <- ask @InfState
-                newValues <- case mbArgV env of
-                    Just argV -> localEquality argV pat
-                    Nothing -> asks @InfState (.values)
+                newValues <- execState env.values do
+                    patValue <- skolemizePattern pat
+                    truePatTy <- snd <$> inferPattern pat
+                    localEquality argTy truePatTy
+                    traverse_ (`localEquality` patValue) (mbArgV env)
                 local' (\infState -> infState{values = newValues}) do
                     check body result
         pure result
       where
+        -- see the comment in the check impl
         mbArgV env = case arg of
             L (Name name) -> Map.lookup name env.values.values
             _ -> Nothing
@@ -562,48 +557,86 @@ inferBinding = \case
             pure $ Map.singleton name ty
 
 inferPattern :: InfEffs es => Pat -> Eff es (EnumMap Name TypeDT, TypeDT)
-inferPattern (Located loc p) = case p of
-    VarP name -> do
-        uni <- freshUniVar $ getLoc name
-        pure (Map.singleton name uni, uni)
-    WildcardP _ -> (Map.empty,) <$> freshUniVar loc
-    (AnnotationP pat ty) -> do
-        tyV <- typeFromTerm ty
-        (,tyV) <$> checkPattern pat tyV
-    ConstructorP name args -> do
-        (resultType, argTypes) <- conArgTypes name
-        unless (length argTypes == length args) do
-            typeError $ ArgCountMismatchPattern (Located loc p) (length argTypes) (length args)
-        typeMap <- fold <$> zipWithM checkPattern args argTypes
-        pure (typeMap, resultType)
-    ListP pats -> do
-        result <- freshUniVar loc
-        typeMap <- foldMapM (`checkPattern` result) pats
-        let listTy = V.TyCon (Located loc ListName) `V.App` result
-        pure (typeMap, listTy)
-    VariantP name arg -> do
-        (typeMap, argTy) <- inferPattern arg
-        ty <- V.VariantT loc . ExtRow (fromList [(name, argTy)]) <$> freshUniVar loc
-        pure (typeMap, ty)
-    RecordP row -> do
-        (typeMap, typeRow) <- traverseFold inferPattern row
-        ty <- V.RecordT loc . ExtRow typeRow <$> freshUniVar loc
-        pure (typeMap, ty)
-    LiteralP (L lit) ->
-        pure
-            ( Map.empty
-            , V.TyCon . Located loc $ case lit of
-                IntLiteral num
-                    | num >= 0 -> NatName
-                    | otherwise -> IntName
-                TextLiteral _ -> TextName
-                CharLiteral _ -> CharName
-            )
+inferPattern = snd (patternFuncs pure)
+
+-- | check a pattern, returning all of the newly bound vars
+checkPattern :: InfEffs es => Pat -> TypeDT -> Eff es (EnumMap Name TypeDT)
+checkPattern = fst (patternFuncs pure)
+
+{- | check a pattern. A GADT constructor checks against a more specific type
+> check VNil (Vec ?n a)
+-}
+checkPatternRelaxed :: InfEffs es => Pat -> TypeDT -> Eff es (EnumMap Name TypeDT)
+checkPatternRelaxed = fst (patternFuncs go)
   where
-    -- conArgTypes and the zipM may be unified into a single function
+    go = \case
+        lhs `V.App` u@V.UniVar{} -> V.App <$> go lhs <*> pure u
+        lhs `V.App` _ -> V.App <$> go lhs <*> freshUniVar Blank
+        other -> pure other
+
+type CheckPattern es = Pat -> TypeDT -> Eff es (EnumMap Name TypeDT)
+type InferPattern es = Pat -> Eff es (EnumMap Name TypeDT, TypeDT)
+patternFuncs :: InfEffs es => (Type' -> Eff es Type') -> (CheckPattern es, InferPattern es)
+patternFuncs postprocess = (checkP, inferP)
+  where
+    checkP (Located ploc outerPat) ty = case outerPat of
+        -- we need this case, since inferPattern only infers monotypes for var patterns
+        VarP name -> pure $ Map.singleton name ty
+        -- we probably do need a case for ConstructorP for the same reason
+        VariantP name arg ->
+            deepLookup Variant name ty >>= \case
+                Nothing -> typeError $ MissingVariant ty name
+                Just argTy -> checkP arg argTy
+        RecordP patRow -> do
+            fold <$> for (IsList.toList patRow) \(name, pat) ->
+                deepLookup Record name ty >>= \case
+                    Nothing -> typeError $ MissingField (Left ty) name
+                    Just fieldTy -> checkP pat fieldTy
+        _ -> do
+            (typeMap, inferredTy) <- inferP $ Located ploc outerPat
+            subtype inferredTy ty
+            pure typeMap
+
+    inferP (Located loc p) = case p of
+        VarP name -> do
+            uni <- freshUniVar $ getLoc name
+            pure (Map.singleton name uni, uni)
+        WildcardP _ -> (Map.empty,) <$> freshUniVar loc
+        (AnnotationP pat ty) -> do
+            tyV <- typeFromTerm ty
+            (,tyV) <$> checkP pat tyV
+        ConstructorP name args -> do
+            (resultType, argTypes) <- conArgTypes name
+            unless (length argTypes == length args) do
+                typeError $ ArgCountMismatchPattern (Located loc p) (length argTypes) (length args)
+            typeMap <- fold <$> zipWithM checkP args argTypes
+            pure (typeMap, resultType)
+        ListP pats -> do
+            result <- freshUniVar loc
+            typeMap <- foldMapM (`checkP` result) pats
+            let listTy = V.TyCon (Located loc ListName) `V.App` result
+            pure (typeMap, listTy)
+        VariantP name arg -> do
+            (typeMap, argTy) <- inferP arg
+            ty <- V.VariantT loc . ExtRow (fromList [(name, argTy)]) <$> freshUniVar loc
+            pure (typeMap, ty)
+        RecordP row -> do
+            (typeMap, typeRow) <- traverseFold inferP row
+            ty <- V.RecordT loc . ExtRow typeRow <$> freshUniVar loc
+            pure (typeMap, ty)
+        LiteralP (L lit) ->
+            pure
+                ( Map.empty
+                , V.TyCon . Located loc $ case lit of
+                    IntLiteral num
+                        | num >= 0 -> NatName
+                        | otherwise -> IntName
+                    TextLiteral _ -> TextName
+                    CharLiteral _ -> CharName
+                )
+
     conArgTypes name = lookupSig name >>= go
       where
-        errorAtName = internalError (getLoc name)
         go =
             monoLayer In >=> \case
                 V.Function _ arg rest -> second (arg :) <$> go rest
@@ -612,22 +645,11 @@ inferPattern (Located loc p) = case p of
                 -- univars should never appear as the rightmost argument of a value constructor type
                 -- i.e. types of value constructors have the shape `a -> b -> c -> d -> ConcreteType a b c d`
                 --
-                -- solved univars cannot appear here either, since `lookupSig` on a pattern returns a type with no univars
-                V.UniVar loc' uni -> internalError loc' $ "unexpected univar" <+> pretty uni <+> "in a constructor type"
-                -- this kind of repetition is necessary to retain missing pattern warnings
                 V.Con cname args -> pure (V.Con cname args, [])
                 V.TyCon cname -> pure (V.TyCon cname, [])
-                V.App lhs rhs -> pure (V.App lhs rhs, [])
-                V.VariantT loc' _ -> internalError loc' $ "unexpected variant type" <+> "in a constructor type"
-                V.RecordT loc' _ -> internalError loc' $ "unexpected record type" <+> "in a constructor type"
-                V.Variant{} -> errorAtName $ "unexpected variant constructor" <+> "in a constructor type"
-                V.Record{} -> errorAtName $ "unexpected record value" <+> "in a constructor type"
-                V.Lambda{} -> errorAtName $ "unexpected lambda" <+> "in a constructor type"
-                V.PrimValue{} -> errorAtName $ "unexpected value" <+> "in a constructor type"
-                V.PrimFunction{} -> errorAtName $ "unexpected primitive function" <+> "in a constructor type"
-                V.Case{} -> errorAtName $ "unexpected case" <+> "in a constructor type"
+                app@V.App{} -> (,[]) <$> postprocess app
                 V.Skolem skolem -> pure (V.Skolem skolem, [])
-                V.Var var -> internalError (getLoc var) $ "unbound var" <+> pretty var <+> "in a constructor type"
+                _ -> internalError (getLoc name) "invalid constructor type signature"
 
 normalise :: InfEffs es => Eff es TypeDT -> Eff es Type'
 normalise = fmap runIdentity . normaliseAll . fmap Identity
