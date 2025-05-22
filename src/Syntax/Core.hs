@@ -1,6 +1,6 @@
 module Syntax.Core where
 
-import Common (Literal, Literal_, Loc, Name, Name_ (TypeName), Skolem, UniVar, pattern L)
+import Common (Literal, Literal_, Loc (..), Located (..), Name, Name_ (TypeName), Skolem, UniVar, pattern L)
 import LangPrelude
 import Prettyprinter
 import Syntax.Row (ExtRow (..), OpenName, Row, extension, sortedRow)
@@ -26,8 +26,9 @@ instance Pretty CorePattern where
         recordField (name, pat) = pretty name <+> "=" <+> pretty pat
 
 type CoreType = CoreTerm
+type CoreTerm = Located CoreTerm_
 
-data CoreTerm
+data CoreTerm_
     = Name Name
     | TyCon Name
     | Con Name [CoreTerm] -- a fully-applied constructor. may only be produced by `quote`
@@ -39,22 +40,22 @@ data CoreTerm
     | Record (Row CoreTerm)
     | Variant OpenName
     | -- types
-      Function Loc CoreTerm CoreTerm
-    | Q Loc Quantifier Visibility Erased Name CoreTerm CoreTerm
-    | VariantT Loc (ExtRow CoreTerm)
-    | RecordT Loc (ExtRow CoreTerm)
+      Function CoreTerm CoreTerm
+    | Q Quantifier Visibility Erased Name CoreTerm CoreTerm
+    | VariantT (ExtRow CoreTerm)
+    | RecordT (ExtRow CoreTerm)
     | -- typechecking metavars
       -- it might be a good idea to split terms-for-typecheck
       -- from normal desugared terms
       -- actually, it should be cleaner to implement standalone prettyprinting for Value
       -- instead of using `quote` and keeping CoreTerm and Value in sync. This way will do for now, though
-      UniVar Loc UniVar
+      UniVar UniVar
     | Skolem Skolem
 
-instance Pretty CoreTerm where
-    pretty = go (0 :: Int)
+instance Pretty CoreTerm_ where
+    pretty = go (0 :: Int) . Located Blank
       where
-        go n = \case
+        go n (L term) = case term of
             Name name -> pretty name
             TyCon name -> pretty name
             Con name [] -> pretty name
@@ -67,12 +68,12 @@ instance Pretty CoreTerm where
             Case arg matches -> nest 4 (vsep $ ("case" <+> pretty arg <+> "of" :) $ matches <&> \(pat, body) -> pretty pat <+> "->" <+> pretty body)
             Let name body expr -> "let" <+> pretty name <+> "=" <+> pretty body <> ";" <+> pretty expr
             Literal lit -> pretty lit
-            Function _ from to -> parensWhen 2 $ go 2 from <+> "->" <+> pretty to
-            Q _ q vis er name ty body -> parensWhen 1 $ kw q er <+> prettyBinder name ty <+> compressQ q vis er body
-            VariantT _ row -> brackets . withExt row . sep . punctuate comma . map variantItem $ sortedRow row.row
-            RecordT _ row -> braces . withExt row . sep . punctuate comma . map recordTyField $ sortedRow row.row
+            Function from to -> parensWhen 2 $ go 2 from <+> "->" <+> pretty to
+            Q q vis er name ty body -> parensWhen 1 $ kw q er <+> prettyBinder name ty <+> compressQ q vis er body
+            VariantT row -> brackets . withExt row . sep . punctuate comma . map variantItem $ sortedRow row.row
+            RecordT row -> braces . withExt row . sep . punctuate comma . map recordTyField $ sortedRow row.row
             Skolem skolem -> pretty skolem
-            UniVar _ uni -> pretty uni
+            UniVar uni -> pretty uni
           where
             parensWhen minPrec
                 | n >= minPrec = parens
@@ -88,16 +89,16 @@ instance Pretty CoreTerm where
             variantItem (name, ty) = pretty name <+> pretty ty
             recordTyField (name, ty) = pretty name <+> ":" <+> pretty ty
 
-        compressLambda = \case
+        compressLambda (L term) = case term of
             Lambda name body -> pretty name <+> compressLambda body
             other -> "->" <+> pretty other
-        compressQ q vis e = \case
-            Q _ q' vis' e' name ty body
+        compressQ q vis e (L term) = case term of
+            Q q' vis' e' name ty body
                 | q == q' && vis == vis' && e == e' ->
                     prettyBinder name ty <+> compressQ q vis e body
             other -> arrOrDot q vis <+> pretty other
 
-        prettyBinder name (TyCon (L TypeName)) = pretty name
+        prettyBinder name (L (TyCon (L TypeName))) = pretty name
         prettyBinder name ty = parens $ pretty name <+> ":" <+> pretty ty
 
         arrOrDot Forall Visible = "->"

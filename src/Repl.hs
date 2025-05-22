@@ -71,7 +71,7 @@ emptyEnv = ReplEnv{..}
   where
     values = ValueEnv{values = LMap.singleton (noLoc TypeName) (V.TyCon (noLoc TypeName)), skolems = Map.empty}
     fixityMap = Map.singleton AppOp InfixL
-    types = Map.singleton (noLoc TypeName) (V.TyCon (noLoc TypeName))
+    types = Map.singleton (noLoc TypeName) (noLoc $ V.TyCon (noLoc TypeName))
     scope = Scope $ HashMap.singleton (Name' "Type") (noLoc TypeName)
     (_, operatorPriorities) = Poset.eqClass AppOp Poset.empty
     lastLoadedFile = Nothing
@@ -193,7 +193,7 @@ replStep env command = do
             pure $ Just env
         Type_ expr -> do
             (_, ty) <- runReader @"values" env.values $ processExpr env.types expr
-            print ty
+            print $ pretty ty
             pure $ Just env
         Load path -> do
             fileContents <- reportExceptions @SomeException (decodeUtf8 <$> readFileBS path)

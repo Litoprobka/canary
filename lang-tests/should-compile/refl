@@ -1,0 +1,7 @@
+-- this example doesn't work yet, but should
+type Refl : Type -> Type -> Type where
+    MkRefl : forall a. Refl a a
+
+indeed : forall a b. Refl a b -> a -> b
+indeed r x = case r of
+    MkRefl -> x

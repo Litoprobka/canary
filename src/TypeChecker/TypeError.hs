@@ -8,7 +8,7 @@ import LangPrelude
 import Syntax
 import Syntax.Row (OpenName)
 
-type TypeDT = Value
+type TypeDT = Located Value
 
 data TypeError
     = CannotUnify TypeDT TypeDT
