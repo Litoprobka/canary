@@ -176,7 +176,7 @@ app = foldl' App
 
 run :: ReplCtx es => ReplEnv -> Eff es ()
 run env = do
-    input <- liftIO $ fromString <$> readlineEx ">>" (Just $ completer env) (Just keywordHighlighter)
+    input <- liftIO $ fromString <$> readlineEx ">>" (Just $ completer env) Nothing -- (Just keywordHighlighter) -- something is wrong with the highlighter
     newEnv <- localDiagnose env ("<interactive>", input) do
         replStep env =<< Parser.run ("<interactive>", input) parseCommand
     traverse_ run newEnv

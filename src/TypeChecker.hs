@@ -367,9 +367,6 @@ skolemizePattern (Located loc pat') = case pat' of
     RecordP row -> V.Record <$> traverse skolemizePattern row
     LiteralP lit -> pure $ V.PrimValue lit
 
--- Vec @ n @ a     Vec @ Z @ a
---
-
 -- | given a map of related signatures, check or infer a declaration
 checkBinding :: InfEffs es => Binding 'Fixity -> EnumMap Name TypeDT -> Eff es (EnumMap Name TypeDT)
 checkBinding binding types = case binding of
@@ -419,25 +416,9 @@ infer (Located loc e) = case e of
         check false result
         pure result
     Case arg matches -> do
-        argTy <- infer arg
         result <- freshUniVar loc
-        for_ matches \(pat, body) -> do
-            typeMap <- checkPatternRelaxed pat argTy
-            local' (declareMany typeMap) do
-                env <- ask @InfState
-                newValues <- execState env.values do
-                    patValue <- skolemizePattern pat
-                    truePatTy <- snd <$> inferPattern pat
-                    localEquality argTy truePatTy
-                    traverse_ (`localEquality` patValue) (mbArgV env)
-                local' (\infState -> infState{values = newValues}) do
-                    check body result
+        check (Located loc (Case arg matches)) result
         pure result
-      where
-        -- see the comment in the check impl
-        mbArgV env = case arg of
-            L (Name name) -> Map.lookup name env.values.values
-            _ -> Nothing
     Match [] -> typeError $ EmptyMatch loc
     Match matches@(_ : _) -> do
         argCount <- case getArgCount matches of
