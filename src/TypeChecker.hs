@@ -67,6 +67,7 @@ inferDeclaration (Located loc decl) = case decl of
             kind <- maybe (pure type_) typeFromTerm mbKind
             modify $ Map.insert name kind
             for_ constrs \con -> do
+                checkGadtConstructor name con
                 conSig <- typeFromTerm con.sig
                 modify $ Map.insert con.name conSig
         pure $ insertVal name (V.TyCon name)
@@ -97,6 +98,22 @@ inferDeclaration (Located loc decl) = case decl of
       where
         fullType loc' = foldl' (\lhs -> Located loc' . App lhs) (Located (getLoc name) $ Name name) (Located loc' . Name . (.var) <$> binders)
 
+    checkGadtConstructor tyName con = case unwrapApp (fnResult con.sig) of
+        (L (Name name), _)
+            | name /= tyName -> typeError $ ConstructorReturnType{con = con.name, expected = tyName, returned = name}
+            | otherwise -> pass
+        (other, _) -> internalError (getLoc other) "something weird in a GADT consturctor type"
+      where
+        fnResult = \case
+            L (Function _ rhs) -> fnResult rhs
+            L (Q _ _ _ _ rhs) -> fnResult rhs
+            other -> other
+        unwrapApp = go []
+          where
+            go acc = \case
+                L (App lhs rhs) -> go (rhs : acc) lhs
+                other -> (other, acc)
+
 typeFromTerm :: InfEffs es => Type 'Fixity -> Eff es Type'
 typeFromTerm term = do
     values <- asks @InfState (.values)
@@ -104,12 +121,9 @@ typeFromTerm term = do
     Located (getLoc term) <$> V.eval values term
 
 subtype :: InfEffs es => TypeDT -> TypeDT -> Eff es ()
-subtype lhs_ rhs_ = do
-    Located locL monoLhs <- monoLayer In lhs_
-    Located locR monoRhs <- monoLayer Out rhs_
-    match locL locR monoLhs monoRhs
+subtype (lhs_ :@ locL) (rhs_ :@ locR) = join $ match <$> monoLayer' In lhs_ <*> monoLayer' Out rhs_
   where
-    match locL locR = \cases
+    match = \cases
         (V.TyCon lhs) (V.TyCon rhs) | lhs == rhs -> pass
         (V.UniVar lhs) (V.UniVar rhs) | lhs == rhs -> pass
         (V.Skolem lhs) (V.Skolem rhs) | lhs == rhs -> pass
@@ -289,7 +303,7 @@ check (e :@ loc) (typeToCheck :@ tyLoc) = match e typeToCheck
         expr (V.Q Exists _vis _e closure) -> check_ (expr :@ loc) =<< substitute In closure
         -- todo: a case for do-notation
         expr ty -> do
-            inferredTy <- infer (Located loc expr)
+            inferredTy <- infer (expr :@ loc)
             subtype inferredTy $ ty :@ tyLoc
 
 -- a helper function for matches
@@ -390,14 +404,14 @@ checkBinding binding types = case binding of
 
 infer :: InfEffs es => Expr 'Fixity -> Eff es TypeDT
 infer (Located loc e) = case e of
-    Name name -> lookupSig name
+    Name name -> Located loc . unLoc <$> lookupSig name
     E.Variant name -> do
         var <- freshUniVar
         rowVar <- freshUniVar
         -- #a -> [Name #a | #r]
         pure $ V.Function var (V.VariantT $ ExtRow (fromList [(name, var)]) rowVar) :@ loc
     App f x -> do
-        fTy <- infer f
+        fTy <- Located loc . unLoc <$> infer f
         inferApp loc fTy x
     TypeApp expr tyArg -> do
         ty <- infer expr
@@ -598,10 +612,11 @@ patternFuncs postprocess = (checkP, inferP)
             (,tyV) <$> checkP pat tyV
         ConstructorP name args -> do
             (resultType, argTypes) <- conArgTypes name
+            fixedResultType <- postprocess resultType
             unless (length argTypes == length args) do
                 typeError $ ArgCountMismatchPattern (Located loc p) (length argTypes) (length args)
             typeMap <- fold <$> zipWithM checkP args (map (:@ loc) argTypes)
-            pure (typeMap, resultType :@ loc)
+            pure (typeMap, fixedResultType :@ loc)
         ListP pats -> do
             result <- freshUniVar
             typeMap <- foldMapM (`checkP` (result :@ loc)) pats
@@ -626,21 +641,23 @@ patternFuncs postprocess = (checkP, inferP)
                     CharLiteral _ -> CharName
                 )
 
-    conArgTypes name = lookupSig name >>= go . unLoc
-      where
-        go =
-            monoLayer' In >=> \case
-                V.Function arg rest -> second (arg :) <$> go rest
-                V.Q{} -> internalError (getLoc name) "dependent constructor types are not supported yet"
-                -- MLQ _loc Forall _e closure -> second (closure.ty :) <$> go (V.closureBody closure) -- alpha-conversion?
-                -- univars should never appear as the rightmost argument of a value constructor type
-                -- i.e. types of value constructors have the shape `a -> b -> c -> d -> ConcreteType a b c d`
-                --
-                V.Con cname args -> pure (V.Con cname args, [])
-                V.TyCon cname -> pure (V.TyCon cname, [])
-                app@V.App{} -> (,[]) <$> postprocess app
-                V.Skolem skolem -> pure (V.Skolem skolem, [])
-                _ -> internalError (getLoc name) "invalid constructor type signature"
+-- | splits the type singature of a value constructor into a list of args and the final type
+conArgTypes :: InfEffs es => Name -> Eff es (V.Value, [V.Type'])
+conArgTypes name = lookupSig name >>= go . unLoc
+  where
+    go =
+        monoLayer' In >=> \case
+            V.Function arg rest -> second (arg :) <$> go rest
+            V.Q{} -> internalError (getLoc name) "dependent constructor types are not supported yet"
+            -- MLQ _loc Forall _e closure -> second (closure.ty :) <$> go (V.closureBody closure) -- alpha-conversion?
+            -- univars should never appear as the rightmost argument of a value constructor type
+            -- i.e. types of value constructors have the shape `a -> b -> c -> d -> ConcreteType a b c d`
+            --
+            V.Con cname args -> pure (V.Con cname args, [])
+            V.TyCon cname -> pure (V.TyCon cname, [])
+            app@V.App{} -> pure (app, [])
+            V.Skolem skolem -> pure (V.Skolem skolem, [])
+            _ -> internalError (getLoc name) "invalid constructor type signature"
 
 normalise :: InfEffs es => Eff es TypeDT -> Eff es Type'
 normalise = fmap runIdentity . normaliseAll . fmap Identity

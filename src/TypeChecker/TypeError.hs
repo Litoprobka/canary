@@ -1,6 +1,8 @@
+{-# OPTIONS_GHC -Wno-partial-fields #-}
+
 module TypeChecker.TypeError (TypeError (..), typeError) where
 
-import Common
+import Common hiding (Blank)
 import Diagnostic
 import Error.Diagnose (Marker (..), Report (..))
 import Eval (Value)
@@ -21,6 +23,7 @@ data TypeError
     | NotAFunction Loc TypeDT -- pretty fTy <+> "is not a function type"
     | SelfReferential Loc UniVar TypeDT
     | NoVisibleTypeArgument (Expr 'Fixity) (Type 'Fixity) TypeDT
+    | ConstructorReturnType {con :: Name, expected :: Name, returned :: Name}
 
 typeError :: Diagnose :> es => TypeError -> Eff es a
 typeError =
@@ -57,19 +60,19 @@ typeError =
             Err
                 Nothing
                 "empty match expression"
-                (mkNotes [(loc, This "")])
+                (mkNotes [(loc, Blank)])
                 []
         ArgCountMismatch loc ->
             Err
                 Nothing
                 "different amount of arguments in a match statement"
-                (mkNotes [(loc, This "")])
+                (mkNotes [(loc, Blank)])
                 []
         ArgCountMismatchPattern pat expected got ->
             Err
                 Nothing
                 ("incorrect arg count (" <> pretty got <> ") in pattern" <+> pretty pat <> ". Expected" <+> pretty expected)
-                (mkNotes [(getLoc pat, This "")])
+                (mkNotes [(getLoc pat, Blank)])
                 []
         NotAFunction loc ty ->
             Err
@@ -91,6 +94,17 @@ typeError =
                     [ (getLoc expr, This "when applying this expression")
                     , (getLoc tyArg, This "to this type")
                     , (getLoc ty, Where $ "where the expression has type" <+> pretty ty)
+                    ]
+                )
+                []
+        ConstructorReturnType{con, expected, returned} ->
+            Err
+                Nothing
+                (pretty con <+> "doesn't return the right type") -- todo: proper wording
+                ( mkNotes
+                    [ (getLoc expected, This "expected return type")
+                    , (getLoc returned, Where "this type is returned instead")
+                    , (getLoc con, Where "in the definition of this constructor")
                     ]
                 )
                 []
