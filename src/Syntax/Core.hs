@@ -1,6 +1,6 @@
 module Syntax.Core where
 
-import Common (Literal, Literal_, Loc (..), Located (..), Name, Name_ (TypeName), Skolem, UniVar, pattern L)
+import Common (Literal, Literal_, Loc (..), Located (..), Name, Name_ (ConsName, NilName, TypeName), Skolem, UniVar, pattern L)
 import LangPrelude
 import Prettyprinter
 import Syntax.Row (ExtRow (..), OpenName, Row, extension, sortedRow)
@@ -58,6 +58,9 @@ instance Pretty CoreTerm_ where
         go n (L term) = case term of
             Name name -> pretty name
             TyCon name -> pretty name
+            Con (L ConsName) [x, xs] | Just output <- prettyConsNil xs -> parens $ pretty x <> "," <+> output
+            -- -> "[" <> pretty x <> prettyConsNil xs <> "]"
+            Con (L NilName) [] -> "[]"
             Con name [] -> pretty name
             Con name args -> parensWhen 3 $ hsep (pretty name : map (go 3) args)
             Lambda name body -> parensWhen 1 $ "λ" <> pretty name <+> compressLambda body
@@ -104,3 +107,8 @@ instance Pretty CoreTerm_ where
         arrOrDot Forall Visible = "->"
         arrOrDot Exists Visible = "**"
         arrOrDot _ _ = "."
+
+        prettyConsNil = \case
+            L (Con (L ConsName) [x', xs']) -> (("," <+> pretty x') <>) <$> prettyConsNil xs'
+            L (Con (L NilName) []) -> Just ""
+            _ -> Nothing

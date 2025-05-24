@@ -521,6 +521,7 @@ inferApp appLoc (fTy :@ fLoc) arg = do
 inferTyApp :: InfEffs es => Expr 'Fixity -> TypeDT -> Type 'Fixity -> Eff es TypeDT
 inferTyApp expr (ty :@ tyLoc) tyArg = case ty of
     V.Q Forall Implicit _e closure -> do
+        check tyArg $ closure.ty :@ getLoc expr
         Subst{var, result} <- substitute' In closure
         values <- asks @InfState (.values)
         tyArgV <- V.eval values tyArg
