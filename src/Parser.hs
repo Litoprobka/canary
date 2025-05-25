@@ -1,6 +1,7 @@
 {-# HLINT ignore "Use <$>" #-}
 {-# LANGUAGE DataKinds #-}
 {-# LANGUAGE LambdaCase #-}
+{-# LANGUAGE TemplateHaskell #-}
 {-# OPTIONS_GHC -Wno-unrecognised-pragmas #-}
 
 module Parser (code, declaration, pattern', term, parseModule, run) where
@@ -51,7 +52,7 @@ declaration = located $ choice [typeDec, fixityDec, signature, valueDec]
 
     typeDec = do
         keyword Token.Type
-        name <- typeName
+        name <- upperName
         simpleTypeDec name <|> gadtDec name
 
     simpleTypeDec name = do
@@ -63,7 +64,7 @@ declaration = located $ choice [typeDec, fixityDec, signature, valueDec]
     gadtDec name = do
         mbKind <- optional $ specialSymbol Token.Colon *> term
         constrs <- block Token.Where $ withLoc do
-            con <- typeName
+            con <- upperName
             specialSymbol Token.Colon
             sig <- term
             pure \loc -> D.GadtConstructor loc con sig
@@ -71,7 +72,7 @@ declaration = located $ choice [typeDec, fixityDec, signature, valueDec]
 
     typePattern :: Parser (Constructor 'Parse)
     typePattern = withLoc do
-        name <- typeName
+        name <- upperName
         args <- many termParens
         pure \loc -> D.Constructor loc name args
 
@@ -107,7 +108,7 @@ varBinder =
         <$> termName
 
 typeVariable :: Parser (Type_ 'Parse)
-typeVariable = Name <$> termName <|> ImplicitVar <$> implicitVariable
+typeVariable = Name <$> termName <|> ImplicitVar <$> mkName $(tok 'Token.ImplicitName)
 
 someRecord :: SpecialSymbol -> Parser value -> Maybe (SimpleName -> value) -> Parser (ExtRow value)
 someRecord delim valueP missingValue = braces do
@@ -159,7 +160,7 @@ quantifier = withLoc do
 pattern' :: Parser (Pattern 'Parse)
 pattern' =
     choice
-        [ located $ ConstructorP <$> typeName <*> many patternParens
+        [ located $ ConstructorP <$> upperName <*> many patternParens
         , located $ VariantP <$> variantConstructor <*> patternParens
         , patternParens
         ]
@@ -173,7 +174,7 @@ patternParens = located do
     pat <-
         located . choice $
             [ VarP <$> termName
-            , WildcardP <$> (do Token.Wildcard w <- anySingle; pure w)
+            , WildcardP <$> $(tok 'Token.Wildcard)
             , record
             , ListP <$> brackets (commaSep pattern')
             , LiteralP <$> literal
@@ -331,7 +332,7 @@ termParens =
     variantType = VariantT . NoExtRow <$> brackets (fromList <$> commaSep variantItem) -- todo: row extensions
     -- todo: tight record binding
     constructor = do
-        name <- constructorName
+        name <- upperName
         optional (located record) <&> \case
             Nothing -> Name name
             Just arg -> Located (getLoc name) (Name name) `App` arg
