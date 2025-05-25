@@ -32,6 +32,32 @@ data Token
     | Newline
     deriving (Eq, Ord)
 
+instance Show Token where
+    show = show . pretty
+
+instance Pretty Token where
+    pretty = \case
+        LowerName name -> pretty name
+        UpperName name -> pretty name
+        VariantName name -> pretty name
+        ImplicitName name -> pretty name
+        Wildcard text -> pretty text
+        Keyword keyword -> pretty keyword
+        BlockStart keyword -> pretty keyword
+        BlockEnd -> ""
+        SpecialSymbol symbol -> pretty symbol
+        Op operator -> pretty operator
+        Literal literal -> pretty literal
+        LParen -> "("
+        RParen -> ")"
+        LBrace -> "{"
+        RBrace -> "}"
+        LBracket -> "["
+        RBracket -> "]"
+        Comma -> ","
+        Semicolon -> ";"
+        Newline -> "\\n"
+
 -- 'above', 'below', 'equals' and 'application' are conditional keywords - that is, they are allowed to be used as identifiers
 data Keyword = If | Then | Else | Type | Case | Let | Forall | Foreach | Exists | Some | With | Infix
     deriving (Eq, Ord, Enum, Bounded, Lift)
@@ -40,7 +66,9 @@ data BlockKeyword = Match | Of | Where | Do | Rec
     deriving (Eq, Ord, Enum, Bounded, Lift)
 
 instance Show Keyword where
-    show = \case
+    show = show . pretty
+instance Pretty Keyword where
+    pretty = \case
         If -> "if"
         Then -> "then"
         Else -> "else"
@@ -55,7 +83,9 @@ instance Show Keyword where
         Infix -> "infix"
 
 instance Show BlockKeyword where
-    show = \case
+    show = show . pretty
+instance Pretty BlockKeyword where
+    pretty = \case
         Match -> "match"
         Of -> "of"
         Where -> "where"
@@ -66,7 +96,9 @@ data SpecialSymbol = Eq | Bar | Colon | Dot | Lambda | Arrow | FatArrow | BackAr
     deriving (Eq, Ord, Enum, Bounded, Lift)
 
 instance Show SpecialSymbol where
-    show = \case
+    show = show . pretty
+instance Pretty SpecialSymbol where
+    pretty = \case
         Eq -> "="
         Bar -> "|"
         Colon -> ":"

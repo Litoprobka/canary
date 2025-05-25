@@ -23,11 +23,12 @@ main = do
             other -> (False, other)
     case otherArgs of
         [] -> runRepl
-        (path : _) -> runFile debug path . decodeUtf8 =<< readFileBS path
+        (path : _) -> runFile debug path =<< readFileBS path
 
-runFile :: Bool -> FilePath -> Text -> IO ()
+runFile :: Bool -> FilePath -> ByteString -> IO ()
 runFile debug fileName input = do
-    eval' <- fmap join . runEff . runDiagnose (fileName, input) $ runNameGen do
+    let inputText = decodeUtf8 input
+    eval' <- fmap join . runEff . runDiagnose (fileName, inputText) $ runNameGen do
         decls <- parseModule (fileName, input)
         prettyAST debug decls
         env <- Repl.mkDefaultEnv
