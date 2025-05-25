@@ -16,6 +16,8 @@ data Token
     | ImplicitName Text
     | Wildcard Text
     | Keyword Keyword
+    | BlockStart BlockKeyword
+    | BlockEnd
     | SpecialSymbol SpecialSymbol
     | Op Text
     | Literal Literal_
@@ -27,12 +29,14 @@ data Token
     | RBracket
     | Comma
     | Semicolon
-    | Whitespace -- some constructs are whitespace-sensitive, so we have to track of the existence of whitespace
     | Newline
     deriving (Eq, Ord)
 
 -- 'above', 'below', 'equals' and 'application' are conditional keywords - that is, they are allowed to be used as identifiers
-data Keyword = If | Then | Else | Type | Case | Where | Let | Rec | Match | Of | Forall | Foreach | Exists | Some | Do | With | Infix
+data Keyword = If | Then | Else | Type | Case | Let | Forall | Foreach | Exists | Some | With | Infix
+    deriving (Eq, Ord, Enum, Bounded, Lift)
+
+data BlockKeyword = Match | Of | Where | Do | Rec
     deriving (Eq, Ord, Enum, Bounded, Lift)
 
 instance Show Keyword where
@@ -42,18 +46,21 @@ instance Show Keyword where
         Else -> "else"
         Type -> "type"
         Case -> "case"
-        Where -> "where"
         Let -> "let"
-        Rec -> "rec"
-        Match -> "match"
-        Of -> "of"
         Forall -> "forall"
         Foreach -> "foreach"
         Exists -> "exists"
         Some -> "some"
-        Do -> "do"
         With -> "with"
         Infix -> "infix"
+
+instance Show BlockKeyword where
+    show = \case
+        Match -> "match"
+        Of -> "of"
+        Where -> "where"
+        Do -> "do"
+        Rec -> "rec"
 
 data SpecialSymbol = Eq | Bar | Colon | Dot | Lambda | Arrow | FatArrow | BackArrow | At | Tilde | DepPair
     deriving (Eq, Ord, Enum, Bounded, Lift)

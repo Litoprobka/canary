@@ -35,7 +35,7 @@ import Text.Megaparsec hiding (token)
 run :: Diagnose :> es => (FilePath, Text) -> Parser a -> Eff es a
 run (fileName, fileContents) parser =
     either (fatal . NE.toList . reportsFromBundle) pure $
-        parse (usingReaderT pos1 $ parser <* eof) fileName _fileContents
+        parse (usingReaderT pos1 $ parser <* eof) fileName fileContents
 
 parseModule :: Diagnose :> es => (FilePath, Text) -> Eff es [Declaration 'Parse]
 parseModule input = run input code
@@ -83,20 +83,20 @@ declaration = located $ choice [typeDec, fixityDec, signature, valueDec]
         keyword Token.Infix
         fixity <-
             choice
-                [ InfixL <$ _keyword "left"
-                , InfixR <$ _keyword "right"
-                , InfixChain <$ _keyword "chain"
+                [ InfixL <$ ctxKeyword "left"
+                , InfixR <$ ctxKeyword "right"
+                , InfixChain <$ ctxKeyword "chain"
                 , pure Infix
                 ]
         op <- operator
         above <- option [] do
-            _keyword "above"
-            commaSep (Just <$> operator <|> Nothing <$ _keyword "application")
+            ctxKeyword "above"
+            commaSep (Just <$> operator <|> Nothing <$ ctxKeyword "application")
         below <- option [] do
-            _keyword "below"
+            ctxKeyword "below"
             commaSep operator
         equal <- option [] do
-            _keyword "equals"
+            ctxKeyword "equals"
             commaSep operator
         pure $ D.Fixity fixity op PriorityRelation{above, below, equal}
 
@@ -173,13 +173,14 @@ patternParens = located do
     pat <-
         located . choice $
             [ VarP <$> termName
-            , lexeme $ WildcardP <$> (do Token.Wildcard w <- anySingle; pure w)
+            , WildcardP <$> (do Token.Wildcard w <- anySingle; pure w)
             , record
             , ListP <$> brackets (commaSep pattern')
-            , LiteralP . _loc <$> literal
-            , -- a constructor without arguments or with a tightly-bound record pattern
-              lexeme $ ConstructorP <$> constructorName <*> option [] (one <$> located record)
-            , flip VariantP unit <$> variantConstructor -- some sugar for variants with a unit payload
+            , LiteralP <$> literal
+            , -- todo
+              -- , -- a constructor without arguments or with a tightly-bound record pattern
+              --  lexeme $ ConstructorP <$> constructorName <*> option [] (one <$> located record)
+              flip VariantP unit <$> variantConstructor -- some sugar for variants with a unit payload
             , unLoc <$> parens pattern'
             ]
     option (unLoc pat) do
@@ -251,13 +252,20 @@ term = located do
             choice
                 [ unLoc <$> lambda'
                 , unLoc <$> quantifier
-                , letRecBlock (try $ keyword Token.Let *> keyword Token.Rec) LetRec binding term
-                , letBlock Token.Let Let binding term
+                , Let <$> letBlock binding <*> term
+                , letRec
                 , case'
                 , match'
                 , if'
                 , doBlock
                 ]
+
+letRec :: Parser (Expr_ Parse)
+letRec = do
+    bindings <- letBlock (block Token.Rec binding)
+    case NE.nonEmpty bindings of
+        Nothing -> fail "empty let rec"
+        Just bindingsNE -> LetRec bindingsNE <$> term
 
 case' :: Parser (Expr_ Parse)
 case' = do
@@ -309,10 +317,10 @@ termParens =
             , variantType -- todo: ambiguity with empty list; unit sugar ambiguity
             , try $ Name <$> parens operator
             , parens $ unLoc <$> term
-            , RecordLens <$> _recordLens
-            , constructor
+            , -- , RecordLens <$> _recordLens
+              constructor
             , Variant <$> variantConstructor
-            , Literal . _loc <$> literal
+            , Literal <$> literal
             , Name <$> termName
             , typeVariable
             ]
@@ -321,7 +329,8 @@ termParens =
     record = Record <$> noExtRecord Token.Eq term (Just $ \n -> Located (getLoc n) $ Name n)
     recordType = RecordT <$> someRecord Token.Colon term Nothing
     variantType = VariantT . NoExtRow <$> brackets (fromList <$> commaSep variantItem) -- todo: row extensions
-    constructor = lexeme do
+    -- todo: tight record binding
+    constructor = do
         name <- constructorName
         optional (located record) <&> \case
             Nothing -> Name name
