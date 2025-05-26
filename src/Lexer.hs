@@ -192,24 +192,6 @@ mkName = located . fmap Name'
 
 -- * Lexer implementation details
 
-testLexer' :: Show a => Lexer a -> Text -> Text
-testLexer' p fileText = case FP.runParser p 0 startPos fileBS of
-    OK result _ _ -> show result
-    Fail -> "failed"
-    Err{} -> "error"
-  where
-    fileBS = encodeUtf8 fileText
-    startPos = FP.unPos (FP.mkPos fileBS (0, 0)) + 1
-
-testLexer :: Text -> Text
-testLexer fileText = case FP.runParser (concatMap NE.toList <$> many token') 0 startPos fileBS of
-    OK result _ _ -> unlines $ show startPos : fmap (\(Span from to, tok) -> show tok <> " @ " <> show from <> " " <> show to) result
-    Fail -> "failed"
-    Err{} -> "error"
-  where
-    fileBS = encodeUtf8 fileText
-    startPos = FP.unPos (FP.mkPos fileBS (0, 0)) + 1
-
 -- | lex an input file in UTF-8 encoding. Lexer errors are todo
 lex :: Diagnose :> es => (FilePath, ByteString) -> Eff es TokenStream
 lex (fileName, fileContents) = do
