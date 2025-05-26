@@ -1,24 +1,37 @@
+{-# LANGUAGE AllowAmbiguousTypes #-}
 {-# LANGUAGE DataKinds #-}
 {-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE MultiWayIf #-}
 {-# LANGUAGE RecordWildCards #-}
+{-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE TemplateHaskell #-}
 {-# LANGUAGE TypeFamilies #-}
 {-# LANGUAGE ViewPatterns #-}
-{-# LANGUAGE ScopedTypeVariables #-}
-{-# LANGUAGE AllowAmbiguousTypes #-}
 
-module Diagnostic (Diagnose, runDiagnose, runDiagnose', dummy, nonFatal, fatal, noErrors, reportsFromBundle, internalError, reportExceptions, guardNoErrors) where
+module Diagnostic (
+    Diagnose,
+    runDiagnose,
+    runDiagnose',
+    dummy,
+    nonFatal,
+    fatal,
+    noErrors,
+    reportsFromBundle,
+    internalError,
+    reportExceptions,
+    guardNoErrors,
+) where
 
-import Common (Loc, mkNotes)
+import Common (HasLoc, Loc, getLoc, mkNotes)
+import Common qualified as C
 import Data.DList (DList)
 import Data.DList qualified as DList
 import Effectful
 import Effectful.Dispatch.Dynamic
 import Effectful.Error.Static (runErrorNoCallStack, throwError_)
+import Effectful.Exception (ErrorCall, handle)
 import Effectful.State.Static.Local (gets, modify, runState)
 import Effectful.TH
-import Effectful.Exception (handle, ErrorCall)
 import Error.Diagnose
 import LangPrelude
 import Prettyprinter.Render.Terminal (AnsiStyle)
@@ -38,18 +51,20 @@ runDiagnose file action = do
     pure mbVal
 
 runDiagnose' :: (FilePath, Text) -> Eff (Diagnose : es) a -> Eff es (Maybe a, Diagnostic (Doc AnsiStyle))
-runDiagnose' (filePath, fileContents) = reinterpret
-    (fmap (joinReports . second diagnosticFromReports) . runState DList.empty . runErrorNoCallStack)
-    (\_ -> \case
-        NonFatal report -> modify (`DList.snoc` report)
-        Fatal reports -> throwError_ reports
-        NoErrors ->
-            gets @(DList (Report (Doc AnsiStyle)))
-                ( all \case
-                    Err{} -> False
-                    Warn{} -> True
-                )
-    ) . reportExceptions @ErrorCall
+runDiagnose' (filePath, fileContents) =
+    reinterpret
+        (fmap (joinReports . second diagnosticFromReports) . runState DList.empty . runErrorNoCallStack)
+        ( \_ -> \case
+            NonFatal report -> modify (`DList.snoc` report)
+            Fatal reports -> throwError_ reports
+            NoErrors ->
+                gets @(DList (Report (Doc AnsiStyle)))
+                    ( all \case
+                        Err{} -> False
+                        Warn{} -> True
+                    )
+        )
+        . reportExceptions @ErrorCall
   where
     baseDiagnostic = addFile mempty filePath $ toString fileContents
     diagnosticFromReports = foldl' @DList addReport baseDiagnostic
@@ -79,7 +94,7 @@ guardNoErrors = do
 
 reportsFromBundle
     :: forall s e
-     . (MP.ShowErrorComponent e, MP.VisualStream s, MP.TraversableStream s)
+     . (MP.ShowErrorComponent e, MP.VisualStream s, HasLoc (MP.Token s))
     => MP.ParseErrorBundle s e
     -> NonEmpty (Report (Doc AnsiStyle))
 reportsFromBundle MP.ParseErrorBundle{..} =
@@ -87,19 +102,14 @@ reportsFromBundle MP.ParseErrorBundle{..} =
   where
     toLabeledPosition :: MP.ParseError s e -> Report (Doc AnsiStyle)
     toLabeledPosition parseError =
-        let (_, pos) = MP.reachOffset (MP.errorOffset parseError) bundlePosState
-            source = fromSourcePos (MP.pstateSourcePos pos)
+        let source = case parseError of
+                MP.TrivialError _ (Just (MP.Tokens (tok :| _))) _ -> getLoc tok
+                _ -> C.Blank
             msgs = fmap (pretty @_ @AnsiStyle . toString) $ lines $ toText (MP.parseErrorTextPretty parseError)
          in flip
                 (Err Nothing "Parse error")
                 []
                 case msgs of
-                    [m] -> [(source, This m)]
-                    [m1, m2] -> [(source, This m1), (source, Where m2)]
-                    _ -> [(source, This "<<Unknown error>>")]
-
-    fromSourcePos :: MP.SourcePos -> Position
-    fromSourcePos MP.SourcePos{..} =
-        let start = bimap MP.unPos MP.unPos (sourceLine, sourceColumn)
-            end = second (+ 1) start
-         in Position start end sourceName
+                    [m] -> mkNotes [(source, This m)]
+                    (m1 : rest) -> mkNotes $ (source, This m1) : map ((source,) . Where) rest
+                    [] -> mkNotes [(source, This "no error message")]

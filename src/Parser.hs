@@ -37,7 +37,7 @@ run :: Diagnose :> es => (FilePath, ByteString) -> Parser a -> Eff es a
 run (fileName, fileContents) parser = do
     tokenStream <- lex (fileName, fileContents)
     either (fatal . NE.toList . reportsFromBundle) pure $
-        parse (usingReaderT pos1 $ parser <* eof) fileName tokenStream
+        parse (parser <* eof) fileName tokenStream
 
 parseModule :: Diagnose :> es => (FilePath, ByteString) -> Eff es [Declaration 'Parse]
 parseModule input = run input code

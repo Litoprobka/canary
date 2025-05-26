@@ -44,7 +44,7 @@ instance Pretty Token where
         Wildcard text -> pretty text
         Keyword keyword -> pretty keyword
         BlockStart keyword -> pretty keyword
-        BlockEnd -> ""
+        BlockEnd -> "<end>"
         SpecialSymbol symbol -> pretty symbol
         Op operator -> pretty operator
         Literal literal -> pretty literal

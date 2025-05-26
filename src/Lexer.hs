@@ -6,7 +6,7 @@
 
 module Lexer where
 
-import Common (Literal_ (..), Loc (..), Located (..), SimpleName, SimpleName_ (..), unLoc, zipLocOf, pattern L)
+import Common (Literal_ (..), Loc (..), Located (..), SimpleName, SimpleName_ (..), unLoc, zipLoc, pattern L)
 import Data.Char (isLetter, isSpace, isUpperCase)
 import Data.Text qualified as Text
 import Data.Vector (Vector)
@@ -28,7 +28,7 @@ import FlatParse.Stateful qualified as FP
 import Language.Haskell.TH qualified as TH
 import Syntax.Token
 
-type Parser = ReaderT MP.Pos (MP.Parsec Void TokenStream)
+type Parser = MP.Parsec Void TokenStream
 
 {- | state stores the last newline
 | reader env stores the current block offset
@@ -38,36 +38,31 @@ type Lexer = FP.Parser Int ()
 newtype TokenStream = TokenStream (Vector (Located Token))
 
 instance MP.Stream TokenStream where
-    type Token TokenStream = Token
-    type Tokens TokenStream = Vector Token
+    type Token TokenStream = Located Token
+    type Tokens TokenStream = Vector (Located Token)
 
     tokensToChunk _ = V.fromList
     chunkToTokens _ = V.toList
     chunkLength _ = length
     chunkEmpty _ = null
     take1_ (TokenStream v) =
-        V.uncons v <&> \(L tok, v') ->
-            (tok, TokenStream v')
+        V.uncons v <&> second TokenStream
     takeN_ n (TokenStream v)
         | V.null v = Nothing
         | otherwise =
             let (toks, v') = V.splitAt n v
-             in Just (fmap unLoc toks, TokenStream v')
+             in Just (toks, TokenStream v')
     takeWhile_ p (TokenStream v) =
-        let (toks, v') = V.span (p . unLoc) v
-         in (fmap unLoc toks, TokenStream v')
+        let (toks, v') = V.span p v
+         in (toks, TokenStream v')
 
 instance MP.VisualStream TokenStream where
     showTokens _ tokens = show $ foldMap pretty tokens
 
--- a crutch until I get rid of Megaparsec
-instance MP.TraversableStream TokenStream where
-    reachOffsetNoLine _ = id
-
 -- * Interface used by the parser
 
 token :: Token -> Parser ()
-token = void . MP.single
+token inputToken = MP.label (show inputToken) $ void $ MP.satisfy ((== inputToken) . unLoc)
 
 {- | matches a token pattern and returns its payload
 
@@ -78,7 +73,7 @@ tok patName = do
     x <- TH.newName "x"
     [|
         MP.try do
-            $(TH.conP patName [TH.varP x]) <- MP.anySingle
+            L $(TH.conP patName [TH.varP x]) <- MP.anySingle
             pure $(TH.varE x)
         |]
 
@@ -122,7 +117,7 @@ topLevelBlock p = p `MP.sepBy` newline
 -- | an identifier that doesn't start with an uppercase letter
 lowerName :: Parser SimpleName
 lowerName = MP.try $ mkName do
-    LowerName name <- MP.anySingle
+    L (LowerName name) <- MP.anySingle
     pure name
 
 -- | an identifier that doesn't start with an uppercase letter or a parenthesised operator
@@ -132,23 +127,23 @@ termName = parens operator <|> lowerName
 -- | an identifier that starts with an uppercase letter
 upperName :: Parser SimpleName
 upperName = MP.try $ mkName do
-    UpperName name <- MP.anySingle
+    L (UpperName name) <- MP.anySingle
     pure name
 
 -- | an identifier that starts with a ' and an uppercase letter, i.e. 'Some
 variantConstructor :: Parser SimpleName
 variantConstructor = MP.try $ mkName do
-    VariantName name <- MP.anySingle
+    L (VariantName name) <- MP.anySingle
     pure name
 
 literal :: Parser C.Literal
 literal = MP.try $ located do
-    Literal lit <- MP.anySingle
+    L (Literal lit) <- MP.anySingle
     pure lit
 
 operator :: Parser SimpleName
 operator = MP.try $ mkName do
-    Op op <- MP.anySingle
+    L (Op op) <- MP.anySingle
     pure op
 
 {- todo: it might be a good idea to ignore strict newlines when inside the brackets
@@ -182,13 +177,11 @@ todo: don't include trailing whitespace where possible
 -}
 withLoc :: Parser (Loc -> a) -> Parser a
 withLoc p = do
-    startOffset <- MP.getOffset
-    f <- p
-    endOffset <- MP.getOffset
-    MP.State{MP.stateInput = TokenStream toks} <- MP.getParserState
-    let loc
-            | startOffset == endOffset = Blank -- do we ever use location info for zero-sized AST nodes? does this matter?
-            | otherwise = zipLocOf (toks V.! startOffset) (toks V.! (endOffset - 1))
+    Located startLoc _ <- MP.lookAhead MP.anySingle
+    (tokens, f) <- MP.match p
+    let loc = case V.unsnoc tokens of
+            Nothing -> Blank -- do we ever use location info for zero-sized AST nodes? does this matter?
+            Just (_, Located endLoc _) -> zipLoc startLoc endLoc
     pure $ f loc
 
 located :: Parser a -> Parser (Located a)
@@ -199,10 +192,28 @@ mkName = located . fmap Name'
 
 -- * Lexer implementation details
 
+testLexer' :: Show a => Lexer a -> Text -> Text
+testLexer' p fileText = case FP.runParser p 0 startPos fileBS of
+    OK result _ _ -> show result
+    Fail -> "failed"
+    Err{} -> "error"
+  where
+    fileBS = encodeUtf8 fileText
+    startPos = FP.unPos (FP.mkPos fileBS (0, 0)) + 1
+
+testLexer :: Text -> Text
+testLexer fileText = case FP.runParser (concatMap NE.toList <$> many token') 0 startPos fileBS of
+    OK result _ _ -> unlines $ show startPos : fmap (\(Span from to, tok) -> show tok <> " @ " <> show from <> " " <> show to) result
+    Fail -> "failed"
+    Err{} -> "error"
+  where
+    fileBS = encodeUtf8 fileText
+    startPos = FP.unPos (FP.mkPos fileBS (0, 0)) + 1
+
 -- | lex an input file in UTF-8 encoding. Lexer errors are todo
 lex :: Diagnose :> es => (FilePath, ByteString) -> Eff es TokenStream
 lex (fileName, fileContents) = do
-    let startPos = FP.unPos $ FP.mkPos fileContents (0, 0)
+    let startPos = FP.unPos (FP.mkPos fileContents (0, 0))
     tokensWithSpans <- case FP.runParser (concatMap NE.toList <$> many token') 0 startPos fileContents of
         OK result _ _ -> pure result
         _ -> internalError Blank "todo: lexer errors lol"
@@ -227,160 +238,163 @@ token' = tokenNoWS <* spaceOrLineWrap
   where
     tokenNoWS :: Lexer (NonEmpty (Span, Token))
     tokenNoWS =
-        choice
-            [ Keyword <$> keyword'
-            , $( switch
-                    [|
-                        case _ of
-                            "∀" -> pure $ Keyword Forall
-                            "Π" -> Keyword Foreach <$ fails (satisfy isIdentifierChar)
-                            "∃" -> pure $ Keyword Exists
-                            "Σ" -> Keyword Some <$ fails (satisfy isIdentifierChar)
-                            "\\" -> pure $ SpecialSymbol Lambda
-                            "(" -> pure LParen
-                            ")" -> pure RParen
-                            "{" -> pure LBrace -- todo: tight braces
-                            "}" -> pure RBrace
-                            "[" -> pure LBracket
-                            "]" -> pure RBracket
-                            "," -> pure Comma
-                            ";" -> pure Semicolon
-                        |]
-               )
-            , identifier'
-            , quotedIdent
-            , SpecialSymbol <$> specialSymbol'
-            , operator'
-            , Literal <$> choice [intLiteral, textLiteral, charLiteral]
-            ]
-            `withSpan` (\tok span -> pure $ one (span, tok))
-            <|> ((:|) <$> withSpan' (BlockStart <$> blockKeyword) <*> block')
+        ((:|) <$> withSpan' (BlockStart <$> blockKeyword) <*> block')
             <|> letBlock'
+            <|> choice
+                [ Keyword <$> keyword'
+                , $( switch
+                        [|
+                            case _ of
+                                "∀" -> pure $ Keyword Forall
+                                "Π" -> Keyword Foreach <$ fails (satisfy isIdentifierChar)
+                                "∃" -> pure $ Keyword Exists
+                                "Σ" -> Keyword Some <$ fails (satisfy isIdentifierChar)
+                                "\\" -> pure $ SpecialSymbol Lambda
+                                "(" -> pure LParen
+                                ")" -> pure RParen
+                                "{" -> pure LBrace -- todo: tight braces
+                                "}" -> pure RBrace
+                                "[" -> pure LBracket
+                                "]" -> pure RBracket
+                                "," -> pure Comma
+                                ";" -> pure Semicolon
+                                "'" -> quotedIdent
+                            |]
+                   )
+                , identifier' -- make sure that identifier is applied after all keyword parsers
+                , Literal <$> choice [intLiteral, textLiteral, charLiteral]
+                , quotedIdent
+                , SpecialSymbol <$> specialSymbol'
+                , operator' -- same as above, operator' should be after specialSymbol
+                ]
+            `withSpan` (\tok span -> pure $ one (span, tok))
+            <|> fmap one (withSpan' exactNewline)
 
-    withSpan' p = withSpan p \tok span -> pure (span, tok)
-    -- it might be cleaner to parse an identifier and then check whether it's a keyword
-    keyword' :: Lexer Keyword
-    keyword' =
-        $(rawSwitchWithPost (Just [|fails (satisfy isIdentifierChar)|]) (parseTable @Keyword) Nothing)
+withSpan' :: Lexer a -> Lexer (Span, a)
+withSpan' p = withSpan p \tok span -> pure (span, tok)
 
-    specialSymbol' :: Lexer SpecialSymbol
-    specialSymbol' =
-        $(rawSwitchWithPost (Just [|fails (satisfy isOperatorChar)|]) (parseTable @SpecialSymbol) Nothing)
+-- it might be cleaner to parse an identifier and then check whether it's a keyword
+keyword' :: Lexer Keyword
+keyword' =
+    $(rawSwitchWithPost (Just [|fails (satisfy isIdentifierChar)|]) (parseTable @Keyword) Nothing)
 
-    blockKeyword :: Lexer BlockKeyword
-    blockKeyword =
-        $( switchWithPost
-            (Just [|fails (satisfy isIdentifierChar)|])
-            [|
-                case _ of
-                    "match" -> pure Match
-                    "of" -> pure Of
-                    "where" -> pure Where
-                    "do" -> pure Do
-                |]
-         )
+specialSymbol' :: Lexer SpecialSymbol
+specialSymbol' =
+    $(rawSwitchWithPost (Just [|fails (satisfy isOperatorChar)|]) (parseTable @SpecialSymbol) Nothing)
 
-    -- todo: should operators in parens be identifiers?
-    identifier' :: Lexer Token
-    identifier' = do
-        firstChar <- satisfy isLetter <|> ('_' <$ $(char '_'))
-        ident <- Text.pack . (firstChar :) <$> many (satisfy isIdentifierChar)
-        pure case firstChar of
-            '_' -> Wildcard ident
-            c | isUpperCase c -> UpperName ident
-            _ -> LowerName ident
+blockKeyword :: Lexer BlockKeyword
+blockKeyword =
+    $( switchWithPost
+        (Just [|fails (satisfy isIdentifierChar)|])
+        [|
+            case _ of
+                "match" -> pure Match
+                "of" -> pure Of
+                "where" -> pure Where
+                "do" -> pure Do
+            |]
+     )
 
-    quotedIdent :: Lexer Token
-    quotedIdent = do
-        $(char '\'')
-        ident <- Text.pack . ('\'' :) <$> some (satisfy isIdentifierChar)
-        pure case Text.head ident of
-            c | isUpperCase c -> VariantName ident
-            _ -> ImplicitName ident
+-- todo: should operators in parens be identifiers?
+identifier' :: Lexer Token
+identifier' = do
+    firstChar <- satisfy isLetter <|> ('_' <$ $(char '_'))
+    ident <- Text.pack . (firstChar :) <$> many (satisfy isIdentifierChar)
+    pure case firstChar of
+        '_' -> Wildcard ident
+        c | isUpperCase c -> UpperName ident
+        _ -> LowerName ident
 
-    operator' :: Lexer Token
-    operator' = Op . Text.pack <$> some (satisfy isOperatorChar)
+quotedIdent :: Lexer Token
+quotedIdent = do
+    $(char '\'')
+    ident <- Text.pack . ('\'' :) <$> some (satisfy isIdentifierChar)
+    pure case Text.head ident of
+        c | isUpperCase c -> VariantName ident
+        _ -> ImplicitName ident
 
-    -- \| a newline with the same column offset as the current block
-    exactNewline :: Lexer Token
-    exactNewline =
-        Newline <$ do
-            newlineWithMeta
-            offset <- columnBytes
-            blockOffset <- FP.ask
-            guard $ offset == blockOffset
+operator' :: Lexer Token
+operator' = Op . Text.pack <$> some (satisfy isOperatorChar)
 
-    block' :: Lexer [(Span, Token)]
-    block' = do
-        spaceOrLineWrap
-        newOffset <- columnBytes
-        prevOffset <- FP.ask
-        blockContents <-
-            if newOffset <= prevOffset
-                then pure []
-                else FP.local (const newOffset) do
-                    -- todo: this is ugly
-                    fmap concat . FP.many $ (NE.toList <$> token' <|> fmap one (withSpan' exactNewline)) <* spaceOrLineWrap
-        blockEnd <- withSpan' (pure BlockEnd)
-        pure $ blockContents <> one blockEnd
-
-    -- the scoping rules of let blocks are slightly different
-    letBlock' :: Lexer (NonEmpty (Span, Token))
-    letBlock' = do
+-- | a newline with the same column offset as the current block
+exactNewline :: Lexer Token
+exactNewline =
+    Newline <$ do
+        newlines
         offset <- columnBytes
-        letTok <- withSpan' $ Keyword Let <$ $(string "let") `notFollowedBy` satisfy isOperatorChar
-        tokens <- FP.local (const offset) do
-            -- todo: this is ugly
-            tokens <- fmap concat . FP.many $ (NE.toList <$> token') <* spaceOrLineWrap
-            terminator <- withSpan' $ exactNewline <|> Semicolon <$ $(char ';')
-            pure $ tokens <> [terminator]
-        pure $ letTok :| tokens
+        blockOffset <- FP.ask
+        guard $ offset == blockOffset
 
-    -- \| returns the byte offset since the last occured newline
-    columnBytes :: Lexer Int
-    columnBytes = do
-        lastNewline <- FP.get
-        pos <- FP.getPos
-        pure $ lastNewline - pos.unPos
+block' :: Lexer [(Span, Token)]
+block' = do
+    spaceOrLineWrap
+    newOffset <- columnBytes
+    prevOffset <- FP.ask
+    blockContents <-
+        if newOffset <= prevOffset
+            then pure []
+            else FP.local (const newOffset) do
+                concatMap NE.toList <$> FP.many token'
+    blockEnd <- withSpan' (pure BlockEnd)
+    pure $ blockContents <> one blockEnd
 
+-- the scoping rules of let blocks are slightly different
+letBlock' :: Lexer (NonEmpty (Span, Token))
+letBlock' = do
+    offset <- columnBytes
+    letTok <- withSpan' $ Keyword Let <$ $(string "let") `notFollowedBy` satisfy isOperatorChar
+    tokens <- FP.local (const offset) do
+        -- todo: this is ugly
+        tokens <- concatMap NE.toList <$> token' `MP.manyTill` exactNewline
+        terminator <- withSpan' $ exactNewline <|> Semicolon <$ $(char ';')
+        pure $ tokens <> [terminator]
+    pure $ letTok :| tokens
+
+-- | returns the byte offset since the last occured newline
+columnBytes :: Lexer Int
+columnBytes = do
+    lastNewline <- FP.get
+    pos <- FP.getPos
+    pure $ lastNewline - pos.unPos
+
+{- | any non-zero amount of newlines and any amount of whitespace
+
+i.e. it skips lines of whitespace entirely
+-}
+newlines :: Lexer ()
+newlines = skipSome $ newlineWithMeta *> space'
+  where
     newlineWithMeta :: Lexer ()
     newlineWithMeta = do
         $(char '\n')
         pos <- FP.getPos
         FP.put pos.unPos
 
-    -- \| any non-zero amount of newlines and any amount of whitespace
-    --      i.e. it skips lines of whitespace entirely
-    --      should never be used outside of the block-parsing functions
-    --
-    newlines :: Lexer ()
-    newlines = skipMany $ newlineWithMeta <|> space'
+-- | non-newline space
+space' :: Lexer ()
+space' =
+    choice
+        [ skipMany (skipSatisfy \c -> isSpace c && c /= '\n')
+        , $(string "---") <* skipAnyChar `skipManyTill` $(string "---")
+        , $(string "--") <* takeLine
+        ]
 
-    -- \| non-newline space
-    space' :: Lexer ()
-    space' =
-        choice
-            [ skipSome (skipSatisfy isSpace)
-            , $(string "---") <* skipAnyChar `skipManyTill` $(string "---")
-            , $(string "--") <* takeLine
-            ]
+-- | space or a newline with increased indentation
+spaceOrLineWrap :: Lexer ()
+spaceOrLineWrap = void $ space' `MP.sepBy` lineWrap
+  where
+    lineWrap = do
+        blockIndent <- FP.ask
+        newlines
+        currentIndent <- columnBytes
+        guard $ currentIndent > blockIndent
 
-    -- \| space or a newline with increased indentation
-    spaceOrLineWrap :: Lexer ()
-    spaceOrLineWrap = void $ space' `MP.sepBy` newlineWithIndent
-      where
-        newlineWithIndent = do
-            blockIndent <- FP.ask
-            newlines
-            currentIndent <- columnBytes
-            guard $ currentIndent > blockIndent
+intLiteral :: Lexer Literal_
+intLiteral = IntLiteral <$> anyAsciiDecimalInt
 
-    intLiteral :: Lexer Literal_
-    intLiteral = IntLiteral <$> anyAsciiDecimalInt
+-- todo: handle escape sequences and interpolation
+textLiteral :: Lexer Literal_
+textLiteral = fmap (TextLiteral . Text.pack) $ between $(char '\'') $(char '\'') $ many (satisfy (/= '"'))
 
-    -- todo: handle escape sequences and interpolation
-    textLiteral :: Lexer Literal_
-    textLiteral = fmap (TextLiteral . Text.pack) $ between $(char '\'') $(char '\'') $ many (satisfy (/= '"'))
-
-    charLiteral :: Lexer Literal_
-    charLiteral = CharLiteral . one <$> between $(char '\'') $(char '\'') anyChar
+charLiteral :: Lexer Literal_
+charLiteral = CharLiteral . one <$> between $(char '\'') $(char '\'') anyChar
