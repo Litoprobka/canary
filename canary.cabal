@@ -124,9 +124,7 @@ test-suite canary-test
   type: exitcode-stdio-1.0
   main-is: Spec.hs
   other-modules:
-      ParserSpec
-      Playground
-      TypeCheckerSpec
+      LexerSpec
       Paths_canary
   hs-source-dirs:
       test

@@ -240,7 +240,6 @@ token' = tokenNoWS <* spaceOrLineWrap
                                 "]" -> pure RBracket
                                 "," -> pure Comma
                                 ";" -> pure Semicolon
-                                "'" -> quotedIdent
                             |]
                    )
                 , identifier' -- make sure that identifier is applied after all keyword parsers
@@ -325,10 +324,14 @@ letBlock' :: Lexer (NonEmpty (Span, Token))
 letBlock' = do
     offset <- columnBytes
     letTok <- withSpan' $ Keyword Let <$ $(string "let") `notFollowedBy` satisfy isOperatorChar
+    spaceOrLineWrap -- we have to remove the whitespace after the token manually here
     tokens <- FP.local (const offset) do
         -- todo: this is ugly
-        tokens <- concatMap NE.toList <$> token' `MP.manyTill` exactNewline
-        terminator <- withSpan' $ exactNewline <|> Semicolon <$ $(char ';')
+        -- I think it might be not quite right to parse a semicolon as an exact newline here, since it might appear in a nested scope
+        -- e.g. `let test = do this; that\nbody`
+        -- perhaps a better approach is to drop the `someTill` part and just parse a terminator afterwards?
+        let terminatorP = withSpan' $ exactNewline <|> Semicolon <$ $(char ';')
+        (tokens, terminator) <- first (concatMap NE.toList) <$> token' `MP.someTill_` terminatorP
         pure $ tokens <> [terminator]
     pure $ letTok :| tokens
 
@@ -376,7 +379,7 @@ intLiteral = IntLiteral <$> anyAsciiDecimalInt
 
 -- todo: handle escape sequences and interpolation
 textLiteral :: Lexer Literal_
-textLiteral = fmap (TextLiteral . Text.pack) $ between $(char '\'') $(char '\'') $ many (satisfy (/= '"'))
+textLiteral = fmap (TextLiteral . Text.pack) $ between $(char '\"') $(char '\"') $ many (satisfy (/= '"'))
 
 charLiteral :: Lexer Literal_
 charLiteral = CharLiteral . one <$> between $(char '\'') $(char '\'') anyChar
