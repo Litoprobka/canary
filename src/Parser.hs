@@ -48,22 +48,22 @@ code = topLevelBlock declaration
 declaration :: Parser (Declaration 'Parse)
 declaration = located $ choice [typeDec, fixityDec, signature, valueDec]
   where
-    valueDec = D.Value <$> binding <*> whereBlock
-    whereBlock = option [] $ block Token.Where (located valueDec)
+    valueDec = D.Value <$> binding <*> option [] whereBlock
+    whereBlock = block Token.Where (located valueDec)
 
     typeDec = do
         keyword Token.Type
         name <- upperName
-        simpleTypeDec name <|> gadtDec name
+        gadtDec name <|> simpleTypeDec name
 
     simpleTypeDec name = do
         vars <- many varBinder
-        specialSymbol Token.Eq
-        D.Type name vars <$> typePattern `sepBy` specialSymbol Token.Bar
+        pats <- option [] $ specialSymbol Token.Eq *> typePattern `sepBy1` specialSymbol Token.Bar
+        pure $ D.Type name vars pats
 
     gadtDec :: SimpleName -> Parser (Declaration_ 'Parse)
     gadtDec name = do
-        mbKind <- optional $ specialSymbol Token.Colon *> term
+        mbKind <- try $ optional $ specialSymbol Token.Colon *> term
         constrs <- block Token.Where $ withLoc do
             con <- upperName
             specialSymbol Token.Colon
@@ -93,13 +93,13 @@ declaration = located $ choice [typeDec, fixityDec, signature, valueDec]
         op <- operator
         above <- option [] do
             ctxKeyword "above"
-            commaSep (Just <$> operator <|> Nothing <$ ctxKeyword "application")
+            commaSep1 (Just <$> operator <|> Nothing <$ ctxKeyword "application")
         below <- option [] do
             ctxKeyword "below"
-            commaSep operator
+            commaSep1 operator
         equal <- option [] do
             ctxKeyword "equals"
-            commaSep operator
+            commaSep1 operator
         pure $ D.Fixity fixity op PriorityRelation{above, below, equal}
 
 varBinder :: Parser (VarBinder 'Parse)
@@ -325,13 +325,18 @@ termParens =
             , Variant <$> variantConstructor
             , Literal <$> literal
             , Name <$> termName
+            , parens $ unLoc <$> term
             , typeVariable
             ]
   where
     variantItem = (,) <$> variantConstructor <*> option (Located Blank $ RecordT $ NoExtRow Row.empty) termParens
     record = Record <$> noExtRecord Token.Eq term (Just $ \n -> Located (getLoc n) $ Name n)
     recordType = RecordT <$> someRecord Token.Colon term Nothing
-    variantType = VariantT . NoExtRow <$> brackets (fromList <$> commaSep variantItem) -- todo: row extensions
+    variantType = brackets do
+        items <- fromList <$> commaSep variantItem
+        VariantT <$> option (NoExtRow items) do
+            specialSymbol Token.Bar
+            ExtRow items <$> term
     -- todo: tight record binding
     constructor = do
         name <- upperName

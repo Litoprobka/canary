@@ -66,7 +66,7 @@ emptyEnv = ReplEnv{..}
   where
     values = ValueEnv{values = LMap.singleton (noLoc TypeName) (V.TyCon (noLoc TypeName)), skolems = Map.empty}
     fixityMap = Map.singleton AppOp InfixL
-    types = Map.singleton (noLoc TypeName) (V.TyCon (noLoc TypeName))
+    types = Map.singleton (noLoc TypeName) (noLoc $ V.TyCon (noLoc TypeName))
     scope = Scope $ HashMap.singleton (Name' "Type") (noLoc TypeName)
     (_, operatorPriorities) = Poset.eqClass AppOp Poset.empty
     lastLoadedFile = Nothing
@@ -102,21 +102,18 @@ mkDefaultEnv = do
 
     mkPreprelude :: NameGen :> es => Eff es ([Declaration 'NameRes], Scope)
     mkPreprelude = do
-        true <- freshName' "True"
         false <- freshName' "False"
         a <- freshName' "a"
-        cons <- freshName' "Cons"
-        nil <- freshName' "Nil"
         let builtinTypes = [C.TypeName, C.IntName, C.NatName, C.TextName]
             decls =
                 map
                     noLoc
-                    [ D.Type (noLoc C.BoolName) [] [D.Constructor Blank true [], D.Constructor Blank false []]
+                    [ D.Type (noLoc C.BoolName) [] [D.Constructor Blank (noLoc C.TrueName) [], D.Constructor Blank false []]
                     , D.Type
                         (noLoc C.ListName)
                         [plainBinder a]
-                        [ D.Constructor Blank cons $ map noLoc [Name a, noLoc (Name (noLoc C.ListName)) `App` noLoc (Name a)]
-                        , D.Constructor Blank nil []
+                        [ D.Constructor Blank (noLoc C.ConsName) $ map noLoc [Name a, noLoc (Name (noLoc C.ListName)) `App` noLoc (Name a)]
+                        , D.Constructor Blank (noLoc C.NilName) []
                         ]
                     ]
                     <> map (\name -> noLoc $ D.Type (noLoc name) [] []) builtinTypes
@@ -124,11 +121,11 @@ mkDefaultEnv = do
                 Scope . HashMap.fromList . map (first C.Name') $
                     [ ("Type", noLoc C.TypeName)
                     , ("Bool", noLoc C.BoolName)
-                    , ("True", true)
+                    , ("True", noLoc C.TrueName)
                     , ("False", false)
                     , ("List", noLoc C.ListName)
-                    , ("Cons", cons)
-                    , ("Nil", nil)
+                    , ("Cons", noLoc C.ConsName)
+                    , ("Nil", noLoc C.NilName)
                     , ("Int", noLoc C.IntName)
                     , ("Nat", noLoc C.NatName)
                     , ("Text", noLoc C.TextName)
@@ -189,7 +186,7 @@ replStep env command = do
             pure $ Just env
         Type_ expr -> do
             (_, ty) <- runReader @"values" env.values $ processExpr env.types expr
-            print ty
+            print $ pretty ty
             pure $ Just env
         Load path -> do
             fileContents <- reportExceptions @SomeException (readFileBS path)

@@ -78,7 +78,7 @@ error =
             Err
                 Nothing
                 ("The variable" <+> pretty name <+> "is unbound")
-                (mkNotes [(getLoc name, M.This "")])
+                (mkNotes [(getLoc name, M.This "referenced here")])
                 []
 
 -- | run a state action without changing the `Scope` part of the state

@@ -6,7 +6,6 @@
 module Eval where
 
 import Common (
-    HasLoc,
     Literal,
     Loc (..),
     Located (..),
@@ -18,6 +17,7 @@ import Common (
     UniVar,
     getLoc,
     toSimpleName,
+    unLoc,
     pattern L,
  )
 import Data.EnumMap.Lazy qualified as LMap -- note that we use the lazy functions here
@@ -41,6 +41,10 @@ data ValueEnv = ValueEnv
     }
 type Type' = Value
 
+-- unlike the AST types, the location information on Values are shallow, since
+-- the way we use it is difference from the AST nodes
+-- in AST, the location corresponds to the source span where the AST node is written
+-- in Values, the location is the source space that the location is *arising from*
 data Value
     = Var Name -- an unbound variable; seems like they are only used for quoting, hmmm
     | TyCon Name -- a type constructor. unlike value constructors, `Either a b` is represented as a stuck application Either `App` a `App` b
@@ -52,62 +56,57 @@ data Value
     | -- | RecordLens (NonEmpty OpenName)
       PrimValue Literal -- the name 'Literal' is slightly misleading here
     | -- types
-      Function Loc Type' Type'
-    | Q Loc Quantifier Visibility Erased (Closure Type')
-    | VariantT Loc (ExtRow Type')
-    | RecordT Loc (ExtRow Type')
+      Function Type' Type'
+    | Q Quantifier Visibility Erased (Closure Type')
+    | VariantT (ExtRow Type')
+    | RecordT (ExtRow Type')
     | -- stuck computations
       App Value ~Value
     | Case Value [(CorePattern, Value)]
     | -- typechecking metavars
-      UniVar Loc UniVar
+      UniVar UniVar
     | Skolem Skolem
 
 data Closure ty = Closure {var :: Name, ty :: ty, env :: ValueEnv, body :: CoreTerm}
 
-quote :: Value -> CoreTerm
-quote = \case
+quote :: Located Value -> CoreTerm
+quote (Located loc value) = Located loc case value of
     Var x -> C.Name x
     TyCon name -> C.TyCon name
-    Con con args -> C.Con con (map quote args)
+    Con con args -> C.Con con (map quote (Located loc <$> args))
     -- if we use quote for anything but pretty-printing,
     -- we'd probably need alpha conversion for all the function-like cases
-    Lambda closure -> C.Lambda closure.var (quote $ closureBody closure)
-    PrimFunction name f -> quote $ f (Var name)
-    Record vals -> C.Record $ fmap quote vals
-    Variant name val -> C.App (C.Variant name) $ quote val
+    Lambda closure -> C.Lambda closure.var (quoteWithLoc $ closureBody closure)
+    PrimFunction name f -> unLoc . quoteWithLoc $ f (Var name)
+    Record vals -> C.Record $ fmap quoteWithLoc vals
+    Variant name val -> C.App (Located (getLoc name) $ C.Variant name) $ quoteWithLoc val
     -- RecordLens path -> RecordLens path
     PrimValue lit -> C.Literal lit
-    Function loc l r -> C.Function loc (quote l) (quote r)
-    Q loc q vis e closure -> C.Q loc q vis e closure.var (quote closure.ty) $ quote (closureBody closure)
-    VariantT loc row -> C.VariantT loc $ fmap quote row
-    RecordT loc row -> C.RecordT loc $ fmap quote row
-    App lhs rhs -> C.App (quote lhs) (quote rhs)
-    Case arg cases -> C.Case (quote arg) $ (fmap . fmap) quote cases
+    Function l r -> C.Function (quoteWithLoc l) (quoteWithLoc r)
+    Q q vis e closure -> C.Q q vis e closure.var (quoteWithLoc closure.ty) $ quoteWithLoc (closureBody closure)
+    VariantT row -> C.VariantT $ fmap quoteWithLoc row
+    RecordT row -> C.RecordT $ fmap quoteWithLoc row
+    App lhs rhs -> C.App (quoteWithLoc lhs) (quoteWithLoc rhs)
+    Case arg cases -> C.Case (quoteWithLoc arg) $ (fmap . fmap) quoteWithLoc cases
     Skolem skolem -> C.Skolem skolem
-    UniVar loc uni -> C.UniVar loc uni
+    UniVar uni -> C.UniVar uni
+  where
+    quoteWithLoc = quote . Located loc
 
 instance Pretty Value where
-    pretty = pretty . quote
+    pretty = pretty . quote . Located Blank
 
 instance Show Value where
     show = Prelude.show . pretty
 
-instance HasLoc Value where
-    getLoc = \case
-        Con name _ -> getLoc name
-        Var name -> getLoc name
-        Skolem skolem -> getLoc skolem
-        _other -> Blank -- fixme
-
 evalCore :: ValueEnv -> CoreTerm -> Value
-evalCore !env = \case
+evalCore !env (L term) = case term of
     -- note that env is a lazy enummap, so we only force the outer structure here
     C.Name name -> fromMaybe (error . show $ "whoopsie, out of scope" <+> pretty name) $ LMap.lookup name env.values
     C.TyCon name -> TyCon name
     C.Con name args -> Con name $ map (evalCore env) args
     C.Lambda name body -> Lambda $ Closure{var = name, ty = (), env, body}
-    C.App (C.Variant name) arg -> Variant name $ evalCore env arg -- this is a bit of an ugly case
+    C.App (L (C.Variant name)) arg -> Variant name $ evalCore env arg -- this is a bit of an ugly case
     C.App lhs rhs -> case (evalCore env lhs, evalCore env rhs) of
         (Lambda closure, arg) -> closure `app` arg
         (other, arg) -> App other arg
@@ -124,17 +123,17 @@ evalCore !env = \case
     C.Literal lit -> PrimValue lit
     C.Record row -> Record $ evalCore env <$> row
     C.Variant _name -> error "todo: seems like evalCore needs namegen" -- Lambda (Located Blank $ Name' "x") $ C.Variant name `C.App`
-    C.Function loc lhs rhs -> Function loc (evalCore env lhs) (evalCore env rhs)
-    C.Q loc q vis e var ty body -> Q loc q vis e $ Closure{var, ty = evalCore env ty, env, body}
-    C.VariantT loc row -> VariantT loc $ evalCore env <$> row
-    C.RecordT loc row -> RecordT loc $ evalCore env <$> row
+    C.Function lhs rhs -> Function (evalCore env lhs) (evalCore env rhs)
+    C.Q q vis e var ty body -> Q q vis e $ Closure{var, ty = evalCore env ty, env, body}
+    C.VariantT row -> VariantT $ evalCore env <$> row
+    C.RecordT row -> RecordT $ evalCore env <$> row
     -- should normal evaluation resolve univars?
     C.Skolem skolem -> Skolem skolem
-    C.UniVar loc uni -> UniVar loc uni
+    C.UniVar uni -> UniVar uni
   where
     mbStuckCase (Var x) matches = Just $ Case (Var x) (mkStuckBranches matches)
     mbStuckCase (Skolem s) matches = Just $ Case (Skolem s) (mkStuckBranches matches)
-    mbStuckCase (UniVar loc u) matches = Just $ Case (UniVar loc u) (mkStuckBranches matches)
+    mbStuckCase (UniVar u) matches = Just $ Case (UniVar u) (mkStuckBranches matches)
     mbStuckCase (App lhs rhs) matches = Just $ Case (App lhs rhs) (mkStuckBranches matches)
     mbStuckCase _ _ = Nothing
 
@@ -182,51 +181,56 @@ desugar :: forall es. (NameGen :> es, Diagnose :> es) => Term 'Fixity -> Eff es 
 desugar = go
   where
     go :: Term 'Fixity -> Eff es CoreTerm
-    go (Located loc e) = case e of
-        T.Name name -> pure $ C.Name name
-        T.Literal lit -> pure $ C.Literal lit
-        T.Annotation expr _ -> go expr
-        T.App lhs rhs -> C.App <$> go lhs <*> go rhs
-        T.Lambda (L (T.VarP arg)) body -> C.Lambda arg <$> go body
-        T.Lambda pat body -> do
-            name <- freshName $ Located Blank $ Name' "lamArg"
-            C.Lambda name <$> go (Located loc $ T.Case (Located (getLoc name) $ T.Name name) [(pat, body)])
-        T.WildcardLambda args body -> do
-            body' <- go body
-            pure $ foldr C.Lambda body' args
-        T.Let binding expr -> case binding of
-            T.ValueB (L (T.VarP name)) body -> C.Let name <$> go body <*> go expr
-            T.ValueB _ _ -> internalError loc "todo: desugar pattern bindings"
-            T.FunctionB name args body -> C.Let name <$> go (foldr (\x -> Located loc . T.Lambda x) body args) <*> go expr
-        T.LetRec _bindings _body -> internalError loc "todo: letrec desugar"
-        T.TypeApp expr _ -> go expr
-        T.Case arg matches -> C.Case <$> go arg <*> traverse (bitraverse flattenPattern go) matches
-        T.Match matches@(([_], _) : _) -> do
-            name <- freshName $ Located Blank $ Name' "matchArg"
-            matches' <- for matches \case
-                ([pat], body) -> bitraverse flattenPattern desugar (pat, body)
-                _ -> internalError loc "inconsistent pattern count in a match expression"
-            pure $ C.Lambda name $ C.Case (C.Name name) matches'
-        T.Match _ -> internalError loc "todo: multi-arg match desugar"
-        T.If cond true false -> do
-            cond' <- go cond
-            true' <- go true
-            false' <- go false
-            pure . C.Case cond' $
-                [ (C.ConstructorP (Located (getLoc cond) TrueName) [], true')
-                , (C.WildcardP "", false')
-                ]
-        T.RecordLens _ -> internalError loc "todo: desugar RecordLens"
-        T.Variant name -> pure $ C.Variant name
-        T.Record fields -> C.Record <$> traverse go fields
-        T.List xs -> foldr (C.App . C.App (C.Name $ Located loc ConsName)) (C.Name $ Located loc NilName) <$> traverse go xs
-        T.Do{} -> error "todo: desugar do blocks"
-        T.Function from to -> C.Function loc <$> go from <*> go to
-        T.Q q vis er binder body -> C.Q loc q vis er binder.var <$> maybe (type_ loc) desugar binder.kind <*> go body
-        T.VariantT row -> C.VariantT loc <$> traverse go row
-        T.RecordT row -> C.RecordT loc <$> traverse go row
-
-    type_ loc = pure $ C.TyCon $ Located loc TypeName
+    go (Located loc e) =
+        Located loc <$> case e of
+            T.Name name -> pure $ C.Name name
+            T.Literal lit -> pure $ C.Literal lit
+            T.Annotation expr _ -> unLoc <$> go expr
+            T.App lhs rhs -> C.App <$> go lhs <*> go rhs
+            T.Lambda (L (T.VarP arg)) body -> C.Lambda arg <$> go body
+            T.Lambda pat body -> do
+                name <- freshName $ Located loc $ Name' "lamArg"
+                C.Lambda name <$> go (Located loc $ T.Case (Located (getLoc name) $ T.Name name) [(pat, body)])
+            T.WildcardLambda args body -> do
+                body' <- go body
+                pure . unLoc $ foldr (\arg -> Located loc . C.Lambda arg) body' args
+            T.Let binding expr -> case binding of
+                T.ValueB (L (T.VarP name)) body -> C.Let name <$> go body <*> go expr
+                T.ValueB _ _ -> internalError loc "todo: desugar pattern bindings"
+                T.FunctionB name args body -> C.Let name <$> go (foldr (\x -> Located loc . T.Lambda x) body args) <*> go expr
+            T.LetRec _bindings _body -> internalError loc "todo: letrec desugar"
+            T.TypeApp expr _ -> unLoc <$> go expr
+            T.Case arg matches -> C.Case <$> go arg <*> traverse (bitraverse flattenPattern go) matches
+            T.Match matches@(([_], _) : _) -> do
+                name <- freshName $ Located Blank $ Name' "matchArg"
+                matches' <- for matches \case
+                    ([pat], body) -> bitraverse flattenPattern desugar (pat, body)
+                    _ -> internalError loc "inconsistent pattern count in a match expression"
+                pure $ C.Lambda name $ Located loc $ C.Case (nameLoc name) matches'
+            T.Match _ -> internalError loc "todo: multi-arg match desugar"
+            T.If cond true false -> do
+                cond' <- go cond
+                true' <- go true
+                false' <- go false
+                pure . C.Case cond' $
+                    [ (C.ConstructorP (Located (getLoc cond) TrueName) [], true')
+                    , (C.WildcardP "", false')
+                    ]
+            T.RecordLens _ -> internalError loc "todo: desugar RecordLens"
+            T.Variant name -> pure $ C.Variant name
+            T.Record fields -> C.Record <$> traverse go fields
+            T.List xs -> unLoc . foldr (appLoc . appLoc cons) nil <$> traverse go xs
+            T.Do{} -> error "todo: desugar do blocks"
+            T.Function from to -> C.Function <$> go from <*> go to
+            T.Q q vis er binder body -> C.Q q vis er binder.var <$> maybe type_ desugar binder.kind <*> go body
+            T.VariantT row -> C.VariantT <$> traverse go row
+            T.RecordT row -> C.RecordT <$> traverse go row
+      where
+        cons = nameLoc $ Located loc ConsName
+        nil = nameLoc $ Located loc NilName
+        nameLoc = Located loc . C.Name
+        appLoc l r = Located loc $ C.App l r
+        type_ = pure $ Located loc $ C.TyCon $ Located loc TypeName
 
     -- we only support non-nested patterns for now
     flattenPattern :: Pattern 'Fixity -> Eff es CorePattern
@@ -290,7 +294,7 @@ mkConLambda n con env = do
         foldr
             ( \var bodyFromEnv env' ->
                 let newEnv = env'{values = LMap.insert var (Var var) env'.values}
-                 in Lambda $ Closure{var, ty = (), env = newEnv, body = quote $ bodyFromEnv newEnv}
+                 in Lambda $ Closure{var, ty = (), env = newEnv, body = quote $ Located (getLoc var) $ bodyFromEnv newEnv}
             )
             (const $ Con con (map Var names))
             names

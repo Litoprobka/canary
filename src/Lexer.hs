@@ -146,6 +146,10 @@ braces = between (token LBrace) (token RBrace)
 commaSep :: Parser a -> Parser [a]
 commaSep p = MP.optional (token Comma) *> p `MP.sepEndBy` token Comma
 
+-- like 'commaSep', but parses one or more items
+commaSep1 :: Parser a -> Parser [a]
+commaSep1 p = MP.optional (token Comma) *> p `MP.sepEndBy1` token Comma
+
 {- | parses an AST node with location info
 todo: don't include trailing whitespace where possible
 -}

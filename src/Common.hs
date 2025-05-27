@@ -39,6 +39,7 @@ module Common (
     pattern L,
     unLoc,
     noLoc,
+    pattern (:@),
 ) where
 
 import Data.Type.Bool (type (||))
@@ -170,6 +171,12 @@ data Located a = Located Loc a deriving (Show, Generic, Functor, Foldable, Trave
 {-# COMPLETE L #-}
 pattern L :: a -> Located a
 pattern L x <- Located _ x
+
+{-# COMPLETE (:@) #-}
+pattern (:@) :: a -> Loc -> Located a
+pattern (:@) x loc <- Located loc x
+    where
+        x :@ loc = Located loc x
 instance Eq a => Eq (Located a) where
     (L lhs) == (L rhs) = lhs == rhs
 
