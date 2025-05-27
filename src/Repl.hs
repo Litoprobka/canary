@@ -1,6 +1,7 @@
 {-# LANGUAGE OverloadedLists #-}
 {-# LANGUAGE OverloadedRecordDot #-}
 {-# LANGUAGE RecordWildCards #-}
+{-# LANGUAGE TemplateHaskell #-}
 
 module Repl where
 
@@ -23,7 +24,9 @@ import Error.Diagnose (Report (..))
 import Eval (ValueEnv (..), eval, modifyEnv)
 import Eval qualified as V
 import Fixity qualified (parse, resolveFixity, run)
+import FlatParse.Stateful qualified as FP
 import LangPrelude
+import Lexer (Parser, space')
 import NameGen (NameGen, freshName)
 import NameResolution (Scope (..), resolveNames, resolveTerm)
 import NameResolution qualified
@@ -34,6 +37,7 @@ import Syntax
 import Syntax.Declaration qualified as D
 import Syntax.Term
 import System.Console.Isocline
+import Text.Megaparsec (try)
 import TypeChecker (infer, inferDeclaration, normalise)
 import TypeChecker.Backend qualified as TC
 
@@ -171,7 +175,10 @@ run env = do
     input <- liftIO $ fromString <$> readlineEx ">>" (Just $ completer env) Nothing
     let inputBS = Text.encodeUtf8 input
     newEnv <- localDiagnose env ("<interactive>", input) do
-        replStep env =<< Parser.run ("<interactive>", inputBS) (fmap Decls Parser.code)
+        cmd <- case parseCommand inputBS of
+            Right cmd -> pure cmd
+            Left (remainingInput, parser) -> Parser.run ("<interactive>", remainingInput) parser
+        replStep env cmd
     traverse_ run newEnv
 
 -- todo: locations of previous expressions get borked
@@ -259,20 +266,25 @@ takeInputChunk = do
             then pure acc
             else go $ acc <> textToStrictBuilder line <> textToStrictBuilder "\n"
 
-{-
-parseCommand :: Parser ReplCommand
-parseCommand =
-    choice @[]
-        [ keyword ":t" *> fmap Type_ Parser.term
-        , keyword ":q" $> Quit
-        , keyword ":r" $> Reload
-        , keyword ":load" *> fmap (Load . Text.unpack) takeRest
-        , keyword ":env" $> Env
-        , symbol ":" *> (UnknownCommand <$> takeRest)
-        , try $ fmap Decls Parser.code
-        , fmap Expr Parser.term
-        ]
--}
+parseCommand :: ByteString -> Either (ByteString, Parser ReplCommand) ReplCommand
+parseCommand input = case FP.runParser cmdParser 0 0 input of
+    FP.OK (Right cmd) _ _ -> Right cmd
+    FP.OK (Left parser) _ remainingInput -> Left (remainingInput, parser)
+    _ -> Left (input, try (fmap Decls Parser.code) <|> fmap Expr Parser.term)
+  where
+    cmdParser =
+        $( FP.switchWithPost
+            (Just [|Lexer.space'|])
+            [|
+                case _ of
+                    ":t" -> pure $ Left (Type_ <$> Parser.term)
+                    ":q" -> pure $ Right Quit
+                    ":r" -> pure $ Right Reload
+                    ":env" -> pure $ Right Env
+                    ":load" -> Right . Load <$> FP.takeRestString
+                    ":" -> Right . UnknownCommand . decodeUtf8 <$> FP.takeRest
+                |]
+         )
 
 completer :: ReplEnv -> CompletionEnv -> String -> IO ()
 completer env cenv input = completeWord cenv input Nothing wordCompletion
