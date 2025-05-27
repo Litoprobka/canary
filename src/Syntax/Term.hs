@@ -147,7 +147,7 @@ instance Pretty (NameAt p) => Pretty (Expr_ p) where
             List xs -> brackets . sep . punctuate comma $ pretty <$> xs
             Do stmts lastAction -> nest 2 $ vsep ("do" : fmap pretty stmts <> [pretty lastAction])
             Literal lit -> pretty lit
-            InfixE pairs last' -> "?(" <> sep (concatMap (\(lhs, op) -> pretty lhs : maybe [] (pure . pretty) op) pairs <> [pretty last']) <> ")"
+            InfixE pairs last' -> "?(" <> sep (concatMap (\(lhs, op) -> go 3 lhs : maybe [] (pure . pretty) op) pairs <> [pretty last']) <> ")"
             Skolem skolem -> pretty skolem
             UniVar uni -> pretty uni
             Function from to -> parensWhen 2 $ go 2 from <+> "->" <+> pretty to

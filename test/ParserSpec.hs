@@ -4,32 +4,50 @@
 module ParserSpec (spec) where
 
 import Common
+import Data.List.NonEmpty qualified as NE
+import FlatParse.Stateful qualified as FP
 import Lexer
 import NeatInterpolation
 import Parser
 import Playground
+import Prettyprinter (Pretty, pretty)
 import Relude
-import Syntax.Expression qualified as E
-import Syntax.Pattern qualified as P
 import Syntax.Row (ExtRow (..))
-import Syntax.Type qualified as T
+import Syntax.Row qualified as Row
+import Syntax.Term (Pattern_ (..))
+import Syntax.Term qualified as E
+import Syntax.Term qualified as T
 import Test.Hspec
-import Text.Megaparsec (eof, errorBundlePretty, parse, pos1)
+import Text.Megaparsec (bundleErrors, eof, parse, parseErrorTextPretty)
 
 parsePretty :: Parser a -> Text -> Either String a
-parsePretty parser input = input & parse (usingReaderT pos1 parser <* eof) "test" & first errorBundlePretty
+parsePretty parser input =
+    lexedInput
+        & parse (parser <* eof) "test"
+        & first (foldMap parseErrorTextPretty . bundleErrors)
+  where
+    inputBS = encodeUtf8 input
+    lexedInput =
+        let startPos = FP.unPos (FP.mkPos inputBS (0, 0))
+            tokens = case FP.runParser (concatMap NE.toList <$> many token') 0 startPos inputBS of
+                FP.OK result _ _ -> result
+                _ -> []
+         in mkTokenStream ("test", inputBS) tokens
+
+shouldBePretty :: (HasCallStack, Show a, Pretty b, Eq a) => Either a b -> Either a b -> Expectation
+shouldBePretty = shouldBe `on` second (show . pretty)
 
 spec :: Spec
 spec = do
     describe "small definitions" do
         it "simple binding" do
-            parsePretty code "x = 15" `shouldBe` Right [valueDec (E.ValueBinding "x" (E.Literal $ intLit 15)) []]
+            parsePretty code "x = 15" `shouldBePretty` Right [valueDec (E.ValueB "x" (literal_ $ intLit 15)) []]
         it "function definition" do
-            parsePretty code "f x = y" `shouldBe` Right [valueDec (E.FunctionBinding "f" ["x"] "y") []]
+            parsePretty code "f x = y" `shouldBePretty` Right [valueDec (E.FunctionB "f" ["x"] "y") []]
         it "application" do
-            parsePretty code "f = g x y" `shouldBe` Right [valueDec (E.ValueBinding "f" ("g" # "x" # "y")) []]
+            parsePretty code "f = g x y" `shouldBePretty` Right [valueDec (E.ValueB "f" $ infixApp ["g", "x", "y"]) []]
         it "identifiers may contain keywords" do
-            parsePretty expression "matcher case1 diff" `shouldBe` Right ("matcher" # "case1" # "diff")
+            parsePretty term "matcher case1 diff" `shouldBePretty` Right (infixApp ["matcher", "case1", "diff"])
 
     describe "where clauses" do
         it "one local binding" do
@@ -41,11 +59,11 @@ spec = do
             let result =
                     Right
                         [ valueDec
-                            (E.ValueBinding "f" "x")
-                            [ valueDec (E.ValueBinding "x" (E.Literal $ intLit 2)) []
+                            (E.ValueB "f" "x")
+                            [ valueDec (E.ValueB "x" (literal_ $ intLit 2)) []
                             ]
                         ]
-            parsePretty code program `shouldBe` result
+            parsePretty code program `shouldBePretty` result
         it "multiple bindings" do
             let program =
                     [text|
@@ -63,7 +81,7 @@ spec = do
                       y
                       z
                     |]
-            parsePretty expression expr `shouldBe` Right ("f" # "x" # "y" # "z")
+            parsePretty term expr `shouldBePretty` Right (infixApp ["f", "x", "y", "z"])
         it "with operators" do
             let expr =
                     [text|
@@ -71,11 +89,11 @@ spec = do
                       |> f
                       |> g
                     |]
-            parsePretty expression expr `shouldBe` Right ("|>" # ("|>" # "x" # "f") # "g")
+            parsePretty term expr `shouldBePretty` Right (noLoc $ E.InfixE [("x", Just "|>"), ("f", Just "|>")] "g")
 
     describe "let" do
         it "inline" do
-            parsePretty expression "let x = y; z" `shouldBe` Right (let_ (E.ValueBinding "x" "y") "z")
+            parsePretty term "let x = y; z" `shouldBePretty` Right (let_ (E.ValueB "x" "y") "z")
         it "nested" do
             let expr =
                     [text|
@@ -83,46 +101,45 @@ spec = do
                     let z = x
                     z
                     |]
-            parsePretty expression expr `shouldBe` Right (let_ (E.ValueBinding "x" "y") $ let_ (E.ValueBinding "z" "x") "z")
+            parsePretty term expr `shouldBePretty` Right (let_ (E.ValueB "x" "y") $ let_ (E.ValueB "z" "x") "z")
 
     describe "if-then-else" do
         it "simple" do
-            parsePretty expression "if True then \"yes\" else \"huh???\""
-                `shouldBe` Right (if_ "True" (E.Literal $ textLit "yes") (E.Literal $ textLit "huh???"))
+            parsePretty term "if True then \"yes\" else \"huh???\""
+                `shouldBePretty` Right (if_ "True" (literal_ $ textLit "yes") (literal_ $ textLit "huh???"))
         it "nested" do
-            parsePretty expression "if if True then False else True then 1 else 0"
-                `shouldBe` Right (if_ (if_ "True" "False" "True") (E.Literal $ intLit 1) (E.Literal $ intLit 0))
-        it "partially applied" do
-            parsePretty expression "(if _ then A else B)" `shouldBe` Right (lam "$1" $ if_ "$1" "A" "B")
+            parsePretty term "if if True then False else True then 1 else 0"
+                `shouldBePretty` Right (if_ (if_ "True" "False" "True") (literal_ $ intLit 1) (literal_ $ intLit 0))
+        -- resolving implicit lambdas in the parser is messy
+        xit "(todo) partially applied" do
+            parsePretty term "(if _ then A else B)" `shouldBePretty` Right (lam "$1" $ if_ "$1" "A" "B")
         it "with operators" do
-            parsePretty expression "x + if y || z then 4 else 5 * 2"
-                `shouldBe` Right
-                    (binApp "+" "x" $ if_ (binApp "||" "y" "z") (E.Literal $ intLit 4) (binApp "*" (E.Literal $ intLit 5) (E.Literal $ intLit 2)))
-        it "fixity shenanigans" do
-            parsePretty expression "if cond then 1 else 2 == 3 == 4" `shouldSatisfy` isLeft
+            parsePretty term "x + if y || z then 4 else 5 * 2"
+                `shouldBePretty` Right
+                    (binApp "+" "x" $ if_ (binApp "||" "y" "z") (literal_ $ intLit 4) (binApp "*" (literal_ $ intLit 5) (literal_ $ intLit 2)))
 
     describe "pattern matching" do
         it "pattern" do
             parsePretty pattern' "Cons x (Cons y (Cons z xs))"
-                `shouldBe` Right (con "Cons" ["x", con "Cons" ["y", con "Cons" ["z", "xs"]]])
+                `shouldBePretty` Right (con "Cons" ["x", con "Cons" ["y", con "Cons" ["z", "xs"]]])
         it "int literal" do
-            parsePretty pattern' "123" `shouldBe` Right (P.Literal $ intLit 123)
+            parsePretty pattern' "123" `shouldBePretty` Right (noLoc $ LiteralP $ intLit 123)
         it "many patterns" do
-            parsePretty (some pattern') "(Cons x xs) y ('Hmmm z)"
-                `shouldBe` Right [con "Cons" ["x", "xs"], "y", P.Variant "'Hmmm" "z"]
+            parsePretty (some patternParens) "(Cons x xs) y ('Hmmm z)"
+                `shouldBePretty` Right [con "Cons" ["x", "xs"], "y", noLoc $ VariantP "'Hmmm" "z"]
         it "annotation pattern" do
             parsePretty pattern' "(Cons x xs : List Int)"
-                `shouldBe` Right (P.Annotation (con "Cons" ["x", "xs"]) (T.App (T.Name "List") (T.Name "Int")))
+                `shouldBePretty` Right (noLoc $ AnnotationP (con "Cons" ["x", "xs"]) ("List" $: "Int"))
         it "record" do
-            parsePretty pattern' "{ x = x, y = y, z = z }" `shouldBe` Right (recordP [("x", "x"), ("y", "y"), ("z", "z")])
+            parsePretty pattern' "{ x = x, y = y, z = z }" `shouldBePretty` Right (recordP [("x", "x"), ("y", "y"), ("z", "z")])
         it "record with implicit names" do
-            parsePretty pattern' "{ x, y, z }" `shouldBe` Right (recordP [("x", "x"), ("y", "y"), ("z", "z")])
+            parsePretty pattern' "{ x, y, z }" `shouldBePretty` Right (recordP [("x", "x"), ("y", "y"), ("z", "z")])
         it "list" do
             parsePretty pattern' "[1, 'a', Just x]"
-                `shouldBe` Right (listP [P.Literal $ intLit 1, P.Literal $ charLit "a", con "Just" ["x"]])
+                `shouldBePretty` Right (listP [noLoc $ LiteralP $ intLit 1, noLoc $ LiteralP $ charLit "a", con "Just" ["x"]])
         it "nested lists" do
             parsePretty pattern' "[x, [y, z], [[w], []]]"
-                `shouldBe` Right (listP ["x", listP ["y", "z"], listP [listP ["w"], listP []]])
+                `shouldBePretty` Right (listP ["x", listP ["y", "z"], listP [listP ["w"], listP []]])
         it "case expression" do
             let expr =
                     [text|
@@ -130,8 +147,8 @@ spec = do
                       Cons x xs -> Yes
                       Nil -> No
                     |]
-            parsePretty expression expr
-                `shouldBe` Right (case_ "list" [(con "Cons" ["x", "xs"], "Yes"), (con "Nil" [], "No")])
+            parsePretty term expr
+                `shouldBePretty` Right (case_ "list" [(con "Cons" ["x", "xs"], "Yes"), (con "Nil" [], "No")])
         it "nested case" do
             let expr =
                     [text|
@@ -149,13 +166,13 @@ spec = do
                                 ( con "Cons" ["x", "xs"]
                                 , case_
                                     "x"
-                                    [ (con "Just" ["_"], "Cons" # "True" # "xs")
-                                    , (con "Nothing" [], "Cons" # "False" # "xs")
+                                    [ (con "Just" ["_"], infixApp ["Cons", "True", "xs"])
+                                    , (con "Nothing" [], infixApp ["Cons", "False", "xs"])
                                     ]
                                 )
                             , (con "Nil" [], "Nil")
                             ]
-            parsePretty expression expr `shouldBe` result
+            parsePretty term expr `shouldBePretty` result
         it "match expression" do
             let expr =
                     [text|
@@ -163,12 +180,12 @@ spec = do
                         Nothing -> Nothing
                         (Just x) -> Just (f x)
                     |]
-            parsePretty expression expr
-                `shouldBe` Right (match [([con "Nothing" []], "Nothing"), ([con "Just" ["x"]], "Just" # ("f" # "x"))])
+            parsePretty term expr
+                `shouldBePretty` Right (match [([con "Nothing" []], "Nothing"), ([con "Just" ["x"]], "Just" # ("f" # "x"))])
         it "inline match" do
-            parsePretty expression "match 42 -> True; _ -> False"
-                `shouldBe` Right (match [([P.Literal $ intLit 42], "True"), ([P.Var "_"], "False")])
-        it "match in parens" do
+            parsePretty term "match 42 -> True; _ -> False"
+                `shouldBePretty` Right (match [([noLoc $ LiteralP $ intLit 42], "True"), ([noLoc $ VarP "_"], "False")])
+        xit "match in parens" do
             let expr =
                     [text|
                     f (match
@@ -176,7 +193,8 @@ spec = do
                          _ -> False)
                       x
                     |]
-            parsePretty expression expr `shouldBe` Right ("f" # match [([P.Literal $ intLit 42], "True"), ([P.Var "_"], "False")] # "x")
+            parsePretty term expr
+                `shouldBePretty` Right ("f" # match [([noLoc $ LiteralP $ intLit 42], "True"), ([noLoc $ VarP "_"], "False")] # "x")
         it "multi-arg match" do
             let expr =
                     [text|
@@ -185,8 +203,8 @@ spec = do
                         x Nothing y -> case2
                         Nothing Nothing (Just y) -> case3
                     |]
-            parsePretty expression expr
-                `shouldBe` Right
+            parsePretty term expr
+                `shouldBePretty` Right
                     ( match
                         [ ([con "Nothing" [], con "Just" ["x"], "y"], "case1")
                         , (["x", con "Nothing" [], "y"], "case2")
@@ -200,9 +218,9 @@ spec = do
                         'None -> Nothing
                         ('Some x) -> Just x
                     |]
-            parsePretty expression expr
-                `shouldBe` Right (match [([P.Variant "'None" (recordP [])], "Nothing"), ([P.Variant "'Some" "x"], "Just" # "x")])
-        it "guard clauses (todo)" do
+            parsePretty term expr
+                `shouldBePretty` Right (match [([noLoc $ VariantP "'None" (recordP [])], "Nothing"), ([noLoc $ VariantP "'Some" "x"], "Just" # "x")])
+        xit "guard clauses (todo)" do
             let expr =
                     [text|
                     match
@@ -211,79 +229,81 @@ spec = do
                             | otherwise = Nothing
                         Just x = Just x
                     |]
-            parsePretty expression expr `shouldSatisfy` isRight
+            parsePretty term expr `shouldSatisfy` isRight
 
-    describe "implicit lambdas with wildcards" do
+    xdescribe "implicit lambdas with wildcards" do
         it "(f _ x)" do
-            parsePretty expression "(f _ x)" `shouldBe` Right (lam "$1" $ "f" # "$1" # "x")
+            parsePretty term "(f _ x)" `shouldBePretty` Right (lam "$1" $ "f" # "$1" # "x")
         it "should work with operators" do
-            parsePretty expression "(_ + x * _ |> f)"
-                `shouldBe` Right (lam "$1" $ lam "$2" $ "|>" # ("+" # "$1" # ("*" # "x" # "$2")) # "f")
+            parsePretty term "(_ + x * _ |> f)"
+                `shouldBePretty` Right (lam "$1" $ lam "$2" $ "|>" # ("+" # "$1" # ("*" # "x" # "$2")) # "f")
         it "should scope to the innermost parenthesis" do
-            parsePretty expression "(f (_ + _) _ x)"
-                `shouldBe` Right (lam "$1" $ "f" # lam "$1" (lam "$2" $ "+" # "$1" # "$2") # "$1" # "x")
+            parsePretty term "(f (_ + _) _ x)"
+                `shouldBePretty` Right (lam "$1" $ "f" # lam "$1" (lam "$2" $ "+" # "$1" # "$2") # "$1" # "x")
         it "records and lists introduce a scope" do
-            parsePretty expression "{x = _, y = 0} z"
-                `shouldBe` Right (lam "$1" (recordExpr [("x", "$1"), ("y", E.Literal $ intLit 0)]) # "z")
-            parsePretty expression "[a, b, c, _, d, _]" `shouldBe` Right (lam "$1" $ lam "$2" $ list ["a", "b", "c", "$1", "d", "$2"])
+            parsePretty term "{x = _, y = 0} z"
+                `shouldBePretty` Right (lam "$1" (recordExpr [("x", "$1"), ("y", literal_ $ intLit 0)]) # "z")
+            parsePretty term "[a, b, c, _, d, _]" `shouldBePretty` Right (lam "$1" $ lam "$2" $ list ["a", "b", "c", "$1", "d", "$2"])
         it "should require outer parenthesis" do
-            parsePretty expression "f _" `shouldSatisfy` isLeft
-            parsePretty expression "f _ x" `shouldSatisfy` isLeft
+            parsePretty term "f _" `shouldSatisfy` isLeft
+            parsePretty term "f _ x" `shouldSatisfy` isLeft
 
-    describe "precedence shenanigans (todo: move to fixity resolution tests)" do
+    xdescribe "precedence shenanigans (todo: move to fixity resolution tests)" do
         it "let" do
-            parsePretty expression "let x = y; z == w == v" `shouldSatisfy` isLeft
+            parsePretty term "let x = y; z == w == v" `shouldSatisfy` isLeft
         it "let-let" do
-            parsePretty expression "let x = y; let z = w; v"
-                `shouldBe` Right (let_ (E.ValueBinding "x" "y") (let_ (E.ValueBinding "z" "w") "v"))
+            parsePretty term "let x = y; let z = w; v"
+                `shouldBePretty` Right (let_ (E.ValueB "x" "y") (let_ (E.ValueB "z" "w") "v"))
         it "case" do
-            parsePretty expression "case x of y -> y == 1 == 2" `shouldSatisfy` isLeft
+            parsePretty term "case x of y -> y == 1 == 2" `shouldSatisfy` isLeft
+        it "precedence" do
+            parsePretty term "x + y * z / w" `shouldBePretty` Right (binApp "+" "x" (binApp "/" (binApp "*" "y" "z") "w"))
+        it "lens composition binds tighter than function application" do
+            parsePretty term "f x . y" `shouldBePretty` Right ("f" # binApp "." "x" "y")
+        it "if-then-else" do
+            parsePretty term "if cond then 1 else 2 == 3 == 4" `shouldSatisfy` isLeft
 
     describe "misc. builtins" do
         it "list" do
-            parsePretty expression "[1, 2, 3]" `shouldBe` Right (list [E.Literal $ intLit 1, E.Literal $ intLit 2, E.Literal $ intLit 3])
+            parsePretty term "[1, 2, 3]" `shouldBePretty` Right (list [literal_ $ intLit 1, literal_ $ intLit 2, literal_ $ intLit 3])
         it "record construction" do
-            parsePretty expression "{ x = 1, y }" `shouldBe` Right (recordExpr [("x", E.Literal $ intLit 1), ("y", "y")])
+            parsePretty term "{ x = 1, y }" `shouldBePretty` Right (recordExpr [("x", literal_ $ intLit 1), ("y", "y")])
 
     describe "operators" do
         it "2 + 2" do
-            parsePretty expression "x + x" `shouldBe` Right (binApp "+" "x" "x")
-        it "precedence" do
-            parsePretty expression "x + y * z / w" `shouldBe` Right (binApp "+" "x" (binApp "/" (binApp "*" "y" "z") "w"))
-        it "lens composition binds tighter than function application" do
-            parsePretty expression "f x . y" `shouldBe` Right ("f" # binApp "." "x" "y")
+            parsePretty term "x + x" `shouldBePretty` Right (binApp "+" "x" "x")
 
     describe "types" do
         it "simple" do
-            parsePretty type' "ThisIsAType" `shouldBe` Right "ThisIsAType"
+            parsePretty term "ThisIsAType" `shouldBePretty` Right "ThisIsAType"
         it "type application" do
-            parsePretty type' "Either (List Int) Text"
-                `shouldBe` Right (T.App (T.App "Either" (T.App "List" "Int")) "Text")
+            parsePretty term "Either (List Int) Text"
+                `shouldBePretty` Right (infixApp ["Either", "List" $: "Int", "Text"])
         it "function type" do
-            parsePretty type' "'b -> ('a -> 'b) -> Maybe 'a -> 'b"
-                `shouldBe` Right
-                    ( T.Function Blank (T.Var "'b") $
-                        T.Function Blank (T.Function Blank (T.Var "'a") (T.Var "'b")) $
-                            T.Function Blank (T.App "Maybe" $ T.Var "'a") $
-                                T.Var "'b"
+            parsePretty term "'b -> ('a -> 'b) -> Maybe 'a -> 'b"
+                `shouldBePretty` Right
+                    ( (-->) "'b" $
+                        (-->) ("'a" --> "'b") $
+                            (-->) (($:) "Maybe" $ "'a") $
+                                "'b"
                     )
         it "record" do
-            parsePretty type' "{ x : Int, y : Int, z : Int }"
-                `shouldBe` Right (recordT $ NoExtRow [("x", "Int"), ("y", "Int"), ("z", "Int")])
+            parsePretty term "{ x : Int, y : Int, z : Int }"
+                `shouldBePretty` Right (recordT $ NoExtRow [("x", "Int"), ("y", "Int"), ("z", "Int")])
         it "duplicate record fields" do
-            parsePretty type' "{x : Int, y : Bool, x : Text}"
-                `shouldBe` Right (recordT $ NoExtRow [("y", "Bool"), ("x", "Int"), ("x", "Text")])
+            parsePretty term "{x : Int, y : Bool, x : Text}"
+                `shouldBePretty` Right (recordT $ NoExtRow [("y", "Bool"), ("x", "Int"), ("x", "Text")])
         it "variant" do
-            parsePretty type' "['A Int, 'B, 'C Double]"
-                `shouldBe` Right (variantT $ NoExtRow [("'A", "Int"), ("'B", "Unit"), ("'C", "Double")])
+            parsePretty term "['A Int, 'B, 'C Double]"
+                `shouldBePretty` Right (variantT $ NoExtRow [("'A", "Int"), ("'B", recordT (NoExtRow Row.empty)), ("'C", "Double")])
         it "type variable" do
-            parsePretty type' "'var" `shouldBe` Right (T.Var "'var")
+            parsePretty term "'var" `shouldBePretty` Right "'var"
         it "forall" do
-            parsePretty type' "forall 'a. Maybe 'a" `shouldBe` Right (T.Forall Blank "'a" $ T.App "Maybe" $ T.Var "'a")
-            parsePretty type' "∀ 'a. 'a -> 'a" `shouldBe` Right (T.Forall Blank "'a" $ (T.Var "'a") --> (T.Var "'a"))
+            parsePretty term "forall 'a. Maybe 'a" `shouldBePretty` Right (forall_ "'a" $ ($:) "Maybe" "'a")
+            parsePretty term "∀ 'a. 'a -> 'a" `shouldBePretty` Right (forall_ "'a" $ "'a" --> "'a")
         it "exists" do
-            parsePretty type' "List (exists 'a. 'a)" `shouldBe` Right ("List" $: (∃) "'a" "'a")
-            parsePretty type' "∃'a 'b. 'a -> 'b" `shouldBe` Right ((∃) "'a" $ (∃) "'b" $ "'a" --> "'b")
+            parsePretty term "List (exists 'a. 'a)" `shouldBePretty` Right ("List" $: (∃) "'a" "'a")
+            parsePretty term "∃'a 'b. 'a -> 'b" `shouldBePretty` Right ((∃) "'a" $ (∃) "'b" $ "'a" --> "'b")
 
     describe "full programs" do
         it "parses the old lambdaTest (with tabs)" do

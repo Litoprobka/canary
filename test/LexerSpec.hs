@@ -1,3 +1,5 @@
+{-# LANGUAGE QuasiQuotes #-}
+
 module LexerSpec (spec) where
 
 import Common (Literal_ (..))
@@ -5,6 +7,7 @@ import Data.List.NonEmpty qualified as NE
 import FlatParse.Stateful
 import LangPrelude
 import Lexer
+import NeatInterpolation
 import Syntax.Token
 import Test.Hspec
 
@@ -107,4 +110,29 @@ spec = do
                            , LowerName "d"
                            , Newline
                            , LowerName "body"
+                           ]
+        it "match block" do
+            let expr =
+                    [text|
+                    match
+                        Nothing -> Nothing
+                        (Just x) -> Just (f x)
+                    |]
+            testLexer expr
+                `shouldBe` [ BlockStart Match
+                           , UpperName "Nothing"
+                           , SpecialSymbol Arrow
+                           , UpperName "Nothing"
+                           , Newline
+                           , LParen
+                           , UpperName "Just"
+                           , LowerName "x"
+                           , RParen
+                           , SpecialSymbol Arrow
+                           , UpperName "Just"
+                           , LParen
+                           , LowerName "f"
+                           , LowerName "x"
+                           , RParen
+                           , BlockEnd
                            ]

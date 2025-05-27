@@ -19,6 +19,7 @@ import Data.EnumMap qualified as Map
 import Data.EnumMap.Lazy qualified as LMap
 import Data.HashMap.Strict qualified as HashMap
 import Data.HashSet qualified as HashSet
+import Data.List.NonEmpty qualified as NE
 import Data.Type.Ord (type (<))
 import DependencyResolution (SimpleOutput (..), resolveDependenciesSimplified)
 import Diagnostic (Diagnose, runDiagnose, runDiagnose')
@@ -88,7 +89,7 @@ instance IsString (Pattern 'Parse) where
     fromString = noLoc . matchCase (\name -> ConstructorP (mkName name) []) (VarP . mkName)
 
 instance IsString (Term 'Parse) where
-    fromString ('\'' : rest) = rest & matchCase (noLoc . E.Variant . mkName . ("'" <>)) (noLoc . T.Name . mkName . ("'" <>))
+    fromString ('\'' : rest) = rest & matchCase (noLoc . E.Variant . mkName . ("'" <>)) (noLoc . T.ImplicitVar . mkName . ("'" <>))
     fromString str = noLoc . E.Name . mkName $ fromString str
 
 instance IsString SimpleName where
@@ -123,6 +124,9 @@ infixl 3 $:
 (∃) :: HasLoc (NameAt p) => NameAt p -> Type p -> Type p
 (∃) var body = Located (zipLocOf var body) $ T.Q Exists Implicit Erased (T.plainBinder var) body
 
+forall_ :: HasLoc (NameAt p) => NameAt p -> Type p -> Type p
+forall_ var body = Located (zipLocOf var body) $ T.Q Forall Implicit Erased (T.plainBinder var) body
+
 recordT :: ExtRow (Type p) -> Type p
 recordT = noLoc . T.RecordT
 
@@ -149,6 +153,12 @@ infixl 1 #
 binApp :: Expr 'Parse -> Expr 'Parse -> Expr 'Parse -> Expr 'Parse
 binApp f arg1 arg2 = f # arg1 # arg2
 
+infixApp :: NonEmpty (Expr 'Parse) -> Expr 'Parse
+infixApp exprs = Located (zipLocOf (NE.head exprs) lastE) $ E.InfixE exprs' lastE
+  where
+    (exprs', lastE) = case NE.reverse exprs of
+        lastE :| nonLast -> ((,Nothing) <$> reverse nonLast, lastE)
+
 λ :: Pattern p -> Expr p -> Expr p
 λ pat expr = Located (zipLocOf pat expr) $ E.Lambda pat expr
 
@@ -169,7 +179,7 @@ list xs = Located loc $ E.List xs
         _ -> Blank
 
 match :: [([Pattern p], Expr p)] -> Expr p
-match = noLoc . E.Matchw
+match = noLoc . E.Match
 
 case_ :: Expr p -> [(Pattern p, Expr p)] -> Expr p
 case_ m = noLoc . E.Case m
@@ -203,6 +213,9 @@ conDec name args = D.Constructor loc name args
     loc = case reverse args of
         [] -> getLoc name
         (last' : _) -> zipLocOf name last'
+
+literal_ :: Literal -> Term p
+literal_ = noLoc . E.Literal
 
 intLit :: Int -> Literal
 intLit = noLoc . IntLiteral

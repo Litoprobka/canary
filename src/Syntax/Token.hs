@@ -3,10 +3,12 @@
 
 module Syntax.Token where
 
-import Common (Literal_)
+import Common (Literal_, pattern L)
 import Data.Char (isAlphaNum)
 import LangPrelude
+import Language.Haskell.TH qualified as TH
 import Language.Haskell.TH.Syntax (Exp, Lift, Q)
+import Text.Megaparsec qualified as MP
 import Prelude qualified
 
 data Token
@@ -122,3 +124,23 @@ isIdentifierChar c = isAlphaNum c || c == '_' || c == '\''
 -- moved out because of the staging restriction
 parseTable :: forall a. (Show a, Lift a, Bounded a, Enum a) => [(String, Q Exp)]
 parseTable = map (\x -> (show x, [|pure x|])) (universe @a)
+
+-- this also should have been in Lexer, but staging restriction
+
+{- | matches a token pattern and returns its payload
+
+tok :: String -> Pattern (a -> Token) -> Lexer a
+-}
+tok :: String -> TH.Name -> TH.ExpQ
+tok labelText patName = do
+    x <- TH.newName "x"
+    let labelNE = case nonEmpty labelText of
+            Just lbl -> lbl
+            Nothing -> '<' :| "no name>"
+    [|
+        MP.label labelText $ MP.try do
+            next <- MP.anySingle
+            case next of
+                L $(TH.conP patName [TH.varP x]) -> pure $(TH.varE x)
+                other -> MP.failure (Just $ MP.Tokens $ one other) (one $ MP.Label labelNE)
+        |]

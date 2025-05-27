@@ -25,7 +25,6 @@ import Diagnostic
 import Error.Diagnose (Position (..))
 import FlatParse.Stateful hiding (Parser, Pos, ask, local, try, (<|>))
 import FlatParse.Stateful qualified as FP
-import Language.Haskell.TH qualified as TH
 import Syntax.Token
 
 type Parser = MP.Parsec Void TokenStream
@@ -35,7 +34,7 @@ type Parser = MP.Parsec Void TokenStream
 -}
 type Lexer = FP.Parser Int ()
 
-newtype TokenStream = TokenStream (Vector (Located Token))
+newtype TokenStream = TokenStream (Vector (Located Token)) deriving (Show)
 
 instance MP.Stream TokenStream where
     type Token TokenStream = Located Token
@@ -64,22 +63,7 @@ instance MP.VisualStream TokenStream where
 token :: Token -> Parser ()
 token inputToken = MP.label (show inputToken) $ void $ MP.satisfy ((== inputToken) . unLoc)
 
-{- | matches a token pattern and returns its payload
-
-tok :: Pattern (a -> Token) -> Lexer a
--}
-tok :: TH.Name -> TH.ExpQ
-tok patName = do
-    x <- TH.newName "x"
-    [|
-        MP.try do
-            L $(TH.conP patName [TH.varP x]) <- MP.anySingle
-            pure $(TH.varE x)
-        |]
-
-{- | parses a keyword token
-it is assumed that `kw` appears in the `keywords` list
--}
+-- | parses a keyword token
 keyword :: Keyword -> Parser ()
 keyword = token . Keyword
 
@@ -116,35 +100,25 @@ topLevelBlock p = p `MP.sepBy` newline
 
 -- | an identifier that doesn't start with an uppercase letter
 lowerName :: Parser SimpleName
-lowerName = MP.try $ mkName do
-    L (LowerName name) <- MP.anySingle
-    pure name
+lowerName = mkName $(tok "lowercase identifier" 'LowerName)
 
 -- | an identifier that doesn't start with an uppercase letter or a parenthesised operator
 termName :: Parser SimpleName
-termName = parens operator <|> lowerName
+termName = MP.try (parens operator) <|> lowerName
 
 -- | an identifier that starts with an uppercase letter
 upperName :: Parser SimpleName
-upperName = MP.try $ mkName do
-    L (UpperName name) <- MP.anySingle
-    pure name
+upperName = mkName $(tok "uppercase identifier" 'UpperName)
 
 -- | an identifier that starts with a ' and an uppercase letter, i.e. 'Some
 variantConstructor :: Parser SimpleName
-variantConstructor = MP.try $ mkName do
-    L (VariantName name) <- MP.anySingle
-    pure name
+variantConstructor = mkName $(tok "variant constructor" 'VariantName)
 
 literal :: Parser C.Literal
-literal = MP.try $ located do
-    L (Literal lit) <- MP.anySingle
-    pure lit
+literal = located $(tok "literal" 'Literal)
 
 operator :: Parser SimpleName
-operator = MP.try $ mkName do
-    L (Op op) <- MP.anySingle
-    pure op
+operator = mkName $(tok "operator" 'Op)
 
 {- todo: it might be a good idea to ignore strict newlines when inside the brackets
 i.e. that would allow
@@ -165,7 +139,7 @@ using anything indentation-sensitve, i.e. do notation, reintroduces strict newli
 -}
 parens, brackets, braces :: Parser a -> Parser a
 parens = between (token LParen) (token RParen)
-brackets = between (token RBracket) (token RBracket)
+brackets = between (token LBracket) (token RBracket)
 braces = between (token LBrace) (token RBrace)
 
 -- leading commas, trailing commas, anything goes
@@ -196,14 +170,17 @@ mkName = located . fmap Name'
 lex :: Diagnose :> es => (FilePath, ByteString) -> Eff es TokenStream
 lex (fileName, fileContents) = do
     let startPos = FP.unPos (FP.mkPos fileContents (0, 0))
-    tokensWithSpans <- case FP.runParser (concatMap NE.toList <$> many token') 0 startPos fileContents of
+    tokens <- case FP.runParser (concatMap NE.toList <$> many token') 0 startPos fileContents of
         OK result _ _ -> pure result
         _ -> internalError Blank "todo: lexer errors lol"
-    let tokenSpans = concatMap (\(Span from to, _) -> [from, to]) tokensWithSpans
-        tokens = map snd tokensWithSpans
-        locatedTokens = zipWith (flip Located) tokens $ map mkPos $ pairs $ posLineCols fileContents tokenSpans
-    pure $ TokenStream $ V.fromList locatedTokens
+    pure $ mkTokenStream (fileName, fileContents) tokens
+
+mkTokenStream :: (FilePath, ByteString) -> [(Span, Token)] -> TokenStream
+mkTokenStream (fileName, fileContents) tokens = TokenStream $ V.fromList locatedTokens
   where
+    locatedTokens = zipWith (flip Located) justTokens $ map mkPos $ pairs $ posLineCols fileContents tokenSpans
+    justTokens = map snd tokens
+    tokenSpans = concatMap (\(Span from to, _) -> [from, to]) tokens
     pairs (x : y : xs) = (x, y) : pairs xs
     pairs _ = []
     mkPos ((lineFrom, columnFrom), (lineTo, columnTo)) =
@@ -289,9 +266,10 @@ identifier' = do
 quotedIdent :: Lexer Token
 quotedIdent = do
     $(char '\'')
-    ident <- Text.pack . ('\'' :) <$> some (satisfy isIdentifierChar)
-    pure case Text.head ident of
-        c | isUpperCase c -> VariantName ident
+    identTail <- some (satisfy isIdentifierChar)
+    let ident = Text.pack $ '\'' : identTail
+    pure case listToMaybe identTail of
+        Just c | isUpperCase c -> VariantName ident
         _ -> ImplicitName ident
 
 operator' :: Lexer Token

@@ -4,7 +4,7 @@
 {-# LANGUAGE TemplateHaskell #-}
 {-# OPTIONS_GHC -Wno-unrecognised-pragmas #-}
 
-module Parser (code, declaration, pattern', term, parseModule, run) where
+module Parser (code, declaration, pattern', patternParens, term, termParens, parseModule, run) where
 
 import LangPrelude
 
@@ -29,7 +29,7 @@ import Syntax.Declaration qualified as D
 import Syntax.Row
 import Syntax.Row qualified as Row
 import Syntax.Term
-import Syntax.Token (SpecialSymbol)
+import Syntax.Token (SpecialSymbol, tok)
 import Syntax.Token qualified as Token
 import Text.Megaparsec hiding (token)
 
@@ -106,10 +106,10 @@ varBinder :: Parser (VarBinder 'Parse)
 varBinder =
     parens (VarBinder <$> termName <* specialSymbol Token.Colon <*> fmap Just term)
         <|> flip VarBinder Nothing
-        <$> termName
+        <$> (termName <|> mkName $(tok "implicit variable" 'Token.ImplicitName))
 
 typeVariable :: Parser (Type_ 'Parse)
-typeVariable = Name <$> termName <|> ImplicitVar <$> mkName $(tok 'Token.ImplicitName)
+typeVariable = Name <$> termName <|> ImplicitVar <$> mkName $(tok "implicit variable" 'Token.ImplicitName)
 
 someRecord :: SpecialSymbol -> Parser value -> Maybe (SimpleName -> value) -> Parser (ExtRow value)
 someRecord delim valueP missingValue = braces do
@@ -159,35 +159,34 @@ quantifier = withLoc do
     pure \loc -> foldr (\binder acc -> Located loc $ Q q visibility erased binder acc) body binders
 
 pattern' :: Parser (Pattern 'Parse)
-pattern' =
-    choice
-        [ located $ ConstructorP <$> upperName <*> many patternParens
-        , located $ VariantP <$> variantConstructor <*> patternParens
-        , patternParens
-        ]
+pattern' = located do
+    pat <-
+        choice
+            [ located $ ConstructorP <$> upperName <*> many patternParens
+            , located $ VariantP <$> variantConstructor <*> patternParens
+            , patternParens
+            ]
+    option (unLoc pat) do
+        specialSymbol Token.Colon
+        AnnotationP pat <$> term
 
 {- | parses a pattern with constructors enclosed in parens
 should be used in cases where multiple patterns in a row are accepted, i.e.
 function definitions and match expressions
 -}
 patternParens :: Parser (Pattern 'Parse)
-patternParens = located do
-    pat <-
-        located . choice $
-            [ VarP <$> termName
-            , WildcardP <$> $(tok 'Token.Wildcard)
-            , record
-            , ListP <$> brackets (commaSep pattern')
-            , LiteralP <$> literal
-            , -- todo
-              -- , -- a constructor without arguments or with a tightly-bound record pattern
-              --  lexeme $ ConstructorP <$> constructorName <*> option [] (one <$> located record)
-              flip VariantP unit <$> variantConstructor -- some sugar for variants with a unit payload
-            , unLoc <$> parens pattern'
-            ]
-    option (unLoc pat) do
-        specialSymbol Token.Colon
-        AnnotationP pat <$> term
+patternParens =
+    located . choice $
+        [ VarP <$> termName
+        , WildcardP <$> $(tok "wildcard" 'Token.Wildcard)
+        , record
+        , ListP <$> brackets (commaSep pattern')
+        , LiteralP <$> literal
+        , -- todo: tightly-bound record
+          ConstructorP <$> upperName <*> pure []
+        , flip VariantP unit <$> variantConstructor -- some sugar for variants with a unit payload
+        , unLoc <$> parens pattern'
+        ]
   where
     record = RecordP <$> noExtRecord Token.Eq pattern' (Just $ \n -> Located (getLoc n) $ VarP n)
     unit = Located Blank $ RecordP Row.empty
@@ -244,7 +243,7 @@ term = located do
     -- x [(+, y), (*, z), (+, w)] --> [(x, +), (y, *), (z, +)] w
     shift expr [] = ([], expr)
     shift lhs ((op, rhs) : rest) = first ((lhs, op) :) $ shift rhs rest
-    noPrec = typeApp <|> keywordBased <|> termParens
+    noPrec = keywordBased <|> typeApp
 
     -- expression forms that have a leading keyword/symbol
     -- most of them also consume all trailing terms
@@ -316,7 +315,9 @@ termParens =
             [ try record
             , recordType -- todo: ambiguity with empty record value
             , try $ List <$> brackets (commaSep term)
-            , variantType -- todo: ambiguity with empty list; unit sugar ambiguity
+            , -- todo: since annotation patterns are a thing, variantType is pretty much always ambiguous
+              -- perhaps it should require a trailing |?
+              variantType
             , try $ Name <$> parens operator
             , parens $ unLoc <$> term
             , -- , RecordLens <$> _recordLens

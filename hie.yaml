@@ -1,0 +1,8 @@
+cradle:
+  stack:
+    - path: "./app"
+      component: "canary:exe:canary-exe"
+    - path: "./src"
+      component: "canary:lib"
+    - path: "./test"
+      component: "canary:test:canary-test"

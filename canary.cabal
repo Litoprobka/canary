@@ -125,6 +125,8 @@ test-suite canary-test
   main-is: Spec.hs
   other-modules:
       LexerSpec
+      ParserSpec
+      Playground
       Paths_canary
   hs-source-dirs:
       test
