@@ -4,7 +4,6 @@
 module ParserSpec (spec) where
 
 import Common
-import Data.List.NonEmpty qualified as NE
 import FlatParse.Stateful qualified as FP
 import Lexer
 import NeatInterpolation
@@ -16,7 +15,6 @@ import Syntax.Row (ExtRow (..))
 import Syntax.Row qualified as Row
 import Syntax.Term (Pattern_ (..))
 import Syntax.Term qualified as E
-import Syntax.Term qualified as T
 import Test.Hspec
 import Text.Megaparsec (bundleErrors, eof, parse, parseErrorTextPretty)
 
@@ -28,14 +26,13 @@ parsePretty parser input =
   where
     inputBS = encodeUtf8 input
     lexedInput =
-        let startPos = FP.unPos (FP.mkPos inputBS (0, 0))
-            tokens = case FP.runParser (concatMap NE.toList <$> many token') 0 startPos inputBS of
-                FP.OK result _ _ -> result
+        let tokens = case Lexer.lexWithWhitespace inputBS of
+                FP.OK result _ _ -> rights result
                 _ -> []
          in mkTokenStream ("test", inputBS) tokens
 
 shouldBePretty :: (HasCallStack, Show a, Pretty b, Eq a) => Either a b -> Either a b -> Expectation
-shouldBePretty = shouldBe `on` second (show . pretty)
+shouldBePretty = shouldBe `on` second (show @Text . pretty)
 
 spec :: Spec
 spec = do

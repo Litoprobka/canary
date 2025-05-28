@@ -11,6 +11,19 @@ import Language.Haskell.TH.Syntax (Exp, Lift, Q)
 import Text.Megaparsec qualified as MP
 import Prelude qualified
 
+data WhitespaceToken
+    = SkippedNewline
+    | Whitespace Text
+    | Comment Text -- does not include the --
+    | MultilineComment Text -- does not include the --- ---
+
+instance Show WhitespaceToken where
+    show = \case
+        SkippedNewline -> "\n"
+        Whitespace ws -> toString ws
+        Comment txt -> "--" <> toString txt
+        MultilineComment txt -> "---" <> toString txt <> "---"
+
 data Token
     = LowerName Text
     | UpperName Text

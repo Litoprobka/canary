@@ -3,7 +3,6 @@
 module LexerSpec (spec) where
 
 import Common (Literal_ (..))
-import Data.List.NonEmpty qualified as NE
 import FlatParse.Stateful
 import LangPrelude
 import Lexer
@@ -12,12 +11,9 @@ import Syntax.Token
 import Test.Hspec
 
 testLexer :: Text -> [Token]
-testLexer fileText = case runParser (concatMap NE.toList <$> many token') 0 startPos fileBS of
-    OK tokens _ _ -> map snd tokens
+testLexer fileText = case lexWithWhitespace (encodeUtf8 fileText) of
+    OK tokens _ _ -> map snd $ rights tokens
     _ -> []
-  where
-    fileBS = encodeUtf8 fileText
-    startPos = unPos (mkPos fileBS (0, 0)) + 1
 
 spec :: Spec
 spec = do

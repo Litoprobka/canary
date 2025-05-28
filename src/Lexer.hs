@@ -19,7 +19,7 @@ import Text.Megaparsec qualified as MP
 -- import Text.Megaparsec.Char hiding (newline, space)
 
 import Common qualified as C
-import Control.Monad.Combinators (between, choice, skipManyTill)
+import Control.Monad.Combinators (between, choice, manyTill, option)
 import Data.List.NonEmpty qualified as NE
 import Diagnostic
 import Error.Diagnose (Position (..))
@@ -170,14 +170,15 @@ mkName = located . fmap Name'
 
 -- * Lexer implementation details
 
+type AnyToken = Either (Span, WhitespaceToken) (Span, Token)
+
 -- | lex an input file in UTF-8 encoding. Lexer errors are todo
 lex :: Diagnose :> es => (FilePath, ByteString) -> Eff es TokenStream
 lex (fileName, fileContents) = do
-    let startPos = FP.unPos (FP.mkPos fileContents (0, 0))
-    tokens <- case FP.runParser (concatMap NE.toList <$> many token') 0 startPos fileContents of
+    tokens <- case lexWithWhitespace fileContents of
         OK result _ _ -> pure result
         _ -> internalError Blank "todo: lexer errors lol"
-    pure $ mkTokenStream (fileName, fileContents) tokens
+    pure $ mkTokenStream (fileName, fileContents) $ rights tokens
 
 mkTokenStream :: (FilePath, ByteString) -> [(Span, Token)] -> TokenStream
 mkTokenStream (fileName, fileContents) tokens = TokenStream $ V.fromList locatedTokens
@@ -195,42 +196,50 @@ mkTokenStream (fileName, fileContents) tokens = TokenStream $ V.fromList located
                 , file = fileName
                 }
 
-{-# INLINE token' #-}
-token' :: Lexer (NonEmpty (Span, Token))
-token' = tokenNoWS <* spaceOrLineWrap
+-- | a pure version of lex that doesn't filter tokens
+lexWithWhitespace :: ByteString -> FP.Result () [AnyToken]
+lexWithWhitespace input = FP.runParser (concatMap NE.toList <$> many token') 0 startPos input
   where
-    tokenNoWS :: Lexer (NonEmpty (Span, Token))
-    tokenNoWS =
-        ((:|) <$> withSpan' (BlockStart <$> blockKeyword) <*> block')
-            <|> letBlock'
-            <|> choice
-                [ Keyword <$> keyword'
-                , $( switch
-                        [|
-                            case _ of
-                                "∀" -> pure $ Keyword Forall
-                                "Π" -> Keyword Foreach <$ fails (satisfy isIdentifierChar)
-                                "∃" -> pure $ Keyword Exists
-                                "Σ" -> Keyword Some <$ fails (satisfy isIdentifierChar)
-                                "\\" -> pure $ SpecialSymbol Lambda
-                                "(" -> pure LParen
-                                ")" -> pure RParen
-                                "{" -> pure LBrace -- todo: tight braces
-                                "}" -> pure RBrace
-                                "[" -> pure LBracket
-                                "]" -> pure RBracket
-                                "," -> pure Comma
-                                ";" -> pure Semicolon
-                            |]
-                   )
-                , identifier' -- make sure that identifier is applied after all keyword parsers
-                , Literal <$> choice [intLiteral, textLiteral, charLiteral]
-                , quotedIdent
-                , SpecialSymbol <$> specialSymbol'
-                , operator' -- same as above, operator' should be after specialSymbol
-                ]
-            `withSpan` (\tok span -> pure $ one (span, tok))
-            <|> fmap one (withSpan' exactNewline)
+    startPos = FP.unPos (FP.mkPos input (0, 0))
+
+{-# INLINE token' #-}
+token' :: Lexer (NonEmpty AnyToken)
+token' =
+    ((:|) . Right <$> withSpan' (BlockStart <$> blockKeyword) <*> block')
+        <|> letBlock'
+        <|> choice
+            [ Keyword <$> keyword'
+            , $( switch
+                    [|
+                        case _ of
+                            "∀" -> pure $ Keyword Forall
+                            "Π" -> Keyword Foreach <$ fails (satisfy isIdentifierChar)
+                            "∃" -> pure $ Keyword Exists
+                            "Σ" -> Keyword Some <$ fails (satisfy isIdentifierChar)
+                            "\\" -> pure $ SpecialSymbol Lambda
+                            "(" -> pure LParen
+                            ")" -> pure RParen
+                            "{" -> pure LBrace -- todo: tight braces
+                            "}" -> pure RBrace
+                            "[" -> pure LBracket
+                            "]" -> pure RBracket
+                            "," -> pure Comma
+                            ";" -> pure Semicolon
+                        |]
+               )
+            , identifier' -- make sure that identifier is applied after all keyword parsers
+            , Literal <$> choice [intLiteral, textLiteral, charLiteral]
+            , quotedIdent
+            , SpecialSymbol <$> specialSymbol'
+            , operator' -- same as above, operator' should be after specialSymbol
+            ]
+        `withSpan` (\tok span -> pure . one $ Right (span, tok))
+        <|> exactNewline
+        <|> do
+            ws <- spaceOrLineWrap
+            case NE.nonEmpty ws of
+                Nothing -> FP.failed
+                Just wsNE -> pure $ fmap Left wsNE
 
 withSpan' :: Lexer a -> Lexer (Span, a)
 withSpan' p = withSpan p \tok span -> pure (span, tok)
@@ -280,17 +289,23 @@ operator' :: Lexer Token
 operator' = Op . Text.pack <$> some (satisfy isOperatorChar)
 
 -- | a newline with the same column offset as the current block
-exactNewline :: Lexer Token
-exactNewline =
-    Newline <$ do
-        newlines
-        offset <- columnBytes
-        blockOffset <- FP.ask
-        guard $ offset == blockOffset
+exactNewline :: Lexer (NonEmpty AnyToken)
+exactNewline = do
+    (span, ws) <- withSpan' newlines
+    offset <- columnBytes
+    blockOffset <- FP.ask
+    guard $ offset == blockOffset
+    -- annoying quirk: the location of the exact newline overlaps with
+    -- the intermediate whitespace
+    -- should we treat an exact-newline as a zero-sized token instead?
+    pure $ fmap Left ws `snoc` Right (span, Newline)
+  where
+    snoc [] y = y :| []
+    snoc (x : xs) y = x `NE.cons` snoc xs y
 
-block' :: Lexer [(Span, Token)]
+block' :: Lexer [AnyToken]
 block' = do
-    spaceOrLineWrap
+    ws <- spaceOrLineWrap
     newOffset <- columnBytes
     prevOffset <- FP.ask
     blockContents <-
@@ -298,24 +313,24 @@ block' = do
             then pure []
             else FP.local (const newOffset) do
                 concatMap NE.toList <$> FP.many token'
-    blockEnd <- withSpan' (pure BlockEnd)
-    pure $ blockContents <> one blockEnd
+    blockEnd <- Right <$> withSpan' (pure BlockEnd)
+    pure $ fmap Left ws <> blockContents <> one blockEnd
 
 -- the scoping rules of let blocks are slightly different
-letBlock' :: Lexer (NonEmpty (Span, Token))
+letBlock' :: Lexer (NonEmpty AnyToken)
 letBlock' = do
     offset <- columnBytes
     letTok <- withSpan' $ Keyword Let <$ $(string "let") `notFollowedBy` satisfy isOperatorChar
-    spaceOrLineWrap -- we have to remove the whitespace after the token manually here
+    ws <- spaceOrLineWrap -- we have to remove the whitespace after the token manually here
     tokens <- FP.local (const offset) do
         -- todo: this is ugly
         -- I think it might be not quite right to parse a semicolon as an exact newline here, since it might appear in a nested scope
         -- e.g. `let test = do this; that\nbody`
         -- perhaps a better approach is to drop the `someTill` part and just parse a terminator afterwards?
-        let terminatorP = withSpan' $ exactNewline <|> Semicolon <$ $(char ';')
+        let terminatorP = exactNewline <|> one . Right <$> withSpan' (Semicolon <$ $(char ';'))
         (tokens, terminator) <- first (concatMap NE.toList) <$> token' `MP.someTill_` terminatorP
-        pure $ tokens <> [terminator]
-    pure $ letTok :| tokens
+        pure $ tokens <> NE.toList terminator
+    pure $ Right letTok :| fmap Left ws ++ tokens
 
 -- | returns the byte offset since the last occured newline
 columnBytes :: Lexer Int
@@ -328,33 +343,52 @@ columnBytes = do
 
 i.e. it skips lines of whitespace entirely
 -}
-newlines :: Lexer ()
-newlines = skipSome $ newlineWithMeta *> space'
+newlines :: Lexer [(Span, WhitespaceToken)]
+newlines = do
+    ns <-
+        concat <$> some do
+            ws <- someSpace
+            newline <- withSpan' newlineWithMeta
+            pure $ ws <> [newline]
+    trailingWS <- someSpace
+    pure $ ns <> trailingWS
   where
-    newlineWithMeta :: Lexer ()
-    newlineWithMeta = do
-        $(char '\n')
-        pos <- FP.getPos
-        FP.put pos.unPos
+    newlineWithMeta :: Lexer WhitespaceToken
+    newlineWithMeta =
+        SkippedNewline <$ do
+            $(char '\n')
+            pos <- FP.getPos
+            FP.put pos.unPos
 
--- | non-newline space
-space' :: Lexer ()
-space' =
-    choice
-        [ skipMany (skipSatisfy \c -> isSpace c && c /= '\n')
-        , $(string "---") <* skipAnyChar `skipManyTill` $(string "---")
-        , $(string "--") <* takeLine
-        ]
+-- | non-zero amount of non-newline space
+space1 :: Lexer (Span, WhitespaceToken)
+space1 =
+    withSpan'
+        $( switch
+            [|
+                case _ of
+                    "---" -> MultilineComment . fromString <$> anyChar `manyTill` $(string "---")
+                    "--" -> Comment . fromString <$> takeLine
+                    _ -> Whitespace . fromString <$> some (satisfy \c -> isSpace c && c /= '\n')
+                |]
+         )
 
--- | space or a newline with increased indentation
-spaceOrLineWrap :: Lexer ()
-spaceOrLineWrap = void $ space' `MP.sepBy` lineWrap
+{- | any amount of non-newline space
+this parser produces zero or one token, but returning a list makes it easier to compose
+-}
+someSpace :: Lexer [(Span, WhitespaceToken)]
+someSpace = maybeToList <$> optional space1
+
+-- | space (possibly none) or a newline with increased indentation
+spaceOrLineWrap :: Lexer [(Span, WhitespaceToken)]
+spaceOrLineWrap = (<>) <$> someSpace <*> option [] lineWrap
   where
     lineWrap = do
         blockIndent <- FP.ask
-        newlines
+        ws <- newlines
         currentIndent <- columnBytes
         guard $ currentIndent > blockIndent
+        pure ws
 
 intLiteral :: Lexer Literal_
 intLiteral = IntLiteral <$> anyAsciiDecimalInt
