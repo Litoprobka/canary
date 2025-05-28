@@ -173,11 +173,16 @@ mkName = located . fmap Name'
 -- | lex an input file in UTF-8 encoding. Lexer errors are todo
 lex :: Diagnose :> es => (FilePath, ByteString) -> Eff es TokenStream
 lex (fileName, fileContents) = do
-    let startPos = FP.unPos (FP.mkPos fileContents (0, 0))
-    tokens <- case FP.runParser (concatMap NE.toList <$> many token') 0 startPos fileContents of
+    tokens <- case lex' fileContents of
         OK result _ _ -> pure result
         _ -> internalError Blank "todo: lexer errors lol"
     pure $ mkTokenStream (fileName, fileContents) tokens
+
+-- | pure version of 'lex' that doesn't postprocess tokens
+lex' :: ByteString -> Result () [(Span, Token)]
+lex' input = FP.runParser (concatMap NE.toList <$> many token') 0 startPos input
+  where
+    startPos = FP.unPos (FP.mkPos input (0, 0))
 
 mkTokenStream :: (FilePath, ByteString) -> [(Span, Token)] -> TokenStream
 mkTokenStream (fileName, fileContents) tokens = TokenStream $ V.fromList locatedTokens

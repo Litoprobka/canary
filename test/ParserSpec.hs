@@ -28,8 +28,7 @@ parsePretty parser input =
   where
     inputBS = encodeUtf8 input
     lexedInput =
-        let startPos = FP.unPos (FP.mkPos inputBS (0, 0))
-            tokens = case FP.runParser (concatMap NE.toList <$> many token') 0 startPos inputBS of
+        let tokens = case lex' inputBS of
                 FP.OK result _ _ -> result
                 _ -> []
          in mkTokenStream ("test", inputBS) tokens
