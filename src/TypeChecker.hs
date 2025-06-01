@@ -297,7 +297,13 @@ check (e :@ loc) (typeToCheck :@ tyLoc) = match e typeToCheck
                     lookupUniVar uni >>= \case
                         Left _ -> solveUniVar uni newTy
                         Right _ -> pass
-        _expr (V.Q Exists Visible _e _closure) -> internalError loc "dependent pairs are not supported yet"
+        (Sigma x y) (V.Q Exists Visible _e closure) -> do
+            check_ x closure.ty
+            env <- asks @InfState (.values)
+            -- I'm not sure 'V.eval' does the right thing here
+            -- we should skolemize the unbound variables rather than failing
+            xVal <- V.eval env x
+            check_ y $ closure `V.app` xVal
         expr (V.Q Forall Implicit _e closure) -> check_ (expr :@ loc) =<< substitute Out closure
         expr (V.Q Forall Hidden _e closure) -> check_ (expr :@ loc) =<< substitute Out closure
         expr (V.Q Exists _vis _e closure) -> check_ (expr :@ loc) =<< substitute In closure
@@ -363,6 +369,9 @@ localEquality argVal patVal = do
                 zipWithM_ localEquality lhsVals rhsVals
         (V.Record lhs, V.Record rhs) -> void $ Row.unionWithM (\l r -> l <$ localEquality l r) lhs rhs
         (V.Variant lhsName lhsArg, V.Variant rhsName rhsArg) | lhsName == rhsName -> localEquality lhsArg rhsArg
+        (V.Sigma lhsX lhsY, V.Sigma rhsX rhsY) -> do
+            localEquality lhsX rhsX
+            localEquality lhsY rhsY
         (V.Function lhsFrom lhsTo, V.Function rhsFrom rhsTo) -> do
             localEquality lhsFrom rhsFrom
             localEquality lhsTo rhsTo
@@ -457,6 +466,13 @@ infer (Located loc e) = case e of
         traverse_ (`check_` itemTy) items
         pure $ Located loc $ V.TyCon (ListName :@ loc) `V.App` itemTy
     E.Record row -> Located loc . V.RecordT . NoExtRow <$> traverse (fmap unLoc . infer) row
+    -- it's not clear whether we should special case dependent pairs where the first element is a variable, or always infer a non-dependent pair typesc
+    Sigma x y -> do
+        xName <- freshName_ $ Name' "x"
+        xTy <- infer x
+        yTy <- infer y
+        env <- asks @InfState (.values)
+        pure $ Located loc $ V.Q Exists Visible Retained V.Closure{var = xName :@ loc, ty = unLoc xTy, env, body = V.quote yTy}
     RecordLens fields -> do
         recordParts <- for fields \field -> do
             rowVar <- freshUniVar
@@ -642,7 +658,9 @@ patternFuncs postprocess = (checkP, inferP)
                     CharLiteral _ -> CharName
                 )
 
--- | splits the type singature of a value constructor into a list of args and the final type
+{- | splits the type singature of a value constructor into a list of args and the final type
+todo: this should really be computed before the typecheck pass and put into a table
+-}
 conArgTypes :: InfEffs es => Name -> Eff es (V.Value, [V.Type'])
 conArgTypes name = lookupSig name >>= go . unLoc
   where
@@ -691,6 +709,7 @@ normaliseAll = generaliseAll >=> traverse (eval' <=< go . V.quote)
             C.Lambda name body -> C.Lambda name <$> go body
             C.Case arg matches -> C.Case <$> go arg <*> traverse (traverse go) matches
             C.Record row -> C.Record <$> traverse go row
+            C.Sigma x y -> C.Sigma <$> go x <*> go y
             -- and these are just boilerplate
             C.Name name -> pure $ C.Name name
             C.TyCon name -> pure $ C.TyCon name

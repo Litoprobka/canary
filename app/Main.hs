@@ -15,6 +15,8 @@ import Prettyprinter
 import Prettyprinter.Render.Text (putDoc)
 import Repl (ReplEnv (..))
 import Repl qualified
+import System.Console.Isocline (setHistory)
+import System.Directory
 
 main :: IO ()
 main = do
@@ -44,6 +46,8 @@ runFile debug fileName input = do
 
 runRepl :: IO ()
 runRepl = void $ runEff $ runDiagnose ("", "") $ runNameGen do
+    historyFile <- liftIO $ getXdgDirectory XdgCache "canary/history.txt"
+    liftIO $ setHistory historyFile (-1)
     liftIO $ hSetBuffering stdout NoBuffering
     replEnv <- Repl.mkDefaultEnv
     Repl.run replEnv

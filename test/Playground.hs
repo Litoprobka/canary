@@ -161,8 +161,8 @@ binApp f arg1 arg2 = f # arg1 # arg2
 infixApp :: NonEmpty (Expr 'Parse) -> Expr 'Parse
 infixApp exprs = Located (zipLocOf (NE.head exprs) lastE) $ E.InfixE exprs' lastE
   where
-    (exprs', lastE) = case NE.reverse exprs of
-        lastE :| nonLast -> ((,Nothing) <$> reverse nonLast, lastE)
+    lastE :| nonLast = NE.reverse exprs
+    exprs' = (,Nothing) <$> reverse nonLast
 
 λ :: Pattern p -> Expr p -> Expr p
 λ pat expr = Located (zipLocOf pat expr) $ E.Lambda pat expr

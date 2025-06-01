@@ -49,6 +49,7 @@ data Monotype_
     | MTyCon Name
     | MLambda (MonoClosure ())
     | MRecord (Row Monotype_)
+    | MSigma Monotype_ Monotype_
     | MVariant OpenName Monotype_
     | MPrim Literal
     | -- types
@@ -195,6 +196,7 @@ alterUniVar override uni ty = do
             MRecordT row -> NoCycle <$ traverse_ (go (Indirect, acc)) row
             MVariant _ val -> go (Indirect, acc) val
             MRecord row -> NoCycle <$ traverse_ (go (Indirect, acc)) row
+            MSigma x y -> go (Indirect, acc) x >> go (Indirect, acc) y
             MLambda closure -> cycleCheckClosure acc closure
             MCase arg matches -> go (Indirect, acc) arg <* (traverse_ . traverse_) (go (Indirect, acc)) matches
             MTyCon{} -> pure NoCycle
@@ -303,6 +305,7 @@ generaliseAll action = do
             C.RecordT row -> C.RecordT <$> traverse (go scope) row
             C.VariantT row -> C.VariantT <$> traverse (go scope) row
             C.Record row -> C.Record <$> traverse (go scope) row
+            C.Sigma x y -> C.Sigma <$> go scope x <*> go scope y
             C.Q q vis e var ty body -> C.Q q vis e var <$> go scope ty <*> go scope body
             C.Lambda var body -> C.Lambda var <$> go scope body
             C.Con name args -> C.Con name <$> traverse (go scope) args
@@ -358,6 +361,7 @@ mono' variance = \case
     V.PrimFunction{} -> internalError' "mono: prim function"
     V.PrimValue val -> pure $ MPrim val
     V.Record row -> MRecord <$> traverse go row
+    V.Sigma x y -> MSigma <$> go x <*> go y
     V.Variant name arg -> MVariant name <$> go arg
     V.Case arg matches -> MCase <$> go arg <*> traverse (bitraverse pure go) matches
     V.Lambda closure -> pure $ MLambda MonoClosure{var = closure.var, variance, env = closure.env, ty = (), body = closure.body}
@@ -387,6 +391,7 @@ unMono' = \case
     MRecordT row -> V.RecordT $ fmap unMono' row
     MVariant name val -> V.Variant name (unMono' val)
     MRecord row -> V.Record (fmap unMono' row)
+    MSigma x y -> V.Sigma (unMono' x) (unMono' y)
     MLambda MonoClosure{var, ty, env, body} -> V.Lambda V.Closure{var, ty, env, body}
     MQ q e MonoClosure{var, ty, env, body} -> V.Q q Visible e V.Closure{var, ty = unMono' ty, env, body}
     MPrim val -> V.PrimValue val

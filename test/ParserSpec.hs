@@ -3,9 +3,7 @@
 
 module ParserSpec (spec) where
 
-import Common
 import Data.Traversable (for)
-import Error.Diagnose (Position (..))
 import FlatParse.Stateful qualified as FP
 import Lexer
 import NeatInterpolation

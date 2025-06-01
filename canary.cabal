@@ -63,6 +63,7 @@ library
   build-depends:
       base >=4.7 && <5
     , diagnose
+    , directory
     , dlist
     , effectful >=2.3 && <3
     , effectful-th
@@ -102,6 +103,7 @@ executable canary-exe
       base >=4.7 && <5
     , canary
     , diagnose
+    , directory
     , dlist
     , effectful >=2.3 && <3
     , effectful-th

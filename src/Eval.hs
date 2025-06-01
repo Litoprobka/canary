@@ -53,6 +53,7 @@ data Value
     | Lambda (Closure ())
     | PrimFunction Name (Value -> Value) -- an escape hatch for interpreter primitives and similar stuff
     | Record (Row Value)
+    | Sigma Value Value
     | Variant OpenName Value
     | -- | RecordLens (NonEmpty OpenName)
       PrimValue Literal -- the name 'Literal' is slightly misleading here
@@ -80,6 +81,7 @@ quote (Located loc value) = Located loc case value of
     Lambda closure -> C.Lambda closure.var (quoteWithLoc $ closureBody closure)
     PrimFunction name f -> unLoc . quoteWithLoc $ f (Var name)
     Record vals -> C.Record $ fmap quoteWithLoc vals
+    Sigma x y -> C.Sigma (quoteWithLoc x) (quoteWithLoc y)
     Variant name val -> C.App (Located (getLoc name) $ C.Variant name) $ quoteWithLoc val
     -- RecordLens path -> RecordLens path
     PrimValue lit -> C.Literal lit
@@ -123,6 +125,7 @@ evalCore !env (L term) = case term of
          in evalCore newEnv body
     C.Literal lit -> PrimValue lit
     C.Record row -> Record $ evalCore env <$> row
+    C.Sigma x y -> Sigma (evalCore env x) (evalCore env y)
     C.Variant _name -> error "todo: seems like evalCore needs namegen" -- Lambda (Located Blank $ Name' "x") $ C.Variant name `C.App`
     C.Function lhs rhs -> Function (evalCore env lhs) (evalCore env rhs)
     C.Q q vis e var ty body -> Q q vis e $ Closure{var, ty = evalCore env ty, env, body}
@@ -220,6 +223,7 @@ desugar = go
             T.RecordLens _ -> internalError loc "todo: desugar RecordLens"
             T.Variant name -> pure $ C.Variant name
             T.Record fields -> C.Record <$> traverse go fields
+            T.Sigma x y -> C.Sigma <$> go x <*> go y
             T.List xs -> unLoc . foldr (appLoc . appLoc cons) nil <$> traverse go xs
             T.Do{} -> error "todo: desugar do blocks"
             T.Function from to -> C.Function <$> go from <*> go to

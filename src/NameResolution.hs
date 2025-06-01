@@ -117,7 +117,7 @@ resolve name@(Located loc name_) = do
         Just (L id') -> pure $ Located loc id'
         Nothing -> do
             error (UnboundVar name)
-            -- this gives a unique id to every occurance of the same unbound name
+            -- this gives a unique id to every occurence of the same unbound name
             scoped $ declare name
 
 runWithEnv :: (NameGen :> es, Diagnose :> es) => Scope -> Eff (Declare : State Scope : es) a -> Eff es (a, Scope)
@@ -276,6 +276,7 @@ resolveTerm (Located loc e) =
         Annotation body ty -> Annotation <$> resolveTerm body <*> resolveTerm ty
         If cond true false -> If <$> resolveTerm cond <*> resolveTerm true <*> resolveTerm false
         Record row -> Record <$> traverse resolveTerm row
+        Sigma x y -> Sigma <$> resolveTerm x <*> resolveTerm y
         List items -> List <$> traverse resolveTerm items
         Do stmts lastAction -> Do <$> traverse resolveStmt stmts <*> resolveTerm lastAction
         InfixE pairs last' ->

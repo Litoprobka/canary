@@ -39,6 +39,7 @@ data CoreTerm_
     | Let Name CoreTerm CoreTerm
     | Literal Literal
     | Record (Row CoreTerm)
+    | Sigma CoreTerm CoreTerm
     | Variant OpenName
     | -- types
       Function CoreTerm CoreTerm
@@ -54,8 +55,9 @@ data CoreTerm_
     | Skolem Skolem
 
 instance Pretty CoreTerm_ where
-    pretty = go (0 :: Int) . Located (Loc Position{begin = (0, 0), end = (0, 0), file = "<none>"})
+    pretty = go 0 . Located (Loc Position{begin = (0, 0), end = (0, 0), file = "<none>"})
       where
+        go :: Int -> CoreTerm -> Doc ann
         go n (L term) = case term of
             Name name -> pretty name
             TyCon name -> pretty name
@@ -67,6 +69,7 @@ instance Pretty CoreTerm_ where
             Lambda name body -> parensWhen 1 $ "λ" <> pretty name <+> compressLambda body
             App lhs rhs -> parensWhen 3 $ go 2 lhs <+> go 3 rhs
             Record row -> braces . sep . punctuate comma . map recordField $ sortedRow row
+            Sigma x y -> parensWhen 1 $ pretty x <+> "**" <+> pretty y
             Variant name -> pretty name
             -- RecordLens lens -> foldMap (("." <>) . pretty) lens
             Case arg matches -> nest 4 (vsep $ ("case" <+> pretty arg <+> "of" :) $ matches <&> \(pat, body) -> pretty pat <+> "->" <+> pretty body)

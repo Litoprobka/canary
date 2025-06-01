@@ -121,6 +121,7 @@ parse = traverse \case
     RecordLens row -> pure $ RecordLens row
     Variant name -> pure $ Variant name
     Record row -> Record <$> traverse parse row
+    Sigma x y -> Sigma <$> parse x <*> parse y
     List exprs -> List <$> traverse parse exprs
     Do stmts lastAction -> Do <$> traverse parseStmt stmts <*> parse lastAction
     Literal lit -> pure $ Literal lit

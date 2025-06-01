@@ -82,7 +82,7 @@ emptyEnv = ReplEnv{..}
     (_, operatorPriorities) = Poset.eqClass AppOp Poset.empty
     lastLoadedFile = Nothing
 
--- this function uis 90% the same as `processDecls`
+-- this function is 90% the same as `processDecls`
 -- I don't see a clean way to factor out the repetition, though
 mkDefaultEnv :: (Diagnose :> es, NameGen :> es) => Eff es ReplEnv
 mkDefaultEnv = do

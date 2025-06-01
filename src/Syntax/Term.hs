@@ -56,6 +56,8 @@ data Term_ (p :: Pass) where
     -- don't need any kind of name resolution
     Variant :: OpenName -> Expr_ p
     Record :: Row (Expr p) -> Expr_ p
+    -- | unlike lambdas, which may have a normal function type as well as a pi type, dependent pairs are distinct from records
+    Sigma :: Expr p -> Expr p -> Expr_ p
     List :: [Expr p] -> Expr_ p
     Do :: [DoStatement p] -> Expr p -> Expr_ p
     -- | an unresolved expression with infix / prefix operators
@@ -124,8 +126,9 @@ instance Pretty (NameAt p) => Pretty (Binding p) where
         FunctionB name args body -> pretty name <+> concatWith (<+>) (pretty <$> args) <+> "=" <+> pretty body
 
 instance Pretty (NameAt p) => Pretty (Expr_ p) where
-    pretty = go (0 :: Int) . Located dummyLoc
+    pretty = go 0 . Located dummyLoc
       where
+        go :: Int -> Expr p -> Doc ann
         go n (L e) = case e of
             Lambda arg body -> parensWhen 1 $ "λ" <> pretty arg <+> compressLambda body
             WildcardLambda _ l@(L List{}) -> pretty l
@@ -145,6 +148,7 @@ instance Pretty (NameAt p) => Pretty (Expr_ p) where
             RecordLens fields -> encloseSep "." "" "." $ toList $ pretty <$> fields
             Variant name -> pretty name
             Record row -> braces . sep . punctuate comma . map recordField $ sortedRow row
+            Sigma x y -> parensWhen 1 $ pretty x <+> "**" <+> pretty y
             List xs -> brackets . sep . punctuate comma $ pretty <$> xs
             Do stmts lastAction -> nest 2 $ vsep ("do" : fmap pretty stmts <> [pretty lastAction])
             Literal lit -> pretty lit
@@ -272,6 +276,7 @@ instance
         If cond true false -> If (cast' cond) (cast' true) (cast' false)
         Annotation expr ty -> Annotation (cast' expr) (cast' ty)
         Record row -> Record (fmap cast' row)
+        Sigma x y -> Sigma (cast' x) (cast' y)
         List exprs -> List (fmap cast' exprs)
         Do stmts ret -> Do (fmap cast' stmts) (cast' ret)
         InfixE pairs l -> castInfix @p (fmap (first cast') pairs) (cast' l)
@@ -338,6 +343,7 @@ collectReferencedNames = go
         Match{} -> error "collectReferencedNames: local bindings are not supported yet"
         If cond true false -> go cond <> go true <> go false
         List xs -> foldMap go xs
+        Sigma x y -> go x <> go y
         Lambda pat body -> collectReferencedNamesInPat pat <> go body
         WildcardLambda _pats body -> go body
         Annotation e ty -> go e <> go ty

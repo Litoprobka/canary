@@ -173,7 +173,7 @@ quantifier = withLoc do
             [ (Forall, Erased) <$ keyword Token.Forall
             , (Exists, Erased) <$ keyword Token.Exists
             , (Forall, Retained) <$ keyword Token.Foreach
-            , (Exists, Retained) <$ keyword Token.Exists
+            , (Exists, Retained) <$ keyword Token.Some
             ]
     binders <- NE.some varBinder `orError` "a variable with an optional type"
     let arrOrStar = case q of
@@ -242,8 +242,18 @@ term = located do
         Annotation expr <$> term
   where
     -- second lowest level of precedence, 'anything but annotations'
+    -- so far, this level has only right-associative dependent pairs
+    -- 'depPairArg' ** 'nonAnn'
     nonAnn :: Parser' (Expr 'Parse)
     nonAnn = located do
+        x <- depPairArg
+        option (unLoc x) do
+            specialSymbol Token.DepPair
+            y <- nonAnn
+            pure $ Sigma x y
+    -- third lowest level of precedence, something that can appear in a dependent pair
+    depPairArg :: Parser' (Expr 'Parse)
+    depPairArg = located do
         (Located loc (firstExpr, pairs)) <- located do
             firstExpr <- noPrec
             pairs <- many $ (,) <$> optional operator <*> noPrec
@@ -255,8 +265,8 @@ term = located do
                 (_ : _ : _) -> uncurry InfixE $ shift firstExpr pairs
         option expr do
             specialSymbol Token.Arrow
-            rhs <- nonAnn
-            pure $ Function (Located loc expr) rhs
+            rhs <- depPairArg
+            pure $ Function (expr :@ loc) rhs
     -- type application precedence level
     typeApp = do
         expr <- termParens
