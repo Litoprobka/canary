@@ -2,7 +2,7 @@
 
 module TypeChecker.TypeError (TypeError (..), typeError) where
 
-import Common hiding (Blank)
+import Common
 import Diagnostic
 import Error.Diagnose (Marker (..), Report (..))
 import Eval (Value)

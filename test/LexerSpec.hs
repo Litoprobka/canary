@@ -3,7 +3,6 @@
 module LexerSpec (spec) where
 
 import Common (Literal_ (..))
-import Data.List.NonEmpty qualified as NE
 import FlatParse.Stateful
 import LangPrelude
 import Lexer

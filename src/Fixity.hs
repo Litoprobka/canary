@@ -6,11 +6,13 @@ module Fixity (resolveFixity, run, parse, Fixity (..)) where
 
 import Common (Fixity (..), Loc (..), Located (..), Pass (..), getLoc, mkNotes, zipLocOf, pattern L)
 import Control.Monad (foldM)
+import Data.EnumMap.Strict qualified as Map
 import Data.List.NonEmpty qualified as NE
 import Data.Traversable (for)
-import Diagnostic (Diagnose, fatal, internalError)
+import DependencyResolution (FixityMap, Op (..))
+import Diagnostic (Diagnose, fatal, internalError')
 import Effectful.Reader.Static (Reader, ask, runReader)
-import Error.Diagnose (Marker (This), Report (..))
+import Error.Diagnose (Marker (This), Position (..), Report (..))
 import LangPrelude hiding (cycle)
 import Poset (Poset)
 import Poset qualified
@@ -18,8 +20,6 @@ import Syntax
 import Syntax.Declaration (GadtConstructor (..))
 import Syntax.Declaration qualified as D
 import Syntax.Term
-import DependencyResolution (FixityMap, Op (..))
-import qualified Data.EnumMap.Strict as Map
 
 data Priority = Left' | Right' deriving (Show)
 
@@ -53,13 +53,13 @@ opError =
                 (mkNotes [(getLocOp next, This "next operator"), (getLocOp prev, This "previous operator")])
                 []
   where
-    getLocOp =  \case
-        AppOp -> Blank
+    getLocOp = \case
+        AppOp -> Loc Position{file = "<builtin>", begin = (0, 0), end = (0, 0)}
         Op op -> getLoc op
 
 lookup' :: (Diagnose :> es, Enum k, Pretty k) => k -> EnumMap k v -> Eff es v
 lookup' key emap = case Map.lookup key emap of
-    Nothing -> internalError Blank $ "missing operator" <+> pretty key
+    Nothing -> internalError' $ "missing operator" <+> pretty key
     Just v -> pure v
 
 {- | figure out which of the two operators has a higher priority
@@ -174,7 +174,7 @@ parseBinder :: Ctx es => VarBinder DependencyRes -> Eff es (VarBinder 'Fixity)
 parseBinder VarBinder{var, kind} = VarBinder var <$> traverse parse kind
 
 parsePattern :: Ctx es => Pattern 'DependencyRes -> Eff es (Pattern 'Fixity)
-parsePattern = traverse  \case
+parsePattern = traverse \case
     VarP name -> pure $ VarP name
     WildcardP name -> pure $ WildcardP name
     AnnotationP pat ty -> AnnotationP <$> parsePattern pat <*> parse ty

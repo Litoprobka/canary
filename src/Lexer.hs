@@ -133,13 +133,13 @@ todo: don't include trailing whitespace where possible
 -}
 withLoc :: Parser e (Loc -> a) -> Parser e a
 withLoc p = do
-    Located startLoc _ <- P.lookAhead P.anyToken
+    Located startLoc@(Loc Position{begin, file}) _ <- P.lookAhead P.anyToken
     TokenStream stream <- P.Proto \s -> P.Parsed s s
     f <- p
     TokenStream newStream <- P.Proto \s -> P.Parsed s s
     let tokensTaken = V.length stream - V.length newStream
         loc
-            | tokensTaken <= 0 = Blank -- do we ever use location info for zero-sized AST nodes? does this matter?
+            | tokensTaken <= 0 = Loc Position{begin, end = begin, file}
             | Just endToken <- stream V.!? (tokensTaken - 1) = zipLoc startLoc (C.getLoc endToken)
             | otherwise = startLoc
     pure $ f loc
@@ -157,7 +157,7 @@ lex :: Diagnose :> es => (FilePath, ByteString) -> Eff es TokenStream
 lex (fileName, fileContents) = do
     tokens <- case lex' fileContents of
         OK result _ _ -> pure result
-        _ -> internalError Blank "todo: lexer errors lol"
+        _ -> internalError' "todo: lexer errors lol"
     pure $ mkTokenStream (fileName, fileContents) tokens
 
 -- | pure version of 'lex' that doesn't postprocess tokens

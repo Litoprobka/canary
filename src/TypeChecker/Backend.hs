@@ -17,7 +17,7 @@ import Data.EnumMap.Lazy qualified as LMap
 import Data.EnumMap.Strict qualified as Map
 import Data.EnumSet qualified as Set
 import Data.Traversable (for)
-import Diagnostic (Diagnose, internalError)
+import Diagnostic (Diagnose, internalError, internalError')
 import Effectful
 import Effectful.Dispatch.Dynamic (reinterpret)
 import Effectful.Error.Static (runErrorNoCallStack, throwError_)
@@ -25,6 +25,7 @@ import Effectful.Labeled
 import Effectful.Reader.Static (Reader, ask, asks, local, runReader)
 import Effectful.State.Static.Local (State, evalState, get, gets, modify, runState)
 import Effectful.TH
+import Error.Diagnose (Position (..))
 import Eval (Value, ValueEnv)
 import Eval qualified as V
 import LangPrelude hiding (break, cycle)
@@ -133,10 +134,10 @@ freshSkolem name = do
     pure $ V.Skolem skolem
   where
     mkName (Located loc (Name' txtName)) = Located loc <$> freshName_ (Name' txtName)
-    mkName _ = freshName (Located Blank $ Name' "what") -- why?
+    mkName _ = freshName (Located (getLoc name) $ Name' "what") -- why?
 
 lookupUniVar :: InfEffs es => UniVar -> Eff es (Either Scope Monotype)
-lookupUniVar uni = maybe (internalError Blank $ "missing univar" <+> pretty uni) pure . Map.lookup uni =<< get @UniVars
+lookupUniVar uni = maybe (internalError' $ "missing univar" <+> pretty uni) pure . Map.lookup uni =<< get @UniVars
 
 withUniVar :: InfEffs es => UniVar -> (Monotype -> Eff es a) -> Eff es ()
 withUniVar uni f =
@@ -354,7 +355,7 @@ mono' variance = \case
         pure $ MQ q e MonoClosure{var = closure.var, variance, env = closure.env, ty, body = closure.body}
     V.Q Forall _ _ closure -> go =<< substitute variance closure
     V.Q Exists _ _ closure -> go =<< substitute (flipVariance variance) closure
-    V.PrimFunction{} -> internalError Blank "mono: prim function"
+    V.PrimFunction{} -> internalError' "mono: prim function"
     V.PrimValue val -> pure $ MPrim val
     V.Record row -> MRecord <$> traverse go row
     V.Variant name arg -> MVariant name <$> go arg
@@ -466,7 +467,7 @@ deepLookup whatToMatch k = fmap sequence . traverse go
                         let con = case whatToMatch of
                                 Variant -> MVariantT
                                 Record -> MRecordT
-                        solveUniVar uni $ Located Blank $ con $ ExtRow (one (k, fieldType)) rowVar
+                        solveUniVar uni $ Located idk $ con $ ExtRow (one (k, fieldType)) rowVar
                         pure $ Just $ unMono' fieldType
             -- V.Skolem{} -> _ -- todo: handle solved skolems?
 
@@ -480,6 +481,8 @@ deepLookup whatToMatch k = fmap sequence . traverse go
         Nothing -> case Row.extension extRow of
             Nothing -> pure Nothing
             Just ext -> go ext
+
+    idk = Loc Position{file = "<todo: deepLookup univars have no position info>", begin = (0, 0), end = (0, 0)}
 
 {- | compresses known row extensions of a row
 

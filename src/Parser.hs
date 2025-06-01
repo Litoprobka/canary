@@ -10,7 +10,6 @@ import LangPrelude hiding (error)
 
 import Common (
     Fixity (..),
-    Loc (..),
     Located (..),
     Pass (..),
     PriorityRelation' (..),
@@ -20,6 +19,7 @@ import Common (
     unLoc,
     zipLocOf,
     pattern L,
+    pattern (:@),
  )
 import Control.Monad.Combinators
 import Control.Monad.Combinators.NonEmpty qualified as NE
@@ -210,12 +210,12 @@ patternParens =
         , LiteralP <$> literal
         , -- todo: tightly-bound record
           ConstructorP <$> upperName <*> pure []
-        , flip VariantP unit <$> variantConstructor -- some sugar for variants with a unit payload
+        , (\(con :@ loc) -> VariantP con (unit :@ loc)) <$> located variantConstructor -- some sugar for variants with a unit payload
         , unLoc <$> parens pattern'
         ]
   where
     record = RecordP <$> noExtRecord Token.Eq pattern' (Just $ \n -> Located (getLoc n) $ VarP n)
-    unit = Located Blank $ RecordP Row.empty
+    unit = RecordP Row.empty
 
 binding :: Parser' (Binding 'Parse)
 binding = do
@@ -355,7 +355,10 @@ termParens =
             , typeVariable
             ]
   where
-    variantItem = (,) <$> variantConstructor <*> option (Located Blank $ RecordT $ NoExtRow Row.empty) termParens
+    variantItem = do
+        con :@ loc <- variantConstructor
+        ty <- option (Located loc $ RecordT $ NoExtRow Row.empty) termParens
+        pure (con :@ loc, ty)
     record = Record <$> noExtRecord Token.Eq term (Just $ \n -> Located (getLoc n) $ Name n)
     recordType = RecordT <$> someRecord Token.Colon term Nothing
     variantType = brackets do

@@ -23,6 +23,7 @@ import Common (
 import Data.EnumMap.Lazy qualified as LMap -- note that we use the lazy functions here
 import Data.Traversable (for)
 import Diagnostic
+import Error.Diagnose (Position (..))
 import LangPrelude
 import NameGen (NameGen, freshName)
 import Prettyprinter (line, vsep)
@@ -94,7 +95,7 @@ quote (Located loc value) = Located loc case value of
     quoteWithLoc = quote . Located loc
 
 instance Pretty Value where
-    pretty = pretty . quote . Located Blank
+    pretty = pretty . quote . Located (Loc Position{file = "<none>", begin = (0, 0), end = (0, 0)})
 
 instance Show Value where
     show = Prelude.show . pretty
@@ -202,7 +203,7 @@ desugar = go
             T.TypeApp expr _ -> unLoc <$> go expr
             T.Case arg matches -> C.Case <$> go arg <*> traverse (bitraverse flattenPattern go) matches
             T.Match matches@(([_], _) : _) -> do
-                name <- freshName $ Located Blank $ Name' "matchArg"
+                name <- freshName $ Located loc $ Name' "matchArg"
                 matches' <- for matches \case
                     ([pat], body) -> bitraverse flattenPattern desugar (pat, body)
                     _ -> internalError loc "inconsistent pattern count in a match expression"
@@ -269,7 +270,7 @@ modifyEnv env decls = do
         D.Value _ (_ : _) -> internalError loc "local bindings are not supported yet"
         D.Value (T.ValueB (L (T.VarP name)) body) [] -> pure [(name, Right body)]
         D.Value (T.ValueB _ _) _ -> internalError loc "whoops, destructuring bindings are not supported yet"
-        D.Value (T.FunctionB name args body) [] -> pure [(name, Right $ foldr (\x -> Located Blank . T.Lambda x) body args)]
+        D.Value (T.FunctionB name args body) [] -> pure [(name, Right $ foldr (\x -> Located loc . T.Lambda x) body args)]
         -- todo: value constructors have to be in scope by the time we typecheck definitions that depend on them (say, GADTs)
         -- the easiest way is to just apply `typecheck` and `modifyEnv` declaration-by-declaration
         D.Type _ _ constrs -> traverse mkConstr constrs
@@ -288,7 +289,7 @@ modifyEnv env decls = do
 
 mkConLambda :: NameGen :> es => Int -> Name -> ValueEnv -> Eff es Value
 mkConLambda n con env = do
-    names <- replicateM n (freshName (Located Blank $ Name' "conArg"))
+    names <- replicateM n (freshName (Located (Loc Position{file = "<builtin>", begin = (0, 0), end = (0, 0)}) $ Name' "conArg"))
     -- fused foldl/foldr go brrr
     pure $
         foldr

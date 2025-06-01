@@ -19,6 +19,7 @@ module Diagnostic (
     internalError,
     reportExceptions,
     guardNoErrors,
+    internalError',
 ) where
 
 import Common (Loc, mkNotes)
@@ -79,6 +80,10 @@ dummy msg = Err Nothing msg [] []
 -- | An internal error. That is, something that may only be caused by a compiler bug
 internalError :: Diagnose :> es => Loc -> Doc AnsiStyle -> Eff es a
 internalError loc msg = fatal . one $ Err Nothing ("Internal error:" <+> msg) (mkNotes [(loc, This "arising from")]) []
+
+-- | An internal error without location info
+internalError' :: Diagnose :> es => Doc AnsiStyle -> Eff es a
+internalError' msg = fatal . one $ Err Nothing ("Internal error:" <+> msg) [] []
 
 -- | treat accumulated errors as fatal
 guardNoErrors :: Diagnose :> es => Eff es ()

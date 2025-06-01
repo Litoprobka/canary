@@ -28,7 +28,7 @@ import Effectful.Labeled (Labeled)
 import Effectful.Labeled.Reader (Reader)
 import Effectful.Reader.Static qualified as S
 import Effectful.State.Static.Local (State, evalState, execState, runState)
-import Error.Diagnose (Diagnostic)
+import Error.Diagnose (Diagnostic, Position (..))
 import Eval (ValueEnv)
 import Fixity (resolveFixity)
 import Fixity qualified (parse)
@@ -75,6 +75,12 @@ testCheck toResolve action = fst $ runPureEff $ runNameGen $ runDiagnose' ("<non
     evalState types $ TC.run values $ action resolved
 
 -- convenient definitions for testing
+
+noLoc :: a -> Located a
+noLoc = Located pgLoc
+
+pgLoc :: Loc
+pgLoc = Loc Position{file = "<playgrond>", begin = (0, 0), end = (0, 0)}
 
 matchCase :: (Text -> a) -> (Text -> a) -> String -> a
 matchCase whenUpper whenLower str@(h : _)
@@ -175,7 +181,7 @@ list xs = Located loc $ E.List xs
   where
     loc = case (xs, reverse xs) of
         (first' : _, last' : _) -> zipLocOf first' last'
-        _ -> Blank
+        _ -> pgLoc
 
 match :: [([Pattern p], Expr p)] -> Expr p
 match = noLoc . E.Match

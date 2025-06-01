@@ -1,6 +1,7 @@
 module Syntax.Core where
 
 import Common (Literal, Literal_, Loc (..), Located (..), Name, Name_ (ConsName, NilName, TypeName), Skolem, UniVar, pattern L)
+import Error.Diagnose (Position (..))
 import LangPrelude
 import Prettyprinter
 import Syntax.Row (ExtRow (..), OpenName, Row, extension, sortedRow)
@@ -53,7 +54,7 @@ data CoreTerm_
     | Skolem Skolem
 
 instance Pretty CoreTerm_ where
-    pretty = go (0 :: Int) . Located Blank
+    pretty = go (0 :: Int) . Located (Loc Position{begin = (0, 0), end = (0, 0), file = "<none>"})
       where
         go n (L term) = case term of
             Name name -> pretty name

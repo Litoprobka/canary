@@ -5,6 +5,7 @@ module ParserSpec (spec) where
 
 import Common
 import Data.Traversable (for)
+import Error.Diagnose (Position (..))
 import FlatParse.Stateful qualified as FP
 import Lexer
 import NeatInterpolation
@@ -36,7 +37,7 @@ parsePretty parser input =
          in mkTokenStream ("test", inputBS) tokens
 
 shouldBePretty :: (HasCallStack, Show a, Pretty b, Eq a) => Either a b -> Either a b -> Expectation
-shouldBePretty = shouldBe `on` second (show . pretty)
+shouldBePretty = shouldBe `on` second (show @String . pretty)
 
 spec :: Spec
 spec = do

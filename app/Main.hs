@@ -6,6 +6,7 @@ import Common
 import Data.EnumMap.Strict qualified as Map
 import Data.Traversable (for)
 import Diagnostic
+import Error.Diagnose (Position (..))
 import Eval (ValueEnv (..))
 import NameGen (runNameGen)
 import NameResolution
@@ -34,7 +35,8 @@ runFile debug fileName input = do
         env <- Repl.mkDefaultEnv
         mbNewEnv <- Repl.replStep env $ Repl.Decls decls
         for mbNewEnv \newEnv -> do
-            nameOfMain <- NameResolution.run newEnv.scope $ resolve $ Located Blank $ Name' "main"
+            nameOfMain <-
+                NameResolution.run newEnv.scope $ resolve $ Located (Loc Position{file = "<main>", begin = (0, 0), end = (0, 0)}) $ Name' "main"
             pure case Map.lookup nameOfMain newEnv.values.values of
                 Nothing -> putTextLn "there is no main function"
                 Just mainExpr -> putDoc $ (<> line) $ pretty mainExpr

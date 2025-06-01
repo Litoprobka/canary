@@ -4,15 +4,14 @@
 
 module Poset where
 
-import Common (Loc (Blank))
+import Data.EnumMap qualified as Map
+import Data.EnumSet qualified as Set
 import Data.Sequence qualified as Seq
-import Diagnostic (Diagnose, internalError)
+import Diagnostic (Diagnose, internalError')
 import Effectful.Error.Static (Error, runErrorNoCallStack, throwError_)
 import Effectful.Writer.Static.Local (Writer, tell)
 import LangPrelude hiding (cycle)
 import Relude.Extra (traverseToSnd)
-import qualified Data.EnumMap as Map
-import qualified Data.EnumSet as Set
 
 -- a partially ordered set implementation with an emphasis on equality
 -- items are stored as equivalence classes and strict > relations between them
@@ -77,7 +76,7 @@ mergeRec l r poset = mergeWith handleCycle l r poset
 O(n) in class count
 -}
 mergeWith
-    :: (Error PosetError :> es)
+    :: Error PosetError :> es
     => (Poset a -> Eff es (Poset a)) -- a callback that's called in case of a cycle
     -> EqClass a
     -> EqClass a
@@ -174,7 +173,7 @@ addRelationLenient' lhs rhs = \case
     warnOnCycle = (<$ tell (Seq.singleton $ Cycle lhs rhs))
 
 -- add an item to a fresh equivalence class. If it belonged to a different equality class, it gets moved
-newClass :: (Enum a) => a -> Poset a -> (EqClass a, Poset a)
+newClass :: Enum a => a -> Poset a -> (EqClass a, Poset a)
 newClass x Poset{nextClass, classes, relations} =
     ( nextClass
     , Poset
@@ -185,7 +184,7 @@ newClass x Poset{nextClass, classes, relations} =
     )
 
 -- get the equivalence class of an item; create a new class if the item didn't have one
-eqClass :: ( Enum a) =>a -> Poset a -> (EqClass a, Poset a)
+eqClass :: Enum a => a -> Poset a -> (EqClass a, Poset a)
 eqClass x poset = case Map.lookup x poset.classes of
     Just class_ -> (class_, poset)
     Nothing -> newClass x poset
@@ -231,4 +230,4 @@ ordered p@Poset{relations} = map (`items` p) $ sortBy cmp (Map.keys relations)
 reportError :: Diagnose :> es => Eff (Error PosetError : es) a -> Eff es a
 reportError = runErrorNoCallStack @PosetError >=> either asDiagnoseError pure
   where
-    asDiagnoseError (Poset.LookupError key) = internalError Blank $ "invalid poset key" <+> pretty key
+    asDiagnoseError (Poset.LookupError key) = internalError' $ "invalid poset key" <+> pretty key

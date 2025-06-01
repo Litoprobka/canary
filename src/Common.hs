@@ -37,7 +37,6 @@ module Common (
     toSimpleName,
     pattern L,
     unLoc,
-    noLoc,
     pattern (:@),
 ) where
 
@@ -156,7 +155,7 @@ instance Enum Name_ where
 
 instance Enum Name where
     fromEnum (L name) = fromEnum name
-    toEnum = Located Blank . toEnum
+    toEnum = Located (Loc Position{begin = (0, 0), end = (0, 0), file = "<none>"}) . toEnum
 
 type SimpleName = Located SimpleName_
 data SimpleName_
@@ -235,13 +234,12 @@ instance Pretty Skolem where
     pretty (Skolem (L (Name name n))) = pretty name <> "?" <> pretty n
     pretty (Skolem builtin) = pretty builtin <> "?"
 
-data Loc
-    = Loc Position
-    | Blank
+newtype Loc = Loc Position
     deriving (Show)
+    deriving newtype (Pretty)
 
 instance Eq Loc where
-    _ == _ = True -- a crutch for the inferred Eq instance of Type'
+    _ == _ = True -- a crutch for the inferred Eq instances of the AST
 
 instance Hashable Loc where
     hashWithSalt salt _ = salt
@@ -266,21 +264,11 @@ class HasLoc a where
 unLoc :: Located a -> a
 unLoc (L x) = x
 
-noLoc :: a -> Located a
-noLoc = Located Blank
-
 zipLoc :: Loc -> Loc -> Loc
-zipLoc loc Blank = loc
-zipLoc Blank loc = loc
 zipLoc (Loc lhs) (Loc rhs) = Loc $ lhs{begin = min lhs.begin rhs.begin, end = max rhs.begin rhs.end}
 
 zipLocOf :: (HasLoc a, HasLoc b) => a -> b -> Loc
 zipLocOf lhs rhs = zipLoc (getLoc lhs) (getLoc rhs)
-
-instance Pretty Loc where
-    pretty = \case
-        Blank -> "<blank>"
-        Loc pos -> pretty pos
 
 toSimpleName :: Name -> SimpleName
 toSimpleName (Located loc name) = Located loc case name of
@@ -299,9 +287,7 @@ toSimpleName (Located loc name) = Located loc case name of
     TypeName -> Name' "Type"
 
 mkNotes :: [(Loc, M.Marker a)] -> [(Position, M.Marker a)]
-mkNotes = mapMaybe \case
-    (Blank, _) -> Nothing
-    (Loc pos, marker) -> Just (pos, marker)
+mkNotes = fmap \(Loc pos, marker) -> (pos, marker)
 
 -- a class for AST nodes that can be losslessly cast to a different pass
 class Cast ty (p :: Pass) (q :: Pass) where

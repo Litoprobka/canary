@@ -10,6 +10,7 @@ import Common hiding (Name, Skolem, UniVar)
 import Common qualified as C
 import Data.List.NonEmpty qualified as NE
 import Data.Type.Ord (type (<))
+import Error.Diagnose (Position (..))
 import LangPrelude hiding (show)
 import Prettyprinter
 import Syntax.Row
@@ -123,7 +124,7 @@ instance Pretty (NameAt p) => Pretty (Binding p) where
         FunctionB name args body -> pretty name <+> concatWith (<+>) (pretty <$> args) <+> "=" <+> pretty body
 
 instance Pretty (NameAt p) => Pretty (Expr_ p) where
-    pretty = go (0 :: Int) . Located Blank
+    pretty = go (0 :: Int) . Located dummyLoc
       where
         go n (L e) = case e of
             Lambda arg body -> parensWhen 1 $ "λ" <> pretty arg <+> compressLambda body
@@ -184,6 +185,9 @@ instance Pretty (NameAt p) => Pretty (Expr_ p) where
             variantItem (name, ty) = pretty name <+> pretty ty
             recordTyField (name, ty) = pretty name <+> ":" <+> pretty ty
 
+dummyLoc :: Loc
+dummyLoc = C.Loc Position{file = "<none>", begin = (0, 0), end = (0, 0)}
+
 instance Pretty (NameAt pass) => Pretty (VarBinder pass) where
     pretty = prettyBinder
 
@@ -211,7 +215,7 @@ instance HasLoc (NameAt pass) => HasLoc (VarBinder pass) where
     getLoc VarBinder{var, kind = Just ty} = zipLocOf var ty
 
 instance Pretty (NameAt pass) => Pretty (Pattern_ pass) where
-    pretty = go 0 . Located Blank
+    pretty = go 0 . Located dummyLoc
       where
         go :: Int -> Pattern pass -> Doc ann
         go n (L p) = case p of

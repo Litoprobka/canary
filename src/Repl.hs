@@ -5,7 +5,7 @@
 
 module Repl where
 
-import Common (Fixity (..), Loc (..), Name, Name_ (TypeName), Pass (..), SimpleName_ (Name'), cast, noLoc)
+import Common (Fixity (..), Loc (..), Located, Name, Name_ (TypeName), Pass (..), SimpleName_ (Name'), cast)
 import Common qualified as C
 import Data.EnumMap qualified as EnumMap
 import Data.EnumMap.Lazy qualified as LMap
@@ -20,7 +20,7 @@ import Effectful.Labeled
 import Effectful.Labeled.Reader (runReader)
 import Effectful.Reader.Static (ask)
 import Effectful.State.Static.Local (evalState, runState)
-import Error.Diagnose (Report (..))
+import Error.Diagnose (Position (..), Report (..))
 import Eval (ValueEnv (..), eval, modifyEnv)
 import Eval qualified as V
 import Fixity qualified (parse, resolveFixity, run)
@@ -64,6 +64,13 @@ type ReplCtx es =
     ( NameGen :> es
     , IOE :> es
     )
+
+-- | a location placeholder for builtin definitions
+builtin :: Loc
+builtin = C.Loc Position{file = "<builtin>", begin = (0, 0), end = (0, 0)}
+
+noLoc :: a -> Located a
+noLoc = C.Located builtin
 
 emptyEnv :: ReplEnv
 emptyEnv = ReplEnv{..}
@@ -112,12 +119,12 @@ mkDefaultEnv = do
             decls =
                 map
                     noLoc
-                    [ D.Type (noLoc C.BoolName) [] [D.Constructor Blank (noLoc C.TrueName) [], D.Constructor Blank false []]
+                    [ D.Type (noLoc C.BoolName) [] [D.Constructor builtin (noLoc C.TrueName) [], D.Constructor builtin false []]
                     , D.Type
                         (noLoc C.ListName)
                         [plainBinder a]
-                        [ D.Constructor Blank (noLoc C.ConsName) $ map noLoc [Name a, noLoc (Name (noLoc C.ListName)) `App` noLoc (Name a)]
-                        , D.Constructor Blank (noLoc C.NilName) []
+                        [ D.Constructor builtin (noLoc C.ConsName) $ map noLoc [Name a, noLoc (Name (noLoc C.ListName)) `App` noLoc (Name a)]
+                        , D.Constructor builtin (noLoc C.NilName) []
                         ]
                     ]
                     <> map (\name -> noLoc $ D.Type (noLoc name) [] []) builtinTypes
