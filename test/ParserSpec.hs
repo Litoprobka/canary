@@ -4,27 +4,29 @@
 module ParserSpec (spec) where
 
 import Common
-import Data.List.NonEmpty qualified as NE
+import Data.Traversable (for)
 import FlatParse.Stateful qualified as FP
 import Lexer
 import NeatInterpolation
 import Parser
 import Playground
 import Prettyprinter (Pretty, pretty)
-import Relude
+import Proto (eof, parse)
+import Relude hiding (readFile)
 import Syntax.Row (ExtRow (..))
 import Syntax.Row qualified as Row
 import Syntax.Term (Pattern_ (..))
 import Syntax.Term qualified as E
-import Syntax.Term qualified as T
+import System.Directory.OsPath
+import System.File.OsPath
+import System.OsPath
 import Test.Hspec
-import Text.Megaparsec (bundleErrors, eof, parse, parseErrorTextPretty)
 
-parsePretty :: Parser a -> Text -> Either String a
+parsePretty :: Parser' a -> Text -> Either String a
 parsePretty parser input =
     lexedInput
-        & parse (parser <* eof) "test"
-        & first (foldMap parseErrorTextPretty . bundleErrors)
+        & parse (parser <* eof)
+        & first show
   where
     inputBS = encodeUtf8 input
     lexedInput =
@@ -326,3 +328,10 @@ spec = do
                     b f g x = f (g x)
                     |]
             parsePretty code program `shouldSatisfy` isRight
+        join $
+            sequenceA_ <$> runIO do
+                let testDir = [osp|./lang-tests/should-compile|]
+                fileNames <- listDirectory testDir
+                for fileNames \file -> do
+                    fileContents <- decodeUtf8 <$> readFile (testDir </> file)
+                    pure $ it (show $ takeFileName file) (parsePretty code fileContents `shouldSatisfy` isRight)

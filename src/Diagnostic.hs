@@ -16,14 +16,12 @@ module Diagnostic (
     nonFatal,
     fatal,
     noErrors,
-    reportsFromBundle,
     internalError,
     reportExceptions,
     guardNoErrors,
 ) where
 
-import Common (HasLoc, Loc, getLoc, mkNotes)
-import Common qualified as C
+import Common (Loc, mkNotes)
 import Data.DList (DList)
 import Data.DList qualified as DList
 import Effectful
@@ -35,7 +33,6 @@ import Effectful.TH
 import Error.Diagnose
 import LangPrelude
 import Prettyprinter.Render.Terminal (AnsiStyle)
-import Text.Megaparsec qualified as MP
 
 data Diagnose :: Effect where
     NonFatal :: Report (Doc AnsiStyle) -> Diagnose m ()
@@ -89,6 +86,7 @@ guardNoErrors = do
     ok <- noErrors
     unless ok $ fatal []
 
+{-
 -- this is 90% copypasted from Error.Diagnose.Compat.Megaparsec, because enabling the feature flag
 -- hangs the compiler for some reason
 
@@ -113,3 +111,4 @@ reportsFromBundle MP.ParseErrorBundle{..} =
                     [m] -> mkNotes [(source, This m)]
                     (m1 : rest) -> mkNotes $ (source, This m1) : map ((source,) . Where) rest
                     [] -> mkNotes [(source, This "no error message")]
+-}

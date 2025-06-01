@@ -7,118 +7,96 @@
 module Lexer where
 
 import Common (Literal_ (..), Loc (..), Located (..), SimpleName, SimpleName_ (..), unLoc, zipLoc, pattern L)
+import Common qualified as C
+import Control.Monad.Combinators (between, choice, sepBy, sepEndBy, sepEndBy1, skipManyTill, someTill_)
+import Control.Monad.Combinators qualified as P
 import Data.Char (isLetter, isSpace, isUpperCase)
+import Data.List.NonEmpty qualified as NE
 import Data.Text qualified as Text
 import Data.Vector (Vector)
 import Data.Vector qualified as V
-import LangPrelude hiding (optional)
-
--- import Text.Megaparsec hiding (Token, token)
-import Text.Megaparsec qualified as MP
-
--- import Text.Megaparsec.Char hiding (newline, space)
-
-import Common qualified as C
-import Control.Monad.Combinators (between, choice, skipManyTill)
-import Data.List.NonEmpty qualified as NE
 import Diagnostic
 import Error.Diagnose (Position (..))
 import FlatParse.Stateful hiding (Parser, Pos, ask, local, try, (<|>))
 import FlatParse.Stateful qualified as FP
+import LangPrelude hiding (optional)
+import Proto qualified as P
 import Syntax.Token
 
-type Parser = MP.Parsec Void TokenStream
+type Parser e = P.Proto e TokenStream
 
 {- | state stores the last newline
 | reader env stores the current block offset
 -}
-type Lexer = FP.Parser Int ()
+type Lexer = FP.Parser Int Void
 
 newtype TokenStream = TokenStream (Vector (Located Token)) deriving (Show)
 
-instance MP.Stream TokenStream where
+instance P.Stream TokenStream where
     type Token TokenStream = Located Token
-    type Tokens TokenStream = Vector (Located Token)
-
-    tokensToChunk _ = V.fromList
-    chunkToTokens _ = V.toList
-    chunkLength _ = length
-    chunkEmpty _ = null
-    take1_ (TokenStream v) =
-        V.uncons v <&> second TokenStream
-    takeN_ n (TokenStream v)
-        | V.null v = Nothing
-        | otherwise =
-            let (toks, v') = V.splitAt n v
-             in Just (toks, TokenStream v')
-    takeWhile_ p (TokenStream v) =
-        let (toks, v') = V.span p v
-         in (toks, TokenStream v')
-
-instance MP.VisualStream TokenStream where
-    showTokens _ tokens = show $ foldMap pretty tokens
+    take1 (TokenStream s) = second TokenStream <$> V.uncons s
 
 -- * Interface used by the parser
 
-token :: Token -> Parser ()
-token inputToken = MP.label (show inputToken) $ void $ MP.satisfy ((== inputToken) . unLoc)
+token :: Token -> Parser e ()
+token inputToken = void $ P.satisfy ((== inputToken) . unLoc)
 
 -- | parses a keyword token
-keyword :: Keyword -> Parser ()
+keyword :: Keyword -> Parser e ()
 keyword = token . Keyword
 
 -- | parser a SpecialSymbol token
-specialSymbol :: SpecialSymbol -> Parser ()
+specialSymbol :: SpecialSymbol -> Parser e ()
 specialSymbol = token . SpecialSymbol
 
 {- | parses a statement separator
 a \\n should have the same indent as previous blocks. A semicolon always works
 -}
-newline :: Parser ()
-newline = MP.label "separator" $ token Semicolon <|> token Newline
+newline :: Parser e ()
+newline = token Semicolon <|> token Newline
 
 -- | parses a contextual keyword - that is, an identifier that behaves as a keyword in some cases
-ctxKeyword :: Text -> Parser ()
-ctxKeyword kw = MP.try do
+ctxKeyword :: Text -> Parser e ()
+ctxKeyword kw = do
     L (Name' text) <- lowerName <|> upperName
     guard $ text == kw
 
-block :: BlockKeyword -> Parser p -> Parser [p]
+block :: BlockKeyword -> Parser e p -> Parser e [p]
 block kw p = do
     token $ BlockStart kw
-    items <- p `MP.sepBy` newline
+    items <- p `sepBy` newline
     token BlockEnd
     pure items
 
-letBlock :: Parser p -> Parser p
+letBlock :: Parser e p -> Parser e p
 letBlock p = do
     keyword Let
     p <* newline
 
-topLevelBlock :: Parser p -> Parser [p]
-topLevelBlock p = p `MP.sepBy` newline
+topLevelBlock :: Parser e p -> Parser e [p]
+topLevelBlock p = p `sepEndBy` newline
 
 -- | an identifier that doesn't start with an uppercase letter
-lowerName :: Parser SimpleName
-lowerName = mkName $(tok "lowercase identifier" 'LowerName)
+lowerName :: Parser e SimpleName
+lowerName = mkName $(tok 'LowerName)
 
 -- | an identifier that doesn't start with an uppercase letter or a parenthesised operator
-termName :: Parser SimpleName
-termName = MP.try (parens operator) <|> lowerName
+termName :: Parser e SimpleName
+termName = parens operator <|> lowerName
 
 -- | an identifier that starts with an uppercase letter
-upperName :: Parser SimpleName
-upperName = mkName $(tok "uppercase identifier" 'UpperName)
+upperName :: Parser e SimpleName
+upperName = mkName $(tok 'UpperName)
 
 -- | an identifier that starts with a ' and an uppercase letter, i.e. 'Some
-variantConstructor :: Parser SimpleName
-variantConstructor = mkName $(tok "variant constructor" 'VariantName)
+variantConstructor :: Parser e SimpleName
+variantConstructor = mkName $(tok 'VariantName)
 
-literal :: Parser C.Literal
-literal = located $(tok "literal" 'Literal)
+literal :: Parser e C.Literal
+literal = located $(tok 'Literal)
 
-operator :: Parser SimpleName
-operator = mkName $(tok "operator" 'Op)
+operator :: Parser e SimpleName
+operator = mkName $(tok 'Op)
 
 {- todo: it might be a good idea to ignore strict newlines when inside the brackets
 i.e. that would allow
@@ -137,35 +115,39 @@ using anything indentation-sensitve, i.e. do notation, reintroduces strict newli
 >   y,
 > ]
 -}
-parens, brackets, braces :: Parser a -> Parser a
+parens, brackets, braces :: Parser e a -> Parser e a
 parens = between (token LParen) (token RParen)
 brackets = between (token LBracket) (token RBracket)
 braces = between (token LBrace) (token RBrace)
 
 -- leading commas, trailing commas, anything goes
-commaSep :: Parser a -> Parser [a]
-commaSep p = MP.optional (token Comma) *> p `MP.sepEndBy` token Comma
+commaSep :: Parser e a -> Parser e [a]
+commaSep p = P.optional (token Comma) *> p `sepEndBy` token Comma
 
 -- like 'commaSep', but parses one or more items
-commaSep1 :: Parser a -> Parser [a]
-commaSep1 p = MP.optional (token Comma) *> p `MP.sepEndBy1` token Comma
+commaSep1 :: Parser e a -> Parser e [a]
+commaSep1 p = P.optional (token Comma) *> p `sepEndBy1` token Comma
 
 {- | parses an AST node with location info
 todo: don't include trailing whitespace where possible
 -}
-withLoc :: Parser (Loc -> a) -> Parser a
+withLoc :: Parser e (Loc -> a) -> Parser e a
 withLoc p = do
-    Located startLoc _ <- MP.lookAhead MP.anySingle
-    (tokens, f) <- MP.match p
-    let loc = case V.unsnoc tokens of
-            Nothing -> Blank -- do we ever use location info for zero-sized AST nodes? does this matter?
-            Just (_, Located endLoc _) -> zipLoc startLoc endLoc
+    Located startLoc _ <- P.lookAhead P.anyToken
+    TokenStream stream <- P.Proto \s -> P.Parsed s s
+    f <- p
+    TokenStream newStream <- P.Proto \s -> P.Parsed s s
+    let tokensTaken = V.length stream - V.length newStream
+        loc
+            | tokensTaken <= 0 = Blank -- do we ever use location info for zero-sized AST nodes? does this matter?
+            | Just endToken <- stream V.!? (tokensTaken - 1) = zipLoc startLoc (C.getLoc endToken)
+            | otherwise = startLoc
     pure $ f loc
 
-located :: Parser a -> Parser (Located a)
+located :: Parser e a -> Parser e (Located a)
 located p = withLoc $ flip Located <$> p
 
-mkName :: Parser Text -> Parser SimpleName
+mkName :: Parser e Text -> Parser e SimpleName
 mkName = located . fmap Name'
 
 -- * Lexer implementation details
@@ -179,9 +161,10 @@ lex (fileName, fileContents) = do
     pure $ mkTokenStream (fileName, fileContents) tokens
 
 -- | pure version of 'lex' that doesn't postprocess tokens
-lex' :: ByteString -> Result () [(Span, Token)]
-lex' input = FP.runParser (concatMap NE.toList <$> many token') 0 startPos input
+lex' :: ByteString -> Result Void [(Span, Token)]
+lex' input = FP.runParser (anySpace *> (concatMap NE.toList <$> many token')) 0 startPos input
   where
+    anySpace = FP.skipMany space1 `sepBy` newlines
     startPos = FP.unPos (FP.mkPos input (0, 0))
 
 mkTokenStream :: (FilePath, ByteString) -> [(Span, Token)] -> TokenStream
@@ -250,17 +233,7 @@ specialSymbol' =
     $(rawSwitchWithPost (Just [|fails (satisfy isOperatorChar)|]) (parseTable @SpecialSymbol) Nothing)
 
 blockKeyword :: Lexer BlockKeyword
-blockKeyword =
-    $( switchWithPost
-        (Just [|fails (satisfy isIdentifierChar)|])
-        [|
-            case _ of
-                "match" -> pure Match
-                "of" -> pure Of
-                "where" -> pure Where
-                "do" -> pure Do
-            |]
-     )
+blockKeyword = $(rawSwitchWithPost (Just [|fails (satisfy isIdentifierChar)|]) (parseTable @BlockKeyword) Nothing)
 
 -- todo: should operators in parens be identifiers?
 identifier' :: Lexer Token
@@ -318,7 +291,7 @@ letBlock' = do
         -- e.g. `let test = do this; that\nbody`
         -- perhaps a better approach is to drop the `someTill` part and just parse a terminator afterwards?
         let terminatorP = withSpan' $ exactNewline <|> Semicolon <$ $(char ';')
-        (tokens, terminator) <- first (concatMap NE.toList) <$> token' `MP.someTill_` terminatorP
+        (tokens, terminator) <- first (concatMap NE.toList) <$> token' `someTill_` terminatorP
         pure $ tokens <> [terminator]
     pure $ letTok :| tokens
 
@@ -334,7 +307,7 @@ columnBytes = do
 i.e. it skips lines of whitespace entirely
 -}
 newlines :: Lexer ()
-newlines = skipSome $ newlineWithMeta *> space'
+newlines = skipSome $ newlineWithMeta *> FP.skipMany space1
   where
     newlineWithMeta :: Lexer ()
     newlineWithMeta = do
@@ -342,18 +315,21 @@ newlines = skipSome $ newlineWithMeta *> space'
         pos <- FP.getPos
         FP.put pos.unPos
 
--- | non-newline space
-space' :: Lexer ()
-space' =
-    choice
-        [ skipMany (skipSatisfy \c -> isSpace c && c /= '\n')
-        , $(string "---") <* skipAnyChar `skipManyTill` $(string "---")
-        , $(string "--") <* takeLine
-        ]
+-- | non-zero amount of non-newline space
+space1 :: Lexer ()
+space1 =
+    $( switch
+        [|
+            case _ of
+                "---" -> skipAnyChar `skipManyTill` $(string "---")
+                "--" -> skipMany $ skipSatisfy (/= '\n')
+                _ -> skipSome (skipSatisfy \c -> isSpace c && c /= '\n')
+            |]
+     )
 
 -- | space or a newline with increased indentation
 spaceOrLineWrap :: Lexer ()
-spaceOrLineWrap = void $ space' `MP.sepBy` lineWrap
+spaceOrLineWrap = void $ FP.skipMany space1 `sepBy` lineWrap
   where
     lineWrap = do
         blockIndent <- FP.ask

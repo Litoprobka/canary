@@ -34,12 +34,13 @@ packages:
 # These entries can reference officially published versions as well as
 # forks / in-progress versions pinned to a git hash. For example:
 #
-# extra-deps:
-# - acme-missiles-0.3
-# - git: https://github.com/commercialhaskell/stack.git
-#   commit: e7b331f14bcffb8367cd58fbfc8b40ec7642100a
-#
-extra-deps: [ diagnose-2.5.1, effectful-core-2.5.1.0, effectful-2.5.1.0, strict-mutable-base-1.1.0.0 ]
+extra-deps: 
+- diagnose-2.5.1
+- effectful-core-2.5.1.0
+- effectful-2.5.1.0
+- strict-mutable-base-1.1.0.0
+- git: https://github.com/litoprobka/proto.git
+  commit: f9ccde4a2b186f8e3556f78c69b5a4fe9079e5e5
 
 ghc-options:
   '$everything': -haddock
@@ -72,3 +73,6 @@ compiler-check: newer-minor
 
 # This is what you get for using an unmaintaned library
 allow-newer: true
+
+nix:
+    packages: [cacert]

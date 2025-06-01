@@ -4,9 +4,9 @@
 {-# LANGUAGE TemplateHaskell #-}
 {-# OPTIONS_GHC -Wno-unrecognised-pragmas #-}
 
-module Parser (code, declaration, pattern', patternParens, term, termParens, parseModule, run) where
+module Parser (code, declaration, pattern', patternParens, term, termParens, Parser', parseModule, run) where
 
-import LangPrelude
+import LangPrelude hiding (error)
 
 import Common (
     Fixity (..),
@@ -16,14 +16,19 @@ import Common (
     PriorityRelation' (..),
     SimpleName,
     getLoc,
+    mkNotes,
     unLoc,
     zipLocOf,
     pattern L,
  )
+import Control.Monad.Combinators
 import Control.Monad.Combinators.NonEmpty qualified as NE
 import Data.List.NonEmpty qualified as NE
-import Diagnostic (Diagnose, fatal, reportsFromBundle)
+import Diagnostic (Diagnose, fatal)
+import Error.Diagnose (Marker (This, Where), Report (..))
 import Lexer
+import Prettyprinter.Render.Terminal (AnsiStyle)
+import Proto hiding (token)
 import Syntax
 import Syntax.Declaration qualified as D
 import Syntax.Row
@@ -31,21 +36,41 @@ import Syntax.Row qualified as Row
 import Syntax.Term
 import Syntax.Token (SpecialSymbol, tok)
 import Syntax.Token qualified as Token
-import Text.Megaparsec hiding (token)
 
-run :: Diagnose :> es => (FilePath, ByteString) -> Parser a -> Eff es a
+data ParseError = ParseError {unexpected :: Located Token.Token, expecting :: Doc AnsiStyle} deriving (Show)
+type Parser' = Parser ParseError
+
+parseError :: Doc AnsiStyle -> Parser' x
+parseError expecting = do
+    unexpected <- lookAhead anyToken
+    error ParseError{unexpected, expecting}
+
+orError :: Parser' a -> Doc AnsiStyle -> Parser' a
+orError p expecting = p <|> parseError expecting
+
+reportParseError :: Maybe ParseError -> Report (Doc AnsiStyle)
+reportParseError Nothing = Err Nothing "Internal error: the parser backtracked all the way to the start" [] []
+reportParseError (Just ParseError{unexpected, expecting}) =
+    Err
+        Nothing
+        "Parse error"
+        ( mkNotes [(getLoc unexpected, This ("unexpected" <+> pretty unexpected)), (getLoc unexpected, Where ("expecting" <+> expecting))]
+        )
+        []
+
+run :: Diagnose :> es => (FilePath, ByteString) -> Parser' a -> Eff es a
 run (fileName, fileContents) parser = do
     tokenStream <- lex (fileName, fileContents)
-    either (fatal . NE.toList . reportsFromBundle) pure $
-        parse (parser <* eof) fileName tokenStream
+    either (fatal . one . reportParseError) pure $
+        parse (parser <* eof `orError` "end of input") tokenStream
 
 parseModule :: Diagnose :> es => (FilePath, ByteString) -> Eff es [Declaration 'Parse]
 parseModule input = run input code
 
-code :: Parser [Declaration 'Parse]
+code :: Parser' [Declaration 'Parse]
 code = topLevelBlock declaration
 
-declaration :: Parser (Declaration 'Parse)
+declaration :: Parser' (Declaration 'Parse)
 declaration = located $ choice [typeDec, fixityDec, signature, valueDec]
   where
     valueDec = D.Value <$> binding <*> option [] whereBlock
@@ -53,7 +78,7 @@ declaration = located $ choice [typeDec, fixityDec, signature, valueDec]
 
     typeDec = do
         keyword Token.Type
-        name <- upperName
+        name <- upperName `orError` "a type name"
         gadtDec name <|> simpleTypeDec name
 
     simpleTypeDec name = do
@@ -61,9 +86,9 @@ declaration = located $ choice [typeDec, fixityDec, signature, valueDec]
         pats <- option [] $ specialSymbol Token.Eq *> typePattern `sepBy1` specialSymbol Token.Bar
         pure $ D.Type name vars pats
 
-    gadtDec :: SimpleName -> Parser (Declaration_ 'Parse)
+    gadtDec :: SimpleName -> Parser' (Declaration_ 'Parse)
     gadtDec name = do
-        mbKind <- try $ optional $ specialSymbol Token.Colon *> term
+        mbKind <- optional $ specialSymbol Token.Colon *> term
         constrs <- block Token.Where $ withLoc do
             con <- upperName
             specialSymbol Token.Colon
@@ -71,14 +96,14 @@ declaration = located $ choice [typeDec, fixityDec, signature, valueDec]
             pure \loc -> D.GadtConstructor loc con sig
         pure $ D.GADT name mbKind constrs
 
-    typePattern :: Parser (Constructor 'Parse)
+    typePattern :: Parser' (Constructor 'Parse)
     typePattern = withLoc do
         name <- upperName
         args <- many termParens
         pure \loc -> D.Constructor loc name args
 
     signature = do
-        name <- try $ termName <* specialSymbol Token.Colon
+        name <- termName <* specialSymbol Token.Colon
         D.Signature name <$> term
 
     fixityDec = do
@@ -90,28 +115,28 @@ declaration = located $ choice [typeDec, fixityDec, signature, valueDec]
                 , InfixChain <$ ctxKeyword "chain"
                 , pure Infix
                 ]
-        op <- operator
+        op <- operator `orError` "name of the operator"
         above <- option [] do
             ctxKeyword "above"
-            commaSep1 (Just <$> operator <|> Nothing <$ ctxKeyword "application")
+            commaSep (Just <$> operator <|> Nothing <$ ctxKeyword "application")
         below <- option [] do
             ctxKeyword "below"
-            commaSep1 operator
+            commaSep operator
         equal <- option [] do
             ctxKeyword "equals"
-            commaSep1 operator
+            commaSep operator
         pure $ D.Fixity fixity op PriorityRelation{above, below, equal}
 
-varBinder :: Parser (VarBinder 'Parse)
+varBinder :: Parser' (VarBinder 'Parse)
 varBinder =
     parens (VarBinder <$> termName <* specialSymbol Token.Colon <*> fmap Just term)
         <|> flip VarBinder Nothing
-        <$> (termName <|> mkName $(tok "implicit variable" 'Token.ImplicitName))
+            <$> (termName <|> mkName $(tok 'Token.ImplicitName))
 
-typeVariable :: Parser (Type_ 'Parse)
-typeVariable = Name <$> termName <|> ImplicitVar <$> mkName $(tok "implicit variable" 'Token.ImplicitName)
+typeVariable :: Parser' (Type_ 'Parse)
+typeVariable = Name <$> termName <|> ImplicitVar <$> mkName $(tok 'Token.ImplicitName)
 
-someRecord :: SpecialSymbol -> Parser value -> Maybe (SimpleName -> value) -> Parser (ExtRow value)
+someRecord :: SpecialSymbol -> Parser' value -> Maybe (SimpleName -> value) -> Parser' (ExtRow value)
 someRecord delim valueP missingValue = braces do
     row <- fromList <$> commaSep recordItem
     optional (specialSymbol Token.Bar *> valueP) <&> \case
@@ -126,22 +151,22 @@ someRecord delim valueP missingValue = braces do
         valuePattern <- onMissing recordLabel $ specialSymbol delim *> valueP
         pure (recordLabel, valuePattern)
 
-noExtRecord :: SpecialSymbol -> Parser value -> Maybe (SimpleName -> value) -> Parser (Row value)
+noExtRecord :: SpecialSymbol -> Parser' value -> Maybe (SimpleName -> value) -> Parser' (Row value)
 noExtRecord delim valueP missingValue =
     someRecord delim valueP missingValue
         >>= \case
             NoExtRow row -> pure row
-            ExtRow{} -> fail "unexpected row extension"
+            ExtRow{} -> parseError "unexpected row extension"
 
-lambda' :: Parser (Expr 'Parse)
+lambda' :: Parser' (Expr 'Parse)
 lambda' = withLoc do
     specialSymbol Token.Lambda
-    args <- NE.some patternParens
+    args <- NE.some patternParens `orError` "argument patterns"
     specialSymbol Token.Arrow
     body <- term
     pure \loc -> foldr (\var -> Located loc . Lambda var) body args
 
-quantifier :: Parser (Type 'Parse)
+quantifier :: Parser' (Type 'Parse)
 quantifier = withLoc do
     (q, erased) <-
         choice
@@ -150,15 +175,16 @@ quantifier = withLoc do
             , (Forall, Retained) <$ keyword Token.Foreach
             , (Exists, Retained) <$ keyword Token.Exists
             ]
-    binders <- NE.some varBinder
-    let arrOrStar = specialSymbol case q of
+    binders <- NE.some varBinder `orError` "a variable with an optional type"
+    let arrOrStar = case q of
             Forall -> Token.Arrow
             Exists -> Token.DepPair
-    visibility <- Implicit <$ specialSymbol Token.Dot <|> Visible <$ arrOrStar
+    visibility <-
+        (Implicit <$ specialSymbol Token.Dot <|> Visible <$ specialSymbol arrOrStar) `orError` ("a . or an" <+> pretty arrOrStar)
     body <- term
     pure \loc -> foldr (\binder acc -> Located loc $ Q q visibility erased binder acc) body binders
 
-pattern' :: Parser (Pattern 'Parse)
+pattern' :: Parser' (Pattern 'Parse)
 pattern' = located do
     pat <-
         choice
@@ -174,11 +200,11 @@ pattern' = located do
 should be used in cases where multiple patterns in a row are accepted, i.e.
 function definitions and match expressions
 -}
-patternParens :: Parser (Pattern 'Parse)
+patternParens :: Parser' (Pattern 'Parse)
 patternParens =
     located . choice $
         [ VarP <$> termName
-        , WildcardP <$> $(tok "wildcard" 'Token.Wildcard)
+        , WildcardP <$> $(tok 'Token.Wildcard)
         , record
         , ListP <$> brackets (commaSep pattern')
         , LiteralP <$> literal
@@ -191,7 +217,7 @@ patternParens =
     record = RecordP <$> noExtRecord Token.Eq pattern' (Just $ \n -> Located (getLoc n) $ VarP n)
     unit = Located Blank $ RecordP Row.empty
 
-binding :: Parser (Binding 'Parse)
+binding :: Parser' (Binding 'Parse)
 binding = do
     f <-
         -- it should probably be `try (E.FunctionBinding <$> funcName) <*> NE.some patternParens
@@ -208,7 +234,7 @@ binding = do
 -- an expression with infix operators and unresolved priorities
 -- the `E.Infix` constructor is only used when there is more than one operator
 -- function arrows are a special case that is handled directly in the parser
-term :: Parser (Expr 'Parse)
+term :: Parser' (Expr 'Parse)
 term = located do
     expr <- nonAnn
     option (unLoc expr) do
@@ -216,7 +242,7 @@ term = located do
         Annotation expr <$> term
   where
     -- second lowest level of precedence, 'anything but annotations'
-    nonAnn :: Parser (Expr 'Parse)
+    nonAnn :: Parser' (Expr 'Parse)
     nonAnn = located do
         (Located loc (firstExpr, pairs)) <- located do
             firstExpr <- noPrec
@@ -247,7 +273,7 @@ term = located do
 
     -- expression forms that have a leading keyword/symbol
     -- most of them also consume all trailing terms
-    keywordBased :: Parser (Term 'Parse)
+    keywordBased :: Parser' (Term 'Parse)
     keywordBased =
         located $
             choice
@@ -261,24 +287,24 @@ term = located do
                 , doBlock
                 ]
 
-letRec :: Parser (Expr_ Parse)
+letRec :: Parser' (Expr_ Parse)
 letRec = do
     bindings <- letBlock (block Token.Rec binding)
     case NE.nonEmpty bindings of
-        Nothing -> fail "empty let rec"
-        Just bindingsNE -> LetRec bindingsNE <$> term
+        Nothing -> parseError "empty let rec"
+        Just bindingsNE -> LetRec bindingsNE <$> term `orError` "an expression at the end of a let rec block"
 
-case' :: Parser (Expr_ Parse)
+case' :: Parser' (Expr_ Parse)
 case' = do
     keyword Token.Case
     arg <- term
     matches <- block Token.Of $ (,) <$> pattern' <* specialSymbol Token.Arrow <*> term
     pure $ Case arg matches
 
-match' :: Parser (Expr_ Parse)
+match' :: Parser' (Expr_ Parse)
 match' = Match <$> block Token.Match ((,) <$> some patternParens <* specialSymbol Token.Arrow <*> term)
 
-if' :: Parser (Expr_ Parse)
+if' :: Parser' (Expr_ Parse)
 if' = do
     keyword Token.If
     cond <- term
@@ -288,19 +314,19 @@ if' = do
     false <- term
     pure $ If cond true false
 
-doBlock :: Parser (Expr_ Parse)
+doBlock :: Parser' (Expr_ Parse)
 doBlock = do
     stmts <-
         block Token.Do . located . choice $
-            [ try $ Bind <$> pattern' <* specialSymbol Token.BackArrow <*> term
+            [ Bind <$> pattern' <* specialSymbol Token.BackArrow <*> term
             , With <$ keyword Token.With <*> pattern' <* specialSymbol Token.BackArrow <*> term
             , keyword Token.Let *> fmap DoLet binding
             , Action <$> term
             ]
     case unsnoc stmts of
-        Nothing -> fail "empty do block"
+        Nothing -> parseError "empty do block"
         Just (stmts', L (Action lastAction)) -> pure $ Do stmts' lastAction
-        _ -> fail "last statement in a do block must be an expression"
+        _ -> parseError "last statement in a do block must be an expression"
   where
     unsnoc [] = Nothing
     unsnoc [x] = Just ([], x)
@@ -308,14 +334,14 @@ doBlock = do
 
 -- a term that may be used as a type parameter or type application
 -- that is, it does not contain any unparenthesized spaces
-termParens :: Parser (Expr 'Parse)
+termParens :: Parser' (Expr 'Parse)
 termParens =
     located $
         choice
             [ try record
             , recordType -- todo: ambiguity with empty record value
             , try $ List <$> brackets (commaSep term)
-            , -- todo: since annotation patterns are a thing, variantType is pretty much always ambiguous
+            , -- todo: since annotation expressions are a thing, variantType is pretty much always ambiguous
               -- perhaps it should require a trailing |?
               variantType
             , try $ Name <$> parens operator

@@ -48,7 +48,6 @@ import Syntax.Row
 import Syntax.Term (Erased (..), Pattern_ (..), Quantifier (..), Visibility (..))
 import Syntax.Term qualified as E
 import Syntax.Term qualified as T
-import Text.Megaparsec (errorBundlePretty, parse, pos1)
 import TypeChecker (InfState)
 import TypeChecker qualified as TC (run)
 import TypeChecker.Backend (TopLevel, Type', UniVars)

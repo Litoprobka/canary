@@ -26,7 +26,6 @@ module Common (
     NameAt,
     Pass (..),
     zipLocOf,
-    locFromSourcePos,
     mkNotes,
     Literal_ (..),
     Literal,
@@ -49,7 +48,6 @@ import Error.Diagnose qualified as M
 import GHC.TypeError (Assert, ErrorMessage (..), TypeError)
 import LangPrelude
 import Prettyprinter
-import Text.Megaparsec (SourcePos (..), unPos)
 
 -- this file is a bit of a crutch. Perhaps it's better to move the definitions to Type or TypeChecker
 -- however, they don't really belong to Type, and moving them to TypeChecker introduces a cyclic dependency (which may or may not be fine)
@@ -278,15 +276,6 @@ zipLoc (Loc lhs) (Loc rhs) = Loc $ lhs{begin = min lhs.begin rhs.begin, end = ma
 
 zipLocOf :: (HasLoc a, HasLoc b) => a -> b -> Loc
 zipLocOf lhs rhs = zipLoc (getLoc lhs) (getLoc rhs)
-
-locFromSourcePos :: SourcePos -> SourcePos -> Loc
-locFromSourcePos start end =
-    Loc $
-        Position
-            { file = start.sourceName
-            , begin = (unPos start.sourceLine, unPos start.sourceColumn)
-            , end = (unPos end.sourceLine, unPos end.sourceColumn)
-            }
 
 instance Pretty Loc where
     pretty = \case

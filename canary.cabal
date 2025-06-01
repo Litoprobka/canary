@@ -69,11 +69,11 @@ library
     , enummapset
     , flatparse
     , isocline
-    , megaparsec >=9.5.0 && <10
     , nonempty-containers
     , parser-combinators >=1.3 && <2
     , prettyprinter >=1.7 && <2
     , prettyprinter-ansi-terminal
+    , proto
     , relude >=1.2.1.0 && <2
     , template-haskell
     , text
@@ -108,11 +108,11 @@ executable canary-exe
     , enummapset
     , flatparse
     , isocline
-    , megaparsec >=9.5.0 && <10
     , nonempty-containers
     , parser-combinators >=1.3 && <2
     , prettyprinter >=1.7 && <2
     , prettyprinter-ansi-terminal
+    , proto
     , relude >=1.2.1.0 && <2
     , template-haskell
     , text
@@ -145,19 +145,22 @@ test-suite canary-test
       base >=4.7 && <5
     , canary
     , diagnose
+    , directory
     , dlist
     , effectful >=2.3 && <3
     , effectful-th
     , enummapset
+    , file-io
+    , filepath
     , flatparse
     , hspec ==2.*
     , isocline
-    , megaparsec >=9.5.0 && <10
     , neat-interpolation
     , nonempty-containers
     , parser-combinators >=1.3 && <2
     , prettyprinter >=1.7 && <2
     , prettyprinter-ansi-terminal
+    , proto
     , relude >=1.2.1.0 && <2
     , template-haskell
     , text

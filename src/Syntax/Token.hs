@@ -8,7 +8,7 @@ import Data.Char (isAlphaNum)
 import LangPrelude
 import Language.Haskell.TH qualified as TH
 import Language.Haskell.TH.Syntax (Exp, Lift, Q)
-import Text.Megaparsec qualified as MP
+import Proto qualified
 import Prelude qualified
 
 data Token
@@ -129,18 +129,13 @@ parseTable = map (\x -> (show x, [|pure x|])) (universe @a)
 
 {- | matches a token pattern and returns its payload
 
-tok :: String -> Pattern (a -> Token) -> Lexer a
+tok :: Pattern (a -> Token) -> Parser a
 -}
-tok :: String -> TH.Name -> TH.ExpQ
-tok labelText patName = do
+tok :: TH.Name -> TH.ExpQ
+tok patName = do
     x <- TH.newName "x"
-    let labelNE = case nonEmpty labelText of
-            Just lbl -> lbl
-            Nothing -> '<' :| "no name>"
     [|
-        MP.label labelText $ MP.try do
-            next <- MP.anySingle
-            case next of
-                L $(TH.conP patName [TH.varP x]) -> pure $(TH.varE x)
-                other -> MP.failure (Just $ MP.Tokens $ one other) (one $ MP.Label labelNE)
+        do
+            L $(TH.conP patName [TH.varP x]) <- Proto.anyToken
+            pure $(TH.varE x)
         |]

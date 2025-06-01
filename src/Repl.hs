@@ -26,10 +26,11 @@ import Eval qualified as V
 import Fixity qualified (parse, resolveFixity, run)
 import FlatParse.Stateful qualified as FP
 import LangPrelude
-import Lexer (Parser, space')
+import Lexer (space1)
 import NameGen (NameGen, freshName)
 import NameResolution (Scope (..), resolveNames, resolveTerm)
 import NameResolution qualified
+import Parser (Parser')
 import Parser qualified
 import Poset (Poset)
 import Poset qualified
@@ -37,7 +38,6 @@ import Syntax
 import Syntax.Declaration qualified as D
 import Syntax.Term
 import System.Console.Isocline
-import Text.Megaparsec (try)
 import TypeChecker (infer, inferDeclaration, normalise)
 import TypeChecker.Backend qualified as TC
 
@@ -266,15 +266,15 @@ takeInputChunk = do
             then pure acc
             else go $ acc <> textToStrictBuilder line <> textToStrictBuilder "\n"
 
-parseCommand :: ByteString -> Either (ByteString, Parser ReplCommand) ReplCommand
+parseCommand :: ByteString -> Either (ByteString, Parser' ReplCommand) ReplCommand
 parseCommand input = case FP.runParser cmdParser 0 0 input of
     FP.OK (Right cmd) _ _ -> Right cmd
     FP.OK (Left parser) _ remainingInput -> Left (remainingInput, parser)
-    _ -> Left (input, try (fmap Decls Parser.code) <|> fmap Expr Parser.term)
+    _ -> Left (input, fmap Decls Parser.code <|> fmap Expr Parser.term)
   where
     cmdParser =
         $( FP.switchWithPost
-            (Just [|Lexer.space'|])
+            (Just [|FP.optional Lexer.space1|])
             [|
                 case _ of
                     ":t" -> pure $ Left (Type_ <$> Parser.term)
