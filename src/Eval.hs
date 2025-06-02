@@ -19,6 +19,7 @@ import Common (
     toSimpleName,
     unLoc,
     pattern L,
+    pattern (:@),
  )
 import Data.EnumMap.Lazy qualified as LMap -- note that we use the lazy functions here
 import Data.Traversable (for)
@@ -43,11 +44,12 @@ data ValueEnv = ValueEnv
 type Type' = Value
 
 -- unlike the AST types, the location information on Values are shallow, since
--- the way we use it is difference from the AST nodes
+-- the way we use it is different from the AST nodes
 -- in AST, the location corresponds to the source span where the AST node is written
 -- in Values, the location is the source space that the location is *arising from*
 data Value
-    = Var Name -- an unbound variable; seems like they are only used for quoting, hmmm
+    = -- unbound variables and skolems seem really close in how they are treated. I wonder whether they can be unified
+      Var Name
     | TyCon Name -- a type constructor. unlike value constructors, `Either a b` is represented as a stuck application Either `App` a `App` b
     | Con Name [Value] -- a fully-applied counstructor
     | Lambda (Closure ())
@@ -71,13 +73,12 @@ data Value
 
 data Closure ty = Closure {var :: Name, ty :: ty, env :: ValueEnv, body :: CoreTerm}
 
-quote :: Located Value -> CoreTerm
-quote (Located loc value) = Located loc case value of
+-- quote a value for pretty-printing
+quoteForPrinting :: Located Value -> CoreTerm
+quoteForPrinting (Located loc value) = Located loc case value of
     Var x -> C.Name x
     TyCon name -> C.TyCon name
-    Con con args -> C.Con con (map quote (Located loc <$> args))
-    -- if we use quote for anything but pretty-printing,
-    -- we'd probably need alpha conversion for all the function-like cases
+    Con con args -> C.Con con (map quoteWithLoc args)
     Lambda closure -> C.Lambda closure.var (quoteWithLoc $ closureBody closure)
     PrimFunction name f -> unLoc . quoteWithLoc $ f (Var name)
     Record vals -> C.Record $ fmap quoteWithLoc vals
@@ -94,13 +95,43 @@ quote (Located loc value) = Located loc case value of
     Skolem skolem -> C.Skolem skolem
     UniVar uni -> C.UniVar uni
   where
-    quoteWithLoc = quote . Located loc
+    quoteWithLoc = quoteForPrinting . Located loc
 
 instance Pretty Value where
-    pretty = pretty . quote . Located (Loc Position{file = "<none>", begin = (0, 0), end = (0, 0)})
+    pretty = pretty . quoteForPrinting . Located (Loc Position{file = "<none>", begin = (0, 0), end = (0, 0)})
 
 instance Show Value where
     show = Prelude.show . pretty
+
+-- quote a value into a normal form expression
+quote :: NameGen :> es => Located Value -> Eff es CoreTerm
+quote (value :@ loc) =
+    (:@ loc) <$> case value of
+        Var x -> pure $ C.Name x
+        TyCon name -> pure $ C.TyCon name
+        Con con args -> C.Con con <$> traverse quoteWithLoc args
+        Lambda closure -> do
+            (var, body) <- closureBody' closure
+            C.Lambda var <$> quoteWithLoc body
+        PrimFunction name f -> fmap unLoc . quoteWithLoc $ f (Var name)
+        Record vals -> C.Record <$> traverse quoteWithLoc vals
+        Sigma x y -> C.Sigma <$> quoteWithLoc x <*> quoteWithLoc y
+        Variant name val -> C.App (Located (getLoc name) $ C.Variant name) <$> quoteWithLoc val
+        -- RecordLens path -> pure $ RecordLens path
+        PrimValue lit -> pure $ C.Literal lit
+        Function l r -> C.Function <$> quoteWithLoc l <*> quoteWithLoc r
+        Q q vis e closure -> do
+            (var, body) <- closureBody' closure
+            ty <- quoteWithLoc closure.ty
+            C.Q q vis e var ty <$> quoteWithLoc body
+        VariantT row -> C.VariantT <$> traverse quoteWithLoc row
+        RecordT row -> C.RecordT <$> traverse quoteWithLoc row
+        App lhs rhs -> C.App <$> quoteWithLoc lhs <*> quoteWithLoc rhs
+        Case arg cases -> C.Case <$> quoteWithLoc arg <*> (traverse . traverse) quoteWithLoc cases
+        Skolem skolem -> pure $ C.Skolem skolem
+        UniVar uni -> pure $ C.UniVar uni
+  where
+    quoteWithLoc = quote . Located loc
 
 evalCore :: ValueEnv -> CoreTerm -> Value
 evalCore !env (L term) = case term of
@@ -158,10 +189,10 @@ app Closure{var, env, body} arg = evalCore (env{values = LMap.insert var arg env
 closureBody :: Closure a -> Value
 closureBody closure = closure `app` Var closure.var
 
-closureBody' :: NameGen :> es => Closure a -> Eff es Value
+closureBody' :: NameGen :> es => Closure a -> Eff es (Name, Value)
 closureBody' closure = do
     var <- freshName $ toSimpleName closure.var
-    pure $ closure `app` Var var
+    pure (var, closure `app` Var var)
 
 matchCore :: ValueEnv -> CorePattern -> Value -> Maybe ValueEnv
 matchCore env = \cases
@@ -299,7 +330,8 @@ mkConLambda n con env = do
         foldr
             ( \var bodyFromEnv env' ->
                 let newEnv = env'{values = LMap.insert var (Var var) env'.values}
-                 in Lambda $ Closure{var, ty = (), env = newEnv, body = quote $ Located (getLoc var) $ bodyFromEnv newEnv}
+                 in -- current implementation with quoteForPrinting is a crutch
+                    Lambda $ Closure{var, ty = (), env = newEnv, body = quoteForPrinting $ Located (getLoc var) $ bodyFromEnv newEnv}
             )
             (const $ Con con (map Var names))
             names

@@ -9,7 +9,7 @@
 module TypeChecker (
     run,
     infer,
-    -- inferPattern,
+    inferPattern,
     inferBinding,
     check,
     checkPattern,
@@ -29,7 +29,7 @@ import Data.Traversable (for)
 import Diagnostic (internalError)
 import Effectful
 import Effectful.Reader.Static (ask, asks)
-import Effectful.State.Static.Local (State, execState, get, modify, put)
+import Effectful.State.Static.Local (State, execState, get, modify, put, runState)
 import Eval (ValueEnv)
 import Eval qualified as V
 import GHC.IsList qualified as IsList
@@ -217,14 +217,15 @@ check (e :@ loc) (typeToCheck :@ tyLoc) = match e typeToCheck
     match = \cases
         -- the case for E.Name is redundant, since
         -- `infer` just looks up its type anyway
-        (Lambda (L (VarP arg)) body) (V.Q Forall Visible Retained closure) -> do
-            -- checkPattern arg closure.ty
-            var <- freshSkolem (toSimpleName arg)
-            local' (define arg var . declare arg (closure.ty :@ tyLoc)) do
-                check body $ (closure `V.app` var) :@ tyLoc
+        (Lambda arg body) (V.Q Forall Visible Retained closure) -> do
+            argVars <- checkPattern arg $ closure.ty :@ tyLoc
+            (argVal, valDiff) <- skolemizePattern' arg
+            local' (defineMany valDiff . declareMany argVars) do
+                check body $ (closure `V.app` argVal) :@ tyLoc
         (Lambda arg body) (V.Function from to) -> do
             newTypes <- checkPattern arg $ from :@ tyLoc
-            local' (\env -> (env{locals = newTypes <> env.locals})) do
+            (_, valDiff) <- skolemizePattern' arg
+            local' (defineMany valDiff . declareMany newTypes) do
                 check_ body to
         (Annotation expr annTy) ty -> do
             annTyV <- typeFromTerm annTy
@@ -258,7 +259,8 @@ check (e :@ loc) (typeToCheck :@ tyLoc) = match e typeToCheck
             (patTypes, bodyTy) <- unwrapFn n ty
             for_ matches \(pats, body) -> do
                 typeMap <- fold <$> zipWithM checkPatternRelaxed pats (map (:@ tyLoc) patTypes)
-                local' (declareMany typeMap) $ check_ body bodyTy
+                valDiff <- foldMap snd <$> traverse skolemizePattern' pats
+                local' (defineMany valDiff . declareMany typeMap) $ check_ body bodyTy
           where
             unwrapFn 0 = pure . ([],)
             unwrapFn n =
@@ -380,6 +382,11 @@ localEquality argVal patVal = do
         -- it's not clear whether we should touch UniVars at all
         _ -> pass
 
+skolemizePattern' :: InfEffs es => Pat -> Eff es (V.Value, EnumMap Name V.Value)
+skolemizePattern' pat = do
+    (val, newEnv) <- runState V.ValueEnv{values = Map.empty, skolems = Map.empty} $ skolemizePattern pat
+    pure (val, newEnv.values)
+
 -- convert a pattern to a new skolemized value
 skolemizePattern :: InfEffs es => Pat -> Eff (State ValueEnv : es) V.Value
 skolemizePattern (Located loc pat') = case pat' of
@@ -427,7 +434,8 @@ infer (Located loc e) = case e of
         inferTyApp expr ty tyArg
     Lambda arg body -> do
         (typeMap, argTy) <- inferPattern arg
-        Located loc . V.Function (unLoc argTy) <$> local' (declareMany typeMap) (unLoc <$> infer body)
+        (_, valDiff) <- skolemizePattern' arg
+        Located loc . V.Function (unLoc argTy) <$> local' (defineMany valDiff . declareMany typeMap) (unLoc <$> infer body)
     -- chances are, I'd want to add some specific error messages or context for wildcard lambdas
     -- for now, they are just desugared to normal lambdas before inference
     WildcardLambda args body -> infer $ foldr (\var -> Located loc . Lambda (Located (getLoc var) $ VarP var)) body args
@@ -452,15 +460,10 @@ infer (Located loc e) = case e of
         pure $ result :@ loc
     Match [] -> typeError $ EmptyMatch loc
     Match matches@(_ : _) -> do
-        argCount <- case getArgCount matches of
-            Just argCount -> pure argCount
-            Nothing -> typeError $ ArgCountMismatch loc
-        result <- freshUniVar
-        patTypes <- replicateM argCount freshUniVar
-        for_ matches \(pats, body) -> do
-            typeMap <- fold <$> zipWithM checkPattern pats (map (:@ loc) patTypes)
-            local' (declareMany typeMap) $ check_ body result
-        pure $ foldr V.Function result patTypes :@ loc
+        argCount <- whenNothing (getArgCount matches) $ typeError $ ArgCountMismatch loc
+        multArgFnTy <- foldr V.Function <$> freshUniVar <*> replicateM argCount freshUniVar
+        check_ (Match matches :@ loc) multArgFnTy
+        pure $ multArgFnTy :@ loc
     List items -> do
         itemTy <- freshUniVar
         traverse_ (`check_` itemTy) items
@@ -470,9 +473,9 @@ infer (Located loc e) = case e of
     Sigma x y -> do
         xName <- freshName_ $ Name' "x"
         xTy <- infer x
-        yTy <- infer y
+        yTy <- V.quote =<< infer y
         env <- asks @InfState (.values)
-        pure $ Located loc $ V.Q Exists Visible Retained V.Closure{var = xName :@ loc, ty = unLoc xTy, env, body = V.quote yTy}
+        pure $ Located loc $ V.Q Exists Visible Retained V.Closure{var = xName :@ loc, ty = unLoc xTy, env, body = yTy}
     RecordLens fields -> do
         recordParts <- for fields \field -> do
             rowVar <- freshUniVar
@@ -523,7 +526,8 @@ inferApp appLoc (fTy :@ fLoc) arg = do
             to <- freshUniVar
             var <- freshName $ Located fLoc $ Name' "x"
             values <- asks @InfState (.values)
-            let closure = V.Closure{var, env = values, ty = unLoc from, body = V.quote $ to :@ fLoc}
+            body <- V.quote (to :@ fLoc)
+            let closure = V.Closure{var, env = values, ty = unLoc from, body}
             to :@ fLoc <$ subtype (V.UniVar uni :@ fLoc) (V.Q Forall Visible Retained closure :@ fLoc)
         V.Function from to -> do
             to :@ fLoc <$ check arg (from :@ fLoc)
@@ -683,7 +687,7 @@ normalise = fmap runIdentity . normaliseAll . fmap Identity
 
 -- gets rid of all univars
 normaliseAll :: (Traversable t, InfEffs es) => Eff es (t TypeDT) -> Eff es (t Type')
-normaliseAll = generaliseAll >=> traverse (eval' <=< go . V.quote)
+normaliseAll = generaliseAll >=> traverse (eval' <=< go <=< V.quote)
   where
     eval' :: InfEffs es => CoreTerm -> Eff es Type'
     eval' term = do
@@ -695,14 +699,19 @@ normaliseAll = generaliseAll >=> traverse (eval' <=< go . V.quote)
             C.UniVar uni ->
                 lookupUniVar uni >>= \case
                     Left _ -> internalError loc $ "dangling univar" <+> pretty uni
-                    Right body -> fmap unLoc . go $ V.quote (unMono body)
+                    Right body -> fmap unLoc . go =<< V.quote (unMono body)
             C.Skolem skolem -> internalError (getLoc skolem) $ "skolem" <+> pretty (V.Skolem skolem) <+> "remains in code"
             -- other cases could be eliminated by a type changing uniplate
             C.App lhs rhs -> C.App <$> go lhs <*> go rhs
             C.Function lhs rhs -> C.Function <$> go lhs <*> go rhs
             -- this might produce incorrect results if we ever share a single forall in multiple places
-            -- todo: convert a pi type to a lambda if its arg doesn't occur in its body
-            -- I'm not sure whether there's a better way than traversing the entire body
+            C.Q Forall Visible e var ty body -> do
+                ty' <- go ty
+                body' <- go body
+                pure
+                    if occurs var body'
+                        then C.Q Forall Visible e var ty' body'
+                        else C.Function ty' body'
             C.Q q v e var ty body -> C.Q q v e var <$> go ty <*> go body
             C.VariantT row -> C.VariantT <$> traverse go row
             C.RecordT row -> C.RecordT <$> traverse go row
@@ -717,3 +726,24 @@ normaliseAll = generaliseAll >=> traverse (eval' <=< go . V.quote)
             C.Variant name -> pure $ C.Variant name
             C.Literal lit -> pure $ C.Literal lit
             C.Let name _ _ -> internalError (getLoc name) "unexpected let in a quoted value"
+
+    -- check whether a variable occurs in a term
+    occurs :: Name -> CoreTerm -> Bool
+    occurs var (L ty) = case ty of
+        C.Name name -> name == var
+        C.UniVar{} -> False
+        C.Skolem{} -> False
+        C.App lhs rhs -> occurs var lhs || occurs var rhs
+        C.Function lhs rhs -> occurs var lhs || occurs var rhs
+        C.Q _ _ _ qvar qty body -> occurs qvar qty || occurs var body
+        C.VariantT row -> any (occurs var) row
+        C.RecordT row -> any (occurs var) row
+        C.Lambda _ body -> occurs var body
+        C.Case arg matches -> occurs var arg || (any . any) (occurs var) matches
+        C.Record row -> any (occurs var) row
+        C.Sigma x y -> occurs var x || occurs var y
+        C.TyCon{} -> False
+        C.Con{} -> False
+        C.Variant{} -> False
+        C.Literal{} -> False
+        C.Let{} -> False

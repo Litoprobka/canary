@@ -280,18 +280,19 @@ parseCommand input = case FP.runParser cmdParser 0 0 input of
     _ -> Left (input, fmap Decls Parser.code <|> fmap Expr Parser.term)
   where
     cmdParser =
-        $( FP.switchWithPost
-            (Just [|FP.optional Lexer.space1|])
-            [|
-                case _ of
-                    ":t" -> pure $ Left (Type_ <$> Parser.term)
-                    ":q" -> pure $ Right Quit
-                    ":r" -> pure $ Right Reload
-                    ":env" -> pure $ Right Env
-                    ":load" -> Right . Load <$> FP.takeRestString
-                    ":" -> Right . UnknownCommand . decodeUtf8 <$> FP.takeRest
-                |]
-         )
+        FP.optional Lexer.space1
+            *> $( FP.switchWithPost
+                    (Just [|FP.optional Lexer.space1|])
+                    [|
+                        case _ of
+                            ":t" -> pure $ Left (Type_ <$> Parser.term)
+                            ":q" -> pure $ Right Quit
+                            ":r" -> pure $ Right Reload
+                            ":env" -> pure $ Right Env
+                            ":load" -> Right . Load <$> FP.takeRestString
+                            ":" -> Right . UnknownCommand . decodeUtf8 <$> FP.takeRest
+                        |]
+                )
 
 completer :: ReplEnv -> CompletionEnv -> String -> IO ()
 completer env cenv input = completeWord cenv input Nothing wordCompletion

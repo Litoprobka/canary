@@ -254,6 +254,9 @@ declareMany typeMap env = env{locals = typeMap <> env.locals}
 define :: Name -> Value -> InfState -> InfState
 define name val env = env{values = env.values{V.values = LMap.insert name val env.values.values}}
 
+defineMany :: EnumMap Name Value -> InfState -> InfState
+defineMany valMap env = env{values = env.values{V.values = valMap <> env.values.values}}
+
 -- defineMany :: EnumMap Name Value -> InfState -> InfState
 -- defineMany vals env = env{values = env.values{V.values = vals <> env.values.values}}
 
@@ -268,7 +271,7 @@ generaliseAll action = do
   where
     generaliseOne ty@(Located loc _) = do
         env <- ask @InfState
-        (ty', vars) <- runState Map.empty $ evalState 'a' $ go env.scope $ V.quote ty
+        (ty', vars) <- runState Map.empty $ evalState 'a' $ go env.scope =<< V.quote ty
         let forallVars = hashNub . lefts $ toList vars
         pure $
             Located loc $
@@ -285,7 +288,7 @@ generaliseAll action = do
                         -- don't generalise outer-scoped vars
                         Left varScope | varScope <= scope -> pure $ C.UniVar uni
                         innerScoped -> do
-                            newTy <- bitraverse (const $ freshTypeVar loc) (go scope . V.quote . unMono) innerScoped
+                            newTy <- bitraverse (const $ freshTypeVar loc) (go scope <=< V.quote . unMono) innerScoped
                             modify @(EnumMap UniVar (Either Name CoreTerm)) $ Map.insert uni newTy
                             pure $ toTypeVar newTy
             C.Skolem skolem -> do
