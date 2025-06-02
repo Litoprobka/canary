@@ -61,12 +61,17 @@ ctxKeyword kw = do
     L (Name' text) <- lowerName <|> upperName
     guard $ text == kw
 
-block :: BlockKeyword -> Parser e p -> Parser e [p]
-block kw p = do
+{- | parse an indented block, starting with the given block keyword
+
+if a parsing failure occurs after the keyword, produce an throw an error
+with the given error parser
+-}
+block :: BlockKeyword -> Parser e e -> Parser e p -> Parser e [p]
+block kw mkError p = do
     token $ BlockStart kw
-    items <- p `sepBy` newline
-    token BlockEnd
-    pure items
+    parseItems <|> (mkError >>= P.error)
+  where
+    parseItems = (p `sepBy` newline) <* token BlockEnd
 
 letBlock :: Parser e p -> Parser e p
 letBlock p = do

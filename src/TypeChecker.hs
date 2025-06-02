@@ -466,7 +466,7 @@ infer (Located loc e) = case e of
         traverse_ (`check_` itemTy) items
         pure $ Located loc $ V.TyCon (ListName :@ loc) `V.App` itemTy
     E.Record row -> Located loc . V.RecordT . NoExtRow <$> traverse (fmap unLoc . infer) row
-    -- it's not clear whether we should special case dependent pairs where the first element is a variable, or always infer a non-dependent pair typesc
+    -- it's not clear whether we should special case dependent pairs where the first element is a variable, or always infer a non-dependent pair type
     Sigma x y -> do
         xName <- freshName_ $ Name' "x"
         xTy <- infer x

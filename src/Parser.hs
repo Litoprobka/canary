@@ -74,7 +74,7 @@ declaration :: Parser' (Declaration 'Parse)
 declaration = located $ choice [typeDec, fixityDec, signature, valueDec]
   where
     valueDec = D.Value <$> binding <*> option [] whereBlock
-    whereBlock = block Token.Where (located valueDec)
+    whereBlock = block Token.Where (parseError "declarations") (located valueDec)
 
     typeDec = do
         keyword Token.Type
@@ -89,7 +89,7 @@ declaration = located $ choice [typeDec, fixityDec, signature, valueDec]
     gadtDec :: SimpleName -> Parser' (Declaration_ 'Parse)
     gadtDec name = do
         mbKind <- optional $ specialSymbol Token.Colon *> term
-        constrs <- block Token.Where $ withLoc do
+        constrs <- block Token.Where (parseError "constructor signatures") $ withLoc do
             con <- upperName
             specialSymbol Token.Colon
             sig <- term
@@ -235,38 +235,42 @@ binding = do
 -- the `E.Infix` constructor is only used when there is more than one operator
 -- function arrows are a special case that is handled directly in the parser
 term :: Parser' (Expr 'Parse)
-term = located do
-    expr <- nonAnn
-    option (unLoc expr) do
-        specialSymbol Token.Colon
-        Annotation expr <$> term
+term = rightAssoc Token.Colon Annotation nonAnn
   where
+    rightAssoc :: Token.SpecialSymbol -> (Located expr -> Located expr -> expr) -> Parser' (Located expr) -> Parser' (Located expr)
+    rightAssoc opToken con argParser = parser
+      where
+        parser = located do
+            lhs <- argParser
+            option (unLoc lhs) do
+                specialSymbol opToken
+                rhs <- parser
+                pure $ con lhs rhs
+
     -- second lowest level of precedence, 'anything but annotations'
     -- so far, this level has only right-associative dependent pairs
     -- 'depPairArg' ** 'nonAnn'
     nonAnn :: Parser' (Expr 'Parse)
-    nonAnn = located do
-        x <- depPairArg
-        option (unLoc x) do
-            specialSymbol Token.DepPair
-            y <- nonAnn
-            pure $ Sigma x y
+    nonAnn = rightAssoc Token.DepPair Sigma depPairArg
+
     -- third lowest level of precedence, something that can appear in a dependent pair
     depPairArg :: Parser' (Expr 'Parse)
-    depPairArg = located do
-        (Located loc (firstExpr, pairs)) <- located do
-            firstExpr <- noPrec
-            pairs <- many $ (,) <$> optional operator <*> noPrec
-            pure (firstExpr, pairs)
-        let expr = case pairs of
+    depPairArg = rightAssoc Token.Arrow Function infixExpr
+      where
+        -- an expression that contains infix operators with unresolved precedences
+        infixExpr = located do
+            (firstExpr, pairs) <- do
+                firstExpr <- noPrec
+                pairs <- many $ (,) <$> optional operator <*> noPrec
+                pure (firstExpr, pairs)
+            pure case pairs of
                 [] -> unLoc firstExpr
                 [(Nothing, secondExpr)] -> firstExpr `App` secondExpr
                 [(Just op, secondExpr)] -> Located (zipLocOf firstExpr op) (Located (getLoc op) (Name op) `App` firstExpr) `App` secondExpr -- todo: a separate AST node for an infix application?
                 (_ : _ : _) -> uncurry InfixE $ shift firstExpr pairs
-        option expr do
-            specialSymbol Token.Arrow
-            rhs <- depPairArg
-            pure $ Function (expr :@ loc) rhs
+        -- x [(+, y), (*, z), (+, w)] --> [(x, +), (y, *), (z, +)] w
+        shift expr [] = ([], expr)
+        shift lhs ((op, rhs) : rest) = first ((lhs, op) :) $ shift rhs rest
     -- type application precedence level
     typeApp = do
         expr <- termParens
@@ -276,9 +280,7 @@ term = located do
             specialSymbol Token.At
             termParens
         pure $ foldl' (\e app -> Located (zipLocOf e app) $ TypeApp e app) expr apps
-    -- x [(+, y), (*, z), (+, w)] --> [(x, +), (y, *), (z, +)] w
-    shift expr [] = ([], expr)
-    shift lhs ((op, rhs) : rest) = first ((lhs, op) :) $ shift rhs rest
+
     noPrec = keywordBased <|> typeApp
 
     -- expression forms that have a leading keyword/symbol
@@ -299,7 +301,7 @@ term = located do
 
 letRec :: Parser' (Expr_ Parse)
 letRec = do
-    bindings <- letBlock (block Token.Rec binding)
+    bindings <- letBlock (block Token.Rec (parseError "bindings") binding)
     case NE.nonEmpty bindings of
         Nothing -> parseError "empty let rec"
         Just bindingsNE -> LetRec bindingsNE <$> term `orError` "an expression at the end of a let rec block"
@@ -308,11 +310,11 @@ case' :: Parser' (Expr_ Parse)
 case' = do
     keyword Token.Case
     arg <- term
-    matches <- block Token.Of $ (,) <$> pattern' <* specialSymbol Token.Arrow <*> term
+    matches <- block Token.Of (parseError "pattern matches") $ (,) <$> pattern' <* specialSymbol Token.Arrow <*> term
     pure $ Case arg matches
 
 match' :: Parser' (Expr_ Parse)
-match' = Match <$> block Token.Match ((,) <$> some patternParens <* specialSymbol Token.Arrow <*> term)
+match' = Match <$> block Token.Match (parseError "pattern matches") ((,) <$> some patternParens <* specialSymbol Token.Arrow <*> term)
 
 if' :: Parser' (Expr_ Parse)
 if' = do
@@ -327,7 +329,7 @@ if' = do
 doBlock :: Parser' (Expr_ Parse)
 doBlock = do
     stmts <-
-        block Token.Do . located . choice $
+        block Token.Do (parseError "do-actions") . located . choice $
             [ Bind <$> pattern' <* specialSymbol Token.BackArrow <*> term
             , With <$ keyword Token.With <*> pattern' <* specialSymbol Token.BackArrow <*> term
             , keyword Token.Let *> fmap DoLet binding
