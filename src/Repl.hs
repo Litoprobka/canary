@@ -93,7 +93,7 @@ mkDefaultEnv = do
         resolveDependenciesSimplified' emptyEnv.fixityMap emptyEnv.operatorPriorities $ preDecls <> afterNameRes
     fixityDecls <- Fixity.resolveFixity fixityMap operatorPriorities depResOutput.declarations
     (env, types) <- runState emptyEnv.types $ TC.run emptyEnv.values do
-        env <- ask @TC.InfState
+        env <- ask @TC.Env
         foldlM addDecl env fixityDecls
     guardNoErrors
     pure $
@@ -241,7 +241,7 @@ processDecls env decls = do
         resolveDependenciesSimplified' env.fixityMap env.operatorPriorities afterNameRes
     fixityDecls <- Fixity.resolveFixity fixityMap operatorPriorities depResOutput.declarations
     (newEnv, types) <- runState env.types $ TC.run env.values do
-        tenv <- ask @TC.InfState
+        tenv <- ask @TC.Env
         foldlM addDecl tenv fixityDecls
     guardNoErrors
     pure . Just $

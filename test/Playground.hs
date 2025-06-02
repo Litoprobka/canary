@@ -48,7 +48,7 @@ import Syntax.Row
 import Syntax.Term (Erased (..), Pattern_ (..), Quantifier (..), Visibility (..))
 import Syntax.Term qualified as E
 import Syntax.Term qualified as T
-import TypeChecker (InfState)
+import TypeChecker (Env)
 import TypeChecker qualified as TC (run)
 import TypeChecker.Backend (TopLevel, Type', UniVars)
 
@@ -58,7 +58,7 @@ testCheck
     :: Eff [NameResolution.Declare, State Scope, Diagnose, NameGen] resolved
     -> ( resolved
          -> Eff
-                '[ S.Reader InfState
+                '[ S.Reader Env
                  , State UniVars
                  , State (EnumMap Skolem Common.Scope)
                  , Labeled UniVar NameGen

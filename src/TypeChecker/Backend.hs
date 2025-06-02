@@ -67,7 +67,7 @@ data Monotype_
 data MonoClosure ty = MonoClosure {var :: Name, variance :: Variance, ty :: ty, env :: ValueEnv, body :: CoreTerm}
 data Variance = In | Out | Inv
 
-data InfState = InfState -- rename to Env since that's how I refer to it anyway
+data Env = Env
     { scope :: Scope
     , values :: ValueEnv
     , locals :: EnumMap Name TypeDT
@@ -83,7 +83,7 @@ type InfEffs es =
     , State UniVars :> es
     , State (EnumMap Skolem Scope) :> es
     , State TopLevel :> es
-    , Reader InfState :> es
+    , Reader Env :> es
     , Diagnose :> es
     )
 
@@ -100,7 +100,7 @@ instance Pretty Monotype_ where
 
 run
     :: ValueEnv
-    -> Eff (Reader InfState : State UniVars : State (EnumMap Skolem Scope) : Labeled UniVar NameGen : es) a
+    -> Eff (Reader Env : State UniVars : State (EnumMap Skolem Scope) : Labeled UniVar NameGen : es) a
     -> Eff es a
 run values action =
     runLabeled @UniVar runNameGen
@@ -109,7 +109,7 @@ run values action =
         $ runReader initState action
   where
     initState =
-        InfState
+        Env
             { scope = Scope 0
             , values
             , locals = Map.empty
@@ -122,14 +122,14 @@ freshUniVar' :: InfEffs es => Eff es UniVar
 freshUniVar' = do
     -- c'mon effectful
     var <- UniVar <$> labeled @UniVar @NameGen freshId
-    scope <- asks @InfState (.scope)
+    scope <- asks @Env (.scope)
     modify @UniVars $ Map.insert var (Left scope)
     pure var
 
 freshSkolem :: InfEffs es => SimpleName -> Eff es TypeDT_
 freshSkolem name = do
     -- skolems are generally derived from type variables, so they have names
-    scope <- asks @InfState (.scope)
+    scope <- asks @Env (.scope)
     skolem <- Skolem <$> mkName name
     modify $ Map.insert skolem scope
     pure $ V.Skolem skolem
@@ -224,7 +224,7 @@ skolemScope skolem =
 lookupSig :: InfEffs es => Name -> Eff es TypeDT
 lookupSig name = do
     topLevel <- get
-    locals <- asks @InfState (.locals)
+    locals <- asks @Env (.locals)
     case (Map.lookup name topLevel, Map.lookup name locals) of
         (Just ty, _) -> pure ty
         (_, Just ty) -> pure ty
@@ -235,8 +235,8 @@ lookupSig name = do
             -- (even then, unbound names are supposed to have unique ids)
             Located (getLoc name) <$> freshUniVar
 
--- | `local` monomorphised to `InfState`
-local' :: Reader InfState :> es => (InfState -> InfState) -> Eff es a -> Eff es a
+-- | `local` monomorphised to `Env`
+local' :: Reader Env :> es => (Env -> Env) -> Eff es a -> Eff es a
 local' = local
 
 declareTopLevel :: InfEffs es => EnumMap Name Type' -> Eff es ()
@@ -245,19 +245,19 @@ declareTopLevel types = modify (types <>)
 declareTopLevel' :: InfEffs es => Name -> Type' -> Eff es ()
 declareTopLevel' name ty = modify $ Map.insert name ty
 
-declare :: Name -> TypeDT -> InfState -> InfState
+declare :: Name -> TypeDT -> Env -> Env
 declare name ty env = env{locals = LMap.insert name ty env.locals}
 
-declareMany :: EnumMap Name TypeDT -> InfState -> InfState
+declareMany :: EnumMap Name TypeDT -> Env -> Env
 declareMany typeMap env = env{locals = typeMap <> env.locals}
 
-define :: Name -> Value -> InfState -> InfState
+define :: Name -> Value -> Env -> Env
 define name val env = env{values = env.values{V.values = LMap.insert name val env.values.values}}
 
-defineMany :: EnumMap Name Value -> InfState -> InfState
+defineMany :: EnumMap Name Value -> Env -> Env
 defineMany valMap env = env{values = env.values{V.values = valMap <> env.values.values}}
 
--- defineMany :: EnumMap Name Value -> InfState -> InfState
+-- defineMany :: EnumMap Name Value -> Env -> Env
 -- defineMany vals env = env{values = env.values{V.values = vals <> env.values.values}}
 
 generalise :: InfEffs es => Eff es TypeDT -> Eff es TypeDT
@@ -265,12 +265,12 @@ generalise = fmap runIdentity . generaliseAll . fmap Identity
 
 generaliseAll :: (Traversable t, InfEffs es) => Eff es (t TypeDT) -> Eff es (t TypeDT)
 generaliseAll action = do
-    Scope n <- asks @InfState (.scope)
+    Scope n <- asks @Env (.scope)
     types <- local' (\e -> e{scope = Scope $ succ n}) action
     traverse generaliseOne types
   where
     generaliseOne ty@(Located loc _) = do
-        env <- ask @InfState
+        env <- ask @Env
         (ty', vars) <- runState Map.empty $ evalState 'a' $ go env.scope =<< V.quote ty
         let forallVars = hashNub . lefts $ toList vars
         pure $

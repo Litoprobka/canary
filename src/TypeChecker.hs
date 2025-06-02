@@ -15,7 +15,7 @@ module TypeChecker (
     checkPattern,
     subtype,
     normalise,
-    InfState (..),
+    Env (..),
     InfEffs,
     inferDeclaration,
 ) where
@@ -116,7 +116,7 @@ inferDeclaration (Located loc decl) = case decl of
 
 typeFromTerm :: InfEffs es => Type 'Fixity -> Eff es Type'
 typeFromTerm term = do
-    values <- asks @InfState (.values)
+    values <- asks @Env (.values)
     check term $ V.TyCon (TypeName :@ getLoc term) :@ getLoc term
     Located (getLoc term) <$> V.eval values term
 
@@ -130,12 +130,12 @@ subtype (lhs_ :@ locL) (rhs_ :@ locR) = join $ match <$> monoLayer' In lhs_ <*> 
         lhs (V.UniVar uni) -> solveOr (Located locL <$> mono' In lhs) (subtype (lhs :@ locL) . unMono) uni
         (V.UniVar uni) rhs -> solveOr (Located locR <$> mono' Out rhs) ((`subtype` (rhs :@ locR)) . unMono) uni
         lhs rhs@(V.Skolem skolem) -> do
-            skolems <- asks @InfState ((.skolems) . (.values))
+            skolems <- asks @Env ((.skolems) . (.values))
             case LMap.lookup skolem skolems of
                 Nothing -> typeError $ NotASubtype (lhs :@ locL) (rhs :@ locR) Nothing
                 Just skolemTy -> subtype (lhs :@ locL) (skolemTy :@ locR)
         lhs@(V.Skolem skolem) rhs -> do
-            skolems <- asks @InfState ((.skolems) . (.values))
+            skolems <- asks @Env ((.skolems) . (.values))
             case LMap.lookup skolem skolems of
                 Nothing -> typeError $ NotASubtype (lhs :@ locL) (rhs :@ locR) Nothing
                 Just skolemTy -> subtype (skolemTy :@ locL) (rhs :@ locR)
@@ -240,13 +240,13 @@ check (e :@ loc) (typeToCheck :@ tyLoc) = match e typeToCheck
             for_ matches \(pat, body) -> do
                 typeMap <- checkPatternRelaxed pat argTy
                 local' (declareMany typeMap) do
-                    env <- ask @InfState
+                    env <- ask @Env
                     newValues <- execState env.values do
                         patValue <- skolemizePattern pat
                         truePatTy <- snd <$> inferPattern pat
                         localEquality (unLoc argTy) (unLoc truePatTy)
                         traverse_ (`localEquality` patValue) (mbArgV env)
-                    local' (\infState -> infState{values = newValues}) do
+                    local' (\tcenv -> tcenv{values = newValues}) do
                         check_ body ty
           where
             -- a special case for matching on a var seems janky, but apparently that's how Idris does this
@@ -301,7 +301,7 @@ check (e :@ loc) (typeToCheck :@ tyLoc) = match e typeToCheck
                         Right _ -> pass
         (Sigma x y) (V.Q Exists Visible _e closure) -> do
             check_ x closure.ty
-            env <- asks @InfState (.values)
+            env <- asks @Env (.values)
             -- I'm not sure 'V.eval' does the right thing here
             -- we should skolemize the unbound variables rather than failing
             xVal <- V.eval env x
@@ -474,7 +474,7 @@ infer (Located loc e) = case e of
         xName <- freshName_ $ Name' "x"
         xTy <- infer x
         yTy <- V.quote =<< infer y
-        env <- asks @InfState (.values)
+        env <- asks @Env (.values)
         pure $ Located loc $ V.Q Exists Visible Retained V.Closure{var = xName :@ loc, ty = unLoc xTy, env, body = yTy}
     RecordLens fields -> do
         recordParts <- for fields \field -> do
@@ -525,7 +525,7 @@ inferApp appLoc (fTy :@ fLoc) arg = do
             from <- infer arg
             to <- freshUniVar
             var <- freshName $ Located fLoc $ Name' "x"
-            values <- asks @InfState (.values)
+            values <- asks @Env (.values)
             body <- V.quote (to :@ fLoc)
             let closure = V.Closure{var, env = values, ty = unLoc from, body}
             to :@ fLoc <$ subtype (V.UniVar uni :@ fLoc) (V.Q Forall Visible Retained closure :@ fLoc)
@@ -533,7 +533,7 @@ inferApp appLoc (fTy :@ fLoc) arg = do
             to :@ fLoc <$ check arg (from :@ fLoc)
         -- todo: special case for erased args
         V.Q Forall Visible _e closure -> do
-            values <- asks @InfState (.values)
+            values <- asks @Env (.values)
             argV <- V.eval values arg
             V.app closure argV :@ fLoc <$ check arg (closure.ty :@ fLoc)
         _ -> typeError $ NotAFunction appLoc (fTy :@ fLoc)
@@ -543,7 +543,7 @@ inferTyApp expr (ty :@ tyLoc) tyArg = case ty of
     V.Q Forall Implicit _e closure -> do
         check tyArg $ closure.ty :@ getLoc expr
         Subst{var, result} <- substitute' In closure
-        values <- asks @InfState (.values)
+        values <- asks @Env (.values)
         tyArgV <- V.eval values tyArg
         subtype (var :@ tyLoc) $ tyArgV :@ getLoc tyArg
         pure $ result :@ getLoc expr
@@ -691,7 +691,7 @@ normaliseAll = generaliseAll >=> traverse (eval' <=< go <=< V.quote)
   where
     eval' :: InfEffs es => CoreTerm -> Eff es Type'
     eval' term = do
-        values <- asks @InfState (.values)
+        values <- asks @Env (.values)
         pure $ V.evalCore values term :@ getLoc term
     go :: InfEffs es => CoreTerm -> Eff es CoreTerm
     go (term :@ loc) =
