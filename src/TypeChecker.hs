@@ -353,6 +353,7 @@ To perform the refinement, we have to
 
 -- an implementation of depedendent pattern matching, pretty much
 -- invariant: two arguments are pattern-matching-compatible
+-- todo: seems like localEquality should require monotypes. When do we skolemise, do we do it by layer or all at once?
 localEquality :: InfEffs es => V.Value -> V.Value -> Eff (State ValueEnv : es) ()
 localEquality argVal patVal = do
     venv <- get

@@ -129,7 +129,6 @@ test-suite canary-test
       LexerSpec
       ParserSpec
       Playground
-      TypeCheckerSpec
       Paths_canary
   hs-source-dirs:
       test

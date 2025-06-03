@@ -21,7 +21,7 @@ data Token
     | BlockStart BlockKeyword
     | BlockEnd
     | SpecialSymbol SpecialSymbol
-    | Op Text
+    | Op Text -- todo: separate 'Uppercase' operators that start with a colon, ala Haskell
     | Literal Literal_
     | LParen
     | RParen

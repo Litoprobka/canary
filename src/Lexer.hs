@@ -93,6 +93,15 @@ termName = parens operator <|> lowerName
 upperName :: Parser e SimpleName
 upperName = mkName $(tok 'UpperName)
 
+-- do we even need the upper/lower distinction at lexer level?
+identifier :: Parser e SimpleName
+identifier =
+    parens operator <|> mkName do
+        P.anyToken >>= \case
+            L (UpperName name) -> pure name
+            L (LowerName name) -> pure name
+            _ -> P.failed
+
 -- | an identifier that starts with a ' and an uppercase letter, i.e. 'Some
 variantConstructor :: Parser e SimpleName
 variantConstructor = mkName $(tok 'VariantName)

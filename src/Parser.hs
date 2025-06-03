@@ -78,7 +78,7 @@ declaration = located $ choice [typeDec, fixityDec, signature, valueDec]
 
     typeDec = do
         keyword Token.Type
-        name <- upperName `orError` "a type name"
+        name <- identifier `orError` "a type name"
         gadtDec name <|> simpleTypeDec name
 
     simpleTypeDec name = do
@@ -103,7 +103,7 @@ declaration = located $ choice [typeDec, fixityDec, signature, valueDec]
         pure \loc -> D.Constructor loc name args
 
     signature = do
-        name <- termName <* specialSymbol Token.Colon
+        name <- identifier <* specialSymbol Token.Colon
         D.Signature name <$> term
 
     fixityDec = do
@@ -129,12 +129,11 @@ declaration = located $ choice [typeDec, fixityDec, signature, valueDec]
 
 varBinder :: Parser' (VarBinder 'Parse)
 varBinder =
-    parens (VarBinder <$> termName <* specialSymbol Token.Colon <*> fmap Just term)
+    parens (VarBinder <$> var <* specialSymbol Token.Colon <*> fmap Just term)
         <|> flip VarBinder Nothing
-            <$> (termName <|> mkName $(tok 'Token.ImplicitName))
-
-typeVariable :: Parser' (Type_ 'Parse)
-typeVariable = Name <$> termName <|> ImplicitVar <$> mkName $(tok 'Token.ImplicitName)
+            <$> var
+  where
+    var = identifier <|> mkName $(tok 'Token.ImplicitName)
 
 someRecord :: SpecialSymbol -> Parser' value -> Maybe (SimpleName -> value) -> Parser' (ExtRow value)
 someRecord delim valueP missingValue = braces do
@@ -147,7 +146,7 @@ someRecord delim valueP missingValue = braces do
         Nothing -> id
         Just nameToValue -> option (nameToValue name)
     recordItem = do
-        recordLabel <- termName
+        recordLabel <- identifier
         valuePattern <- onMissing recordLabel $ specialSymbol delim *> valueP
         pure (recordLabel, valuePattern)
 
@@ -229,7 +228,7 @@ binding = do
   where
     -- we might want to support infix operator declarations in the future
     -- > f $ x = f x
-    funcName = termName
+    funcName = identifier
 
 -- an expression with infix operators and unresolved priorities
 -- the `E.Infix` constructor is only used when there is more than one operator
@@ -359,12 +358,12 @@ termParens =
             , try $ Name <$> parens operator
             , parens $ unLoc <$> term
             , -- , RecordLens <$> _recordLens
-              constructor
-            , Variant <$> variantConstructor
+              -- , tightConstructor
+              Variant <$> variantConstructor
             , Literal <$> literal
-            , Name <$> termName
+            , Name <$> identifier
+            , ImplicitVar <$> mkName $(tok 'Token.ImplicitName)
             , parens $ unLoc <$> term
-            , typeVariable
             ]
   where
     variantItem = do
@@ -378,9 +377,13 @@ termParens =
         VariantT <$> option (NoExtRow items) do
             specialSymbol Token.Bar
             ExtRow items <$> term
-    -- todo: tight record binding
-    constructor = do
-        name <- upperName
-        optional (located record) <&> \case
-            Nothing -> Name name
-            Just arg -> Located (getLoc name) (Name name) `App` arg
+
+-- todo: tight record binding
+{-
+tightConstructor = do
+    name <- upperName
+    -- somehow check for no whitespace between the name and the record
+    optional (located record) <&> \case
+        Nothing -> Name name
+        Just arg -> Located (getLoc name) (Name name) `App` arg
+-}
