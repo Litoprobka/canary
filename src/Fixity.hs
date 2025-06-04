@@ -4,7 +4,7 @@
 
 module Fixity (resolveFixity, run, parse, Fixity (..)) where
 
-import Common (Fixity (..), Loc (..), Located (..), Pass (..), getLoc, mkNotes, zipLocOf, pattern L)
+import Common (Fixity (..), Loc (..), Located (..), Name, Pass (..), getLoc, mkNotes, unLoc, zipLocOf, pattern L, pattern (:@))
 import Control.Monad (foldM)
 import Data.EnumMap.Strict qualified as Map
 import Data.List.NonEmpty qualified as NE
@@ -62,6 +62,7 @@ lookupFixity :: Op -> FixityMap -> Fixity
 lookupFixity = Map.findWithDefault Infix
 
 {- | figure out which of the two operators has a higher priority
+
 throws an error on incompatible fixities
 -}
 priority :: Ctx es => Op -> Op -> Eff es Priority
@@ -141,7 +142,7 @@ parse = traverse \case
     RecordT row -> RecordT <$> traverse parse row
   where
     go' :: Ctx es => [(Expr 'Fixity, Op)] -> Expr 'Fixity -> Eff es (Expr_ 'Fixity)
-    go' pairs last' = go [] pairs <&> \(L e) -> e
+    go' pairs last' = go [] pairs <&> unLoc
       where
         go :: Ctx es => [(Expr 'Fixity, Op)] -> [(Expr 'Fixity, Op)] -> Eff es (Expr 'Fixity)
         go [] [] = pure last'
@@ -190,6 +191,37 @@ parsePattern = traverse \case
     RecordP row -> RecordP <$> traverse parsePattern row
     ListP pats -> ListP <$> traverse parsePattern pats
     LiteralP lit -> pure $ LiteralP lit
+    InfixP pairs l -> do
+        pairs' <- traverse (bitraverse parsePattern pure) pairs
+        l' <- parsePattern l
+        go' pairs' l'
+  where
+    go' :: Ctx es => [(Pattern 'Fixity, Name)] -> Pattern 'Fixity -> Eff es (Pattern_ 'Fixity)
+    go' pairs last' = go [] pairs <&> unLoc
+      where
+        go :: Ctx es => [(Pattern 'Fixity, Name)] -> [(Pattern 'Fixity, Name)] -> Eff es (Pattern 'Fixity)
+        go [] [] = pure last'
+        go ((x, op) : rest) [] =
+            pure
+                let last'' = conP op x last'
+                 in foldl' (\acc (z, op') -> conP op' z acc) last'' rest
+        go [] ((x, op) : rest) = go [(x, op)] rest
+        go ((x, prev) : stack) ((y, next) : rest) = do
+            newStack <- pop (y, next) ((x, prev) :| stack)
+            go newStack rest
+
+    conP :: Name -> Pattern 'Fixity -> Pattern 'Fixity -> Pattern 'Fixity
+    conP conOp lhs rhs = ConstructorP conOp [lhs, rhs] :@ zipLocOf lhs rhs
+
+    pop :: Ctx es => (Pattern 'Fixity, Name) -> NonEmpty (Pattern 'Fixity, Name) -> Eff es [(Pattern 'Fixity, Name)]
+    pop (y, next) ((x, prev) :| stack) =
+        priority (Op prev) (Op next) >>= \case
+            Right' -> pure ((y, next) : (x, prev) : stack)
+            Left' -> do
+                let newX = conP prev x y
+                case NE.nonEmpty stack of
+                    Nothing -> pure [(newX, next)]
+                    Just stack' -> pop (newX, next) stack'
 
 parseBinding :: Ctx es => Binding 'DependencyRes -> Eff es (Binding 'Fixity)
 parseBinding = \case

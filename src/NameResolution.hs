@@ -130,9 +130,9 @@ resolveNames :: (NameResCtx es, Declare :> es) => [Declaration 'Parse] -> Eff es
 resolveNames decls = do
     mkGlobalScope
     let (valueDecls, rest) = partition isValueDecl decls
-    valueDecls' <- traverse resolveDec rest
-    otherDecls <- traverse resolveDec valueDecls
-    pure $ valueDecls' <> otherDecls
+    otherDecls <- traverse resolveDec rest
+    valueDecls' <- traverse resolveDec valueDecls
+    pure $ otherDecls <> valueDecls'
   where
     -- this is going to handle imports at some point
     mkGlobalScope :: (NameResCtx es, Declare :> es) => Eff es ()
@@ -227,6 +227,7 @@ resolvePat = traverse \case
     ListP pats -> ListP <$> traverse resolvePat pats
     WildcardP name -> pure $ WildcardP name
     LiteralP lit -> pure $ LiteralP lit
+    InfixP pairs last' -> InfixP <$> traverse (bitraverse resolvePat resolve) pairs <*> resolvePat last'
 
 -- | resolves names in a pattern. Adds all new names to the current scope
 declarePat :: (NameResCtx es, Declare :> es) => Pattern 'Parse -> Eff es (Pattern 'NameRes)
@@ -239,6 +240,7 @@ declarePat = traverse \case
     ListP pats -> ListP <$> traverse declarePat pats
     WildcardP name -> pure $ WildcardP name
     LiteralP lit -> pure $ LiteralP lit
+    InfixP pairs last' -> InfixP <$> traverse (bitraverse declarePat resolve) pairs <*> declarePat last'
 
 -- | resolves names in a term. Doesn't change the current scope
 resolveTerm :: NameResCtx es => Term 'Parse -> Eff es (Term 'NameRes)

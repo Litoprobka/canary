@@ -113,6 +113,8 @@ data Pattern_ (p :: Pass)
     | RecordP (Row (Pattern p))
     | ListP [Pattern p]
     | LiteralP Literal
+    | -- infix constructors cannot have a higher-than-pattern precedence
+      p < 'Fixity => InfixP [(Pattern p, NameAt p)] (Pattern p)
 
 deriving instance Eq (Pattern_ 'DuringTypecheck)
 deriving instance Eq (Pattern_ 'Parse)
@@ -231,6 +233,7 @@ instance Pretty (NameAt pass) => Pretty (Pattern_ pass) where
             RecordP row -> braces . sep . punctuate comma . map recordField $ sortedRow row
             ListP items -> brackets . sep $ map pretty items
             LiteralP lit -> pretty lit
+            InfixP pairs last' -> "?(" <> sep (concatMap (\(lhs, op) -> go 3 lhs : (pure . pretty) op) pairs <> [pretty last']) <> ")"
           where
             parensWhen minPrec
                 | n >= minPrec = parens
@@ -240,12 +243,16 @@ instance Pretty (NameAt pass) => Pretty (Pattern_ pass) where
 
 class FixityAgrees (p :: Pass) (q :: Pass) where
     castInfix :: p < 'Fixity => [(Expr q, Maybe (NameAt q))] -> Expr q -> Expr_ q
+    castInfixP :: p < 'Fixity => [(Pattern q, NameAt q)] -> Pattern q -> Pattern_ q
 instance {-# OVERLAPPABLE #-} q < 'Fixity => FixityAgrees p q where
     castInfix = InfixE
+    castInfixP = InfixP
 instance FixityAgrees 'Fixity q where
     castInfix = error "unsatisfiable"
+    castInfixP = error "unsatisfiable"
 instance FixityAgrees 'DuringTypecheck q where
     castInfix = error "unsatisfiable"
+    castInfixP = error "unsatisfiable"
 
 class TcAgrees (p :: Pass) (q :: Pass) where
     castUni :: p ~ 'DuringTypecheck => UniVar -> Type_ q
@@ -310,7 +317,7 @@ instance (Cast Expr_ p q, Cast Pattern_ p q, Cast Binding p q) => Cast DoStateme
 instance (NameAt p ~ NameAt q, Cast Term_ p q) => Cast VarBinder p q where
     cast VarBinder{var, kind} = VarBinder{var, kind = (fmap . fmap) cast kind}
 
-instance (NameAt p ~ NameAt q, Cast Term_ p q) => Cast Pattern_ p q where
+instance (NameAt p ~ NameAt q, FixityAgrees p q, Cast Term_ p q) => Cast Pattern_ p q where
     cast = \case
         VarP name -> VarP name
         WildcardP name -> WildcardP name
@@ -320,6 +327,7 @@ instance (NameAt p ~ NameAt q, Cast Term_ p q) => Cast Pattern_ p q where
         RecordP row -> RecordP ((fmap . fmap) cast row)
         ListP pats -> ListP ((fmap . fmap) cast pats)
         LiteralP lit -> LiteralP lit
+        InfixP pairs l -> castInfixP @p (fmap (first (fmap cast)) pairs) (fmap cast l)
 
 -- one place where recursion schemes would come in handy
 --
@@ -370,6 +378,7 @@ collectNamesInPat (L p) = case p of
     ListP pats -> foldMap collectNamesInPat pats
     RecordP row -> foldMap collectNamesInPat $ toList row
     LiteralP _ -> []
+    InfixP pairs l -> foldMap (collectNamesInPat . fst) pairs <> collectNamesInPat l
 
 collectReferencedNamesInPat :: Pattern p -> [NameAt p]
 collectReferencedNamesInPat = go
@@ -383,6 +392,7 @@ collectReferencedNamesInPat = go
         ListP pats -> foldMap go pats
         RecordP row -> foldMap go $ toList row
         LiteralP _ -> []
+        InfixP pairs l -> foldMap (\(pat, conOp) -> go pat <> [conOp]) pairs <> go l
 
 collectNamesInBinding :: Binding p -> [NameAt p]
 collectNamesInBinding = \case

@@ -185,15 +185,28 @@ quantifier = withLoc do
 
 pattern' :: Parser' (Pattern 'Parse)
 pattern' = located do
-    pat <-
+    pat <- infixPattern
+    option (unLoc pat) do
+        specialSymbol Token.Colon
+        AnnotationP pat <$> term
+  where
+    infixPattern = located do
+        firstPat <- nonOpPattern
+        pairs <- many $ (,) <$> colonOperator <*> nonOpPattern
+        pure case pairs of
+            [] -> unLoc firstPat
+            [(op, secondPat)] -> ConstructorP op [firstPat, secondPat]
+            (_ : _ : _) -> uncurry InfixP $ shift firstPat pairs
+    -- x [(+, y), (*, z), (+, w)] --> [(x, +), (y, *), (z, +)] w
+    shift expr [] = ([], expr)
+    shift lhs ((op, rhs) : rest) = first ((lhs, op) :) $ shift rhs rest
+
+    nonOpPattern =
         choice
             [ located $ ConstructorP <$> upperName <*> many patternParens
             , located $ VariantP <$> variantConstructor <*> patternParens
             , patternParens
             ]
-    option (unLoc pat) do
-        specialSymbol Token.Colon
-        AnnotationP pat <$> term
 
 {- | parses a pattern with constructors enclosed in parens
 should be used in cases where multiple patterns in a row are accepted, i.e.
@@ -258,10 +271,8 @@ term = rightAssoc Token.Colon Annotation nonAnn
       where
         -- an expression that contains infix operators with unresolved precedences
         infixExpr = located do
-            (firstExpr, pairs) <- do
-                firstExpr <- noPrec
-                pairs <- many $ (,) <$> optional anyOperator <*> noPrec
-                pure (firstExpr, pairs)
+            firstExpr <- noPrec
+            pairs <- many $ (,) <$> optional anyOperator <*> noPrec
             pure case pairs of
                 [] -> unLoc firstExpr
                 [(Nothing, secondExpr)] -> firstExpr `App` secondExpr
