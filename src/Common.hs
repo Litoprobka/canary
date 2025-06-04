@@ -38,8 +38,10 @@ module Common (
     pattern L,
     unLoc,
     pattern (:@),
+    isInfixConstructor,
 ) where
 
+import Data.Text qualified as Text
 import Data.Type.Bool (type (||))
 import Data.Type.Ord (Compare, type (>?))
 import Error.Diagnose (Position (..))
@@ -191,6 +193,11 @@ instance Pretty a => Pretty (Located a) where
 instance Pretty SimpleName_ where
     pretty (Name' name) = pretty name
     pretty (Wildcard' n) = "_" <> pretty n
+
+-- | does the name belong to an infix constructor?
+isInfixConstructor :: Name -> Bool
+isInfixConstructor (L (Name name _)) = Text.head name == ':'
+isInfixConstructor _ = False
 
 -- univars use a different range of ids, so it's not clear whether they should use the same Id newtype
 newtype UniVar = UniVar Id

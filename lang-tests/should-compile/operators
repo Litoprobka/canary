@@ -1,5 +1,5 @@
-infix left |> above <|
 infix right <| below <<
+infix left |> above <|
 
 (<|) : forall a b. (a -> b) -> a -> b
 (<|) f x = f x
@@ -15,3 +15,6 @@ infix left >> above |>, <|
 infix right << above |>, <|
 
 thrice f = f >> f >> f
+
+compose : forall a b c. (a -> b) -> (b -> c) -> a -> c
+compose f g x = g <| f <| x

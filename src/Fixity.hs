@@ -76,7 +76,7 @@ priority prev next = do
         _ | prev == next && prevFixity == InfixChain -> pure Left'
         Poset.DefinedOrder EQ -> case (prevFixity, nextFixity) of
             (InfixL, InfixL) -> pure Left'
-            (InfixR, InfixR) -> pure Left'
+            (InfixR, InfixR) -> pure Right'
             _ -> opError $ IncompatibleFixity prev next
         Poset.DefinedOrder GT -> pure Left'
         Poset.DefinedOrder LT -> pure Right'
@@ -170,6 +170,8 @@ parse = traverse \case
         let loc = zipLocOf lhs rhs
         pure $ Located loc case (mbOp, fixity, lhs) of
             (AppOp, _, _) -> App lhs rhs
+            -- todo: InfixChain applications should use a special AST node, otherwise
+            -- stuff like `(==) [a, b] == c` gets incorrectly parsed as `(==) [a, b, c]`
             (Op op, InfixChain, L (App (Located nloc (Name op')) (L (List args))))
                 | op == op' ->
                     App (Located nloc $ Name op') (Located loc $ List $ args <> [rhs])

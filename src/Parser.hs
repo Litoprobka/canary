@@ -68,7 +68,7 @@ parseModule :: Diagnose :> es => (FilePath, ByteString) -> Eff es [Declaration '
 parseModule input = run input code
 
 code :: Parser' [Declaration 'Parse]
-code = topLevelBlock declaration
+code = topLevelBlock declaration <* eof
 
 declaration :: Parser' (Declaration 'Parse)
 declaration = located $ choice [typeDec, fixityDec, signature, valueDec]

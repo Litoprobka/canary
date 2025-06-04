@@ -4,6 +4,7 @@
 module DependencyResolution where
 
 import Common
+import Data.EnumMap.Strict qualified as Map
 import Diagnostic (Diagnose, fatal, nonFatal)
 import Effectful.State.Static.Local
 import Effectful.Writer.Static.Local (Writer, runWriter)
@@ -14,7 +15,6 @@ import Poset qualified
 import Prettyprinter (comma, hsep, punctuate)
 import Syntax
 import Syntax.Declaration qualified as D
-import qualified Data.EnumMap.Strict as Map
 
 -- once we've done name resolution, all sorts of useful information may be collected into tables
 -- this pass gets rid of the old [Declaration] shape of the AST and transforms it into something more structured
@@ -140,7 +140,11 @@ resolveDependenciesSimplified' initFixity initPoset = fmap packOutput . runState
     go :: Declaration 'NameRes -> Eff (State (Poset Op) : State FixityMap : es) (Maybe (Declaration 'DependencyRes))
     go (Located loc decl) = fmap (fmap $ Located loc) case decl of
         D.Fixity fixity op rels -> do
-            modify @FixityMap $ Map.insert (Op op) fixity
+            fixity' <-
+                if isInfixConstructor op && fixity == InfixChain
+                    then Infix <$ colonOpChainfixWarning op
+                    else pure fixity
+            modify @FixityMap $ Map.insert (Op op) fixity'
             modifyM @(Poset Op) $ updatePrecedence loc op rels
             pure Nothing
         D.Value binding locals -> Just . D.Value (cast binding) <$> mapMaybeM go locals
@@ -182,6 +186,16 @@ danglingSigError ty =
             "Signature lacks an accompanying binding"
             (mkNotes [(getLoc ty, This "this")])
             []
+
+colonOpChainfixWarning :: Diagnose :> es => Name -> Eff es ()
+colonOpChainfixWarning op =
+    nonFatal
+        ( Warn
+            Nothing
+            "infix constructors cannot be chainfix, defaulting to non-associative"
+            (mkNotes [(getLoc op, This "in this fixity declaration")])
+            []
+        )
 
 cycleWarning :: Diagnose :> es => Loc -> [Op] -> [Op] -> Eff es ()
 cycleWarning loc ops ops2 =

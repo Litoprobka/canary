@@ -179,7 +179,7 @@ app = foldl' App
 
 run :: ReplCtx es => ReplEnv -> Eff es ()
 run env = do
-    input <- liftIO $ fromString <$> readlineEx ">>" (Just $ completer env) Nothing
+    input <- liftIO $ fromString <$> readlineEx "λ" (Just $ completer env) Nothing
     let inputBS = Text.encodeUtf8 input
     newEnv <- localDiagnose env ("<interactive>", input) do
         cmd <- case parseCommand inputBS of
