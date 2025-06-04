@@ -10,7 +10,8 @@ import Data.EnumMap.Strict qualified as Map
 import Data.List.NonEmpty qualified as NE
 import Data.Traversable (for)
 import DependencyResolution (FixityMap, Op (..))
-import Diagnostic (Diagnose, fatal, internalError')
+import Diagnostic (Diagnose, fatal)
+import Effectful.Error.Static (runErrorNoCallStackWith)
 import Effectful.Reader.Static (Reader, ask, runReader)
 import Error.Diagnose (Marker (This), Position (..), Report (..))
 import LangPrelude hiding (cycle)
@@ -57,10 +58,8 @@ opError =
         AppOp -> Loc Position{file = "<builtin>", begin = (0, 0), end = (0, 0)}
         Op op -> getLoc op
 
-lookup' :: (Diagnose :> es, Enum k, Pretty k) => k -> EnumMap k v -> Eff es v
-lookup' key emap = case Map.lookup key emap of
-    Nothing -> internalError' $ "missing operator" <+> pretty key
-    Just v -> pure v
+lookupFixity :: Op -> FixityMap -> Fixity
+lookupFixity = Map.findWithDefault Infix
 
 {- | figure out which of the two operators has a higher priority
 throws an error on incompatible fixities
@@ -69,9 +68,9 @@ priority :: Ctx es => Op -> Op -> Eff es Priority
 priority prev next = do
     poset <- ask @(Poset Op)
     fixities <- ask @FixityMap
-    prevFixity <- lookup' prev fixities
-    nextFixity <- lookup' next fixities
-    order <- Poset.reportError $ Poset.relation prev next poset
+    let prevFixity = lookupFixity prev fixities
+        nextFixity = lookupFixity next fixities
+    order <- runErrorNoCallStackWith @Poset.PosetError (const $ pure defaultRelation) $ Poset.relation prev next poset
     case order of
         _ | prev == next && prevFixity == InfixChain -> pure Left'
         Poset.DefinedOrder EQ -> case (prevFixity, nextFixity) of
@@ -84,6 +83,13 @@ priority prev next = do
         -- instead, relations where A > B and B > A are considered borked and are treated as if A and B are not comparable
         Poset.NoOrder -> opError $ UndefinedOrdering prev next
         Poset.AmbiguousOrder -> opError $ AmbiguousOrdering prev next
+  where
+    -- a relation that's used when one of the operators lacks a fixity declaration
+    defaultRelation = case (prev, next) of
+        (AppOp, Op _) -> Poset.DefinedOrder GT
+        (Op _, AppOp) -> Poset.DefinedOrder LT
+        (Op _, Op _) -> Poset.NoOrder
+        (AppOp, AppOp) -> Poset.DefinedOrder GT -- this shouldn't normally happen
 
 run :: FixityMap -> Poset Op -> Eff (Reader (Poset Op) : Reader FixityMap : es) a -> Eff es a
 run fixityMap poset = runReader fixityMap . runReader poset
@@ -159,7 +165,7 @@ parse = traverse \case
 
     appOrMerge :: Ctx es => Op -> Expr 'Fixity -> Expr 'Fixity -> Eff es (Expr 'Fixity)
     appOrMerge mbOp lhs rhs = do
-        fixity <- lookup' mbOp =<< ask @FixityMap
+        fixity <- lookupFixity mbOp <$> ask @FixityMap
         let loc = zipLocOf lhs rhs
         pure $ Located loc case (mbOp, fixity, lhs) of
             (AppOp, _, _) -> App lhs rhs

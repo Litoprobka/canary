@@ -58,7 +58,7 @@ newline = token Semicolon <|> token Newline
 -- | parses a contextual keyword - that is, an identifier that behaves as a keyword in some cases
 ctxKeyword :: Text -> Parser e ()
 ctxKeyword kw = do
-    L (Name' text) <- lowerName <|> upperName
+    L (Name' text) <- identifier
     guard $ text == kw
 
 {- | parse an indented block, starting with the given block keyword
@@ -81,22 +81,18 @@ letBlock p = do
 topLevelBlock :: Parser e p -> Parser e [p]
 topLevelBlock p = p `sepEndBy` newline
 
--- | an identifier that doesn't start with an uppercase letter
-lowerName :: Parser e SimpleName
-lowerName = mkName $(tok 'LowerName)
-
--- | an identifier that doesn't start with an uppercase letter or a parenthesised operator
+-- | an identifier that doesn't start with an uppercase letter or a parenthesised operator that doesn't start with a colon
 termName :: Parser e SimpleName
-termName = parens operator <|> lowerName
+termName = parens termOperator <|> mkName $(tok 'LowerName)
 
--- | an identifier that starts with an uppercase letter
+-- | an identifier that starts with an uppercase letter or a parenthesized operator that starts with a colon
 upperName :: Parser e SimpleName
-upperName = mkName $(tok 'UpperName)
+upperName = parens colonOperator <|> mkName $(tok 'UpperName)
 
 -- do we even need the upper/lower distinction at lexer level?
 identifier :: Parser e SimpleName
 identifier =
-    parens operator <|> mkName do
+    parens anyOperator <|> mkName do
         P.anyToken >>= \case
             L (UpperName name) -> pure name
             L (LowerName name) -> pure name
@@ -109,8 +105,14 @@ variantConstructor = mkName $(tok 'VariantName)
 literal :: Parser e C.Literal
 literal = located $(tok 'Literal)
 
-operator :: Parser e SimpleName
-operator = mkName $(tok 'Op)
+anyOperator :: Parser e SimpleName
+anyOperator = termOperator <|> colonOperator
+
+termOperator :: Parser e SimpleName
+termOperator = mkName $(tok 'Op)
+
+colonOperator :: Parser e SimpleName
+colonOperator = mkName $(tok 'ColonOp)
 
 {- todo: it might be a good idea to ignore strict newlines when inside the brackets
 i.e. that would allow
@@ -269,7 +271,12 @@ quotedIdent = do
         _ -> ImplicitName ident
 
 operator' :: Lexer Token
-operator' = Op . Text.pack <$> some (satisfy isOperatorChar)
+operator' = do
+    opStr <- some (satisfy isOperatorChar)
+    let op = Text.pack opStr
+    pure case listToMaybe opStr of
+        Just ':' -> ColonOp op
+        _ -> Op op
 
 -- | a newline with the same column offset as the current block
 exactNewline :: Lexer Token

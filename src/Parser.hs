@@ -115,16 +115,16 @@ declaration = located $ choice [typeDec, fixityDec, signature, valueDec]
                 , InfixChain <$ ctxKeyword "chain"
                 , pure Infix
                 ]
-        op <- operator `orError` "name of the operator"
+        op <- anyOperator `orError` "name of the operator"
         above <- option [] do
             ctxKeyword "above"
-            commaSep (Just <$> operator <|> Nothing <$ ctxKeyword "application")
+            commaSep (Just <$> anyOperator <|> Nothing <$ ctxKeyword "application")
         below <- option [] do
             ctxKeyword "below"
-            commaSep operator
+            commaSep anyOperator
         equal <- option [] do
             ctxKeyword "equals"
-            commaSep operator
+            commaSep anyOperator
         pure $ D.Fixity fixity op PriorityRelation{above, below, equal}
 
 varBinder :: Parser' (VarBinder 'Parse)
@@ -260,7 +260,7 @@ term = rightAssoc Token.Colon Annotation nonAnn
         infixExpr = located do
             (firstExpr, pairs) <- do
                 firstExpr <- noPrec
-                pairs <- many $ (,) <$> optional operator <*> noPrec
+                pairs <- many $ (,) <$> optional anyOperator <*> noPrec
                 pure (firstExpr, pairs)
             pure case pairs of
                 [] -> unLoc firstExpr
@@ -355,8 +355,6 @@ termParens =
             , -- todo: since annotation expressions are a thing, variantType is pretty much always ambiguous
               -- perhaps it should require a trailing |?
               variantType
-            , try $ Name <$> parens operator
-            , parens $ unLoc <$> term
             , -- , RecordLens <$> _recordLens
               -- , tightConstructor
               Variant <$> variantConstructor

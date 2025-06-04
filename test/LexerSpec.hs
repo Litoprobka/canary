@@ -32,8 +32,20 @@ spec = do
         it "literals" do
             testLexer "123 'a' \"huh\"" `shouldLex` Literal <$> [IntLiteral 123, CharLiteral "a", TextLiteral "huh"]
         it "operators" do
-            testLexer "|> <| + - %% a>b>c"
-                `shouldLex` [Op "|>", Op "<|", Op "+", Op "-", Op "%%", LowerName "a", Op ">", LowerName "b", Op ">", LowerName "c"]
+            testLexer "|> <| + - %% a>b>c :: :+"
+                `shouldLex` [ Op "|>"
+                            , Op "<|"
+                            , Op "+"
+                            , Op "-"
+                            , Op "%%"
+                            , LowerName "a"
+                            , Op ">"
+                            , LowerName "b"
+                            , Op ">"
+                            , LowerName "c"
+                            , ColonOp "::"
+                            , ColonOp ":+"
+                            ]
         it "comment" do
             testLexer
                 [text|
