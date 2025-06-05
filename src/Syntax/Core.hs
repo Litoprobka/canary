@@ -61,8 +61,8 @@ instance Pretty CoreTerm_ where
         go n (L term) = case term of
             Name name -> pretty name
             TyCon name -> pretty name
-            Con (L ConsName) [x, xs] | Just output <- prettyConsNil xs -> parens $ pretty x <> "," <+> output
-            -- -> "[" <> pretty x <> prettyConsNil xs <> "]"
+            Con (L ConsName) [x, L (Con (L NilName) [])] -> brackets $ pretty x
+            Con (L ConsName) [x, xs] | Just output <- prettyConsNil xs -> brackets $ pretty x <> output
             Con (L NilName) [] -> "[]"
             Con name [] -> pretty name
             Con name args -> parensWhen 3 $ hsep (pretty name : map (go 3) args)
