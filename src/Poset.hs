@@ -4,12 +4,13 @@
 
 module Poset where
 
-import Data.EnumMap qualified as Map
+import Data.EnumMap.Strict qualified as EMap
 import Data.EnumSet qualified as Set
 import Data.Sequence qualified as Seq
 import Diagnostic (Diagnose, internalError')
 import Effectful.Error.Static (Error, runErrorNoCallStack, throwError_)
 import Effectful.Writer.Static.Local (Writer, tell)
+import IdMap qualified as Map
 import LangPrelude hiding (cycle)
 import Relude.Extra (traverseToSnd)
 
@@ -28,7 +29,7 @@ type CycleErrors a es = Error (Cycle a) :> es
 
 data Poset a = Poset
     { nextClass :: EqClass a
-    , classes :: EnumMap a (EqClass a) -- name-to-enum conversion is lossy, so we might want to use HashMap here after all
+    , classes :: IdMap a (EqClass a)
     , relations :: EnumMap (EqClass a) (EnumSet (EqClass a))
     }
 
@@ -37,11 +38,11 @@ empty =
     Poset
         { nextClass = EqClass 0
         , classes = Map.empty
-        , relations = Map.empty
+        , relations = EMap.empty
         }
 
 lookup' :: (Error PosetError :> es, Enum k, Pretty k) => k -> EnumMap k v -> Eff es v
-lookup' k emap = maybe (throwError_ $ LookupError k) pure $ Map.lookup k emap
+lookup' k emap = maybe (throwError_ $ LookupError k) pure $ EMap.lookup k emap
 
 -- | merge two equivalence classes. Error out if there was a relation between them
 mergeStrict :: (Ctx es, CycleErrors a es) => EqClass a -> EqClass a -> Poset a -> Eff es (Poset a)
@@ -88,7 +89,7 @@ mergeWith onCycle classL classR Poset{classes, relations, nextClass} = do
     let cycle = Set.member classL rhsGreaterThan || Set.member classR lhsGreaterThan
         newPoset = Poset{classes = newClasses, relations = newRelations, nextClass}
         newClasses = (classR <$ lhsClassElems) <> classes
-        newRelations = preserveTransitivity . replaceOldClass <$> Map.delete classL relations
+        newRelations = preserveTransitivity . replaceOldClass <$> EMap.delete classL relations
         replaceOldClass hset
             | Set.member classL hset = Set.delete classL $ (rhsGreaterThan <>) $ Set.insert classR hset
             | Set.member classR hset = lhsGreaterThan <> hset
@@ -106,7 +107,7 @@ addGtRel :: (Ctx es, CycleErrors a es) => EqClass a -> EqClass a -> Poset a -> E
 addGtRel l r = addGreaterThanRel (const $ throwError_ $ Cycle l r) l r
 
 -- | add a relation between two classes; merge them if the relation causes a cycle (i.e. A > B and B > A)
-addGteRel :: (Ctx es, Hashable a, Enum a) => a -> a -> Poset a -> Eff es (Poset a)
+addGteRel :: (Ctx es, Hashable a, Map.HasId a) => a -> a -> Poset a -> Eff es (Poset a)
 addGteRel lhs rhs poset =
     let (lhsClass, poset') = eqClass lhs poset
         (rhsClass, poset'') = eqClass rhs poset'
@@ -133,14 +134,14 @@ addGreaterThanRel onCycle greaterClass lesserClass poset = do
         then onCycle poset{relations = relations newRels}
         else pure poset{relations = relations newRels}
   where
-    relations newRels = addTransitiveRels newRels <$> Map.adjust (<> newRels) greaterClass poset.relations
+    relations newRels = addTransitiveRels newRels <$> EMap.adjust (<> newRels) greaterClass poset.relations
     addTransitiveRels newRels hset
         | Set.member greaterClass hset = hset <> newRels
         | otherwise = hset
 
 -- | add a strict relation between the classes of two items - that is, classes may not be merged if they form a cycle
 addRelationStrict
-    :: (Ctx es, CycleErrors a es, Enum a) => a -> a -> Ordering -> Poset a -> Eff es (Poset a)
+    :: (Ctx es, CycleErrors a es, Map.HasId a) => a -> a -> Ordering -> Poset a -> Eff es (Poset a)
 addRelationStrict lhs rhs order poset =
     let (lhsClass, poset') = eqClass lhs poset
         (rhsClass, poset'') = eqClass rhs poset'
@@ -156,7 +157,7 @@ addRelationStrict' lhs rhs = \case
 
 -- | add a GTE / LTE relation between the classes of two items. Ignores class cycles
 addRelationLenient
-    :: (Ctx es, CycleWarnings a es, Enum a) => a -> a -> Ordering -> Poset a -> Eff es (Poset a)
+    :: (Ctx es, CycleWarnings a es, Map.HasId a) => a -> a -> Ordering -> Poset a -> Eff es (Poset a)
 addRelationLenient lhs rhs order poset =
     let (lhsClass, poset') = eqClass lhs poset
         (rhsClass, poset'') = eqClass rhs poset'
@@ -173,23 +174,23 @@ addRelationLenient' lhs rhs = \case
     warnOnCycle = (<$ tell (Seq.singleton $ Cycle lhs rhs))
 
 -- add an item to a fresh equivalence class. If it belonged to a different equality class, it gets moved
-newClass :: Enum a => a -> Poset a -> (EqClass a, Poset a)
+newClass :: Map.HasId a => a -> Poset a -> (EqClass a, Poset a)
 newClass x Poset{nextClass, classes, relations} =
     ( nextClass
     , Poset
         { nextClass = succ nextClass
         , classes = Map.insert x nextClass classes
-        , relations = Map.insert nextClass Set.empty relations
+        , relations = EMap.insert nextClass Set.empty relations
         }
     )
 
 -- get the equivalence class of an item; create a new class if the item didn't have one
-eqClass :: Enum a => a -> Poset a -> (EqClass a, Poset a)
+eqClass :: Map.HasId a => a -> Poset a -> (EqClass a, Poset a)
 eqClass x poset = case Map.lookup x poset.classes of
     Just class_ -> (class_, poset)
     Nothing -> newClass x poset
 
-items :: Enum a => EqClass a -> Poset a -> [a]
+items :: EqClass a -> Poset a -> [a]
 items cl poset = map fst . filter ((== cl) . snd) $ Map.toList poset.classes
 
 data PosetOrdering
@@ -199,10 +200,10 @@ data PosetOrdering
     deriving (Eq, Show)
 
 -- find out the relation between two poset items
-relation :: (Ctx es, Pretty a, Enum a) => a -> a -> Poset a -> Eff es PosetOrdering
+relation :: (Ctx es, Pretty a, Map.HasId a) => a -> a -> Poset a -> Eff es PosetOrdering
 relation lhs rhs poset = do
-    lhsClass <- lookup' lhs poset.classes
-    rhsClass <- lookup' rhs poset.classes
+    lhsClass <- maybe (throwError_ $ LookupError lhs) pure $ Map.lookup lhs poset.classes
+    rhsClass <- maybe (throwError_ $ LookupError rhs) pure $ Map.lookup rhs poset.classes
     classRelation lhsClass rhsClass poset
 
 classRelation :: Ctx es => EqClass a -> EqClass a -> Poset a -> Eff es PosetOrdering
@@ -218,8 +219,8 @@ classRelation lhsClass rhsClass poset = do
 
 -- convert a poset to a list of equivalence classes, lowest to highest
 -- the order of uncomparable elements is not guaranteed
-ordered :: Enum a => Poset a -> [[a]]
-ordered p@Poset{relations} = map (`items` p) $ sortBy cmp (Map.keys relations)
+ordered :: Poset a -> [[a]]
+ordered p@Poset{relations} = map (`items` p) $ sortBy cmp (EMap.keys relations)
   where
     cmp l r = case runPureEff $ runErrorNoCallStack @PosetError $ classRelation l r p of
         Right (DefinedOrder order) -> order

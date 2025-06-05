@@ -7,9 +7,6 @@ module Repl where
 
 import Common (Fixity (..), Loc (..), Located, Name, Name_ (TypeName), Pass (..), SimpleName_ (Name'), cast)
 import Common qualified as C
-import Data.EnumMap qualified as EnumMap
-import Data.EnumMap.Lazy qualified as LMap
-import Data.EnumMap.Strict qualified as Map
 import Data.HashMap.Strict qualified as HashMap
 import Data.Text.Encoding (strictBuilderToText, textToStrictBuilder)
 import Data.Text.Encoding qualified as Text
@@ -25,6 +22,7 @@ import Eval (ValueEnv (..), eval, modifyEnv)
 import Eval qualified as V
 import Fixity qualified (parse, resolveFixity, run)
 import FlatParse.Stateful qualified as FP
+import IdMap qualified as Map
 import LangPrelude
 import Lexer (space1)
 import NameGen (NameGen, freshName)
@@ -56,7 +54,7 @@ data ReplEnv = ReplEnv
     , fixityMap :: FixityMap
     , operatorPriorities :: Poset Op
     , scope :: Scope
-    , types :: EnumMap Name TC.Type'
+    , types :: IdMap Name TC.Type'
     , lastLoadedFile :: Maybe FilePath
     }
 
@@ -75,9 +73,9 @@ noLoc = C.Located builtin
 emptyEnv :: ReplEnv
 emptyEnv = ReplEnv{..}
   where
-    values = ValueEnv{values = LMap.singleton (noLoc TypeName) (V.TyCon (noLoc TypeName)), skolems = Map.empty}
-    fixityMap = Map.singleton AppOp InfixL
-    types = Map.singleton (noLoc TypeName) (noLoc $ V.TyCon (noLoc TypeName))
+    values = ValueEnv{values = Map.one (noLoc TypeName) (V.TyCon (noLoc TypeName)), skolems = Map.empty}
+    fixityMap = Map.one AppOp InfixL
+    types = Map.one (noLoc TypeName) (noLoc $ V.TyCon (noLoc TypeName))
     scope = Scope $ HashMap.singleton (Name' "Type") (noLoc TypeName)
     (_, operatorPriorities) = Poset.eqClass AppOp Poset.empty
     lastLoadedFile = Nothing
@@ -213,12 +211,10 @@ replStep env command = do
                 Nothing -> pure $ Just defaultEnv
                 Just path -> replStep defaultEnv (Load path)
         Env -> do
-            -- since the to/from enum conversion is lossy, only ids are available here
-            -- perhaps I should write a custom wrapper for IntMap?..
-            for_ (Map.toList env.types) \(name, ty) ->
-                print $ pretty name <+> ":" <+> pretty ty
-            for_ (Map.toList env.values.values) \(name, value) ->
-                print $ pretty name <+> "=" <+> pretty value
+            let mergedEnv = Map.merge (\ty val -> (Just ty, Just val)) ((,Nothing) . Just) ((Nothing,) . Just) env.types env.values.values
+            for_ (Map.toList mergedEnv) \(name, (mbTy, mbVal)) -> do
+                for_ mbTy \ty -> print $ pretty name <+> ":" <+> pretty ty
+                for_ mbVal \value -> print $ pretty name <+> "=" <+> pretty value
             pure $ Just env
         Quit -> pure Nothing
         UnknownCommand cmd -> fatal . one $ Err Nothing ("Unknown command:" <+> pretty cmd) [] []
@@ -304,7 +300,7 @@ completer env cenv input = completeWord cenv input Nothing wordCompletion
         prettyName = show $ pretty name
         mbSig = do
             id' <- HashMap.lookup name env.scope.table
-            ty <- EnumMap.lookup id' env.types
+            ty <- Map.lookup id' env.types
             pure $ show $ pretty ty
 
 {-

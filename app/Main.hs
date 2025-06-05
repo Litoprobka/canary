@@ -3,11 +3,11 @@ module Main (main) where
 import LangPrelude
 
 import Common
-import Data.EnumMap.Strict qualified as Map
 import Data.Traversable (for)
 import Diagnostic
 import Error.Diagnose (Position (..))
 import Eval (ValueEnv (..))
+import IdMap qualified as Map
 import NameGen (runNameGen)
 import NameResolution
 import Parser (parseModule)

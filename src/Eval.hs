@@ -21,10 +21,12 @@ import Common (
     pattern L,
     pattern (:@),
  )
-import Data.EnumMap.Lazy qualified as LMap -- note that we use the lazy functions here
+
+-- IdMap is currently lazy anyway, but it's up to change
 import Data.Traversable (for)
 import Diagnostic
 import Error.Diagnose (Position (..))
+import IdMap qualified as LMap
 import LangPrelude
 import NameGen (NameGen, freshName)
 import Prettyprinter (line, vsep)
@@ -38,8 +40,8 @@ import Syntax.Term qualified as T
 import Prelude qualified (Show (..))
 
 data ValueEnv = ValueEnv
-    { values :: EnumMap Name Value
-    , skolems :: EnumMap Skolem Value
+    { values :: IdMap Name Value
+    , skolems :: IdMap Skolem Value
     }
 type Type' = Value
 

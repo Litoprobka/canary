@@ -22,8 +22,6 @@ module TypeChecker (
 
 import Common (Name)
 import Common hiding (Name)
-import Data.EnumMap.Lazy qualified as LMap
-import Data.EnumMap.Strict qualified as Map
 import Data.Foldable1 (foldr1)
 import Data.Traversable (for)
 import Diagnostic (internalError)
@@ -33,6 +31,8 @@ import Effectful.State.Static.Local (State, execState, get, modify, put, runStat
 import Eval (ValueEnv)
 import Eval qualified as V
 import GHC.IsList qualified as IsList
+import IdMap qualified as LMap
+import IdMap qualified as Map
 import LangPrelude hiding (bool, unzip)
 import NameGen
 import Syntax
@@ -232,7 +232,7 @@ check (e :@ loc) (typeToCheck :@ tyLoc) = match e typeToCheck
             check expr annTyV
             subtype annTyV (ty :@ tyLoc)
         (If cond true false) ty -> do
-            check cond $ V.TyCon (BoolName :@ loc) :@ loc
+            check_ cond $ V.TyCon (BoolName :@ loc)
             check_ true ty
             check_ false ty
         (Case arg matches) ty -> do
@@ -383,7 +383,7 @@ localEquality argVal patVal = do
         -- it's not clear whether we should touch UniVars at all
         _ -> pass
 
-skolemizePattern' :: InfEffs es => Pat -> Eff es (V.Value, EnumMap Name V.Value)
+skolemizePattern' :: InfEffs es => Pat -> Eff es (V.Value, IdMap Name V.Value)
 skolemizePattern' pat = do
     (val, newEnv) <- runState V.ValueEnv{values = Map.empty, skolems = Map.empty} $ skolemizePattern pat
     pure (val, newEnv.values)
@@ -407,14 +407,14 @@ skolemizePattern (Located loc pat') = case pat' of
     LiteralP lit -> pure $ V.PrimValue lit
 
 -- | given a map of related signatures, check or infer a declaration
-checkBinding :: InfEffs es => Binding 'Fixity -> EnumMap Name TypeDT -> Eff es (EnumMap Name TypeDT)
+checkBinding :: InfEffs es => Binding 'Fixity -> IdMap Name TypeDT -> Eff es (IdMap Name TypeDT)
 checkBinding binding types = case binding of
     _ | Map.null types -> inferBinding binding
     FunctionB name args body -> case Map.lookup name types of
-        Just ty -> Map.singleton name ty <$ check (foldr (\var -> Located (getLoc binding) . Lambda var) body args) ty
+        Just ty -> Map.one name ty <$ check (foldr (\var -> Located (getLoc binding) . Lambda var) body args) ty
         Nothing -> inferBinding binding
     ValueB (L (VarP name)) body -> case Map.lookup name types of
-        Just ty -> Map.singleton name ty <$ check body ty
+        Just ty -> Map.one name ty <$ check body ty
         Nothing -> inferBinding binding
     ValueB pat _body -> do
         internalError (getLoc pat) "todo: type check destructuring bindings with partial signatures"
@@ -558,7 +558,7 @@ inferTyApp expr (ty :@ tyLoc) tyArg = case ty of
         Exists -> Out
 
 -- infers the type of a function / variables in a pattern
-inferBinding :: InfEffs es => Binding 'Fixity -> Eff es (EnumMap Name TypeDT)
+inferBinding :: InfEffs es => Binding 'Fixity -> Eff es (IdMap Name TypeDT)
 inferBinding = \case
     ValueB pat body -> do
         (typeMap, patTy) <- inferPattern pat
@@ -581,19 +581,19 @@ inferBinding = \case
             -- we only need the subtype check when the univar is solved, i.e. when the
             -- function contains any recursive calls at all
             withUniVar uni (subtype ty . unMono)
-            pure $ Map.singleton name ty
+            pure $ Map.one name ty
 
-inferPattern :: InfEffs es => Pat -> Eff es (EnumMap Name TypeDT, TypeDT)
+inferPattern :: InfEffs es => Pat -> Eff es (IdMap Name TypeDT, TypeDT)
 inferPattern = snd (patternFuncs pure)
 
 -- | check a pattern, returning all of the newly bound vars
-checkPattern :: InfEffs es => Pat -> TypeDT -> Eff es (EnumMap Name TypeDT)
+checkPattern :: InfEffs es => Pat -> TypeDT -> Eff es (IdMap Name TypeDT)
 checkPattern = fst (patternFuncs pure)
 
 {- | check a pattern. A GADT constructor checks against a more specific type
 > check VNil (Vec ?n a)
 -}
-checkPatternRelaxed :: InfEffs es => Pat -> TypeDT -> Eff es (EnumMap Name TypeDT)
+checkPatternRelaxed :: InfEffs es => Pat -> TypeDT -> Eff es (IdMap Name TypeDT)
 checkPatternRelaxed = fst (patternFuncs go)
   where
     go = \case
@@ -601,14 +601,14 @@ checkPatternRelaxed = fst (patternFuncs go)
         lhs `V.App` _ -> V.App <$> go lhs <*> freshUniVar
         other -> pure other
 
-type CheckPattern es = Pat -> TypeDT -> Eff es (EnumMap Name TypeDT)
-type InferPattern es = Pat -> Eff es (EnumMap Name TypeDT, TypeDT)
+type CheckPattern es = Pat -> TypeDT -> Eff es (IdMap Name TypeDT)
+type InferPattern es = Pat -> Eff es (IdMap Name TypeDT, TypeDT)
 patternFuncs :: InfEffs es => (Type'_ -> Eff es Type'_) -> (CheckPattern es, InferPattern es)
 patternFuncs postprocess = (checkP, inferP)
   where
     checkP (Located ploc outerPat) ty = case outerPat of
         -- we need this case, since inferPattern only infers monotypes for var patterns
-        VarP name -> pure $ Map.singleton name ty
+        VarP name -> pure $ Map.one name ty
         -- we probably do need a case for ConstructorP for the same reason
         VariantP name arg ->
             deepLookup Variant name ty >>= \case
@@ -627,7 +627,7 @@ patternFuncs postprocess = (checkP, inferP)
     inferP (Located loc p) = case p of
         VarP name -> do
             uni <- freshUniVar
-            pure (Map.singleton name (uni :@ loc), uni :@ loc)
+            pure (Map.one name (uni :@ loc), uni :@ loc)
         WildcardP _ -> (Map.empty,) . Located loc <$> freshUniVar
         (AnnotationP pat ty) -> do
             tyV <- typeFromTerm ty

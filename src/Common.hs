@@ -47,6 +47,7 @@ import Data.Type.Ord (Compare, type (>?))
 import Error.Diagnose (Position (..))
 import Error.Diagnose qualified as M
 import GHC.TypeError (Assert, ErrorMessage (..), TypeError)
+import IdMap (HasId (..))
 import LangPrelude
 import Prettyprinter
 
@@ -121,11 +122,8 @@ data Name_
     | TypeName
     deriving (Show, Eq, Generic, Hashable)
 
--- some hacky code to use Name_ in an EnumMap
--- this relies on the fact that ids are non-negative
--- also, EnumMap wouldn't work well with randomly generated ids
-instance Enum Name_ where
-    fromEnum = \case
+instance HasId Name_ where
+    toId = \case
         Name _ (Id id') -> id'
         Wildcard _ (Id id') -> id'
         BoolName -> -10
@@ -139,25 +137,6 @@ instance Enum Name_ where
         CharName -> -18
         LensName -> -19
         TypeName -> -20
-
-    -- I don't think we ever care about retrieving name keys from an EnumMap
-    toEnum = \case
-        -10 -> BoolName
-        -11 -> TrueName
-        -12 -> ListName
-        -13 -> ConsName
-        -14 -> NilName
-        -15 -> IntName
-        -16 -> NatName
-        -17 -> TextName
-        -18 -> CharName
-        -19 -> LensName
-        -20 -> TypeName
-        n -> Name "" (Id n)
-
-instance Enum Name where
-    fromEnum (L name) = fromEnum name
-    toEnum = Located (Loc Position{begin = (0, 0), end = (0, 0), file = "<none>"}) . toEnum
 
 type SimpleName = Located SimpleName_
 data SimpleName_
@@ -190,6 +169,9 @@ instance HasLoc (Located a) where
 instance Pretty a => Pretty (Located a) where
     pretty (L x) = pretty x
 
+instance HasId a => HasId (Located a) where
+    toId (L x) = toId x
+
 instance Pretty SimpleName_ where
     pretty (Name' name) = pretty name
     pretty (Wildcard' n) = "_" <> pretty n
@@ -213,7 +195,7 @@ inc (Id n) = Id $ n + 1
 
 newtype Skolem = Skolem Name
     deriving (Show, Eq)
-    deriving newtype (Hashable, Enum)
+    deriving newtype (Hashable, HasId)
 
 instance HasLoc Skolem where
     getLoc (Skolem name) = getLoc name

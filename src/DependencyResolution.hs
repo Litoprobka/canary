@@ -4,11 +4,11 @@
 module DependencyResolution where
 
 import Common
-import Data.EnumMap.Strict qualified as Map
 import Diagnostic (Diagnose, fatal, nonFatal)
 import Effectful.State.Static.Local
 import Effectful.Writer.Static.Local (Writer, runWriter)
 import Error.Diagnose (Marker (..), Report (..))
+import IdMap qualified as Map
 import LangPrelude
 import Poset (Poset)
 import Poset qualified
@@ -30,7 +30,7 @@ data Output = Output
     }
 
 type Decl = Declaration 'DependencyRes
-type FixityMap = EnumMap Op Fixity
+type FixityMap = IdMap Op Fixity
 type Signatures = HashMap Name (Type 'DependencyRes)
 
 data Op = Op Name | AppOp deriving (Eq)
@@ -38,15 +38,10 @@ instance Pretty Op where
     pretty = \case
         Op name -> pretty name
         AppOp -> "function application"
-
--- yes, this is hacky
-instance Enum Op where
-    toEnum = \case
-        -1 -> AppOp
-        n -> Op $ toEnum n
-    fromEnum = \case
+instance Map.HasId Op where
+    toId = \case
         AppOp -> -1
-        Op name -> fromEnum name
+        Op name -> Map.toId name
 
 {-
 nameDependencies :: Diagnose :> es => [Declaration 'NameRes] -> Eff es (Poset Name)
@@ -129,7 +124,7 @@ resolveDependenciesSimplified
     -> Eff es SimpleOutput
 resolveDependenciesSimplified = resolveDependenciesSimplified' initFixity initPoset
   where
-    initFixity = Map.singleton AppOp InfixL
+    initFixity = Map.one AppOp InfixL
     (_, initPoset) = Poset.eqClass AppOp Poset.empty
 
 resolveDependenciesSimplified'

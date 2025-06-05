@@ -13,8 +13,7 @@
 module TypeChecker.Backend where
 
 import Common
-import Data.EnumMap.Lazy qualified as LMap
-import Data.EnumMap.Strict qualified as Map
+import Data.EnumMap.Strict qualified as EMap
 import Data.EnumSet qualified as Set
 import Data.Traversable (for)
 import Diagnostic (Diagnose, internalError, internalError')
@@ -28,6 +27,8 @@ import Effectful.TH
 import Error.Diagnose (Position (..))
 import Eval (Value, ValueEnv)
 import Eval qualified as V
+import IdMap qualified as LMap
+import IdMap qualified as Map
 import LangPrelude hiding (break, cycle)
 import NameGen
 import Syntax
@@ -70,18 +71,18 @@ data Variance = In | Out | Inv
 data Env = Env
     { scope :: Scope
     , values :: ValueEnv
-    , locals :: EnumMap Name TypeDT
+    , locals :: IdMap Name TypeDT
     }
 
 -- the types of top-level bindings should not contain metavars
 -- this is not enforced at type level, though
-type TopLevel = EnumMap Name Type'
+type TopLevel = IdMap Name Type'
 type UniVars = EnumMap UniVar (Either Scope Monotype) -- should we use located Monotypes here? I'm not sure
 type InfEffs es =
     ( NameGen :> es
     , Labeled UniVar NameGen :> es
     , State UniVars :> es
-    , State (EnumMap Skolem Scope) :> es
+    , State (IdMap Skolem Scope) :> es
     , State TopLevel :> es
     , Reader Env :> es
     , Diagnose :> es
@@ -100,12 +101,12 @@ instance Pretty Monotype_ where
 
 run
     :: ValueEnv
-    -> Eff (Reader Env : State UniVars : State (EnumMap Skolem Scope) : Labeled UniVar NameGen : es) a
+    -> Eff (Reader Env : State UniVars : State (IdMap Skolem Scope) : Labeled UniVar NameGen : es) a
     -> Eff es a
 run values action =
     runLabeled @UniVar runNameGen
         . evalState Map.empty
-        . evalState @UniVars Map.empty
+        . evalState @UniVars EMap.empty
         $ runReader initState action
   where
     initState =
@@ -123,7 +124,7 @@ freshUniVar' = do
     -- c'mon effectful
     var <- UniVar <$> labeled @UniVar @NameGen freshId
     scope <- asks @Env (.scope)
-    modify @UniVars $ Map.insert var (Left scope)
+    modify @UniVars $ EMap.insert var (Left scope)
     pure var
 
 freshSkolem :: InfEffs es => SimpleName -> Eff es TypeDT_
@@ -138,7 +139,7 @@ freshSkolem name = do
     mkName _ = freshName (Located (getLoc name) $ Name' "what") -- why?
 
 lookupUniVar :: InfEffs es => UniVar -> Eff es (Either Scope Monotype)
-lookupUniVar uni = maybe (internalError' $ "missing univar" <+> pretty uni) pure . Map.lookup uni =<< get @UniVars
+lookupUniVar uni = maybe (internalError' $ "missing univar" <+> pretty uni) pure . EMap.lookup uni =<< get @UniVars
 
 withUniVar :: InfEffs es => UniVar -> (Monotype -> Eff es a) -> Eff es ()
 withUniVar uni f =
@@ -164,7 +165,7 @@ alterUniVar override uni ty = do
             Right _ -> pure Nothing
             Left scope -> pure $ Just scope
     cycle <- cycleCheck mbScope (Direct, Set.singleton uni) ty
-    when (cycle == NoCycle) $ modify @UniVars $ Map.insert uni (Right ty)
+    when (cycle == NoCycle) $ modify @UniVars $ EMap.insert uni (Right ty)
   where
     -- errors out on indirect cycles (i.e. a ~ Maybe a)
     -- returns False on direct univar cycles (i.e. a ~ b, b ~ c, c ~ a)
@@ -185,7 +186,7 @@ alterUniVar override uni ty = do
                     Right ty' -> go (selfRefType, Set.insert uni2 acc) $ unLoc ty'
                     Left scope' -> do
                         case mbScope of
-                            Just scope | scope' > scope -> modify @UniVars $ Map.insert uni2 (Left scope')
+                            Just scope | scope' > scope -> modify @UniVars $ EMap.insert uni2 (Left scope')
                             _ -> pass
                         pure NoCycle
             MFn from to -> go (Indirect, acc) from >> go (Indirect, acc) to
@@ -239,7 +240,7 @@ lookupSig name = do
 local' :: Reader Env :> es => (Env -> Env) -> Eff es a -> Eff es a
 local' = local
 
-declareTopLevel :: InfEffs es => EnumMap Name Type' -> Eff es ()
+declareTopLevel :: InfEffs es => IdMap Name Type' -> Eff es ()
 declareTopLevel types = modify (types <>)
 
 declareTopLevel' :: InfEffs es => Name -> Type' -> Eff es ()
@@ -248,13 +249,13 @@ declareTopLevel' name ty = modify $ Map.insert name ty
 declare :: Name -> TypeDT -> Env -> Env
 declare name ty env = env{locals = LMap.insert name ty env.locals}
 
-declareMany :: EnumMap Name TypeDT -> Env -> Env
+declareMany :: IdMap Name TypeDT -> Env -> Env
 declareMany typeMap env = env{locals = typeMap <> env.locals}
 
 define :: Name -> Value -> Env -> Env
 define name val env = env{values = env.values{V.values = LMap.insert name val env.values.values}}
 
-defineMany :: EnumMap Name Value -> Env -> Env
+defineMany :: IdMap Name Value -> Env -> Env
 defineMany valMap env = env{values = env.values{V.values = valMap <> env.values.values}}
 
 -- defineMany :: EnumMap Name Value -> Env -> Env
@@ -271,7 +272,7 @@ generaliseAll action = do
   where
     generaliseOne ty@(Located loc _) = do
         env <- ask @Env
-        (ty', vars) <- runState Map.empty $ evalState 'a' $ go env.scope =<< V.quote ty
+        (ty', vars) <- runState EMap.empty $ evalState 'a' $ go env.scope =<< V.quote ty
         let forallVars = hashNub . lefts $ toList vars
         pure $
             Located loc $
@@ -283,13 +284,13 @@ generaliseAll action = do
     go scope (Located loc term) =
         Located loc <$> case term of
             C.UniVar uni -> do
-                whenNothingM (fmap toTypeVar <$> gets @(EnumMap UniVar (Either Name CoreTerm)) (Map.lookup uni)) do
+                whenNothingM (fmap toTypeVar <$> gets @(EnumMap UniVar (Either Name CoreTerm)) (EMap.lookup uni)) do
                     lookupUniVar uni >>= \case
                         -- don't generalise outer-scoped vars
                         Left varScope | varScope <= scope -> pure $ C.UniVar uni
                         innerScoped -> do
                             newTy <- bitraverse (const $ freshTypeVar loc) (go scope <=< V.quote . unMono) innerScoped
-                            modify @(EnumMap UniVar (Either Name CoreTerm)) $ Map.insert uni newTy
+                            modify @(EnumMap UniVar (Either Name CoreTerm)) $ EMap.insert uni newTy
                             pure $ toTypeVar newTy
             C.Skolem skolem -> do
                 skScope <- skolemScope skolem

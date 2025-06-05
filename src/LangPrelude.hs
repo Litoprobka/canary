@@ -1,13 +1,15 @@
 {-# LANGUAGE ApplicativeDo #-}
+
 module LangPrelude (module Reexport, (.>), traverseFold) where
 
 -- Relude becomes inconvenient the moment I want to use effectful over mtl
 
-import Effectful as Reexport
-import Effectful.TH as Reexport
-import Prettyprinter as Reexport (Doc, Pretty (..), (<+>))
 import Data.EnumMap as Reexport (EnumMap)
 import Data.EnumSet as Reexport (EnumSet)
+import Effectful as Reexport
+import Effectful.TH as Reexport
+import IdMap as Reexport (IdMap)
+import Prettyprinter as Reexport (Doc, Pretty (..), (<+>))
 import Relude as Reexport hiding (
     Op,
     Reader,

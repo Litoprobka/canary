@@ -6,7 +6,6 @@ module Fixity (resolveFixity, run, parse, Fixity (..)) where
 
 import Common (Fixity (..), Loc (..), Located (..), Name, Pass (..), getLoc, mkNotes, unLoc, zipLocOf, pattern L, pattern (:@))
 import Control.Monad (foldM)
-import Data.EnumMap.Strict qualified as Map
 import Data.List.NonEmpty qualified as NE
 import Data.Traversable (for)
 import DependencyResolution (FixityMap, Op (..))
@@ -14,6 +13,7 @@ import Diagnostic (Diagnose, fatal)
 import Effectful.Error.Static (runErrorNoCallStackWith)
 import Effectful.Reader.Static (Reader, ask, runReader)
 import Error.Diagnose (Marker (This), Position (..), Report (..))
+import IdMap qualified as Map
 import LangPrelude hiding (cycle)
 import Poset (Poset)
 import Poset qualified
@@ -59,7 +59,7 @@ opError =
         Op op -> getLoc op
 
 lookupFixity :: Op -> FixityMap -> Fixity
-lookupFixity = Map.findWithDefault Infix
+lookupFixity = Map.lookupDefault Infix
 
 {- | figure out which of the two operators has a higher priority
 
