@@ -60,12 +60,13 @@ data Monotype_
     | MRecordT (ExtRow Monotype_)
     | -- stuck computations
       MApp Monotype_ ~Monotype_
-    | MCase Monotype_ [(CorePattern, Monotype_)]
+    | MCase Monotype_ [MonoPatternClosure ()]
     | -- typechecking metavars
       MUniVar UniVar
     | MSkolem Skolem
 
 data MonoClosure ty = MonoClosure {var :: Name, variance :: Variance, ty :: ty, env :: ValueEnv, body :: CoreTerm}
+data MonoPatternClosure ty = MonoPatternClosure {pat :: CorePattern, variance :: Variance, ty :: ty, env :: ValueEnv, body :: CoreTerm}
 data Variance = In | Out | Inv
 
 data Env = Env
@@ -199,7 +200,7 @@ alterUniVar override uni ty = do
             MRecord row -> NoCycle <$ traverse_ (go (Indirect, acc)) row
             MSigma x y -> go (Indirect, acc) x >> go (Indirect, acc) y
             MLambda closure -> cycleCheckClosure acc closure
-            MCase arg matches -> go (Indirect, acc) arg <* (traverse_ . traverse_) (go (Indirect, acc)) matches
+            MCase _arg _matches -> internalError' "todo: cycleCheck stuck MCase" -- go (Indirect, acc) arg <* traverse_ _what matches
             MTyCon{} -> pure NoCycle
             MSkolem{} -> pure NoCycle
             MPrim{} -> pure NoCycle
@@ -207,7 +208,7 @@ alterUniVar override uni ty = do
         cycleCheckClosure :: EnumSet UniVar -> MonoClosure a -> Eff es Cycle
         cycleCheckClosure acc closure = do
             skolem <- freshSkolem $ toSimpleName closure.var
-            go (Indirect, acc) =<< appMono closure skolem -- is it ok to use the top-level env here?
+            go (Indirect, acc) =<< appMono closure skolem
     unwrap = traverse \case
         uni2@(MUniVar var) ->
             lookupUniVar var >>= \case
@@ -367,10 +368,11 @@ mono' variance = \case
     V.Record row -> MRecord <$> traverse go row
     V.Sigma x y -> MSigma <$> go x <*> go y
     V.Variant name arg -> MVariant name <$> go arg
-    V.Case arg matches -> MCase <$> go arg <*> traverse (bitraverse pure go) matches
+    V.Case arg matches -> MCase <$> go arg <*> pure (fmap monoPatternClosure matches)
     V.Lambda closure -> pure $ MLambda MonoClosure{var = closure.var, variance, env = closure.env, ty = (), body = closure.body}
   where
     go = mono' variance
+    monoPatternClosure V.PatternClosure{pat, ty, env, body} = MonoPatternClosure{pat, ty, variance, env, body}
 
 appMono :: InfEffs es => MonoClosure a -> Value -> Eff es Monotype_
 appMono MonoClosure{var, variance, env, body} arg = mono' variance $ V.evalCore (env{V.values = Map.insert var arg env.values}) body
@@ -399,7 +401,9 @@ unMono' = \case
     MLambda MonoClosure{var, ty, env, body} -> V.Lambda V.Closure{var, ty, env, body}
     MQ q e MonoClosure{var, ty, env, body} -> V.Q q Visible e V.Closure{var, ty = unMono' ty, env, body}
     MPrim val -> V.PrimValue val
-    MCase arg matches -> V.Case (unMono' arg) ((map . second) unMono' matches)
+    MCase arg matches -> V.Case (unMono' arg) (fmap toPatternClosure matches)
+  where
+    toPatternClosure MonoPatternClosure{pat, ty, env, body} = V.PatternClosure{pat, ty, env, body}
 
 {- unwraps forall/exists clauses in a type until a monomorphic constructor is encountered
 

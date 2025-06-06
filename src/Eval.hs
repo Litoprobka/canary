@@ -1,4 +1,5 @@
 {-# LANGUAGE DataKinds #-}
+{-# LANGUAGE DuplicateRecordFields #-}
 {-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE OverloadedRecordDot #-}
 {-# LANGUAGE PatternSynonyms #-}
@@ -52,15 +53,20 @@ type Type' = Value
 data Value
     = -- unbound variables and skolems seem really close in how they are treated. I wonder whether they can be unified
       Var Name
-    | TyCon Name -- a type constructor. unlike value constructors, `Either a b` is represented as a stuck application Either `App` a `App` b
-    | Con Name [Value] -- a fully-applied counstructor
+    | -- | a type constructor. unlike value constructors, `Either a b` is represented as a stuck application Either `App` a `App` b
+      TyCon Name
+    | -- | a fully-applied counstructor
+      Con Name [Value]
     | Lambda (Closure ())
-    | PrimFunction Name (Value -> Value) -- an escape hatch for interpreter primitives and similar stuff
+    | -- | an escape hatch for interpreter primitives and similar stuff
+      PrimFunction Name (Value -> Value)
     | Record (Row Value)
     | Sigma Value Value
     | Variant OpenName Value
-    | -- | RecordLens (NonEmpty OpenName)
-      PrimValue Literal -- the name 'Literal' is slightly misleading here
+    | --  | RecordLens (NonEmpty OpenName)
+
+      -- | A primitive (Text, Char or Int) value. The name 'Literal' is slightly misleading here
+      PrimValue Literal
     | -- types
       Function Type' Type'
     | Q Quantifier Visibility Erased (Closure Type')
@@ -68,12 +74,13 @@ data Value
     | RecordT (ExtRow Type')
     | -- stuck computations
       App Value ~Value
-    | Case Value [(CorePattern, Value)]
+    | Case Value [PatternClosure ()]
     | -- typechecking metavars
       UniVar UniVar
     | Skolem Skolem
 
 data Closure ty = Closure {var :: Name, ty :: ty, env :: ValueEnv, body :: CoreTerm}
+data PatternClosure ty = PatternClosure {pat :: CorePattern, ty :: ty, env :: ValueEnv, body :: CoreTerm}
 
 -- quote a value for pretty-printing
 quoteForPrinting :: Located Value -> CoreTerm
@@ -93,7 +100,7 @@ quoteForPrinting (Located loc value) = Located loc case value of
     VariantT row -> C.VariantT $ fmap quoteWithLoc row
     RecordT row -> C.RecordT $ fmap quoteWithLoc row
     App lhs rhs -> C.App (quoteWithLoc lhs) (quoteWithLoc rhs)
-    Case arg cases -> C.Case (quoteWithLoc arg) $ (fmap . fmap) quoteWithLoc cases
+    Case arg cases -> C.Case (quoteWithLoc arg) $ fmap (\PatternClosure{pat, body} -> (pat, body)) cases
     Skolem skolem -> C.Skolem skolem
     UniVar uni -> C.UniVar uni
   where
@@ -129,7 +136,8 @@ quote (value :@ loc) =
         VariantT row -> C.VariantT <$> traverse quoteWithLoc row
         RecordT row -> C.RecordT <$> traverse quoteWithLoc row
         App lhs rhs -> C.App <$> quoteWithLoc lhs <*> quoteWithLoc rhs
-        Case arg cases -> C.Case <$> quoteWithLoc arg <*> (traverse . traverse) quoteWithLoc cases
+        -- todo: not applying the closure here doesn't seem safe, but I'm not sure how to do that without running into infinite recursion
+        Case arg cases -> C.Case <$> quoteWithLoc arg <*> traverse (\PatternClosure{pat, body} -> pure (pat, body)) cases
         Skolem skolem -> pure $ C.Skolem skolem
         UniVar uni -> pure $ C.UniVar uni
   where
@@ -174,17 +182,10 @@ evalCore !env (L term) = case term of
     mbStuckCase (App lhs rhs) matches = Just $ Case (App lhs rhs) (mkStuckBranches matches)
     mbStuckCase _ _ = Nothing
 
-    mkStuckBranches :: [(CorePattern, CoreTerm)] -> [(CorePattern, Value)]
-    mkStuckBranches = map \(pat, body) -> (pat, evalCore (stuckBranchEnv pat) body)
+    mkStuckBranches :: [(CorePattern, CoreTerm)] -> [PatternClosure ()]
+    mkStuckBranches = map \(pat, body) -> PatternClosure{pat, ty = (), env, body}
 
-    stuckBranchEnv :: CorePattern -> ValueEnv
-    stuckBranchEnv = \case
-        (C.VarP name) -> env{values = LMap.insert name (Var name) env.values}
-        (C.ConstructorP _ argNames) -> env{values = LMap.fromList (argNames <&> \arg -> (arg, Var arg)) <> env.values}
-        (C.VariantP _ argName) -> env{values = LMap.insert argName (Var argName) env.values}
-        _ -> env
-
-app :: Closure a -> Value -> Value
+app :: Closure ty -> Value -> Value
 app Closure{var, env, body} arg = evalCore (env{values = LMap.insert var arg env.values}) body
 
 -- do we need a fresh name here?
@@ -196,6 +197,7 @@ closureBody' closure = do
     var <- freshName $ toSimpleName closure.var
     pure (var, closure `app` Var var)
 
+-- | try to apply a pattern to a value, updating the given value env
 matchCore :: ValueEnv -> CorePattern -> Value -> Maybe ValueEnv
 matchCore env = \cases
     (C.VarP name) val -> Just $ env{values = LMap.insert name val env.values}
