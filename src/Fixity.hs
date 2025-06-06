@@ -1,8 +1,9 @@
 {-# LANGUAGE DataKinds #-}
 {-# LANGUAGE DuplicateRecordFields #-}
+{-# LANGUAGE MonoLocalBinds #-}
 {-# LANGUAGE PatternSynonyms #-}
 
-module Fixity (resolveFixity, run, parse, Fixity (..)) where
+module Fixity (resolveFixity, run, traversal, parse, Fixity (..)) where
 
 import Common (Fixity (..), Loc (..), Located (..), Name, Pass (..), getLoc, mkNotes, unLoc, zipLocOf, pattern L, pattern (:@))
 import Control.Monad (foldM)
@@ -18,7 +19,7 @@ import LangPrelude hiding (cycle)
 import Poset (Poset)
 import Poset qualified
 import Syntax
-import Syntax.Declaration (GadtConstructor (..))
+import Syntax.AstTraversal
 import Syntax.Declaration qualified as D
 import Syntax.Term
 
@@ -97,49 +98,40 @@ run fixityMap poset = runReader fixityMap . runReader poset
 
 resolveFixity :: Diagnose :> es => FixityMap -> Poset Op -> [Declaration 'DependencyRes] -> Eff es [Declaration 'Fixity]
 resolveFixity fixityMap poset decls =
-    run fixityMap poset $ traverse parseDeclaration decls
+    run fixityMap poset $ traverse traversal.declaration decls
 
 parseDeclaration :: Ctx es => Declaration 'DependencyRes -> Eff es (Declaration 'Fixity)
 parseDeclaration = traverse \case
-    D.Value binding locals -> D.Value <$> parseBinding binding <*> traverse parseDeclaration locals
+    D.Value binding locals -> D.Value <$> traversal.binding binding <*> traverse traversal.declaration locals
     D.Type name binders constrs ->
         D.Type name
-            <$> for binders parseBinder
+            <$> for binders traversal.binder
             <*> for constrs \(D.Constructor cloc cname args) -> D.Constructor cloc cname <$> traverse parse args
     D.GADT name mbKind constrs ->
-        D.GADT name <$> traverse parse mbKind <*> traverse parseGadtConstructor constrs
+        D.GADT name <$> traverse parse mbKind <*> traverse (travGadtConstructor traversal) constrs
     D.Signature name ty -> D.Signature name <$> parse ty
-  where
-    parseGadtConstructor GadtConstructor{loc, name, sig} = D.GadtConstructor loc name <$> parse sig
+
+traversal :: forall es. (Applicative (Eff es), Ctx es) => AstTraversal 'DependencyRes 'Fixity (Eff es)
+traversal =
+    tie
+        UntiedTraversal
+            { term = const parse
+            , pattern_ = const parsePattern
+            , declaration = const parseDeclaration
+            , name = const pure
+            , binding = defTravBinding
+            , binder = defTravBinder
+            , statement = defTravStatement
+            }
 
 parse :: Ctx es => Term 'DependencyRes -> Eff es (Term 'Fixity)
-parse = traverse \case
-    Lambda arg body -> Lambda <$> parsePattern arg <*> parse body
-    WildcardLambda args body -> WildcardLambda args <$> parse body
-    App lhs rhs -> App <$> parse lhs <*> parse rhs
-    TypeApp expr tyArg -> TypeApp <$> parse expr <*> parse tyArg
-    Let binding expr -> Let <$> parseBinding binding <*> parse expr
-    LetRec bindings expr -> LetRec <$> traverse parseBinding bindings <*> parse expr
-    Case arg cases -> Case <$> parse arg <*> traverse (bitraverse parsePattern parse) cases
-    Match cases -> Match <$> traverse (bitraverse (traverse parsePattern) parse) cases
-    If cond true false -> If <$> parse cond <*> parse true <*> parse false
-    Annotation e ty -> Annotation <$> parse e <*> parse ty
-    Name name -> pure $ Name name
-    RecordLens row -> pure $ RecordLens row
-    Variant name -> pure $ Variant name
-    Record row -> Record <$> traverse parse row
-    Sigma x y -> Sigma <$> parse x <*> parse y
-    List exprs -> List <$> traverse parse exprs
-    Do stmts lastAction -> Do <$> traverse parseStmt stmts <*> parse lastAction
-    Literal lit -> pure $ Literal lit
-    InfixE pairs last' -> do
-        pairs' <- traverse (bitraverse parse (pure . maybe AppOp Op)) pairs
-        last'' <- parse last'
-        go' pairs' last''
-    Function lhs rhs -> Function <$> parse lhs <*> parse rhs
-    Q q vis e binder body -> Q q vis e <$> parseBinder binder <*> parse body
-    VariantT row -> VariantT <$> traverse parse row
-    RecordT row -> RecordT <$> traverse parse row
+parse (term' :@ termLoc) =
+    Located termLoc <$> case term' of
+        InfixE pairs last' -> do
+            pairs' <- traverse (bitraverse parse (pure . maybe AppOp Op)) pairs
+            last'' <- parse last'
+            go' pairs' last''
+        other -> unLoc <$> partialTravTerm traversal (other :@ termLoc)
   where
     go' :: Ctx es => [(Expr 'Fixity, Op)] -> Expr 'Fixity -> Eff es (Expr_ 'Fixity)
     go' pairs last' = go [] pairs <&> unLoc
@@ -178,26 +170,16 @@ parse = traverse \case
             (Op op, InfixChain, _) -> App (Located (getLoc op) (Name op)) $ Located loc $ List [lhs, rhs]
             (Op op, _, _) -> App (Located (zipLocOf lhs op) $ App (Located (getLoc op) (Name op)) lhs) rhs
 
--- * Helpers
-
-parseBinder :: Ctx es => VarBinder DependencyRes -> Eff es (VarBinder 'Fixity)
-parseBinder VarBinder{var, kind} = VarBinder var <$> traverse parse kind
-
 parsePattern :: Ctx es => Pattern 'DependencyRes -> Eff es (Pattern 'Fixity)
-parsePattern = traverse \case
-    VarP name -> pure $ VarP name
-    WildcardP name -> pure $ WildcardP name
-    AnnotationP pat ty -> AnnotationP <$> parsePattern pat <*> parse ty
-    ConstructorP name pats -> ConstructorP name <$> traverse parsePattern pats
-    VariantP name pat -> VariantP name <$> parsePattern pat
-    RecordP row -> RecordP <$> traverse parsePattern row
-    ListP pats -> ListP <$> traverse parsePattern pats
-    LiteralP lit -> pure $ LiteralP lit
-    InfixP pairs l -> do
-        pairs' <- traverse (bitraverse parsePattern pure) pairs
-        l' <- parsePattern l
-        go' pairs' l'
+parsePattern (term' :@ termLoc) =
+    Located termLoc <$> case term' of
+        InfixP pairs l -> do
+            pairs' <- traverse (bitraverse parsePattern pure) pairs
+            l' <- parsePattern l
+            go' pairs' l'
+        other -> unLoc <$> partialTravPattern traversal (other :@ termLoc)
   where
+    -- parsing logic is copy-pasted at the moment. There should be a way to factor it out
     go' :: Ctx es => [(Pattern 'Fixity, Name)] -> Pattern 'Fixity -> Eff es (Pattern_ 'Fixity)
     go' pairs last' = go [] pairs <&> unLoc
       where
@@ -224,15 +206,3 @@ parsePattern = traverse \case
                 case NE.nonEmpty stack of
                     Nothing -> pure [(newX, next)]
                     Just stack' -> pop (newX, next) stack'
-
-parseBinding :: Ctx es => Binding 'DependencyRes -> Eff es (Binding 'Fixity)
-parseBinding = \case
-    ValueB pat expr -> ValueB <$> parsePattern pat <*> parse expr
-    FunctionB name pats body -> FunctionB name <$> traverse parsePattern pats <*> parse body
-
-parseStmt :: Ctx es => DoStatement 'DependencyRes -> Eff es (DoStatement 'Fixity)
-parseStmt = traverse \case
-    Bind pat body -> Bind <$> parsePattern pat <*> parse body
-    With pat body -> With <$> parsePattern pat <*> parse body
-    DoLet binding -> DoLet <$> parseBinding binding
-    Action expr -> Action <$> parse expr

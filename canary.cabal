@@ -38,6 +38,7 @@ library
       Poset
       Repl
       Syntax
+      Syntax.AstTraversal
       Syntax.Core
       Syntax.Declaration
       Syntax.Row

@@ -15,8 +15,7 @@ module Playground where
 import Common hiding (Scope)
 import Common qualified (Scope)
 import Data.Char (isUpperCase)
-import Data.EnumMap qualified as Map
-import Data.EnumMap.Lazy qualified as LMap
+import Data.EnumMap.Strict qualified as EMap
 import Data.HashMap.Strict qualified as HashMap
 import Data.HashSet qualified as HashSet
 import Data.List.NonEmpty qualified as NE
@@ -32,6 +31,8 @@ import Error.Diagnose (Diagnostic, Position (..))
 import Eval (ValueEnv)
 import Fixity (resolveFixity)
 import Fixity qualified (parse)
+import IdMap qualified as LMap
+import IdMap qualified as Map
 import LangPrelude
 import NameGen (NameGen, freshName, runNameGen)
 import NameResolution (Scope (..), declare, resolveNames, resolveTerm, runDeclare)
@@ -60,7 +61,7 @@ testCheck
          -> Eff
                 '[ S.Reader Env
                  , State UniVars
-                 , State (EnumMap Skolem Common.Scope)
+                 , State (IdMap Skolem Common.Scope)
                  , Labeled UniVar NameGen
                  , State TopLevel
                  , Diagnose

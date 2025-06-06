@@ -1,6 +1,7 @@
 {-# LANGUAGE AllowAmbiguousTypes #-}
 {-# LANGUAGE DataKinds #-}
 {-# LANGUAGE DeriveAnyClass #-}
+{-# LANGUAGE DuplicateRecordFields #-}
 {-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE OverloadedRecordDot #-}
 {-# LANGUAGE PatternSynonyms #-}
@@ -34,6 +35,7 @@ import Error.Diagnose qualified as M
 import LangPrelude hiding (error)
 import NameGen
 import Syntax
+import Syntax.AstTraversal
 import Syntax.Declaration qualified as D
 import Syntax.Term
 
@@ -154,6 +156,22 @@ collectNames decls = for_ decls $ traverse_ \case
     D.Signature{} -> pass
     D.Fixity{} -> pass
 
+type Traversal es = AstTraversal 'Parse 'NameRes (Eff es)
+
+resolveTrav :: NameResCtx es => Traversal es
+resolveTrav =
+    tie
+        UntiedTraversal
+            { term = const resolveTerm
+            , pattern_ = defTravPattern
+            , declaration = defTravDeclaration
+            , name = const resolve
+            , -- juggling Declare scopes is complicated
+              binder = \_ _ -> internalError' "resolveTrav: binder"
+            , binding = \_ _ -> internalError' "resolveTrav: binding"
+            , statement = \_ _ -> internalError' "resolveTrav: statement"
+            }
+
 -- | resolves names in a declaration. Adds type constructors to the current scope
 resolveDec :: (NameResCtx es, Declare :> es) => Declaration 'Parse -> Eff es (Declaration 'NameRes)
 resolveDec = traverse \case
@@ -196,7 +214,7 @@ resolveBinding locals =
             body' <- resolveTerm body
             pure $ FunctionB name' args' body'
         ValueB pat body -> do
-            pat' <- resolvePat pat
+            pat' <- resolveTrav.pattern_ pat
             collectNames locals
             body' <- resolveTerm body
             pure $ ValueB pat' body'
@@ -215,32 +233,25 @@ declareBinding = \case
         body' <- resolveTerm body
         pure $ ValueB pat' body'
 
--- this could have been a Traversable instance
--- resolves names in a pattern, assuming that all new bindings have already been declared
-resolvePat :: NameResCtx es => Pattern 'Parse -> Eff es (Pattern 'NameRes)
-resolvePat = traverse \case
-    ConstructorP con pats -> ConstructorP <$> resolve con <*> traverse resolvePat pats
-    AnnotationP pat ty -> AnnotationP <$> resolvePat pat <*> resolveTerm ty
-    RecordP row -> RecordP <$> traverse resolvePat row
-    VariantP openName arg -> VariantP openName <$> resolvePat arg
-    VarP name -> VarP <$> resolve name
-    ListP pats -> ListP <$> traverse resolvePat pats
-    WildcardP name -> pure $ WildcardP name
-    LiteralP lit -> pure $ LiteralP lit
-    InfixP pairs last' -> InfixP <$> traverse (bitraverse resolvePat resolve) pairs <*> resolvePat last'
-
 -- | resolves names in a pattern. Adds all new names to the current scope
 declarePat :: (NameResCtx es, Declare :> es) => Pattern 'Parse -> Eff es (Pattern 'NameRes)
-declarePat = traverse \case
-    ConstructorP con pats -> ConstructorP <$> resolve con <*> traverse declarePat pats
-    AnnotationP pat ty -> AnnotationP <$> declarePat pat <*> resolveTerm ty
-    RecordP row -> RecordP <$> traverse declarePat row
-    VariantP openName arg -> VariantP openName <$> declarePat arg
-    VarP name -> VarP <$> declare name
-    ListP pats -> ListP <$> traverse declarePat pats
-    WildcardP name -> pure $ WildcardP name
-    LiteralP lit -> pure $ LiteralP lit
-    InfixP pairs last' -> InfixP <$> traverse (bitraverse declarePat resolve) pairs <*> declarePat last'
+declarePat (pat' :@ loc) =
+    Located loc <$> case pat' of
+        VarP name -> VarP <$> declare name
+        other -> unLoc <$> defTravPattern declareTrav (other :@ loc)
+  where
+    -- we don't have any open recursion cases here, so we only care about
+    -- what's directly reachable from Pattern, i.e. other patterns, terms and names
+    declareTrav =
+        AstTraversal
+            { term = resolveTerm
+            , pattern_ = declarePat
+            , name = resolve
+            , declaration = const $ internalError' "declareTrav: declaration"
+            , binder = const $ internalError' "resolveTrav: binder"
+            , binding = const $ internalError' "resolveTrav: binding"
+            , statement = const $ internalError' "resolveTrav: statement"
+            }
 
 -- | resolves names in a term. Doesn't change the current scope
 resolveTerm :: NameResCtx es => Term 'Parse -> Eff es (Term 'NameRes)
@@ -254,8 +265,6 @@ resolveTerm (Located loc e) =
             args' <- traverse declare args
             body' <- resolveTerm body
             pure $ WildcardLambda args' body'
-        App f arg -> App <$> resolveTerm f <*> resolveTerm arg
-        TypeApp expr tyArg -> TypeApp <$> resolveTerm expr <*> resolveTerm tyArg
         Let binding expr -> do
             binding' <- declareBinding binding
             expr' <- resolveTerm expr
@@ -275,31 +284,17 @@ resolveTerm (Located loc e) =
                 pats' <- traverse declarePat pats
                 expr' <- resolveTerm expr
                 pure (pats', expr')
-        Annotation body ty -> Annotation <$> resolveTerm body <*> resolveTerm ty
-        If cond true false -> If <$> resolveTerm cond <*> resolveTerm true <*> resolveTerm false
-        Record row -> Record <$> traverse resolveTerm row
-        Sigma x y -> Sigma <$> resolveTerm x <*> resolveTerm y
-        List items -> List <$> traverse resolveTerm items
-        Do stmts lastAction -> Do <$> traverse resolveStmt stmts <*> resolveTerm lastAction
-        InfixE pairs last' ->
-            InfixE
-                <$> traverse (bitraverse resolveTerm (traverse resolve)) pairs
-                <*> resolveTerm last'
-        Name name -> Name <$> resolve name
-        RecordLens lens -> pure $ RecordLens lens
-        Variant openName -> pure $ Variant openName
-        Literal lit -> pure $ Literal lit
-        Function from to -> Function <$> resolveTerm from <*> resolveTerm to
         Q q vis er binder body -> do
             binder' <- resolveBinder binder
             body' <- resolveTerm body
             pure $ Q q vis er binder' body'
+        Do stmts lastAction -> Do <$> traverse resolveStmt stmts <*> resolveTerm lastAction
+        InfixE pairs last' -> InfixE <$> traverse (bitraverse resolveTerm (traverse resolve)) pairs <*> resolveTerm last'
         ImplicitVar var -> internalError (getLoc var) "inference for implicit vars is not implemented yet"
         Parens expr ->
             -- todo: construct implicit lambdas here
-            resolveTerm expr <&> \(L inner) -> inner
-        VariantT row -> VariantT <$> traverse resolveTerm row
-        RecordT row -> RecordT <$> traverse resolveTerm row
+            unLoc <$> resolveTerm expr
+        other -> unLoc <$> partialTravTerm resolveTrav (other :@ loc)
 
 resolveStmt :: (NameResCtx es, Declare :> es) => DoStatement 'Parse -> Eff es (DoStatement 'NameRes)
 resolveStmt = traverse \case

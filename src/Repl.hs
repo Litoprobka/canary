@@ -14,7 +14,7 @@ import DependencyResolution (FixityMap, Op (..), SimpleOutput (..), resolveDepen
 import Diagnostic (Diagnose, fatal, guardNoErrors, reportExceptions, runDiagnose)
 import Effectful
 import Effectful.Labeled
-import Effectful.Labeled.Reader (runReader)
+import Effectful.Labeled.Reader (Reader, runReader)
 import Effectful.Reader.Static (ask)
 import Effectful.State.Static.Local (evalState, runState)
 import Error.Diagnose (Position (..), Report (..))
@@ -187,7 +187,7 @@ run env = do
     traverse_ run newEnv
 
 -- todo: locations of previous expressions get borked
-replStep :: (ReplCtx es, Diagnose :> es) => ReplEnv -> ReplCommand -> Eff es (Maybe ReplEnv)
+replStep :: forall es. (ReplCtx es, Diagnose :> es) => ReplEnv -> ReplCommand -> Eff es (Maybe ReplEnv)
 replStep env command = do
     case command of
         Decls decls -> processDecls env decls
@@ -219,6 +219,7 @@ replStep env command = do
         Quit -> pure Nothing
         UnknownCommand cmd -> fatal . one $ Err Nothing ("Unknown command:" <+> pretty cmd) [] []
   where
+    processExpr :: IdMap Name TC.Type' -> Term 'Parse -> Eff (Labeled "values" (Reader ValueEnv) ': es) (Term 'Fixity, TC.Type')
     processExpr types expr = evalState types do
         afterNameRes <- NameResolution.run env.scope $ resolveTerm expr
         afterFixityRes <- Fixity.run env.fixityMap env.operatorPriorities $ Fixity.parse $ fmap cast afterNameRes

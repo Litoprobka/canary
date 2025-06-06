@@ -1,3 +1,4 @@
+{-# LANGUAGE AllowAmbiguousTypes #-}
 {-# LANGUAGE DuplicateRecordFields #-}
 {-# LANGUAGE ExplicitNamespaces #-}
 {-# LANGUAGE MonoLocalBinds #-}
@@ -5,7 +6,7 @@
 {-# LANGUAGE UndecidableInstances #-}
 {-# LANGUAGE NoFieldSelectors #-}
 
-module Syntax.Declaration (Declaration_ (..), Declaration, Constructor (..), GadtConstructor (..)) where
+module Syntax.Declaration (Declaration_ (..), Declaration, Constructor (..), GadtConstructor (..), DepResAgrees (..)) where
 
 import Common (
     Cast (..),
@@ -79,6 +80,15 @@ instance Pretty (NameAt p) => Show (Declaration_ p) where
 
 instance HasLoc (Constructor p) where
     getLoc Constructor{loc} = loc
+
+class DepResAgrees (p :: Pass) (q :: Pass) where
+    castFixity :: p < 'DependencyRes => Fixity -> NameAt q -> PriorityRelation q -> Declaration_ q
+
+instance {-# OVERLAPPABLE #-} q < 'DependencyRes => DepResAgrees p q where
+    castFixity = Fixity
+
+instance DepResAgrees 'DependencyRes q where
+    castFixity = error "unsatisfiable"
 
 instance (Cast Type_ p q, NameAt p ~ NameAt q) => Cast Constructor p q where
     cast Constructor{loc, name, args} = Constructor{loc, name, args = (fmap . fmap) cast args}
