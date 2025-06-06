@@ -23,13 +23,15 @@ module NameResolution (
 
 import Common (Name)
 import Common hiding (Name, Scope)
+import Data.DList (DList)
+import Data.DList qualified as DList
 import Data.HashMap.Strict qualified as Map
 import Data.List (partition)
 import Data.List.NonEmpty qualified as NE
 import Data.Traversable (for)
 import Diagnostic
 import Effectful.Dispatch.Dynamic (interpret)
-import Effectful.State.Static.Local (State, evalState, get, put, runState)
+import Effectful.State.Static.Local (State, evalState, get, modify, put, runState, state)
 import Error.Diagnose (Report (..))
 import Error.Diagnose qualified as M
 import LangPrelude hiding (error)
@@ -55,7 +57,7 @@ makeEffect ''Declare
 
 newtype Scope = Scope {table :: HashMap SimpleName_ Name}
 data Warning = Shadowing SimpleName Loc | UnusedVar SimpleName deriving (Show)
-newtype Error = UnboundVar SimpleName
+data Error = UnboundVar SimpleName | OutOfScopeWildcard SimpleName
 
 warn :: Diagnose :> es => Warning -> Eff es ()
 warn =
@@ -82,6 +84,12 @@ error =
                 ("The variable" <+> pretty name <+> "is unbound")
                 (mkNotes [(getLoc name, M.This "referenced here")])
                 []
+        OutOfScopeWildcard name ->
+            Err
+                Nothing
+                "Wildcards must be delimited by brackets, parentheses, or braces"
+                (mkNotes [(getLoc name, M.This "wildcard is out of scope")])
+                []
 
 -- | run a state action without changing the `Scope` part of the state
 scoped :: NameResCtx es => Eff (Declare : es) a -> Eff es a
@@ -106,7 +114,7 @@ runDeclare = interpret \_ -> \case
         put $ Scope $ Map.insert name_ disambiguatedName scope.table
         pure disambiguatedName
 
-type NameResCtx es = (State Scope :> es, NameGen :> es, Diagnose :> es)
+type NameResCtx es = (State Scope :> es, State [DList Name] :> es, NameGen :> es, Diagnose :> es)
 
 {- | looks up a name in the current scope
 if the name is unbound, gives it a new unique id and
@@ -122,11 +130,12 @@ resolve name@(Located loc name_) = do
             -- this gives a unique id to every occurence of the same unbound name
             scoped $ declare name
 
-runWithEnv :: (NameGen :> es, Diagnose :> es) => Scope -> Eff (Declare : State Scope : es) a -> Eff es (a, Scope)
-runWithEnv env = runState env . runDeclare
+runWithEnv
+    :: (NameGen :> es, Diagnose :> es) => Scope -> Eff (Declare : State [DList Name] : State Scope : es) a -> Eff es (a, Scope)
+runWithEnv env = runState env . evalState [] . runDeclare
 
-run :: (NameGen :> es, Diagnose :> es) => Scope -> Eff (Declare : State Scope : es) a -> Eff es a
-run env = evalState env . runDeclare
+run :: (NameGen :> es, Diagnose :> es) => Scope -> Eff (Declare : State [DList Name] : State Scope : es) a -> Eff es a
+run env = evalState env . evalState [] . runDeclare
 
 resolveNames :: (NameResCtx es, Declare :> es) => [Declaration 'Parse] -> Eff es [Declaration 'NameRes]
 resolveNames decls = do
@@ -261,10 +270,6 @@ resolveTerm (Located loc e) =
             arg' <- declarePat arg
             body' <- resolveTerm body
             pure $ Lambda arg' body'
-        WildcardLambda args body -> do
-            args' <- traverse declare args
-            body' <- resolveTerm body
-            pure $ WildcardLambda args' body'
         Let binding expr -> do
             binding' <- declareBinding binding
             expr' <- resolveTerm expr
@@ -291,9 +296,26 @@ resolveTerm (Located loc e) =
         Do stmts lastAction -> Do <$> traverse resolveStmt stmts <*> resolveTerm lastAction
         InfixE pairs last' -> InfixE <$> traverse (bitraverse resolveTerm (traverse resolve)) pairs <*> resolveTerm last'
         ImplicitVar var -> internalError (getLoc var) "inference for implicit vars is not implemented yet"
-        Parens expr ->
-            -- todo: construct implicit lambdas here
-            unLoc <$> resolveTerm expr
+        Name name@(Wildcard' txt :@ wloc) -> do
+            stackIsEmpty <- null <$> get @[DList Name]
+            if stackIsEmpty
+                then do
+                    name' <- declare name
+                    error $ OutOfScopeWildcard name
+                    pure $ Name name'
+                else do
+                    name' <- declare $ Name' ("$" <> txt) :@ wloc
+                    modify @[DList Name] \case
+                        (top : rest) -> DList.snoc top name' : rest
+                        [] -> []
+                    pure $ Name name'
+        Parens expr -> do
+            modify @[DList Name] (DList.empty :)
+            body <- resolveTerm expr
+            vars <- state @[DList Name] (splitAt 1)
+            pure case NE.nonEmpty $ foldMap DList.toList vars of
+                Nothing -> unLoc body
+                Just varsNE -> WildcardLambda varsNE body
         other -> unLoc <$> partialTravTerm resolveTrav (other :@ loc)
 
 resolveStmt :: (NameResCtx es, Declare :> es) => DoStatement 'Parse -> Eff es (DoStatement 'NameRes)

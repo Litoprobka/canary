@@ -107,7 +107,7 @@ type family NameAt (pass :: Pass) where
 type Name = Located Name_
 data Name_
     = Name Text Id
-    | Wildcard Int Id
+    | Wildcard Text Id
     | BoolName
     | TrueName
     | ListName
@@ -140,7 +140,7 @@ instance HasId Name_ where
 type SimpleName = Located SimpleName_
 data SimpleName_
     = Name' Text
-    | Wildcard' Int
+    | Wildcard' Text
     deriving (Show, Eq, Ord, Generic, Hashable)
 
 data Located a = Located Loc a deriving (Show, Generic, Functor, Foldable, Traversable)

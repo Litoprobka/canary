@@ -14,6 +14,7 @@ import Common (
     Pass (..),
     PriorityRelation' (..),
     SimpleName,
+    SimpleName_ (Wildcard'),
     getLoc,
     mkNotes,
     unLoc,
@@ -370,9 +371,9 @@ termParens =
               -- , tightConstructor
               Variant <$> variantConstructor
             , Literal <$> literal
-            , Name <$> identifier
+            , Name <$> (identifier <|> located (Wildcard' <$> $(tok 'Token.Wildcard)))
             , ImplicitVar <$> mkName $(tok 'Token.ImplicitName)
-            , parens $ unLoc <$> term
+            , Parens <$> parens term
             ]
   where
     variantItem = do

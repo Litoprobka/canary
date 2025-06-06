@@ -22,7 +22,7 @@ freshName (Located loc name) = Located loc <$> freshName_ name
 freshName_ :: NameGen :> es => SimpleName_ -> Eff es Name_
 freshName_ = \case
     Name' name -> Name name <$> freshId
-    Wildcard' n -> Wildcard n <$> freshId
+    Wildcard' name -> Wildcard name <$> freshId
 
 runNameGen :: Eff (NameGen : es) a -> Eff es a
 runNameGen = reinterpret (evalState $ Id 0) \_ FreshId -> get <* modify inc
