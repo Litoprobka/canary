@@ -130,32 +130,9 @@ parse (term' :@ termLoc) =
         InfixE pairs last' -> do
             pairs' <- traverse (bitraverse parse (pure . maybe AppOp Op)) pairs
             last'' <- parse last'
-            go' pairs' last''
+            shuntingYard id appOrMerge pairs' last''
         other -> unLoc <$> partialTravTerm traversal (other :@ termLoc)
   where
-    go' :: Ctx es => [(Expr 'Fixity, Op)] -> Expr 'Fixity -> Eff es (Expr_ 'Fixity)
-    go' pairs last' = go [] pairs <&> unLoc
-      where
-        go :: Ctx es => [(Expr 'Fixity, Op)] -> [(Expr 'Fixity, Op)] -> Eff es (Expr 'Fixity)
-        go [] [] = pure last'
-        go ((x, op) : rest) [] = do
-            last'' <- appOrMerge op x last'
-            foldM (\acc (z, op') -> appOrMerge op' z acc) last'' rest
-        go [] ((x, op) : rest) = go [(x, op)] rest
-        go ((x, prev) : stack) ((y, next) : rest) = do
-            newStack <- pop (y, next) ((x, prev) :| stack)
-            go newStack rest
-
-    pop :: Ctx es => (Expr 'Fixity, Op) -> NonEmpty (Expr 'Fixity, Op) -> Eff es [(Expr 'Fixity, Op)]
-    pop (y, next) ((x, prev) :| stack) =
-        priority prev next >>= \case
-            Right' -> pure ((y, next) : (x, prev) : stack)
-            Left' -> do
-                newX <- appOrMerge prev x y
-                case NE.nonEmpty stack of
-                    Nothing -> pure [(newX, next)]
-                    Just stack' -> pop (newX, next) stack'
-
     appOrMerge :: Ctx es => Op -> Expr 'Fixity -> Expr 'Fixity -> Eff es (Expr 'Fixity)
     appOrMerge mbOp lhs rhs = do
         fixity <- lookupFixity mbOp <$> ask @FixityMap
@@ -176,33 +153,32 @@ parsePattern (term' :@ termLoc) =
         InfixP pairs l -> do
             pairs' <- traverse (bitraverse parsePattern pure) pairs
             l' <- parsePattern l
-            go' pairs' l'
+            shuntingYard Op conP pairs' l'
         other -> unLoc <$> partialTravPattern traversal (other :@ termLoc)
   where
-    -- parsing logic is copy-pasted at the moment. There should be a way to factor it out
-    go' :: Ctx es => [(Pattern 'Fixity, Name)] -> Pattern 'Fixity -> Eff es (Pattern_ 'Fixity)
-    go' pairs last' = go [] pairs <&> unLoc
-      where
-        go :: Ctx es => [(Pattern 'Fixity, Name)] -> [(Pattern 'Fixity, Name)] -> Eff es (Pattern 'Fixity)
-        go [] [] = pure last'
-        go ((x, op) : rest) [] =
-            pure
-                let last'' = conP op x last'
-                 in foldl' (\acc (z, op') -> conP op' z acc) last'' rest
-        go [] ((x, op) : rest) = go [(x, op)] rest
-        go ((x, prev) : stack) ((y, next) : rest) = do
-            newStack <- pop (y, next) ((x, prev) :| stack)
-            go newStack rest
+    conP :: Applicative m => Name -> Pattern 'Fixity -> Pattern 'Fixity -> m (Pattern 'Fixity)
+    conP conOp lhs rhs = pure $ ConstructorP conOp [lhs, rhs] :@ zipLocOf lhs rhs
 
-    conP :: Name -> Pattern 'Fixity -> Pattern 'Fixity -> Pattern 'Fixity
-    conP conOp lhs rhs = ConstructorP conOp [lhs, rhs] :@ zipLocOf lhs rhs
+shuntingYard
+    :: forall es a unloc op. (a ~ Located unloc, Ctx es) => (op -> Op) -> (op -> a -> a -> Eff es a) -> [(a, op)] -> a -> Eff es unloc
+shuntingYard toOp app pairs last' = go [] pairs <&> unLoc
+  where
+    go :: [(a, op)] -> [(a, op)] -> Eff es a
+    go [] [] = pure last'
+    go ((x, op) : rest) [] = do
+        last'' <- app op x last'
+        foldM (\acc (z, op') -> app op' z acc) last'' rest
+    go [] ((x, op) : rest) = go [(x, op)] rest
+    go ((x, prev) : stack) ((y, next) : rest) = do
+        newStack <- pop (y, next) ((x, prev) :| stack)
+        go newStack rest
 
-    pop :: Ctx es => (Pattern 'Fixity, Name) -> NonEmpty (Pattern 'Fixity, Name) -> Eff es [(Pattern 'Fixity, Name)]
+    pop :: (a, op) -> NonEmpty (a, op) -> Eff es [(a, op)]
     pop (y, next) ((x, prev) :| stack) =
-        priority (Op prev) (Op next) >>= \case
+        priority (toOp prev) (toOp next) >>= \case
             Right' -> pure ((y, next) : (x, prev) : stack)
             Left' -> do
-                let newX = conP prev x y
+                newX <- app prev x y
                 case NE.nonEmpty stack of
                     Nothing -> pure [(newX, next)]
                     Just stack' -> pop (newX, next) stack'
