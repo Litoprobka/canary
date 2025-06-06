@@ -58,14 +58,12 @@ data Pass
     | NameRes -- etc
     | DependencyRes -- not sure how to call this pass. it computes a dependency graph and collects all sorts of information
     | Fixity
-    | DuringTypecheck -- an intermediate state for univars and skolems
 
 type instance Compare (a :: Pass) (b :: Pass) = ComparePass a b
 type family ComparePass a b where
     ComparePass Parse Parse = EQ
     ComparePass NameRes NameRes = EQ
     ComparePass 'Fixity 'Fixity = EQ
-    ComparePass 'DuringTypecheck 'DuringTypecheck = EQ
     ComparePass 'DependencyRes 'DependencyRes = EQ
     ComparePass Parse _ = LT
     ComparePass _ Parse = GT
@@ -75,8 +73,6 @@ type family ComparePass a b where
     ComparePass _ 'DependencyRes = GT
     ComparePass 'Fixity _ = LT
     ComparePass _ 'Fixity = GT
-    ComparePass DuringTypecheck _ = LT
-    ComparePass _ DuringTypecheck = GT
 
 type (!=) (a :: k) (b :: k) =
     Assert

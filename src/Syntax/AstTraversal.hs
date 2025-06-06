@@ -53,17 +53,15 @@ data UntiedTraversal (p :: Pass) (q :: Pass) m = UntiedTraversal
     }
 
 defTravTerm
-    :: forall p q m. (FixityAgrees p q, TcAgrees p q, NameAt p ~ NameAt q, Applicative m) => AstTraversal p q m -> Term p -> m (Term q)
+    :: forall p q m. (FixityAgrees p q, NameAt p ~ NameAt q, Applicative m) => AstTraversal p q m -> Term p -> m (Term q)
 defTravTerm trav (term' :@ loc) =
     Located loc <$> case term' of
         ImplicitVar name -> ImplicitVar <$> trav.name name
         Parens term -> Parens <$> trav.term term
-        T.UniVar uni -> pure $ castUni uni
-        T.Skolem skolem -> pure $ castSkolem skolem
         InfixE pairs term -> castInfix @p <$> traverse (bitraverse trav.term (traverse trav.name)) pairs <*> trav.term term
         other -> unLoc <$> partialTravTerm trav (other :@ loc)
 
--- | caution: this traversal doesn't handle ImplicitName, Parens, UniVar, Skolem and InfixE
+-- | caution: this traversal doesn't handle ImplicitName, Parens and InfixE
 partialTravTerm :: Applicative m => AstTraversal p q m -> Term p -> m (Term q)
 partialTravTerm trav (term' :@ loc) =
     Located loc <$> case term' of
@@ -91,8 +89,6 @@ partialTravTerm trav (term' :@ loc) =
         RecordT row -> RecordT <$> traverse trav.term row
         ImplicitVar{} -> error "partialTravTerm: encountered ImplicitVar"
         Parens{} -> error "partialTravTerm: encountered Parens"
-        T.UniVar{} -> error "partialTravTerm: encountered UniVar"
-        T.Skolem{} -> error "partialTravTerm: encountered Skolem"
         InfixE{} -> error "partialTravTerm: encountered InfixE"
 
 defTravPattern :: forall p q m. (FixityAgrees p q, Applicative m) => AstTraversal p q m -> Pattern p -> m (Pattern q)
@@ -158,7 +154,7 @@ defTravStatement trav = traverse \case
     DoLet binding -> DoLet <$> trav.binding binding
     Action term -> Action <$> trav.term term
 
-defTrav :: (FixityAgrees p q, TcAgrees p q, DepResAgrees p q, NameAt p ~ NameAt q, Applicative m) => UntiedTraversal p q m
+defTrav :: (FixityAgrees p q, DepResAgrees p q, NameAt p ~ NameAt q, Applicative m) => UntiedTraversal p q m
 defTrav =
     UntiedTraversal
         { term = defTravTerm
@@ -205,18 +201,6 @@ instance {-# OVERLAPPABLE #-} q < 'Fixity => FixityAgrees p q where
 instance FixityAgrees 'Fixity q where
     castInfix = error "unsatisfiable"
     castInfixP = error "unsatisfiable"
-instance FixityAgrees 'DuringTypecheck q where
-    castInfix = error "unsatisfiable"
-    castInfixP = error "unsatisfiable"
-class TcAgrees (p :: Pass) (q :: Pass) where
-    castUni :: p ~ 'DuringTypecheck => UniVar -> Type_ q
-    castSkolem :: p ~ 'DuringTypecheck => Skolem -> Type_ q
-instance TcAgrees p 'DuringTypecheck where
-    castUni = T.UniVar
-    castSkolem = T.Skolem
-instance {-# OVERLAPPABLE #-} p != 'DuringTypecheck => TcAgrees p q where
-    castUni = error "unsatisfiable"
-    castSkolem = error "unsatisfiable"
 
 class DepResAgrees (p :: Pass) (q :: Pass) where
     castFixity :: p < 'DependencyRes => Fixity -> NameAt q -> PriorityRelation q -> Declaration_ q

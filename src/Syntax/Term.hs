@@ -4,7 +4,6 @@
 
 module Syntax.Term where
 
-import Common (Skolem, UniVar)
 import Common hiding (Name, Skolem, UniVar)
 import Common qualified as C
 import Data.List.NonEmpty qualified as NE
@@ -21,51 +20,48 @@ type Expr p = Term p
 type Type_ = Term_
 type Expr_ = Term_
 
-data Term_ (p :: Pass) where
-    -- terminal constructors
-    Name :: NameAt p -> Term_ p
-    -- | 'a
-    -- | type variables with an inferred forall binder
-    ImplicitVar :: NameAt p ~ SimpleName => NameAt p -> Term_ p
-    Parens :: NameAt p ~ SimpleName => Term p -> Term_ p
-    UniVar :: UniVar -> Type_ 'DuringTypecheck
-    Skolem :: Skolem -> Type_ 'DuringTypecheck
-    Literal :: Literal -> Expr_ p
-    -- shared between Expr and Type
+data Term_ p
+    = -- terminal constructors
+      Name (NameAt p)
+    | -- | 'a
+      -- | type variables with an inferred forall binder
+      NameAt p ~ SimpleName => ImplicitVar (NameAt p)
+    | NameAt p ~ SimpleName => Parens (Term p)
+    | Literal Literal
+    | -- shared between Expr and Type
 
-    -- | value : Type
-    Annotation :: Term p -> Type p -> Term_ p
-    App :: Term p -> Term p -> Term_ p
-    -- expression-only stuff
-    Lambda :: Pattern p -> Expr p -> Expr_ p -- it's still unclear to me whether I want to desugar multi-arg lambdas while parsing
-
-    -- | (f _ x + _ y)
-    WildcardLambda :: NonEmpty (NameAt p) -> Expr p -> Expr_ p
-    Let :: Binding p -> Expr p -> Expr_ p
-    LetRec :: NonEmpty (Binding p) -> Expr p -> Expr_ p
-    TypeApp :: Expr p -> Type p -> Expr_ p
-    Case :: Expr p -> [(Pattern p, Expr p)] -> Expr_ p
-    -- | Haskell's \cases
-    Match :: [([Pattern p], Expr p)] -> Expr_ p
-    If :: Expr p -> Expr p -> Expr p -> Expr_ p
-    -- | .field.otherField.thirdField
-    RecordLens :: NonEmpty OpenName -> Expr_ p
-    -- | 'Constructor
-    -- unlike the rest of the cases, variant tags and record fields
-    -- don't need any kind of name resolution
-    Variant :: OpenName -> Expr_ p
-    Record :: Row (Expr p) -> Expr_ p
-    -- | unlike lambdas, which may have a normal function type as well as a pi type, dependent pairs are distinct from records
-    Sigma :: Expr p -> Expr p -> Expr_ p
-    List :: [Expr p] -> Expr_ p
-    Do :: [DoStatement p] -> Expr p -> Expr_ p
-    -- | an unresolved expression with infix / prefix operators
-    InfixE :: p < 'Fixity => [(Expr p, Maybe (NameAt p))] -> Expr p -> Expr_ p
-    -- type-only stuff
-    Function :: Type p -> Type p -> Type_ p
-    Q :: Quantifier -> Visibility -> Erased -> VarBinder p -> Type p -> Type_ p
-    VariantT :: ExtRow (Type p) -> Type_ p
-    RecordT :: ExtRow (Type p) -> Type_ p
+      -- | value : Type
+      Annotation (Term p) (Type p)
+    | App (Term p) (Term p)
+    | -- expression-only stuff
+      Lambda (Pattern p) (Expr p) -- it's still unclear to me whether I want to desugar multi-arg lambdas while parsing
+    | -- | (f _ x + _ y)
+      WildcardLambda (NonEmpty (NameAt p)) (Expr p)
+    | Let (Binding p) (Expr p)
+    | LetRec (NonEmpty (Binding p)) (Expr p)
+    | TypeApp (Expr p) (Type p)
+    | Case (Expr p) [(Pattern p, Expr p)]
+    | -- | Haskell's \cases
+      Match [([Pattern p], Expr p)]
+    | If (Expr p) (Expr p) (Expr p)
+    | -- | .field.otherField.thirdField
+      RecordLens (NonEmpty OpenName)
+    | -- | 'Constructor
+      -- unlike the rest of the cases, variant tags and record fields
+      -- don't need any kind of name resolution
+      Variant OpenName
+    | Record (Row (Expr p))
+    | -- | unlike lambdas, which may have a normal function type as well as a pi type, dependent pairs are distinct from records
+      Sigma (Expr p) (Expr p)
+    | List [Expr p]
+    | Do [DoStatement p] (Expr p)
+    | -- | an unresolved expression with infix / prefix operators
+      p < 'Fixity => InfixE [(Expr p, Maybe (NameAt p))] (Expr p)
+    | -- type-only stuff
+      Function (Type p) (Type p)
+    | Q Quantifier Visibility Erased (VarBinder p) (Type p)
+    | VariantT (ExtRow (Type p))
+    | RecordT (ExtRow (Type p))
 
 data Quantifier = Forall | Exists deriving (Eq, Show)
 data Visibility = Visible | Implicit | Hidden deriving (Eq, Show)
@@ -90,13 +86,13 @@ data DoStatement_ (p :: Pass)
     | DoLet (Binding p)
     | Action (Expr p)
 
-deriving instance Eq (Term_ 'DuringTypecheck)
+deriving instance Eq (Term_ 'Fixity)
 deriving instance Eq (Term_ 'Parse)
-deriving instance Eq (VarBinder 'DuringTypecheck)
+deriving instance Eq (VarBinder 'Fixity)
 deriving instance Eq (VarBinder 'Parse)
-deriving instance Eq (DoStatement_ 'DuringTypecheck)
+deriving instance Eq (DoStatement_ 'Fixity)
 deriving instance Eq (DoStatement_ 'Parse)
-deriving instance Eq (Binding 'DuringTypecheck)
+deriving instance Eq (Binding 'Fixity)
 deriving instance Eq (Binding 'Parse)
 
 -- unfortunately, Term and Pattern are mutually recursive, so I had to copypaste
@@ -115,7 +111,7 @@ data Pattern_ (p :: Pass)
     | -- infix constructors cannot have a higher-than-pattern precedence
       p < 'Fixity => InfixP [(Pattern p, NameAt p)] (Pattern p)
 
-deriving instance Eq (Pattern_ 'DuringTypecheck)
+deriving instance Eq (Pattern_ 'Fixity)
 deriving instance Eq (Pattern_ 'Parse)
 
 instance Pretty (NameAt p) => Show (Pattern_ p) where
@@ -154,8 +150,6 @@ instance Pretty (NameAt p) => Pretty (Expr_ p) where
             Do stmts lastAction -> nest 2 $ vsep ("do" : fmap pretty stmts <> [pretty lastAction])
             Literal lit -> pretty lit
             InfixE pairs last' -> "?(" <> sep (concatMap (\(lhs, op) -> go 3 lhs : maybe [] (pure . pretty) op) pairs <> [pretty last']) <> ")"
-            Skolem skolem -> pretty skolem
-            UniVar uni -> pretty uni
             Function from to -> parensWhen 2 $ go 2 from <+> "->" <+> pretty to
             Q q vis er binder body -> parensWhen 2 $ kw q er <+> prettyBinder binder <+> compressQ q vis er body
             VariantT row -> brackets . withExt row . sep . punctuate comma . map variantItem $ sortedRow row.row
@@ -251,8 +245,6 @@ collectReferencedNames = go
         Name name -> [name]
         ImplicitVar var -> [var]
         Parens expr -> go expr
-        UniVar{} -> []
-        Skolem _ -> []
         Literal _ -> []
         RecordLens{} -> []
         Variant{} -> []
