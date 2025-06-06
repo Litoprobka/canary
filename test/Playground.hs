@@ -15,6 +15,7 @@ module Playground where
 import Common hiding (Scope)
 import Common qualified (Scope)
 import Data.Char (isUpperCase)
+import Data.DList (DList)
 import Data.EnumMap.Strict qualified as EMap
 import Data.HashMap.Strict qualified as HashMap
 import Data.HashSet qualified as HashSet
@@ -35,7 +36,7 @@ import IdMap qualified as LMap
 import IdMap qualified as Map
 import LangPrelude
 import NameGen (NameGen, freshName, runNameGen)
-import NameResolution (Scope (..), declare, resolveNames, resolveTerm, runDeclare)
+import NameResolution (ImplicitVars, Scope (..), declare, resolveNames, resolveTerm, runDeclare)
 import NameResolution qualified (Declare, run)
 import Parser hiding (run)
 import Prettyprinter hiding (list)
@@ -56,7 +57,7 @@ import TypeChecker.Backend (TopLevel, Type', UniVars)
 -- some wrappers and syntactic niceties for testing
 
 testCheck
-    :: Eff [NameResolution.Declare, State Scope, Diagnose, NameGen] resolved
+    :: Eff [NameResolution.Declare, State ImplicitVars, State [DList Name], State Scope, Diagnose, NameGen] resolved
     -> ( resolved
          -> Eff
                 '[ S.Reader Env

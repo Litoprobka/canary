@@ -2,7 +2,7 @@ type Peano = S Peano | Z
 
 
 type Vec : Peano -> Type -> Type where
-  VNil : forall a. Vec Z a
+  VNil : Vec Z 'a
   (:::) : forall (n : Peano) a. a -> Vec n a -> Vec (S n) a
 
 infix right :::

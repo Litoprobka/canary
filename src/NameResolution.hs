@@ -18,6 +18,7 @@ module NameResolution (
     declarePat,
     Scope (..),
     Declare,
+    ImplicitVars,
     runWithEnv,
 ) where
 
@@ -27,6 +28,7 @@ import Data.DList (DList)
 import Data.DList qualified as DList
 import Data.HashMap.Strict qualified as Map
 import Data.List (partition)
+import Data.List qualified as List
 import Data.List.NonEmpty qualified as NE
 import Data.Traversable (for)
 import Diagnostic
@@ -57,7 +59,7 @@ makeEffect ''Declare
 
 newtype Scope = Scope {table :: HashMap SimpleName_ Name}
 data Warning = Shadowing SimpleName Loc | UnusedVar SimpleName deriving (Show)
-data Error = UnboundVar SimpleName | OutOfScopeWildcard SimpleName
+data Error = UnboundVar SimpleName | OutOfScopeWildcard SimpleName | OutOfScopeImplicit SimpleName
 
 warn :: Diagnose :> es => Warning -> Eff es ()
 warn =
@@ -90,6 +92,12 @@ error =
                 "Wildcards must be delimited by brackets, parentheses, or braces"
                 (mkNotes [(getLoc name, M.This "wildcard is out of scope")])
                 []
+        OutOfScopeImplicit name ->
+            Err
+                Nothing
+                "implicit variables may only appear in a type"
+                (mkNotes [(getLoc name, M.This "variable is outside of a type")])
+                []
 
 -- | run a state action without changing the `Scope` part of the state
 scoped :: NameResCtx es => Eff (Declare : es) a -> Eff es a
@@ -114,7 +122,7 @@ runDeclare = interpret \_ -> \case
         put $ Scope $ Map.insert name_ disambiguatedName scope.table
         pure disambiguatedName
 
-type NameResCtx es = (State Scope :> es, State [DList Name] :> es, NameGen :> es, Diagnose :> es)
+type NameResCtx es = (State Scope :> es, State [DList Name] :> es, State ImplicitVars :> es, NameGen :> es, Diagnose :> es)
 
 {- | looks up a name in the current scope
 if the name is unbound, gives it a new unique id and
@@ -130,12 +138,37 @@ resolve name@(Located loc name_) = do
             -- this gives a unique id to every occurence of the same unbound name
             scoped $ declare name
 
-runWithEnv
-    :: (NameGen :> es, Diagnose :> es) => Scope -> Eff (Declare : State [DList Name] : State Scope : es) a -> Eff es (a, Scope)
-runWithEnv env = runState env . evalState [] . runDeclare
+data ImplicitVars
+    = NotInTypeScope
+    | CollectingVars [(SimpleName, Name)] -- poor man's scope
 
-run :: (NameGen :> es, Diagnose :> es) => Scope -> Eff (Declare : State [DList Name] : State Scope : es) a -> Eff es a
-run env = evalState env . evalState [] . runDeclare
+inferForall :: (State ImplicitVars :> es, Diagnose :> es) => Eff es (Term 'NameRes) -> Eff es (Term 'NameRes)
+inferForall mkType =
+    get >>= \case
+        CollectingVars{} -> mkType
+        NotInTypeScope -> do
+            put $ CollectingVars []
+            body <- mkType
+            let loc = getLoc body
+            get >>= \case
+                NotInTypeScope -> internalError loc "something wrong with implicit forall inference"
+                CollectingVars vars -> do
+                    put NotInTypeScope
+                    pure $ foldr (\(_, var) acc -> Q Forall Implicit Erased VarBinder{var, kind = Nothing} acc :@ loc) body vars
+
+runWithEnv
+    :: (NameGen :> es, Diagnose :> es)
+    => Scope
+    -> Eff (Declare : State ImplicitVars : State [DList Name] : State Scope : es) a
+    -> Eff es (a, Scope)
+runWithEnv env = runState env . evalState [] . evalState NotInTypeScope . runDeclare
+
+run
+    :: (NameGen :> es, Diagnose :> es)
+    => Scope
+    -> Eff (Declare : State ImplicitVars : State [DList Name] : State Scope : es) a
+    -> Eff es a
+run env = evalState env . evalState [] . evalState NotInTypeScope . runDeclare
 
 resolveNames :: (NameResCtx es, Declare :> es) => [Declaration 'Parse] -> Eff es [Declaration 'NameRes]
 resolveNames decls = do
@@ -204,10 +237,10 @@ resolveDec = traverse \case
         mbKind' <- traverse resolveTerm mbKind
         constrs' <- for constrs \(D.GadtConstructor conLoc con sig) -> do
             con' <- declare con
-            sig' <- resolveTerm sig
+            sig' <- inferForall (resolveTerm sig)
             pure $ D.GadtConstructor conLoc con' sig'
         pure $ D.GADT name' mbKind' constrs'
-    D.Signature name ty -> D.Signature <$> resolve name <*> resolveTerm ty
+    D.Signature name ty -> D.Signature <$> resolve name <*> inferForall (resolveTerm ty)
     D.Fixity fixity name rels -> D.Fixity fixity <$> resolve name <*> traverse resolve rels
 
 {- | resolves names in a binding. Unlike the rest of the functions, it also
@@ -247,6 +280,7 @@ declarePat :: (NameResCtx es, Declare :> es) => Pattern 'Parse -> Eff es (Patter
 declarePat (pat' :@ loc) =
     Located loc <$> case pat' of
         VarP name -> VarP <$> declare name
+        AnnotationP pat ty -> AnnotationP <$> declarePat pat <*> inferForall (resolveTerm ty)
         other -> unLoc <$> defTravPattern declareTrav (other :@ loc)
   where
     -- we don't have any open recursion cases here, so we only care about
@@ -266,6 +300,7 @@ declarePat (pat' :@ loc) =
 resolveTerm :: NameResCtx es => Term 'Parse -> Eff es (Term 'NameRes)
 resolveTerm (Located loc e) =
     Located loc <$> scoped case e of
+        Annotation term ty -> Annotation <$> resolveTerm term <*> inferForall (resolveTerm ty)
         Lambda arg body -> do
             arg' <- declarePat arg
             body' <- resolveTerm body
@@ -295,7 +330,17 @@ resolveTerm (Located loc e) =
             pure $ Q q vis er binder' body'
         Do stmts lastAction -> Do <$> traverse resolveStmt stmts <*> resolveTerm lastAction
         InfixE pairs last' -> InfixE <$> traverse (bitraverse resolveTerm (traverse resolve)) pairs <*> resolveTerm last'
-        ImplicitVar var -> internalError (getLoc var) "inference for implicit vars is not implemented yet"
+        ImplicitVar var ->
+            get @ImplicitVars >>= \case
+                NotInTypeScope -> do
+                    error $ OutOfScopeImplicit var
+                    Name <$> declare var
+                CollectingVars vars -> case List.lookup var vars of
+                    Just name -> pure $ Name name
+                    Nothing -> do
+                        name <- declare var
+                        put $ CollectingVars $ vars ++ [(var, name)]
+                        pure $ Name name
         Name name@(Wildcard' txt :@ wloc) -> do
             stackIsEmpty <- null <$> get @[DList Name]
             if stackIsEmpty
