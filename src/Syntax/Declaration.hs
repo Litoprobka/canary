@@ -6,10 +6,9 @@
 {-# LANGUAGE UndecidableInstances #-}
 {-# LANGUAGE NoFieldSelectors #-}
 
-module Syntax.Declaration (Declaration_ (..), Declaration, Constructor (..), GadtConstructor (..), DepResAgrees (..)) where
+module Syntax.Declaration (Declaration_ (..), Declaration, Constructor (..), GadtConstructor (..)) where
 
 import Common (
-    Cast (..),
     Fixity (..),
     HasLoc (..),
     Loc,
@@ -22,7 +21,7 @@ import Common (
 import Data.Type.Ord (type (<))
 import LangPrelude hiding (show)
 import Prettyprinter
-import Syntax.Term (Binding, Type, Type_, VarBinder)
+import Syntax.Term (Binding, Type, VarBinder)
 import Prelude (show)
 
 type Declaration p = Located (Declaration_ p)
@@ -80,18 +79,3 @@ instance Pretty (NameAt p) => Show (Declaration_ p) where
 
 instance HasLoc (Constructor p) where
     getLoc Constructor{loc} = loc
-
-class DepResAgrees (p :: Pass) (q :: Pass) where
-    castFixity :: p < 'DependencyRes => Fixity -> NameAt q -> PriorityRelation q -> Declaration_ q
-
-instance {-# OVERLAPPABLE #-} q < 'DependencyRes => DepResAgrees p q where
-    castFixity = Fixity
-
-instance DepResAgrees 'DependencyRes q where
-    castFixity = error "unsatisfiable"
-
-instance (Cast Type_ p q, NameAt p ~ NameAt q) => Cast Constructor p q where
-    cast Constructor{loc, name, args} = Constructor{loc, name, args = (fmap . fmap) cast args}
-
-instance (Cast Type_ p q, NameAt p ~ NameAt q) => Cast GadtConstructor p q where
-    cast GadtConstructor{loc, name, sig} = GadtConstructor{loc, name, sig = fmap cast sig}

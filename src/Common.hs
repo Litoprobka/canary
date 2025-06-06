@@ -33,7 +33,6 @@ module Common (
     PriorityRelation,
     PriorityRelation' (..),
     type (!=),
-    Cast (..),
     toSimpleName,
     pattern L,
     unLoc,
@@ -277,7 +276,3 @@ toSimpleName (Located loc name) = Located loc case name of
 
 mkNotes :: [(Loc, M.Marker a)] -> [(Position, M.Marker a)]
 mkNotes = fmap \(Loc pos, marker) -> (pos, marker)
-
--- a class for AST nodes that can be losslessly cast to a different pass
-class Cast ty (p :: Pass) (q :: Pass) where
-    cast :: ty p -> ty q

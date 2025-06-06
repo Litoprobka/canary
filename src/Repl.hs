@@ -5,12 +5,12 @@
 
 module Repl where
 
-import Common (Fixity (..), Loc (..), Located, Name, Name_ (TypeName), Pass (..), SimpleName_ (Name'), cast)
+import Common (Fixity (..), Loc (..), Located, Name, Name_ (TypeName), Pass (..), SimpleName_ (Name'))
 import Common qualified as C
 import Data.HashMap.Strict qualified as HashMap
 import Data.Text.Encoding (strictBuilderToText, textToStrictBuilder)
 import Data.Text.Encoding qualified as Text
-import DependencyResolution (FixityMap, Op (..), SimpleOutput (..), resolveDependenciesSimplified')
+import DependencyResolution (FixityMap, Op (..), SimpleOutput (..), cast, resolveDependenciesSimplified')
 import Diagnostic (Diagnose, fatal, guardNoErrors, reportExceptions, runDiagnose)
 import Effectful
 import Effectful.Labeled
@@ -33,6 +33,7 @@ import Parser qualified
 import Poset (Poset)
 import Poset qualified
 import Syntax
+import Syntax.AstTraversal
 import Syntax.Declaration qualified as D
 import Syntax.Term
 import System.Console.Isocline
@@ -222,7 +223,8 @@ replStep env command = do
     processExpr :: IdMap Name TC.Type' -> Term 'Parse -> Eff (Labeled "values" (Reader ValueEnv) ': es) (Term 'Fixity, TC.Type')
     processExpr types expr = evalState types do
         afterNameRes <- NameResolution.run env.scope $ resolveTerm expr
-        afterFixityRes <- Fixity.run env.fixityMap env.operatorPriorities $ Fixity.parse $ fmap cast afterNameRes
+        skippedDepRes <- cast.term afterNameRes
+        afterFixityRes <- Fixity.run env.fixityMap env.operatorPriorities $ Fixity.parse skippedDepRes
         fmap (afterFixityRes,) $ runLabeled @"types" (evalState env.types) $ TC.run env.values $ normalise $ infer afterFixityRes
 
 localDiagnose :: IOE :> es => a -> (FilePath, Text) -> Eff (Diagnose : es) (Maybe a) -> Eff es (Maybe a)

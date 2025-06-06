@@ -1,12 +1,15 @@
+{-# LANGUAGE AllowAmbiguousTypes #-}
 {-# LANGUAGE DuplicateRecordFields #-}
 {-# LANGUAGE GADTs #-}
 {-# LANGUAGE OverloadedRecordDot #-}
 {-# LANGUAGE RecordWildCards #-}
+{-# LANGUAGE UndecidableInstances #-}
 {-# LANGUAGE NoFieldSelectors #-}
 
 module Syntax.AstTraversal where
 
 import Common
+import Data.Type.Ord (type (<))
 import LangPrelude
 import Syntax
 import Syntax.Declaration qualified as D
@@ -98,7 +101,7 @@ defTravPattern trav (pat' :@ loc) =
         InfixP pairs pat -> castInfixP @p <$> traverse (bitraverse trav.pattern_ trav.name) pairs <*> trav.pattern_ pat
         other -> unLoc <$> partialTravPattern trav (other :@ loc)
 
--- same as 'partialTravTerm'. Doesn't handle InfixP
+-- | same as 'partialTravTerm'. Doesn't handle InfixP
 partialTravPattern :: Applicative m => AstTraversal p q m -> Pattern p -> m (Pattern q)
 partialTravPattern trav (pat' :@ loc) =
     Located loc <$> case pat' of
@@ -113,14 +116,15 @@ partialTravPattern trav (pat' :@ loc) =
         InfixP{} -> error "partialTravPattern: encountered InfixP"
 
 defTravDeclaration
-    :: forall p q m. (D.DepResAgrees p q, Applicative m) => AstTraversal p q m -> Declaration p -> m (Declaration q)
+    :: forall p q m. (DepResAgrees p q, Applicative m) => AstTraversal p q m -> Declaration p -> m (Declaration q)
 defTravDeclaration trav = traverse \case
     D.Value binding locals -> D.Value <$> trav.binding binding <*> traverse trav.declaration locals -- does a reversed order make more sense?
     D.Type name binders constrs -> D.Type <$> trav.name name <*> traverse trav.binder binders <*> traverse (travConstructor trav) constrs
     D.GADT name mbSig constrs -> D.GADT <$> trav.name name <*> traverse trav.term mbSig <*> traverse (travGadtConstructor trav) constrs
     D.Signature name ty -> D.Signature <$> trav.name name <*> trav.term ty
-    D.Fixity fixity op relations -> D.castFixity @p fixity <$> trav.name op <*> traverse trav.name relations
+    D.Fixity fixity op relations -> castFixity @p fixity <$> trav.name op <*> traverse trav.name relations
 
+-- | doesn't handle Fixity
 partialTravDeclaration :: Applicative m => AstTraversal p q m -> Declaration p -> m (Declaration q)
 partialTravDeclaration trav (decl :@ loc) =
     Located loc <$> case decl of
@@ -128,7 +132,7 @@ partialTravDeclaration trav (decl :@ loc) =
         D.Type name binders constrs -> D.Type <$> trav.name name <*> traverse trav.binder binders <*> traverse (travConstructor trav) constrs
         D.GADT name mbSig constrs -> D.GADT <$> trav.name name <*> traverse trav.term mbSig <*> traverse (travGadtConstructor trav) constrs
         D.Signature name ty -> D.Signature <$> trav.name name <*> trav.term ty
-        D.Fixity fixity op relations -> unLoc <$> trav.declaration (D.Fixity fixity op relations :@ loc)
+        D.Fixity{} -> error "partialTravDeclaration: encountered Fixity"
 
 travConstructor :: Applicative m => AstTraversal p q m -> Constructor p -> m (Constructor q)
 travConstructor trav con = D.Constructor con.loc <$> trav.name con.name <*> traverse trav.term con.args
@@ -154,7 +158,7 @@ defTravStatement trav = traverse \case
     DoLet binding -> DoLet <$> trav.binding binding
     Action term -> Action <$> trav.term term
 
-defTrav :: (FixityAgrees p q, TcAgrees p q, D.DepResAgrees p q, NameAt p ~ NameAt q, Applicative m) => UntiedTraversal p q m
+defTrav :: (FixityAgrees p q, TcAgrees p q, DepResAgrees p q, NameAt p ~ NameAt q, Applicative m) => UntiedTraversal p q m
 defTrav =
     UntiedTraversal
         { term = defTravTerm
@@ -187,3 +191,38 @@ mkTrav term pattern_ declaration name =
         , binder = defTravBinder
         , statement = defTravStatement
         }
+
+-- some type-level trickery to make default traversals work with more passes
+
+-- now that I think about it, another solution would have been a Pass singleton
+
+class FixityAgrees (p :: Pass) (q :: Pass) where
+    castInfix :: p < 'Fixity => [(Expr q, Maybe (NameAt q))] -> Expr q -> Expr_ q
+    castInfixP :: p < 'Fixity => [(Pattern q, NameAt q)] -> Pattern q -> Pattern_ q
+instance {-# OVERLAPPABLE #-} q < 'Fixity => FixityAgrees p q where
+    castInfix = InfixE
+    castInfixP = InfixP
+instance FixityAgrees 'Fixity q where
+    castInfix = error "unsatisfiable"
+    castInfixP = error "unsatisfiable"
+instance FixityAgrees 'DuringTypecheck q where
+    castInfix = error "unsatisfiable"
+    castInfixP = error "unsatisfiable"
+class TcAgrees (p :: Pass) (q :: Pass) where
+    castUni :: p ~ 'DuringTypecheck => UniVar -> Type_ q
+    castSkolem :: p ~ 'DuringTypecheck => Skolem -> Type_ q
+instance TcAgrees p 'DuringTypecheck where
+    castUni = T.UniVar
+    castSkolem = T.Skolem
+instance {-# OVERLAPPABLE #-} p != 'DuringTypecheck => TcAgrees p q where
+    castUni = error "unsatisfiable"
+    castSkolem = error "unsatisfiable"
+
+class DepResAgrees (p :: Pass) (q :: Pass) where
+    castFixity :: p < 'DependencyRes => Fixity -> NameAt q -> PriorityRelation q -> Declaration_ q
+
+instance {-# OVERLAPPABLE #-} q < 'DependencyRes => DepResAgrees p q where
+    castFixity = D.Fixity
+
+instance DepResAgrees 'DependencyRes q where
+    castFixity = error "unsatisfiable"

@@ -4,7 +4,7 @@
 module DependencyResolution where
 
 import Common
-import Diagnostic (Diagnose, fatal, nonFatal)
+import Diagnostic (Diagnose, fatal, internalError', nonFatal)
 import Effectful.State.Static.Local
 import Effectful.Writer.Static.Local (Writer, runWriter)
 import Error.Diagnose (Marker (..), Report (..))
@@ -14,6 +14,7 @@ import Poset (Poset)
 import Poset qualified
 import Prettyprinter (comma, hsep, punctuate)
 import Syntax
+import Syntax.AstTraversal
 import Syntax.Declaration qualified as D
 
 -- once we've done name resolution, all sorts of useful information may be collected into tables
@@ -142,10 +143,10 @@ resolveDependenciesSimplified' initFixity initPoset = fmap packOutput . runState
             modify @FixityMap $ Map.insert (Op op) fixity'
             modifyM @(Poset Op) $ updatePrecedence loc op rels
             pure Nothing
-        D.Value binding locals -> Just . D.Value (cast binding) <$> mapMaybeM go locals
-        D.Type name vars constrs -> pure . Just $ D.Type name (map cast vars) (map cast constrs)
-        D.GADT name sig constrs -> pure . Just $ D.GADT name ((fmap . fmap) cast sig) (map cast constrs)
-        D.Signature name ty -> pure . Just $ D.Signature name (fmap cast ty)
+        other -> Just . unLoc <$> partialTravDeclaration cast (other :@ loc)
+
+cast :: Diagnose :> es => AstTraversal 'NameRes 'DependencyRes (Eff es)
+cast = tie $ mkTrav defTravTerm defTravPattern (\_ _ -> internalError' "depResTrav: shouldn't reach declaration") (const pure)
 
 reportCycleWarnings :: (State (Poset Op) :> es, Diagnose :> es) => Loc -> Eff (Writer (Seq (Poset.Cycle Op)) : es) a -> Eff es a
 reportCycleWarnings loc action = do
