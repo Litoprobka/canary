@@ -13,7 +13,7 @@ import Test.Hspec
 infix 1 `shouldLex`
 
 testLexer :: Text -> ([Token], ByteString)
-testLexer fileText = case lex' (encodeUtf8 fileText) of
+testLexer fileText = case lex' 0 (encodeUtf8 fileText) of
     OK tokens _ remaining -> (map snd tokens, remaining)
     _ -> ([], encodeUtf8 fileText)
 

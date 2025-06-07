@@ -21,7 +21,7 @@ import GHC.TypeError (Assert, ErrorMessage (..), TypeError)
 import IdMap (HasId (..))
 import LangPrelude
 import Prettyprinter
-import Prettyprinter.Render.Terminal (AnsiStyle, Color (..), bold, colorDull)
+import Prettyprinter.Render.Terminal (AnsiStyle, Color (..), bold, color, colorDull)
 import Prelude qualified (Show (..))
 
 -- this file is a bit of a crutch. Perhaps it's better to move the definitions to Type or TypeChecker
@@ -283,7 +283,7 @@ opStyle :: Doc AnsiStyle -> Doc AnsiStyle
 opStyle = annotate $ bold <> colorDull Green
 
 specSym :: Doc AnsiStyle -> Doc AnsiStyle
-specSym = annotate $ bold <> colorDull Red
+specSym = annotate $ bold <> color Red
 
 conColor :: Doc AnsiStyle -> Doc AnsiStyle
 conColor = annotate $ bold <> colorDull Yellow

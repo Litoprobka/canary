@@ -31,7 +31,7 @@ main = do
 runFile :: Bool -> FilePath -> ByteString -> IO ()
 runFile debug fileName input = do
     let inputText = decodeUtf8 input
-    eval' <- fmap join . runEff . runDiagnose (fileName, inputText) $ runNameGen do
+    eval' <- fmap join . runEff . runDiagnose [(fileName, inputText)] $ runNameGen do
         decls <- parseModule (fileName, input)
         prettyAST debug decls
         env <- Repl.mkDefaultEnv
@@ -45,7 +45,7 @@ runFile debug fileName input = do
     sequence_ eval'
 
 runRepl :: IO ()
-runRepl = void $ runEff $ runDiagnose ("", "") $ runNameGen do
+runRepl = void $ runEff $ runDiagnose [] $ runNameGen do
     historyFile <- liftIO $ getXdgDirectory XdgCache "canary/history.txt"
     liftIO $ setHistory historyFile (-1)
     liftIO $ hSetBuffering stdout NoBuffering

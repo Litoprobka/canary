@@ -29,7 +29,7 @@ parsePretty parser input =
   where
     inputBS = encodeUtf8 input
     lexedInput =
-        let tokens = case lex' inputBS of
+        let tokens = case lex' 0 inputBS of
                 FP.OK result _ _ -> result
                 _ -> []
          in mkTokenStream ("test", inputBS) tokens

@@ -71,7 +71,7 @@ testCheck
                 a
        )
     -> Maybe a
-testCheck toResolve action = fst $ runPureEff $ runNameGen $ runDiagnose' ("<none>", "") do
+testCheck toResolve action = fst $ runPureEff $ runNameGen $ runDiagnose' [("<none>", "")] do
     ReplEnv{scope, types, values} <- Repl.mkDefaultEnv
     resolved <- NameResolution.run scope toResolve
     evalState types $ TC.run values $ action resolved

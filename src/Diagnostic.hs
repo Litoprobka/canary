@@ -11,7 +11,9 @@
 module Diagnostic (
     Diagnose,
     runDiagnose,
+    runDiagnoseWith,
     runDiagnose',
+    runDiagnoseWith',
     dummy,
     nonFatal,
     fatal,
@@ -42,14 +44,25 @@ data Diagnose :: Effect where
 
 makeEffect ''Diagnose
 
-runDiagnose :: IOE :> es => (FilePath, Text) -> Eff (Diagnose : es) a -> Eff es (Maybe a)
-runDiagnose file action = do
-    (mbVal, diagnostic) <- runDiagnose' file action
+runDiagnose :: IOE :> es => [(FilePath, Text)] -> Eff (Diagnose : es) a -> Eff es (Maybe a)
+runDiagnose files action = do
+    (mbVal, diagnostic) <- runDiagnose' files action
     printDiagnostic' stdout WithUnicode (TabSize 4) defaultStyle diagnostic
     pure mbVal
 
-runDiagnose' :: (FilePath, Text) -> Eff (Diagnose : es) a -> Eff es (Maybe a, Diagnostic (Doc AnsiStyle))
-runDiagnose' (filePath, fileContents) =
+runDiagnoseWith :: IOE :> es => Diagnostic (Doc AnsiStyle) -> Eff (Diagnose : es) a -> Eff es (Maybe a)
+runDiagnoseWith baseDiagnostic action = do
+    (mbVal, diagnostic) <- runDiagnoseWith' baseDiagnostic action
+    printDiagnostic' stdout WithUnicode (TabSize 4) defaultStyle diagnostic
+    pure mbVal
+
+runDiagnose' :: [(FilePath, Text)] -> Eff (Diagnose : es) a -> Eff es (Maybe a, Diagnostic (Doc AnsiStyle))
+runDiagnose' files = runDiagnoseWith' baseDiagnostic
+  where
+    baseDiagnostic = foldr (\(filePath, fileContents) acc -> addFile acc filePath (toString fileContents)) mempty files
+
+runDiagnoseWith' :: Diagnostic (Doc AnsiStyle) -> Eff (Diagnose : es) a -> Eff es (Maybe a, Diagnostic (Doc AnsiStyle))
+runDiagnoseWith' baseDiagnostic =
     reinterpret
         (fmap (joinReports . second diagnosticFromReports) . runState DList.empty . runErrorNoCallStack)
         ( \_ -> \case
@@ -64,7 +77,6 @@ runDiagnose' (filePath, fileContents) =
         )
         . reportExceptions @ErrorCall
   where
-    baseDiagnostic = addFile mempty filePath $ toString fileContents
     diagnosticFromReports = foldl' @DList addReport baseDiagnostic
     joinReports = \case
         (Left fatalErrors, diagnostic) -> (Nothing, foldl' @[] addReport diagnostic fatalErrors)

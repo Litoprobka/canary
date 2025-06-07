@@ -4,7 +4,7 @@
 {-# LANGUAGE TemplateHaskell #-}
 {-# OPTIONS_GHC -Wno-unrecognised-pragmas #-}
 
-module Parser (code, declaration, pattern', patternParens, term, termParens, Parser', parseModule, run) where
+module Parser (code, declaration, pattern', patternParens, term, termParens, Parser', parseModule, run, runWithOffset) where
 
 import LangPrelude hiding (error)
 
@@ -62,8 +62,12 @@ reportParseError (Just ParseError{unexpected, expecting}) =
         []
 
 run :: Diagnose :> es => (FilePath, ByteString) -> Parser' a -> Eff es a
-run (fileName, fileContents) parser = do
-    tokenStream <- lex (fileName, fileContents)
+run = runWithOffset 0
+
+-- | when we run the parser from the REPL, we might want to start parsing from somewhere else other than the start of the input
+runWithOffset :: Diagnose :> es => Int -> (FilePath, ByteString) -> Parser' a -> Eff es a
+runWithOffset initOffset (fileName, fileContents) parser = do
+    tokenStream <- lex initOffset (fileName, fileContents)
     either (fatal . one . reportParseError) pure $
         parse (parser <* eof `orError` "end of input") tokenStream
 

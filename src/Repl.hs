@@ -18,17 +18,19 @@ import Common (
     prettyDef,
  )
 import Common qualified as C
+import Data.ByteString qualified as BS
 import Data.HashMap.Strict qualified as HashMap
+import Data.Text qualified as Text
 import Data.Text.Encoding (strictBuilderToText, textToStrictBuilder)
 import Data.Text.Encoding qualified as Text
 import DependencyResolution (FixityMap, Op (..), SimpleOutput (..), cast, resolveDependenciesSimplified')
-import Diagnostic (Diagnose, fatal, guardNoErrors, reportExceptions, runDiagnose)
+import Diagnostic (Diagnose, fatal, guardNoErrors, reportExceptions, runDiagnoseWith)
 import Effectful
 import Effectful.Labeled
 import Effectful.Labeled.Reader (Reader, runReader)
 import Effectful.Reader.Static (ask)
 import Effectful.State.Static.Local (evalState, runState)
-import Error.Diagnose (Position (..), Report (..))
+import Error.Diagnose (Diagnostic, Position (..), Report (..), addFile)
 import Eval (ValueEnv (..), eval, modifyEnv)
 import Eval qualified as V
 import Fixity qualified (parse, resolveFixity, run)
@@ -70,6 +72,9 @@ data ReplEnv = ReplEnv
     , scope :: Scope
     , types :: IdMap Name TC.Type'
     , lastLoadedFile :: Maybe FilePath
+    , loadedFiles :: forall msg. Diagnostic msg -- an empty diagnostic with files
+    , input :: Text
+    , inputBS :: ByteString
     }
 
 type ReplCtx es =
@@ -85,7 +90,7 @@ noLoc :: a -> Located a
 noLoc = C.Located builtin
 
 emptyEnv :: ReplEnv
-emptyEnv = ReplEnv{..}
+emptyEnv = ReplEnv{loadedFiles = mempty, ..}
   where
     values = ValueEnv{values = Map.one (noLoc TypeName) (V.TyCon (noLoc TypeName)), skolems = Map.empty}
     fixityMap = Map.one AppOp InfixL
@@ -93,6 +98,8 @@ emptyEnv = ReplEnv{..}
     scope = Scope $ HashMap.singleton (Name' "Type") (noLoc TypeName)
     (_, operatorPriorities) = Poset.eqClass AppOp Poset.empty
     lastLoadedFile = Nothing
+    inputBS = BS.empty
+    input = Text.empty
 
 -- this function is 90% the same as `processDecls`
 -- I don't see a clean way to factor out the repetition, though
@@ -116,6 +123,9 @@ mkDefaultEnv = do
             , scope = newScope
             , types
             , lastLoadedFile = Nothing
+            , loadedFiles = mempty
+            , inputBS = BS.empty
+            , input = Text.empty
             }
   where
     addDecl env decl = TC.local' (const env) do
@@ -191,18 +201,21 @@ app = foldl' App
 
 run :: ReplCtx es => ReplEnv -> Eff es ()
 run env = do
-    input <- liftIO $ fromString <$> readlineEx "λ" (Just $ completer env) Nothing
-    let inputBS = Text.encodeUtf8 input
-    newEnv <- localDiagnose env ("<interactive>", input) do
-        cmd <- case parseCommand inputBS of
+    nextLine <- liftIO $ fromString <$> readlineEx "λ" (Just $ completer env) Nothing
+    let nextLineBS = Text.encodeUtf8 nextLine
+        input = env.input <> nextLine
+        inputBS = env.inputBS <> nextLineBS
+        envWithInput = env{input = input <> "\n", inputBS = inputBS <> "\n"}
+    newEnv <- localDiagnose envWithInput [] do
+        cmd <- case parseCommand nextLineBS of
             Right cmd -> pure cmd
-            Left (remainingInput, parser) -> Parser.run ("<interactive>", remainingInput) parser
-        replStep env cmd
+            Left (newOffset, parser) -> Parser.runWithOffset (BS.length env.inputBS + newOffset) ("<interactive>", inputBS) parser
+        replStep envWithInput cmd
     traverse_ run newEnv
 
 -- todo: locations of previous expressions get borked
 replStep :: forall es. (ReplCtx es, Diagnose :> es) => ReplEnv -> ReplCommand -> Eff es (Maybe ReplEnv)
-replStep env command = do
+replStep env@ReplEnv{loadedFiles} command = do
     case command of
         Decls decls -> processDecls env decls
         Expr expr -> do
@@ -216,9 +229,11 @@ replStep env command = do
             pure $ Just env
         Load path -> do
             fileContents <- reportExceptions @SomeException (readFileBS path)
-            localDiagnose env (path, decodeUtf8 fileContents) do
+            let fileText = decodeUtf8 fileContents
+            localDiagnose env [(path, fileText)] do
                 decls <- Parser.parseModule (path, fileContents)
-                processDecls (env{lastLoadedFile = Just path}) decls
+                newEnv <- processDecls (env{lastLoadedFile = Just path, loadedFiles = addFile loadedFiles path (toString fileText)}) decls
+                newEnv <$ print (pretty path <+> "loaded.")
         Reload -> do
             defaultEnv <- mkDefaultEnv
             case env.lastLoadedFile of
@@ -243,14 +258,17 @@ replStep env command = do
     prettyVal val = do
         liftIO $ putDoc $ prettyAnsi PrettyOptions{printIds = False} val <> Pretty.line
 
-localDiagnose :: IOE :> es => a -> (FilePath, Text) -> Eff (Diagnose : es) (Maybe a) -> Eff es (Maybe a)
-localDiagnose env file action =
-    runDiagnose file action >>= \case
+localDiagnose :: IOE :> es => ReplEnv -> [(FilePath, Text)] -> Eff (Diagnose : es) (Maybe ReplEnv) -> Eff es (Maybe ReplEnv)
+localDiagnose env@ReplEnv{input, loadedFiles} files action =
+    runDiagnoseWith newFiles action >>= \case
         Nothing -> pure $ Just env
         Just cmd -> pure cmd
+  where
+    oldFilesWithInteractive = addFile loadedFiles "<interactive>" (toString input)
+    newFiles = foldr (\(path, contents) acc -> addFile acc path (toString contents)) oldFilesWithInteractive files
 
 processDecls :: (Diagnose :> es, ReplCtx es) => ReplEnv -> [Declaration 'Parse] -> Eff es (Maybe ReplEnv)
-processDecls env decls = do
+processDecls env@ReplEnv{loadedFiles} decls = do
     (afterNameRes, newScope) <- NameResolution.runWithEnv env.scope $ resolveNames decls
     depResOutput@SimpleOutput{fixityMap, operatorPriorities} <-
         resolveDependenciesSimplified' env.fixityMap env.operatorPriorities afterNameRes
@@ -267,12 +285,15 @@ processDecls env decls = do
             , scope = newScope
             , types
             , lastLoadedFile = env.lastLoadedFile
+            , loadedFiles = loadedFiles
+            , input = env.input
+            , inputBS = env.inputBS
             }
   where
-    addDecl tenv decl = TC.local' (const tenv) do
+    addDecl tcenv decl = TC.local' (const tcenv) do
         envDiff <- inferDeclaration decl
-        newValues <- modifyEnv (envDiff tenv.values) [decl]
-        pure tenv{TC.values = newValues}
+        newValues <- modifyEnv (envDiff tcenv.values) [decl]
+        pure tcenv{TC.values = newValues}
 
 -- takes a line of input, or a bunch of lines in :{ }:
 takeInputChunk :: IO Text
@@ -288,11 +309,11 @@ takeInputChunk = do
             then pure acc
             else go $ acc <> textToStrictBuilder line <> textToStrictBuilder "\n"
 
-parseCommand :: ByteString -> Either (ByteString, Parser' ReplCommand) ReplCommand
+parseCommand :: ByteString -> Either (Int, Parser' ReplCommand) ReplCommand
 parseCommand input = case FP.runParser cmdParser 0 0 input of
     FP.OK (Right cmd) _ _ -> Right cmd
-    FP.OK (Left parser) _ remainingInput -> Left (remainingInput, parser)
-    _ -> Left (input, fmap Decls Parser.code <|> fmap Expr Parser.term)
+    FP.OK (Left parser) _ remainingInput -> Left (BS.length input - BS.length remainingInput, parser)
+    _ -> Left (0, fmap Decls Parser.code <|> fmap Expr Parser.term)
   where
     cmdParser =
         FP.optional Lexer.space1
