@@ -699,9 +699,9 @@ normaliseAll = generaliseAll >=> traverse (eval' <=< go <=< V.quote)
         Located loc <$> case term of
             C.UniVar uni ->
                 lookupUniVar uni >>= \case
-                    Left _ -> internalError loc $ "dangling univar" <+> pretty uni
+                    Left _ -> internalError loc $ "dangling univar" <+> prettyDef uni
                     Right body -> fmap unLoc . go =<< V.quote (unMono body)
-            C.Skolem skolem -> internalError (getLoc skolem) $ "skolem" <+> pretty (V.Skolem skolem) <+> "remains in code"
+            C.Skolem skolem -> internalError (getLoc skolem) $ "skolem" <+> prettyDef (V.Skolem skolem) <+> "remains in code"
             -- other cases could be eliminated by a type changing uniplate
             C.App lhs rhs -> C.App <$> go lhs <*> go rhs
             C.Function lhs rhs -> C.Function <$> go lhs <*> go rhs

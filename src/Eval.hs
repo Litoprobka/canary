@@ -1,4 +1,5 @@
 {-# LANGUAGE DataKinds #-}
+{-# LANGUAGE DerivingVia #-}
 {-# LANGUAGE DuplicateRecordFields #-}
 {-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE OverloadedRecordDot #-}
@@ -13,10 +14,13 @@ import Common (
     Name,
     Name_ (ConsName, NilName, TrueName, TypeName),
     Pass (..),
+    PrettyAnsi (..),
     SimpleName_ (Name'),
     Skolem,
+    UnAnnotate (..),
     UniVar,
     getLoc,
+    prettyDef,
     toSimpleName,
     unLoc,
     pattern L,
@@ -38,7 +42,6 @@ import Syntax.Row (ExtRow (..), OpenName)
 import Syntax.Row qualified as Row
 import Syntax.Term (Erased, Quantifier, Visibility (..))
 import Syntax.Term qualified as T
-import Prelude qualified (Show (..))
 
 data ValueEnv = ValueEnv
     { values :: IdMap Name Value
@@ -78,6 +81,7 @@ data Value
     | -- typechecking metavars
       UniVar UniVar
     | Skolem Skolem
+    deriving (Pretty, Show) via (UnAnnotate Value)
 
 data Closure ty = Closure {var :: Name, ty :: ty, env :: ValueEnv, body :: CoreTerm}
 data PatternClosure ty = PatternClosure {pat :: CorePattern, ty :: ty, env :: ValueEnv, body :: CoreTerm}
@@ -106,11 +110,8 @@ quoteForPrinting (Located loc value) = Located loc case value of
   where
     quoteWithLoc = quoteForPrinting . Located loc
 
-instance Pretty Value where
-    pretty = pretty . quoteForPrinting . Located (Loc Position{file = "<none>", begin = (0, 0), end = (0, 0)})
-
-instance Show Value where
-    show = Prelude.show . pretty
+instance PrettyAnsi Value where
+    prettyAnsi opts = prettyAnsi opts . quoteForPrinting . Located (Loc Position{file = "<none>", begin = (0, 0), end = (0, 0)})
 
 -- quote a value into a normal form expression
 quote :: NameGen :> es => Located Value -> Eff es CoreTerm
@@ -146,7 +147,7 @@ quote (value :@ loc) =
 evalCore :: ValueEnv -> CoreTerm -> Value
 evalCore !env (L term) = case term of
     -- note that env is a lazy enummap, so we only force the outer structure here
-    C.Name name -> fromMaybe (error . show $ "whoopsie, out of scope" <+> pretty name) $ LMap.lookup name env.values
+    C.Name name -> fromMaybe (error . show $ "whoopsie, out of scope" <+> prettyDef name) $ LMap.lookup name env.values
     C.TyCon name -> TyCon name
     C.Con name args -> Con name $ map (evalCore env) args
     C.Lambda name body -> Lambda $ Closure{var = name, ty = (), env, body}
@@ -157,7 +158,7 @@ evalCore !env (L term) = case term of
     C.Case arg matches ->
         let val = evalCore env arg
          in fromMaybe
-                (error $ show $ "pattern mismatch when matching " <+> pretty val <+> "with:" <> line <> vsep (map (pretty . fst) matches))
+                (error $ show $ "pattern mismatch when matching " <+> prettyDef val <+> "with:" <> line <> vsep (map (prettyDef . fst) matches))
                 . (<|> mbStuckCase val matches)
                 . asum
                 $ matches <&> \(pat, body) -> evalCore <$> matchCore env pat val <*> pure body

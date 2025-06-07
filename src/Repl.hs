@@ -5,7 +5,18 @@
 
 module Repl where
 
-import Common (Fixity (..), Loc (..), Located, Name, Name_ (TypeName), Pass (..), SimpleName_ (Name'))
+import Common (
+    Fixity (..),
+    Loc (..),
+    Located,
+    Name,
+    Name_ (TypeName),
+    Pass (..),
+    PrettyOptions (..),
+    SimpleName_ (Name'),
+    prettyAnsi,
+    prettyDef,
+ )
 import Common qualified as C
 import Data.HashMap.Strict qualified as HashMap
 import Data.Text.Encoding (strictBuilderToText, textToStrictBuilder)
@@ -32,6 +43,8 @@ import Parser (Parser')
 import Parser qualified
 import Poset (Poset)
 import Poset qualified
+import Prettyprinter qualified as Pretty
+import Prettyprinter.Render.Terminal (putDoc)
 import Syntax
 import Syntax.AstTraversal
 import Syntax.Declaration qualified as D
@@ -195,11 +208,11 @@ replStep env command = do
         Expr expr -> do
             (checkedExpr, _) <- runReader @"values" env.values $ processExpr env.types expr
             guardNoErrors
-            print . pretty =<< eval env.values checkedExpr
+            prettyVal =<< eval env.values checkedExpr
             pure $ Just env
         Type_ expr -> do
             (_, ty) <- runReader @"values" env.values $ processExpr env.types expr
-            print $ pretty ty
+            prettyVal ty
             pure $ Just env
         Load path -> do
             fileContents <- reportExceptions @SomeException (readFileBS path)
@@ -214,8 +227,8 @@ replStep env command = do
         Env -> do
             let mergedEnv = Map.merge (\ty val -> (Just ty, Just val)) ((,Nothing) . Just) ((Nothing,) . Just) env.types env.values.values
             for_ (Map.toList mergedEnv) \(name, (mbTy, mbVal)) -> do
-                for_ mbTy \ty -> print $ pretty name <+> ":" <+> pretty ty
-                for_ mbVal \value -> print $ pretty name <+> "=" <+> pretty value
+                for_ mbTy \ty -> print $ prettyDef name <+> ":" <+> prettyDef ty
+                for_ mbVal \value -> print $ prettyDef name <+> "=" <+> prettyDef value
             pure $ Just env
         Quit -> pure Nothing
         UnknownCommand cmd -> fatal . one $ Err Nothing ("Unknown command:" <+> pretty cmd) [] []
@@ -226,6 +239,9 @@ replStep env command = do
         skippedDepRes <- cast.term afterNameRes
         afterFixityRes <- Fixity.run env.fixityMap env.operatorPriorities $ Fixity.parse skippedDepRes
         fmap (afterFixityRes,) $ runLabeled @"types" (evalState env.types) $ TC.run env.values $ normalise $ infer afterFixityRes
+
+    prettyVal val = do
+        liftIO $ putDoc $ prettyAnsi PrettyOptions{printIds = False} val <> Pretty.line
 
 localDiagnose :: IOE :> es => a -> (FilePath, Text) -> Eff (Diagnose : es) (Maybe a) -> Eff es (Maybe a)
 localDiagnose env file action =
@@ -300,11 +316,11 @@ completer env cenv input = completeWord cenv input Nothing wordCompletion
         filter (isPrefix word) . fmap toCompletion $ HashMap.keys env.scope.table
     toCompletion name = Completion prettyName (prettyName <> maybe "" (" : " <>) mbSig) ""
       where
-        prettyName = show $ pretty name
+        prettyName = show $ prettyDef name
         mbSig = do
             id' <- HashMap.lookup name env.scope.table
             ty <- Map.lookup id' env.types
-            pure $ show $ pretty ty
+            pure $ show $ prettyDef ty
 
 {-
 -- perhaps we *should* have a separate lexer pass after all?..

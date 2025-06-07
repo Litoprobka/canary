@@ -1,9 +1,10 @@
 {-# LANGUAGE AllowAmbiguousTypes #-}
+{-# LANGUAGE DerivingVia #-}
 {-# LANGUAGE TemplateHaskellQuotes #-}
 
 module Syntax.Token where
 
-import Common (Literal_, pattern L)
+import Common (Literal_, PrettyAnsi (..), UnAnnotate (..), prettyDef, pattern L)
 import Data.Char (isAlphaNum)
 import LangPrelude
 import Language.Haskell.TH qualified as TH
@@ -34,12 +35,10 @@ data Token
     | Semicolon
     | Newline
     deriving (Eq, Ord)
+    deriving (Pretty, Show) via (UnAnnotate Token)
 
-instance Show Token where
-    show = show . pretty
-
-instance Pretty Token where
-    pretty = \case
+instance PrettyAnsi Token where
+    prettyAnsi _ = \case
         LowerName name -> pretty name
         UpperName name -> pretty name
         VariantName name -> pretty name
@@ -51,7 +50,7 @@ instance Pretty Token where
         SpecialSymbol symbol -> pretty symbol
         Op operator -> pretty operator
         ColonOp operator -> pretty operator
-        Literal literal -> pretty literal
+        Literal literal -> prettyDef literal
         LParen -> "("
         RParen -> ")"
         LBrace -> "{"

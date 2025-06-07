@@ -17,6 +17,7 @@ import Common (
     SimpleName_ (Wildcard'),
     getLoc,
     mkNotes,
+    prettyDef,
     unLoc,
     zipLocOf,
     pattern L,
@@ -55,7 +56,8 @@ reportParseError (Just ParseError{unexpected, expecting}) =
     Err
         Nothing
         "Parse error"
-        ( mkNotes [(getLoc unexpected, This ("unexpected" <+> pretty unexpected)), (getLoc unexpected, Where ("expecting" <+> expecting))]
+        ( mkNotes
+            [(getLoc unexpected, This ("unexpected" <+> prettyDef unexpected)), (getLoc unexpected, Where ("expecting" <+> expecting))]
         )
         []
 

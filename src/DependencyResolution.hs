@@ -1,3 +1,4 @@
+{-# LANGUAGE DerivingVia #-}
 {-# LANGUAGE DuplicateRecordFields #-}
 {-# LANGUAGE RecordWildCards #-}
 
@@ -34,10 +35,12 @@ type Decl = Declaration 'DependencyRes
 type FixityMap = IdMap Op Fixity
 type Signatures = HashMap Name (Type 'DependencyRes)
 
-data Op = Op Name | AppOp deriving (Eq)
-instance Pretty Op where
-    pretty = \case
-        Op name -> pretty name
+data Op = Op Name | AppOp
+    deriving (Eq)
+    deriving (Pretty) via (UnAnnotate Op)
+instance PrettyAnsi Op where
+    prettyAnsi opts = \case
+        Op name -> prettyAnsi opts name
         AppOp -> "function application"
 instance Map.HasId Op where
     toId = \case
@@ -204,13 +207,13 @@ cycleWarning loc ops ops2 =
             []
   where
     mbPretty AppOp = "function application"
-    mbPretty (Op op) = pretty op
+    mbPretty (Op op) = prettyDef op
 
 selfRelationError :: Diagnose :> es => Name -> Eff es ()
 selfRelationError op =
     fatal . one $
         Err
             Nothing
-            ("self-reference in fixity declaration" <+> pretty op)
+            ("self-reference in fixity declaration" <+> prettyDef op)
             (mkNotes [(getLoc op, This "is referenced in its own fixity declaration")])
             []

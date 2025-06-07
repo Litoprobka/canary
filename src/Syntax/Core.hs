@@ -1,9 +1,24 @@
 module Syntax.Core where
 
-import Common (Literal, Literal_, Loc (..), Located (..), Name, Name_ (ConsName, NilName, TypeName), Skolem, UniVar, pattern L)
+import Common (
+    Literal,
+    Literal_,
+    Loc (..),
+    Located (..),
+    Name,
+    Name_ (ConsName, NilName, TypeName),
+    PrettyAnsi (..),
+    Skolem,
+    UniVar,
+    conColor,
+    keyword,
+    specSym,
+    pattern L,
+ )
 import Error.Diagnose (Position (..))
 import LangPrelude
 import Prettyprinter
+import Prettyprinter.Render.Terminal (AnsiStyle)
 import Syntax.Row (ExtRow (..), OpenName, Row, extension, sortedRow)
 import Syntax.Term (Erased (..), Quantifier (..), Visibility (..))
 
@@ -15,16 +30,18 @@ data CorePattern
     | RecordP (Row Name)
     | LiteralP Literal_
 
-instance Pretty CorePattern where
-    pretty = \case
-        VarP name -> pretty name
+instance PrettyAnsi CorePattern where
+    prettyAnsi opts = \case
+        VarP name -> prettyAnsi opts name
         WildcardP txt -> "_" <> pretty txt
-        ConstructorP name args -> parens $ hsep (pretty name : map pretty args)
-        VariantP name arg -> parens $ pretty name <+> pretty arg
+        ConstructorP name [] -> prettyCon name
+        ConstructorP name args -> parens $ hsep (prettyCon name : map (prettyAnsi opts) args)
+        VariantP name arg -> parens $ prettyCon name <+> prettyAnsi opts arg
         RecordP row -> braces . sep . punctuate comma . map recordField $ sortedRow row
-        LiteralP lit -> pretty lit
+        LiteralP lit -> prettyAnsi opts lit
       where
-        recordField (name, pat) = pretty name <+> "=" <+> pretty pat
+        prettyCon name = conColor $ prettyAnsi opts name
+        recordField (name, pat) = prettyAnsi opts name <+> "=" <+> prettyAnsi opts pat
 
 type CoreType = CoreTerm
 type CoreTerm = Located CoreTerm_
@@ -54,65 +71,71 @@ data CoreTerm_
       UniVar UniVar
     | Skolem Skolem
 
-instance Pretty CoreTerm_ where
-    pretty = go 0 . Located (Loc Position{begin = (0, 0), end = (0, 0), file = "<none>"})
+instance PrettyAnsi CoreTerm_ where
+    prettyAnsi opts = go 0 . Located (Loc Position{begin = (0, 0), end = (0, 0), file = "<none>"})
       where
-        go :: Int -> CoreTerm -> Doc ann
+        go :: Int -> CoreTerm -> Doc AnsiStyle
         go n (L term) = case term of
-            Name name -> pretty name
-            TyCon name -> pretty name
-            Con (L ConsName) [x, L (Con (L NilName) [])] -> brackets $ pretty x
-            Con (L ConsName) [x, xs] | Just output <- prettyConsNil xs -> brackets $ pretty x <> output
+            Name name -> prettyAnsi opts name
+            TyCon name -> prettyAnsi opts name
+            Con (L ConsName) [x, L (Con (L NilName) [])] -> brackets $ go 0 x
+            Con (L ConsName) [x, xs] | Just output <- prettyConsNil xs -> brackets $ go 0 x <> output
             Con (L NilName) [] -> "[]"
-            Con name [] -> pretty name
-            Con name args -> parensWhen 3 $ hsep (pretty name : map (go 3) args)
-            Lambda name body -> parensWhen 1 $ "λ" <> pretty name <+> compressLambda body
+            Con name [] -> prettyAnsi opts name
+            Con name args -> parensWhen 3 $ hsep (prettyAnsi opts name : map (go 3) args)
+            Lambda name body -> parensWhen 1 $ specSym "λ" <> prettyAnsi opts name <+> compressLambda body
             App lhs rhs -> parensWhen 3 $ go 2 lhs <+> go 3 rhs
             Record row -> braces . sep . punctuate comma . map recordField $ sortedRow row
-            Sigma x y -> parensWhen 1 $ pretty x <+> "**" <+> pretty y
-            Variant name -> pretty name
+            Sigma x y -> parensWhen 1 $ go 0 x <+> specSym "**" <+> go 0 y
+            Variant name -> prettyAnsi opts name
             -- RecordLens lens -> foldMap (("." <>) . pretty) lens
-            Case arg matches -> nest 4 (vsep $ ("case" <+> pretty arg <+> "of" :) $ matches <&> \(pat, body) -> pretty pat <+> "->" <+> pretty body)
-            Let name body expr -> "let" <+> pretty name <+> "=" <+> pretty body <> ";" <+> pretty expr
-            Literal lit -> pretty lit
-            Function from to -> parensWhen 2 $ go 2 from <+> "->" <+> pretty to
+            Case arg matches ->
+                nest
+                    4
+                    ( vsep $
+                        (keyword "case" <+> go 0 arg <+> keyword "of" :) $
+                            matches <&> \(pat, body) -> prettyAnsi opts pat <+> specSym "->" <+> go 0 body
+                    )
+            Let name body expr -> keyword "let" <+> prettyAnsi opts name <+> specSym "=" <+> go 0 body <> ";" <+> go 0 expr
+            Literal lit -> prettyAnsi opts lit
+            Function from to -> parensWhen 2 $ go 2 from <+> specSym "->" <+> go 0 to
             Q q vis er name ty body -> parensWhen 1 $ kw q er <+> prettyBinder name ty <+> compressQ q vis er body
             VariantT row -> brackets . withExt row . sep . punctuate comma . map variantItem $ sortedRow row.row
             RecordT row -> braces . withExt row . sep . punctuate comma . map recordTyField $ sortedRow row.row
-            Skolem skolem -> pretty skolem
-            UniVar uni -> pretty uni
+            Skolem skolem -> prettyAnsi opts skolem
+            UniVar uni -> prettyAnsi opts uni
           where
             parensWhen minPrec
                 | n >= minPrec = parens
                 | otherwise = id
-            recordField (name, body) = pretty name <+> "=" <+> pretty body
-            withExt row = maybe id (\r doc -> doc <+> "|" <+> pretty r) (extension row)
+            recordField (name, body) = prettyAnsi opts name <+> specSym "=" <+> go 0 body
+            withExt row = maybe id (\r doc -> doc <+> specSym "|" <+> go 0 r) (extension row)
 
-            kw Forall Erased = "∀"
-            kw Forall Retained = "Π"
-            kw Exists Erased = "∃"
-            kw Exists Retained = "Σ"
+            kw Forall Erased = keyword "∀"
+            kw Forall Retained = keyword "Π"
+            kw Exists Erased = keyword "∃"
+            kw Exists Retained = keyword "Σ"
 
-            variantItem (name, ty) = pretty name <+> pretty ty
-            recordTyField (name, ty) = pretty name <+> ":" <+> pretty ty
+            variantItem (name, ty) = conColor (prettyAnsi opts name) <+> go 0 ty
+            recordTyField (name, ty) = prettyAnsi opts name <+> specSym ":" <+> go 0 ty
 
         compressLambda (L term) = case term of
-            Lambda name body -> pretty name <+> compressLambda body
-            other -> "->" <+> pretty other
+            Lambda name body -> prettyAnsi opts name <+> compressLambda body
+            other -> specSym "->" <+> prettyAnsi opts other
         compressQ q vis e (L term) = case term of
             Q q' vis' e' name ty body
                 | q == q' && vis == vis' && e == e' ->
                     prettyBinder name ty <+> compressQ q vis e body
-            other -> arrOrDot q vis <+> pretty other
+            other -> arrOrDot q vis <+> prettyAnsi opts other
 
-        prettyBinder name (L (TyCon (L TypeName))) = pretty name
-        prettyBinder name ty = parens $ pretty name <+> ":" <+> pretty ty
+        prettyBinder name (L (TyCon (L TypeName))) = prettyAnsi opts name
+        prettyBinder name ty = parens $ prettyAnsi opts name <+> specSym ":" <+> go 0 ty
 
-        arrOrDot Forall Visible = "->"
-        arrOrDot Exists Visible = "**"
-        arrOrDot _ _ = "."
+        arrOrDot Forall Visible = specSym "->"
+        arrOrDot Exists Visible = specSym "**"
+        arrOrDot _ _ = specSym "."
 
         prettyConsNil = \case
-            L (Con (L ConsName) [x', xs']) -> (("," <+> pretty x') <>) <$> prettyConsNil xs'
+            L (Con (L ConsName) [x', xs']) -> (("," <+> go 0 x') <>) <$> prettyConsNil xs'
             L (Con (L NilName) []) -> Just ""
             _ -> Nothing

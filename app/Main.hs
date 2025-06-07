@@ -12,7 +12,7 @@ import NameGen (runNameGen)
 import NameResolution
 import Parser (parseModule)
 import Prettyprinter
-import Prettyprinter.Render.Text (putDoc)
+import Prettyprinter.Render.Terminal (putDoc)
 import Repl (ReplEnv (..))
 import Repl qualified
 import System.Console.Isocline (setHistory)
@@ -52,5 +52,5 @@ runRepl = void $ runEff $ runDiagnose ("", "") $ runNameGen do
     replEnv <- Repl.mkDefaultEnv
     Repl.run replEnv
 
-prettyAST :: (Traversable t, Pretty a, MonadIO m) => Bool -> t a -> m ()
-prettyAST debug = when debug . liftIO . traverse_ (putDoc . (<> line) . pretty)
+prettyAST :: (Traversable t, PrettyAnsi a, MonadIO m) => Bool -> t a -> m ()
+prettyAST debug = when debug . liftIO . traverse_ (putDoc . (<> line) . prettyDef)

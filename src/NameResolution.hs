@@ -67,13 +67,13 @@ warn =
         Shadowing name loc ->
             Warn
                 Nothing
-                ("The binding" <+> pretty name <+> "shadows an earlier binding")
+                ("The binding" <+> prettyDef name <+> "shadows an earlier binding")
                 (mkNotes [(getLoc name, M.This "new binding"), (loc, M.Where "previously bound at")])
                 []
         UnusedVar name ->
             Warn
                 Nothing
-                ("The binding" <+> pretty name <+> "is unused")
+                ("The binding" <+> prettyDef name <+> "is unused")
                 (mkNotes [(getLoc name, M.This "bound at")])
                 []
 
@@ -83,7 +83,7 @@ error =
         UnboundVar name ->
             Err
                 Nothing
-                ("The variable" <+> pretty name <+> "is unbound")
+                ("The variable" <+> prettyDef name <+> "is unbound")
                 (mkNotes [(getLoc name, M.This "referenced here")])
                 []
         OutOfScopeWildcard name ->

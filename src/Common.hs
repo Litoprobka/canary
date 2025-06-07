@@ -1,44 +1,16 @@
 {-# LANGUAGE AllowAmbiguousTypes #-}
 {-# LANGUAGE DataKinds #-}
 {-# LANGUAGE DeriveAnyClass #-}
-{-# LANGUAGE DerivingStrategies #-}
+{-# LANGUAGE DerivingVia #-}
 {-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE OverloadedRecordDot #-}
 {-# LANGUAGE PatternSynonyms #-}
 {-# LANGUAGE TypeFamilies #-}
 {-# LANGUAGE UndecidableInstances #-}
 {-# LANGUAGE NoFieldSelectors #-}
+{-# OPTIONS_GHC -Wno-orphans #-}
 
-module Common (
-    Name,
-    Name_ (..),
-    UniVar (..),
-    Skolem (..),
-    Scope (..),
-    Id (..),
-    inc,
-    Loc (..),
-    Located (..),
-    SimpleName,
-    SimpleName_ (..),
-    HasLoc (..),
-    zipLoc,
-    NameAt,
-    Pass (..),
-    zipLocOf,
-    mkNotes,
-    Literal_ (..),
-    Literal,
-    Fixity (..),
-    PriorityRelation,
-    PriorityRelation' (..),
-    type (!=),
-    toSimpleName,
-    pattern L,
-    unLoc,
-    pattern (:@),
-    isInfixConstructor,
-) where
+module Common where
 
 import Data.Text qualified as Text
 import Data.Type.Bool (type (||))
@@ -49,6 +21,8 @@ import GHC.TypeError (Assert, ErrorMessage (..), TypeError)
 import IdMap (HasId (..))
 import LangPrelude
 import Prettyprinter
+import Prettyprinter.Render.Terminal (AnsiStyle, Color (..), bold, colorDull)
+import Prelude qualified (Show (..))
 
 -- this file is a bit of a crutch. Perhaps it's better to move the definitions to Type or TypeChecker
 -- however, they don't really belong to Type, and moving them to TypeChecker introduces a cyclic dependency (which may or may not be fine)
@@ -138,8 +112,11 @@ data SimpleName_
     = Name' Text
     | Wildcard' Text
     deriving (Show, Eq, Ord, Generic, Hashable)
+    deriving (Pretty) via (UnAnnotate SimpleName_)
 
-data Located a = Located Loc a deriving (Show, Generic, Functor, Foldable, Traversable)
+data Located a = Located Loc a
+    deriving (Show, Generic, Functor, Foldable, Traversable)
+    deriving (Pretty) via (UnAnnotate (Located a))
 
 {-# COMPLETE L #-}
 pattern L :: a -> Located a
@@ -161,15 +138,15 @@ instance Hashable a => Hashable (Located a) where
 instance HasLoc (Located a) where
     getLoc (Located loc _) = loc
 
-instance Pretty a => Pretty (Located a) where
-    pretty (L x) = pretty x
+instance PrettyAnsi a => PrettyAnsi (Located a) where
+    prettyAnsi opts (L x) = prettyAnsi opts x
 
 instance HasId a => HasId (Located a) where
     toId (L x) = toId x
 
-instance Pretty SimpleName_ where
-    pretty (Name' name) = pretty name
-    pretty (Wildcard' n) = "_" <> pretty n
+instance PrettyAnsi SimpleName_ where
+    prettyAnsi _ (Name' name) = pretty name
+    prettyAnsi _ (Wildcard' n) = "_" <> pretty n
 
 -- | does the name belong to an infix constructor?
 isInfixConstructor :: Name -> Bool
@@ -191,15 +168,18 @@ inc (Id n) = Id $ n + 1
 newtype Skolem = Skolem Name
     deriving (Show, Eq)
     deriving newtype (Hashable, HasId)
+    deriving (Pretty) via (UnAnnotate Skolem)
 
 instance HasLoc Skolem where
     getLoc (Skolem name) = getLoc name
 
 newtype Scope = Scope Int deriving (Show, Eq, Ord)
 
-instance Pretty Name_ where
-    pretty = \case
-        (Name name id') -> pretty name <> "#" <> pretty id'
+instance PrettyAnsi Name_ where
+    prettyAnsi opts = \case
+        (Name name id')
+            | opts.printIds -> pretty name <> "#" <> pretty id'
+            | otherwise -> pretty name
         (Wildcard n id') -> "_" <> pretty n <> "#" <> pretty id'
         BoolName -> "Bool"
         TrueName -> "True"
@@ -212,11 +192,13 @@ instance Pretty Name_ where
         CharName -> "Char"
         LensName -> "Lens"
         TypeName -> "Type"
-instance Pretty UniVar where
-    pretty (UniVar n) = "#" <> pretty n
-instance Pretty Skolem where
-    pretty (Skolem (L (Name name n))) = pretty name <> "?" <> pretty n
-    pretty (Skolem builtin) = pretty builtin <> "?"
+instance PrettyAnsi UniVar where
+    prettyAnsi _ (UniVar n) = "#" <> pretty n
+instance PrettyAnsi Skolem where
+    prettyAnsi opts (Skolem (L (Name name n)))
+        | opts.printIds = pretty name <> "?" <> pretty n
+        | otherwise = pretty name <> "?"
+    prettyAnsi opts (Skolem builtin) = prettyAnsi opts builtin <> "?"
 
 newtype Loc = Loc Position
     deriving (Show)
@@ -235,8 +217,8 @@ data Literal_
     | CharLiteral Text
     deriving (Eq, Ord)
 
-instance Pretty Literal_ where
-    pretty = \case
+instance PrettyAnsi Literal_ where
+    prettyAnsi _ = \case
         IntLiteral num -> pretty num
         TextLiteral txt -> dquotes $ pretty txt
         CharLiteral c -> "'" <> pretty c <> "'"
@@ -272,3 +254,36 @@ toSimpleName (Located loc name) = Located loc case name of
 
 mkNotes :: [(Loc, M.Marker a)] -> [(Position, M.Marker a)]
 mkNotes = fmap \(Loc pos, marker) -> (pos, marker)
+
+newtype PrettyOptions = PrettyOptions {printIds :: Bool}
+
+defaultPrettyOptions :: PrettyOptions
+defaultPrettyOptions = PrettyOptions{printIds = True}
+
+class PrettyAnsi a where
+    prettyAnsi :: PrettyOptions -> a -> Doc AnsiStyle
+
+prettyDef :: PrettyAnsi a => a -> Doc AnsiStyle
+prettyDef = prettyAnsi defaultPrettyOptions
+
+newtype UnAnnotate a = UnAnnotate a
+
+instance Pretty a => Show (UnAnnotate a) where
+    show (UnAnnotate x) = show $ pretty x
+instance PrettyAnsi a => Pretty (UnAnnotate a) where
+    pretty (UnAnnotate x) = unAnnotate $ prettyDef x
+
+instance PrettyAnsi a => PrettyAnsi (Maybe a) where
+    prettyAnsi opts = maybe "" (prettyAnsi opts)
+
+keyword :: Doc AnsiStyle -> Doc AnsiStyle
+keyword = annotate $ bold <> colorDull Magenta
+
+opStyle :: Doc AnsiStyle -> Doc AnsiStyle
+opStyle = annotate $ bold <> colorDull Green
+
+specSym :: Doc AnsiStyle -> Doc AnsiStyle
+specSym = annotate $ bold <> colorDull Red
+
+conColor :: Doc AnsiStyle -> Doc AnsiStyle
+conColor = annotate $ bold <> colorDull Yellow

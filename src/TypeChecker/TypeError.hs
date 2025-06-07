@@ -31,29 +31,29 @@ typeError =
         CannotUnify lhs rhs ->
             Err
                 Nothing
-                ("cannot unify" <+> pretty lhs <+> "with" <+> pretty rhs)
-                (mkNotes [(getLoc lhs, This $ pretty lhs <+> "originates from"), (getLoc rhs, This $ pretty rhs <+> "originates from")])
+                ("cannot unify" <+> prettyDef lhs <+> "with" <+> prettyDef rhs)
+                (mkNotes [(getLoc lhs, This $ prettyDef lhs <+> "originates from"), (getLoc rhs, This $ prettyDef rhs <+> "originates from")])
                 []
         NotASubtype lhs rhs mbField ->
             Err
                 Nothing
-                (pretty lhs <+> "is not a subtype of" <+> pretty rhs <> fieldMsg)
+                (prettyDef lhs <+> "is not a subtype of" <+> prettyDef rhs <> fieldMsg)
                 (mkNotes [(getLoc lhs, This "lhs"), (getLoc rhs, This "rhs")])
                 []
           where
             fieldMsg = case mbField of
                 Nothing -> ""
-                Just field -> ": right hand side does not contain" <+> pretty field
+                Just field -> ": right hand side does not contain" <+> prettyDef field
         MissingField row field ->
             Err
                 Nothing
-                (either pretty pretty row <+> "does not contain field" <+> pretty field)
+                (either prettyDef prettyDef row <+> "does not contain field" <+> prettyDef field)
                 (mkNotes [(either getLoc getLoc row, This "row arising from"), (getLoc field, This "field arising from")])
                 []
         MissingVariant ty variant ->
             Err
                 Nothing
-                (pretty ty <+> "does not contain variant" <+> pretty variant)
+                (prettyDef ty <+> "does not contain variant" <+> prettyDef variant)
                 (mkNotes [(getLoc ty, This "type arising from"), (getLoc variant, This "variant arising from")])
                 []
         EmptyMatch loc ->
@@ -71,19 +71,19 @@ typeError =
         ArgCountMismatchPattern pat expected got ->
             Err
                 Nothing
-                ("incorrect arg count (" <> pretty got <> ") in pattern" <+> pretty pat <> ". Expected" <+> pretty expected)
+                ("incorrect arg count (" <> pretty got <> ") in pattern" <+> prettyDef pat <> ". Expected" <+> pretty expected)
                 (mkNotes [(getLoc pat, Blank)])
                 []
         NotAFunction loc ty ->
             Err
                 Nothing
-                (pretty ty <+> "is not a function type")
+                (prettyDef ty <+> "is not a function type")
                 (mkNotes [(loc, This "arising from function application")])
                 []
         SelfReferential loc var ty ->
             Err
                 Nothing
-                ("self-referential type" <+> pretty var <+> "~" <+> pretty ty)
+                ("self-referential type" <+> prettyDef var <+> "~" <+> prettyDef ty)
                 (mkNotes [(loc, This "arising from"), (getLoc ty, Where "and from")])
                 []
         NoVisibleTypeArgument expr tyArg ty ->
@@ -93,14 +93,14 @@ typeError =
                 ( mkNotes
                     [ (getLoc expr, This "when applying this expression")
                     , (getLoc tyArg, This "to this type")
-                    , (getLoc ty, Where $ "where the expression has type" <+> pretty ty)
+                    , (getLoc ty, Where $ "where the expression has type" <+> prettyDef ty)
                     ]
                 )
                 []
         ConstructorReturnType{con, expected, returned} ->
             Err
                 Nothing
-                (pretty con <+> "doesn't return the right type") -- todo: proper wording
+                (prettyDef con <+> "doesn't return the right type") -- todo: proper wording
                 ( mkNotes
                     [ (getLoc expected, This "expected return type")
                     , (getLoc returned, Where "this type is returned instead")

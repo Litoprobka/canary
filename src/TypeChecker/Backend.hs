@@ -140,7 +140,7 @@ freshSkolem name = do
     mkName _ = freshName (Located (getLoc name) $ Name' "what") -- why?
 
 lookupUniVar :: InfEffs es => UniVar -> Eff es (Either Scope Monotype)
-lookupUniVar uni = maybe (internalError' $ "missing univar" <+> pretty uni) pure . EMap.lookup uni =<< get @UniVars
+lookupUniVar uni = maybe (internalError' $ "missing univar" <+> prettyDef uni) pure . EMap.lookup uni =<< get @UniVars
 
 withUniVar :: InfEffs es => UniVar -> (Monotype -> Eff es a) -> Eff es ()
 withUniVar uni f =
@@ -162,7 +162,7 @@ alterUniVar override uni ty = do
         lookupUniVar uni >>= \case
             Right _
                 | not override ->
-                    internalError (getLoc ty) $ "attempted to solve a solved univar " <> pretty uni
+                    internalError (getLoc ty) $ "attempted to solve a solved univar " <> prettyDef uni
             Right _ -> pure Nothing
             Left scope -> pure $ Just scope
     cycle <- cycleCheck mbScope (Direct, Set.singleton uni) ty
@@ -349,7 +349,7 @@ mono variance = traverse (mono' variance)
 
 mono' :: InfEffs es => Variance -> TypeDT_ -> Eff es Monotype_
 mono' variance = \case
-    V.Var var -> internalError (getLoc var) $ "mono: dangling var" <+> pretty var
+    V.Var var -> internalError (getLoc var) $ "mono: dangling var" <+> prettyDef var
     V.Con name args -> MCon name <$> traverse go args
     V.TyCon name -> pure $ MTyCon name
     V.Skolem skolem -> pure $ MSkolem skolem
