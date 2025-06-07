@@ -121,7 +121,10 @@ typeFromTerm term = do
     Located (getLoc term) <$> V.eval values term
 
 subtype :: InfEffs es => TypeDT -> TypeDT -> Eff es ()
-subtype (lhs_ :@ locL) (rhs_ :@ locR) = join $ match <$> monoLayer' In lhs_ <*> monoLayer' Out rhs_
+subtype (lhs_ :@ locL) (rhs_ :@ locR) = do
+    _valEnv <- asks @Env (.values)
+    -- todo: unstack here causes an infinite loop, not sure why
+    join $ match <$> ({- V.unstuck valEnv <$> -} monoLayer' In lhs_) <*> ({- V.unstuck valEnv <$> -} monoLayer' Out rhs_)
   where
     match = \cases
         (V.TyCon lhs) (V.TyCon rhs) | lhs == rhs -> pass
@@ -211,7 +214,9 @@ subtype (lhs_ :@ locL) (rhs_ :@ locR) = join $ match <$> monoLayer' In lhs_ <*> 
     solveOr solveWith whenSolved uni = lookupUniVar uni >>= either (const $ solveUniVar uni =<< solveWith) whenSolved
 
 check :: InfEffs es => Expr 'Fixity -> TypeDT -> Eff es ()
-check (e :@ loc) (typeToCheck :@ tyLoc) = match e typeToCheck
+check (e :@ loc) (typeToCheck :@ tyLoc) = do
+    valEnv <- asks @Env (.values)
+    match e $ V.unstuck valEnv typeToCheck
   where
     check_ expr ty = check expr (ty :@ tyLoc)
     match = \cases

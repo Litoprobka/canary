@@ -186,6 +186,20 @@ evalCore !env (L term) = case term of
     mkStuckBranches :: [(CorePattern, CoreTerm)] -> [PatternClosure ()]
     mkStuckBranches = map \(pat, body) -> PatternClosure{pat, ty = (), env, body}
 
+-- try to evaluate an expression that was previously stuck on an unsolved skolem
+unstuck :: ValueEnv -> Value -> Value
+unstuck !env = \case
+    App stuckLhs rhs -> case unstuck env stuckLhs of
+        Lambda closure -> unstuck env $ closure `app` rhs
+        other -> App other rhs
+    Case stuckArg matches ->
+        let arg = unstuck env stuckArg
+         in fromMaybe (Case arg matches) $ asum $ fmap (`tryApplyPatternClosure` arg) matches
+    Skolem skolem -> case LMap.lookup skolem env.skolems of
+        Nothing -> Skolem skolem
+        Just value -> unstuck env value
+    nonStuck -> nonStuck
+
 app :: Closure ty -> Value -> Value
 app Closure{var, env, body} arg = evalCore (env{values = LMap.insert var arg env.values}) body
 
@@ -213,6 +227,11 @@ matchCore env = \cases
          in Just $ env{values = foldl' (flip $ uncurry LMap.insert) env.values pairs}
     (C.LiteralP lit) (PrimValue (L val)) -> env <$ guard (lit == val)
     _ _ -> Nothing
+
+tryApplyPatternClosure :: PatternClosure ty -> Value -> Maybe Value
+tryApplyPatternClosure PatternClosure{pat, env, body} arg = do
+    newEnv <- matchCore env pat arg
+    pure $ evalCore newEnv body
 
 -- desugar could *almost* be pure, but unfortunately, we need name gen here
 -- perhaps we should use something akin to locally nameless?
