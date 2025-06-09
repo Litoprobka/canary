@@ -20,7 +20,7 @@ import LangPrelude
 import Prettyprinter
 import Prettyprinter.Render.Terminal (AnsiStyle)
 import Syntax.Row (ExtRow (..), OpenName, Row, extension, sortedRow)
-import Syntax.Term (Erased (..), Quantifier (..), Visibility (..))
+import Syntax.Term (Erasure (..), Quantifier (..), Visibility (..))
 
 data CorePattern
     = VarP Name
@@ -60,7 +60,7 @@ data CoreTerm_
     | Variant OpenName
     | -- types
       Function CoreTerm CoreTerm
-    | Q Quantifier Visibility Erased Name CoreTerm CoreTerm
+    | Q Quantifier Visibility Erasure Name CoreTerm CoreTerm
     | VariantT (ExtRow CoreTerm)
     | RecordT (ExtRow CoreTerm)
     | -- typechecking metavars

@@ -47,7 +47,7 @@ import Repl qualified
 import Syntax
 import Syntax.Declaration qualified as D
 import Syntax.Row
-import Syntax.Term (Erased (..), Pattern_ (..), Quantifier (..), Visibility (..))
+import Syntax.Term (Erasure (..), Pattern_ (..), Quantifier (..), Visibility (..))
 import Syntax.Term qualified as E
 import Syntax.Term qualified as T
 import TypeChecker (Env)

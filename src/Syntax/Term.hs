@@ -61,13 +61,13 @@ data Term_ p
       p < 'Fixity => InfixE [(Expr p, Maybe (NameAt p))] (Expr p)
     | -- type-only stuff
       Function (Type p) (Type p)
-    | Q Quantifier Visibility Erased (VarBinder p) (Type p)
+    | Q Quantifier Visibility Erasure (VarBinder p) (Type p)
     | VariantT (ExtRow (Type p))
     | RecordT (ExtRow (Type p))
 
 data Quantifier = Forall | Exists deriving (Eq, Show)
 data Visibility = Visible | Implicit | Hidden deriving (Eq, Show)
-data Erased = Retained | Erased deriving (Eq, Show)
+data Erasure = Retained | Erased deriving (Eq, Show)
 
 data Binding (p :: Pass)
     = ValueB {pat :: Pattern p, body :: Expr p}

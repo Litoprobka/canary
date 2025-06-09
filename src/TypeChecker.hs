@@ -204,7 +204,7 @@ subtype (lhs_ :@ locL) (rhs_ :@ locR) = do
 
     -- (forall a -> ty) <: (foreach a -> ty)
     -- (some a ** ty) <: (exists a ** ty)
-    subErased :: Erased -> Erased -> Bool
+    subErased :: Erasure -> Erasure -> Bool
     subErased _ Erased = True
     subErased Retained Retained = True
     subErased Erased Retained = False

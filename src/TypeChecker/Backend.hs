@@ -35,7 +35,7 @@ import Syntax
 import Syntax.Core qualified as C
 import Syntax.Row
 import Syntax.Row qualified as Row
-import Syntax.Term (Erased (..), Quantifier (..), Visibility (..))
+import Syntax.Term (Erasure (..), Quantifier (..), Visibility (..))
 import TypeChecker.TypeError
 
 type Pat = Pattern 'Fixity
@@ -55,7 +55,7 @@ data Monotype_
     | MPrim Literal
     | -- types
       MFn Monotype_ Monotype_
-    | MQ Quantifier Erased (MonoClosure Monotype_)
+    | MQ Quantifier Erasure (MonoClosure Monotype_)
     | MVariantT (ExtRow Monotype_)
     | MRecordT (ExtRow Monotype_)
     | -- stuck computations

@@ -40,7 +40,7 @@ import Syntax.Core qualified as C
 import Syntax.Declaration qualified as D
 import Syntax.Row (ExtRow (..), OpenName)
 import Syntax.Row qualified as Row
-import Syntax.Term (Erased, Quantifier, Visibility (..))
+import Syntax.Term (Erasure, Quantifier, Visibility (..))
 import Syntax.Term qualified as T
 
 data ValueEnv = ValueEnv
@@ -72,7 +72,7 @@ data Value
       PrimValue Literal
     | -- types
       Function Type' Type'
-    | Q Quantifier Visibility Erased (Closure Type')
+    | Q Quantifier Visibility Erasure (Closure Type')
     | VariantT (ExtRow Type')
     | RecordT (ExtRow Type')
     | -- stuck computations
@@ -348,7 +348,7 @@ modifyEnv env decls = do
 
 mkConLambda :: NameGen :> es => Int -> Name -> ValueEnv -> Eff es Value
 mkConLambda n con env = do
-    names <- replicateM n (freshName (Located (Loc Position{file = "<builtin>", begin = (0, 0), end = (0, 0)}) $ Name' "conArg"))
+    names <- for [1 .. n] \i -> freshName (Name' ("x" <> show i) :@ getLoc con)
     -- fused foldl/foldr go brrr
     pure $
         foldr
