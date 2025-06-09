@@ -33,7 +33,7 @@ import Data.List.NonEmpty qualified as NE
 import Data.Traversable (for)
 import Diagnostic
 import Effectful.Dispatch.Dynamic (interpret)
-import Effectful.State.Static.Local (State, evalState, get, modify, put, runState, state)
+import Effectful.State.Static.Local (State, evalState, get, gets, modify, put, runState, state)
 import Error.Diagnose (Report (..))
 import Error.Diagnose qualified as M
 import LangPrelude hiding (error)
@@ -136,7 +136,20 @@ resolve name@(Located loc name_) = do
         Nothing -> do
             error (UnboundVar name)
             -- this gives a unique id to every occurence of the same unbound name
-            scoped $ declare name
+            freshName name
+
+{- | resolves a name and checks that it doesn't belong to a parent scope
+
+used to prevent type declarations from overriding the type of an outer scope binding
+-}
+resolveGuarded :: NameResCtx es => HashMap SimpleName_ Name -> SimpleName -> Eff es Name
+resolveGuarded parentScope name@(name_ :@ _) = do
+    currentScope <- get @Scope
+    case (Map.lookup name_ currentScope.table, Map.lookup name_ parentScope) of
+        (Just (L id'), Just (L parentId)) | id' == parentId -> do
+            error (UnboundVar name)
+            freshName name
+        _ -> resolve name
 
 data ImplicitVars
     = NotInTypeScope
@@ -172,15 +185,18 @@ run env = evalState env . evalState [] . evalState NotInTypeScope . runDeclare
 
 resolveNames :: (NameResCtx es, Declare :> es) => [Declaration 'Parse] -> Eff es [Declaration 'NameRes]
 resolveNames decls = do
-    mkGlobalScope
+    parentScope <- mkGlobalScope
     let (valueDecls, rest) = partition isValueDecl decls
-    otherDecls <- traverse resolveDec rest
-    valueDecls' <- traverse resolveDec valueDecls
+    otherDecls <- traverse (resolveDec parentScope) rest
+    valueDecls' <- traverse (resolveDec parentScope) valueDecls
     pure $ otherDecls <> valueDecls'
   where
     -- this is going to handle imports at some point
-    mkGlobalScope :: (NameResCtx es, Declare :> es) => Eff es ()
-    mkGlobalScope = collectNames decls
+    mkGlobalScope :: (NameResCtx es, Declare :> es) => Eff es (HashMap SimpleName_ Name)
+    mkGlobalScope = do
+        parentScope <- gets @Scope (.table)
+        collectNames decls
+        pure parentScope
 
     isValueDecl (L D.Value{}) = True
     isValueDecl _ = False
@@ -215,11 +231,11 @@ resolveTrav =
             }
 
 -- | resolves names in a declaration. Adds type constructors to the current scope
-resolveDec :: (NameResCtx es, Declare :> es) => Declaration 'Parse -> Eff es (Declaration 'NameRes)
-resolveDec = traverse \case
+resolveDec :: (NameResCtx es, Declare :> es) => HashMap SimpleName_ Name -> Declaration 'Parse -> Eff es (Declaration 'NameRes)
+resolveDec parentScope = traverse \case
     D.Value binding locals -> scoped do
         binding' <- resolveBinding locals binding
-        locals' <- traverse resolveDec locals
+        locals' <- traverse (resolveDec parentScope) locals
         pure $ D.Value binding' locals'
     D.Type name vars constrs -> do
         -- TODO: NAMESPACES: constrs should be declared in a corresponding type namespace
@@ -240,8 +256,8 @@ resolveDec = traverse \case
             sig' <- inferForall (resolveTerm sig)
             pure $ D.GadtConstructor conLoc con' sig'
         pure $ D.GADT name' mbKind' constrs'
-    D.Signature name ty -> D.Signature <$> resolve name <*> inferForall (resolveTerm ty)
-    D.Fixity fixity name rels -> D.Fixity fixity <$> resolve name <*> traverse resolve rels
+    D.Signature name ty -> D.Signature <$> resolveGuarded parentScope name <*> inferForall (resolveTerm ty)
+    D.Fixity fixity name rels -> D.Fixity fixity <$> resolveGuarded parentScope name <*> traverse resolve rels
 
 {- | resolves names in a binding. Unlike the rest of the functions, it also
 takes local definitions as an argument, and uses them after resolving the name / pattern

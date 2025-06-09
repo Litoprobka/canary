@@ -180,6 +180,29 @@ spec = do
                             , RParen
                             , BlockEnd
                             ]
+        it "relaxed block rules in parens" do
+            let expr =
+                    [text|
+                    thing = [
+                        a,
+                        b,
+                    c,
+                    d
+                    ]
+                    |]
+            testLexer expr
+                `shouldLex` [ LowerName "thing"
+                            , SpecialSymbol Eq
+                            , LBracket
+                            , LowerName "a"
+                            , Comma
+                            , LowerName "b"
+                            , Comma
+                            , LowerName "c"
+                            , Comma
+                            , LowerName "d"
+                            , RBracket
+                            ]
         it "another match example" do
             let program =
                     [text|

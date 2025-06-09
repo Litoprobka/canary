@@ -114,15 +114,15 @@ termOperator = mkName $(tok 'Op)
 colonOperator :: Parser e SimpleName
 colonOperator = mkName $(tok 'ColonOp)
 
-{- todo: it might be a good idea to ignore strict newlines when inside the brackets
-i.e. that would allow
+{- parens / brackets / braces locally disable the scoping rules,
+which allows stuff like this without the parser complaining about a newline before the terminating bracket
 > stuff = [
 >   x,
 >   y,
 >   z,
 > ]
 the indentation inside the list is optional as well
-using anything indentation-sensitve, i.e. do notation, reintroduces strict newlines
+using anything that uses block rules, i.e. do notation, reintroduces strict newlines
 > otherStuff = [
 >   x,
 >   do
@@ -178,7 +178,7 @@ lex initOffset (fileName, fileContents) = do
 
 -- | pure version of 'lex' that doesn't postprocess tokens
 lex' :: Int -> ByteString -> Result Void [(Span, Token)]
-lex' offset input = FP.runParser (FP.skip offset *> anySpace *> (concatMap NE.toList <$> many token')) 0 startPos input
+lex' offset input = FP.runParser (FP.skip offset *> anySpace *> tokens) 0 startPos input
   where
     anySpace = FP.skipMany space1 `sepBy` newlines
     startPos = FP.unPos (FP.mkPos input (0, 0))
@@ -199,6 +199,10 @@ mkTokenStream (fileName, fileContents) tokens = TokenStream $ V.fromList located
                 , file = fileName
                 }
 
+{-# INLINE tokens #-}
+tokens :: Lexer [(Span, Token)]
+tokens = concatMap NE.toList <$> FP.many token'
+
 {-# INLINE token' #-}
 token' :: Lexer (NonEmpty (Span, Token))
 token' = tokenNoWS <* spaceOrLineWrap
@@ -206,6 +210,10 @@ token' = tokenNoWS <* spaceOrLineWrap
     tokenNoWS :: Lexer (NonEmpty (Span, Token))
     tokenNoWS =
         ((:|) <$> withSpan' (BlockStart <$> blockKeyword) <*> block')
+            <|> parenBlock (LParen <$ $(char '(')) (RParen <$ $(char ')'))
+            <|> parenBlock (LBracket <$ $(char '[')) (RBracket <$ $(char ']'))
+            -- todo: tight braces
+            <|> parenBlock (LBrace <$ $(char '{')) (RBrace <$ $(char '}'))
             <|> letBlock'
             <|> choice
                 [ Keyword <$> keyword'
@@ -217,12 +225,6 @@ token' = tokenNoWS <* spaceOrLineWrap
                                 "∃" -> pure $ Keyword Exists
                                 "Σ" -> Keyword Some <$ fails (satisfy isIdentifierChar)
                                 "\\" -> pure $ SpecialSymbol Lambda
-                                "(" -> pure LParen
-                                ")" -> pure RParen
-                                "{" -> pure LBrace -- todo: tight braces
-                                "}" -> pure RBrace
-                                "[" -> pure LBracket
-                                "]" -> pure RBracket
                                 "," -> pure Comma
                                 ";" -> pure Semicolon
                             |]
@@ -295,8 +297,7 @@ block' = do
     blockContents <-
         if newOffset <= prevOffset
             then pure []
-            else FP.local (const newOffset) do
-                concatMap NE.toList <$> FP.many token'
+            else FP.local (const newOffset) tokens
     blockEnd <- withSpan' (pure BlockEnd)
     pure $ blockContents <> one blockEnd
 
@@ -315,6 +316,15 @@ letBlock' = do
         (tokens, terminator) <- first (concatMap NE.toList) <$> token' `someTill_` terminatorP
         pure $ tokens <> [terminator]
     pure $ letTok :| tokens
+
+-- | inside parenthesis, outer scope block rules are disabled
+parenBlock :: Lexer Token -> Lexer Token -> Lexer (NonEmpty (Span, Token))
+parenBlock openP closeP = do
+    open <- withSpan' openP <* spaceOrLineWrap
+    -- an offset of -1 means that even an unindented newline would be considered a line continuation
+    tokens <- FP.local (const (-1)) tokens
+    close <- withSpan' closeP
+    pure $ open :| tokens <> [close]
 
 -- | returns the byte offset since the last occured newline
 columnBytes :: Lexer Int

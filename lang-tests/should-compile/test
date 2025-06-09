@@ -9,5 +9,10 @@ length xs = case xs of
     Cons _ tail -> S (length tail)
     Nil -> Z
 
-recrec {x, y} = { x = myId x, y = myId y }
+-- check this out, braces suppress hard newlines
+recrec {x, y} = { 
+    x = myId x,
+    y = myId y,
+}
+
 myId x = x
