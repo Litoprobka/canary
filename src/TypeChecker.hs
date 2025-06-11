@@ -22,7 +22,6 @@ module TypeChecker (
 
 import Common (Name)
 import Common hiding (Name)
-import Data.Foldable1 (foldr1)
 import Data.Traversable (for)
 import Diagnostic (internalError)
 import Effectful
@@ -482,21 +481,6 @@ infer (Located loc e) = case e of
         yTy <- V.quote =<< infer y
         env <- asks @Env (.values)
         pure $ Located loc $ V.Q Exists Visible Retained V.Closure{var = xName :@ loc, ty = unLoc xTy, env, body = yTy}
-    RecordLens fields -> do
-        recordParts <- for fields \field -> do
-            rowVar <- freshUniVar
-            pure \nested -> V.RecordT $ ExtRow (one (field, nested)) rowVar
-        let mkNestedRecord = foldr1 (.) recordParts
-        a <- freshUniVar
-        b <- freshUniVar
-        pure $
-            Located loc $
-                V.TyCon
-                    (Located loc LensName)
-                    `V.App` mkNestedRecord a
-                    `V.App` mkNestedRecord b
-                    `V.App` a
-                    `V.App` b
     Do _ _ -> internalError loc "do-notation is not supported yet"
     Literal (Located loc' lit) -> pure $ Located loc . V.TyCon . Located loc' $ case lit of
         IntLiteral num

@@ -88,7 +88,6 @@ instance PrettyAnsi CoreTerm_ where
             Record row -> braces . sep . punctuate comma . map recordField $ sortedRow row
             Sigma x y -> parensWhen 1 $ go 0 x <+> specSym "**" <+> go 0 y
             Variant name -> prettyAnsi opts name
-            -- RecordLens lens -> foldMap (("." <>) . pretty) lens
             Case arg matches ->
                 nest
                     4

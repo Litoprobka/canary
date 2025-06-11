@@ -66,9 +66,7 @@ data Value
     | Record (Row Value)
     | Sigma Value Value
     | Variant OpenName Value
-    | --  | RecordLens (NonEmpty OpenName)
-
-      -- | A primitive (Text, Char or Int) value. The name 'Literal' is slightly misleading here
+    | -- | A primitive (Text, Char or Int) value. The name 'Literal' is slightly misleading here
       PrimValue Literal
     | -- types
       Function Type' Type'
@@ -97,7 +95,6 @@ quoteForPrinting (Located loc value) = Located loc case value of
     Record vals -> C.Record $ fmap quoteWithLoc vals
     Sigma x y -> C.Sigma (quoteWithLoc x) (quoteWithLoc y)
     Variant name val -> C.App (Located (getLoc name) $ C.Variant name) $ quoteWithLoc val
-    -- RecordLens path -> RecordLens path
     PrimValue lit -> C.Literal lit
     Function l r -> C.Function (quoteWithLoc l) (quoteWithLoc r)
     Q q vis e closure -> C.Q q vis e closure.var (quoteWithLoc closure.ty) $ quoteWithLoc (closureBody closure)
@@ -127,7 +124,6 @@ quote (value :@ loc) =
         Record vals -> C.Record <$> traverse quoteWithLoc vals
         Sigma x y -> C.Sigma <$> quoteWithLoc x <*> quoteWithLoc y
         Variant name val -> C.App (Located (getLoc name) $ C.Variant name) <$> quoteWithLoc val
-        -- RecordLens path -> pure $ RecordLens path
         PrimValue lit -> pure $ C.Literal lit
         Function l r -> C.Function <$> quoteWithLoc l <*> quoteWithLoc r
         Q q vis e closure -> do
@@ -275,7 +271,6 @@ desugar = go
                     [ (C.ConstructorP (Located (getLoc cond) TrueName) [], true')
                     , (C.WildcardP "", false')
                     ]
-            T.RecordLens _ -> internalError loc "todo: desugar RecordLens"
             T.Variant name -> pure $ C.Variant name
             T.Record fields -> C.Record <$> traverse go fields
             T.Sigma x y -> C.Sigma <$> go x <*> go y

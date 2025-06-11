@@ -87,7 +87,6 @@ data Name_
     | NatName
     | TextName
     | CharName
-    | LensName
     | TypeName
     deriving (Show, Eq, Generic, Hashable)
 
@@ -104,8 +103,7 @@ instance HasId Name_ where
         NatName -> -16
         TextName -> -17
         CharName -> -18
-        LensName -> -19
-        TypeName -> -20
+        TypeName -> -19
 
 type SimpleName = Located SimpleName_
 data SimpleName_
@@ -190,7 +188,6 @@ instance PrettyAnsi Name_ where
         NatName -> "Nat"
         TextName -> "Text"
         CharName -> "Char"
-        LensName -> "Lens"
         TypeName -> "Type"
 instance PrettyAnsi UniVar where
     prettyAnsi _ (UniVar n) = "#" <> pretty n
@@ -249,7 +246,6 @@ toSimpleName (Located loc name) = Located loc case name of
     NatName -> Name' "Nat"
     TextName -> Name' "Text"
     CharName -> Name' "Char"
-    LensName -> Name' "Lens"
     TypeName -> Name' "Type"
 
 mkNotes :: [(Loc, M.Marker a)] -> [(Position, M.Marker a)]

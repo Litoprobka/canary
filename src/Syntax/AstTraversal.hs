@@ -77,7 +77,6 @@ partialTravTerm trav (term' :@ loc) =
         Case term matches -> Case <$> trav.term term <*> traverse (bitraverse trav.pattern_ trav.term) matches
         Match matches -> Match <$> traverse (bitraverse (traverse trav.pattern_) trav.term) matches
         If cond true false -> If <$> trav.term cond <*> trav.term true <*> trav.term false
-        RecordLens path -> pure $ RecordLens path
         T.Variant oname -> pure $ T.Variant oname
         Record row -> Record <$> traverse trav.term row
         Sigma x y -> Sigma <$> trav.term x <*> trav.term y

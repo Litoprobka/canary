@@ -46,8 +46,6 @@ data Term_ p
     | -- | Haskell's \cases
       Match [([Pattern p], Expr p)]
     | If (Expr p) (Expr p) (Expr p)
-    | -- | .field.otherField.thirdField
-      RecordLens (NonEmpty OpenName)
     | -- | 'Constructor
       -- unlike the rest of the cases, variant tags and record fields
       -- don't need any kind of name resolution
@@ -146,7 +144,6 @@ instance PrettyAnsi (NameAt p) => PrettyAnsi (Expr_ p) where
             Name name -> prettyAnsi opts name
             ImplicitVar var -> prettyAnsi opts var
             Parens expr -> parens $ go 0 expr
-            RecordLens fields -> encloseSep "." "" "." $ toList $ prettyAnsi opts <$> fields
             Variant name -> prettyAnsi opts name
             Record row -> braces . sep . punctuate comma . map recordField $ sortedRow row
             Sigma x y -> parensWhen 1 $ go 0 x <+> "**" <+> go 0 y
@@ -250,7 +247,6 @@ collectReferencedNames = go
         ImplicitVar var -> [var]
         Parens expr -> go expr
         Literal _ -> []
-        RecordLens{} -> []
         Variant{} -> []
         Let{} -> error "collectReferencedNames: local bindings are not supported yet"
         LetRec{} -> error "collectReferencedNames: local bindings are not supported yet"
