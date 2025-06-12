@@ -4,11 +4,11 @@
 {-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE OverloadedRecordDot #-}
 {-# LANGUAGE PatternSynonyms #-}
+{-# OPTIONS_GHC -Wno-orphans #-}
 
-module Eval where
+module Eval (quote, eval, evalCore, unstuck, modifyEnv, evalAll, mkLambda', app, module Reexport, desugarElaborated) where
 
 import Common (
-    Literal,
     Loc (..),
     Located (..),
     Name,
@@ -16,15 +16,13 @@ import Common (
     Pass (..),
     PrettyAnsi (..),
     SimpleName_ (Name'),
-    Skolem,
     UnAnnotate (..),
-    UniVar,
     getLoc,
     prettyDef,
     toSimpleName,
     unLoc,
     pattern L,
-    pattern (:@),
+    pattern Located,
  )
 
 -- IdMap is currently lazy anyway, but it's up to change
@@ -38,51 +36,12 @@ import Prettyprinter (line, vsep)
 import Syntax
 import Syntax.Core qualified as C
 import Syntax.Declaration qualified as D
-import Syntax.Row (ExtRow (..), OpenName)
+import Syntax.Elaborated (EPattern, ETerm, Typed (..))
+import Syntax.Elaborated qualified as E
 import Syntax.Row qualified as Row
-import Syntax.Term (Erasure, Quantifier, Visibility (..))
+import Syntax.Term (Visibility (..))
 import Syntax.Term qualified as T
-
-data ValueEnv = ValueEnv
-    { values :: IdMap Name Value
-    , skolems :: IdMap Skolem Value
-    }
-type Type' = Value
-
--- unlike the AST types, the location information on Values are shallow, since
--- the way we use it is different from the AST nodes
--- in AST, the location corresponds to the source span where the AST node is written
--- in Values, the location is the source space that the location is *arising from*
-data Value
-    = -- unbound variables and skolems seem really close in how they are treated. I wonder whether they can be unified
-      Var Name
-    | -- | a type constructor. unlike value constructors, `Either a b` is represented as a stuck application Either `App` a `App` b
-      TyCon Name
-    | -- | a fully-applied counstructor
-      Con Name [Value]
-    | Lambda (Closure ())
-    | -- | an escape hatch for interpreter primitives and similar stuff
-      PrimFunction Name (Value -> Value)
-    | Record (Row Value)
-    | Sigma Value Value
-    | Variant OpenName Value
-    | -- | A primitive (Text, Char or Int) value. The name 'Literal' is slightly misleading here
-      PrimValue Literal
-    | -- types
-      Function Type' Type'
-    | Q Quantifier Visibility Erasure (Closure Type')
-    | VariantT (ExtRow Type')
-    | RecordT (ExtRow Type')
-    | -- stuck computations
-      App Value ~Value
-    | Case Value [PatternClosure ()]
-    | -- typechecking metavars
-      UniVar UniVar
-    | Skolem Skolem
-    deriving (Pretty, Show) via (UnAnnotate Value)
-
-data Closure ty = Closure {var :: Name, ty :: ty, env :: ValueEnv, body :: CoreTerm}
-data PatternClosure ty = PatternClosure {pat :: CorePattern, ty :: ty, env :: ValueEnv, body :: CoreTerm}
+import Syntax.Value as Reexport
 
 -- quote a value for pretty-printing
 quoteForPrinting :: Located Value -> CoreTerm
@@ -107,8 +66,13 @@ quoteForPrinting (Located loc value) = Located loc case value of
   where
     quoteWithLoc = quoteForPrinting . Located loc
 
+-- an orphan instance, since otherwise we'd have a cyclic dependency between elaborated terms, which are typed, and values
+-- perhaps elaborated terms should be parametrised by the type instead?..
 instance PrettyAnsi Value where
     prettyAnsi opts = prettyAnsi opts . quoteForPrinting . Located (Loc Position{file = "<none>", begin = (0, 0), end = (0, 0)})
+
+deriving via (UnAnnotate Value) instance Pretty Value
+deriving via (UnAnnotate Value) instance Show Value
 
 -- quote a value into a normal form expression
 quote :: NameGen :> es => Located Value -> Eff es CoreTerm
@@ -232,6 +196,8 @@ tryApplyPatternClosure PatternClosure{pat, env, body} arg = do
 -- desugar could *almost* be pure, but unfortunately, we need name gen here
 -- perhaps we should use something akin to locally nameless?
 -- TODO: properly handle recursive bindings (that is, don't infinitely loop on them)
+
+-- todo: replace all uses of this function with 'desugarElaborated'
 desugar :: forall es. (NameGen :> es, Diagnose :> es) => Term 'Fixity -> Eff es CoreTerm
 desugar = go
   where
@@ -301,6 +267,69 @@ desugar = go
     asVar (L (T.VarP name)) = pure name
     asVar (Located loc (T.WildcardP txt)) = freshName $ Located loc $ Name' txt
     asVar v = internalError (getLoc v) "todo: nested patterns"
+
+desugarElaborated :: forall es. (NameGen :> es, Diagnose :> es) => ETerm -> Eff es CoreTerm
+desugarElaborated = go
+  where
+    go (e :@ loc ::: _) =
+        Located loc <$> case e of
+            E.Name name -> pure $ C.Name name
+            E.Literal lit -> pure $ C.Literal lit
+            E.App lhs rhs -> C.App <$> go lhs <*> go rhs
+            E.Lambda (L (E.VarP arg) ::: _) body -> C.Lambda arg <$> go body
+            E.Lambda pat@(_ ::: patTy) body@(_ ::: bodyTy) -> do
+                name <- freshName $ Name' "lamArg" :@ loc
+                C.Lambda name <$> go (E.Case (E.Name name :@ getLoc name ::: patTy) [(pat, body)] :@ loc ::: bodyTy)
+            E.Let binding expr -> case binding of
+                E.ValueB (L (E.VarP name) ::: _) body -> C.Let name <$> go body <*> go expr
+                E.ValueB _ _ -> internalError loc "todo: desugar pattern bindings"
+                E.FunctionB name args body -> C.Let name <$> go (foldr (\x -> (::: error "tedium") . (:@ loc) . E.Lambda x) body args) <*> go expr
+            E.LetRec _bindings _body -> internalError loc "todo: letrec desugar"
+            E.Case arg matches -> C.Case <$> go arg <*> traverse (bitraverse flattenPattern go) matches
+            E.Match matches@(([_], _) : _) -> do
+                name <- freshName $ Located loc $ Name' "matchArg"
+                matches' <- for matches \case
+                    ([pat], body) -> bitraverse flattenPattern desugarElaborated (pat, body)
+                    _ -> internalError loc "inconsistent pattern count in a match expression"
+                pure $ C.Lambda name $ Located loc $ C.Case (nameLoc name) matches'
+            E.Match _ -> internalError loc "todo: multi-arg match desugar"
+            E.If cond@(_ :@ condLoc ::: _) true false -> do
+                cond' <- go cond
+                true' <- go true
+                false' <- go false
+                pure . C.Case cond' $
+                    [ (C.ConstructorP (TrueName :@ condLoc) [], true')
+                    , (C.WildcardP "", false')
+                    ]
+            E.Variant name -> pure $ C.Variant name
+            E.Record fields -> C.Record <$> traverse go fields
+            E.Sigma x y -> C.Sigma <$> go x <*> go y
+            E.List xs -> unLoc . foldr (appLoc . appLoc cons) nil <$> traverse go xs
+            E.Do{} -> error "todo: desugar do blocks"
+            E.Function from to -> C.Function <$> go from <*> go to
+            E.Q q vis er var kind body -> C.Q q vis er var <$> quote (kind :@ loc) <*> go body
+            E.VariantT row -> C.VariantT <$> traverse go row
+            E.RecordT row -> C.RecordT <$> traverse go row
+      where
+        cons = nameLoc $ Located loc ConsName
+        nil = nameLoc $ Located loc NilName
+        nameLoc = Located loc . C.Name
+        appLoc l r = Located loc $ C.App l r
+
+    -- we only support non-nested patterns for now
+    flattenPattern :: EPattern -> Eff es CorePattern
+    flattenPattern (p :@ loc ::: _) = case p of
+        E.VarP name -> pure $ C.VarP name
+        E.WildcardP name -> pure $ C.WildcardP name
+        E.ConstructorP name pats -> C.ConstructorP name <$> traverse asVar pats
+        E.VariantP name pat -> C.VariantP name <$> asVar pat
+        E.RecordP row -> C.RecordP <$> traverse asVar row
+        E.ListP _ -> internalError loc "todo: list pattern desugaring"
+        E.LiteralP (L lit) -> pure $ C.LiteralP lit
+
+    asVar (L (E.VarP name) ::: _) = pure name
+    asVar (Located loc (E.WildcardP txt) ::: _) = freshName $ Located loc $ Name' txt
+    asVar (_ :@ loc ::: _) = internalError loc "todo: nested patterns"
 
 eval :: (Diagnose :> es, NameGen :> es) => ValueEnv -> Term 'Fixity -> Eff es Value
 eval env term = evalCore env <$> desugar term

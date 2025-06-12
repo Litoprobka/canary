@@ -6,7 +6,7 @@
 
 module Lexer where
 
-import Common (Literal_ (..), Loc (..), Located (..), SimpleName, SimpleName_ (..), unLoc, zipLoc, pattern L)
+import Common (Literal_ (..), Loc (..), Located (..), SimpleName, SimpleName_ (..), unLoc, zipLoc, pattern L, pattern Located)
 import Common qualified as C
 import Control.Monad.Combinators (between, choice, sepBy, sepEndBy, sepEndBy1, skipManyTill, someTill_)
 import Control.Monad.Combinators qualified as P

@@ -112,19 +112,19 @@ data SimpleName_
     deriving (Show, Eq, Ord, Generic, Hashable)
     deriving (Pretty) via (UnAnnotate SimpleName_)
 
-data Located a = Located Loc a
+data Located a = a :@ Loc
     deriving (Show, Generic, Functor, Foldable, Traversable)
     deriving (Pretty) via (UnAnnotate (Located a))
 
 {-# COMPLETE L #-}
 pattern L :: a -> Located a
-pattern L x <- Located _ x
+pattern L x <- x :@ _
 
-{-# COMPLETE (:@) #-}
-pattern (:@) :: a -> Loc -> Located a
-pattern (:@) x loc <- Located loc x
+{-# COMPLETE Located #-}
+pattern Located :: Loc -> a -> Located a
+pattern Located loc x <- x :@ loc
     where
-        x :@ loc = Located loc x
+        Located loc x = x :@ loc
 instance Eq a => Eq (Located a) where
     (L lhs) == (L rhs) = lhs == rhs
 

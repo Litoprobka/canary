@@ -8,7 +8,7 @@ module Repl where
 import Common (
     Fixity (..),
     Loc (..),
-    Located,
+    Located (..),
     Name,
     Name_ (TypeName),
     Pass (..),
@@ -50,6 +50,7 @@ import Prettyprinter.Render.Terminal (putDoc)
 import Syntax
 import Syntax.AstTraversal
 import Syntax.Declaration qualified as D
+import Syntax.Elaborated (Typed (..))
 import Syntax.Term
 import System.Console.Isocline
 import TypeChecker (infer, inferDeclaration, normalise)
@@ -253,7 +254,11 @@ replStep env@ReplEnv{loadedFiles} command = do
         afterNameRes <- NameResolution.run env.scope $ resolveTerm expr
         skippedDepRes <- cast.term afterNameRes
         afterFixityRes <- Fixity.run env.fixityMap env.operatorPriorities $ Fixity.parse skippedDepRes
-        fmap (afterFixityRes,) $ runLabeled @"types" (evalState env.types) $ TC.run env.values $ normalise $ infer afterFixityRes
+        fmap (afterFixityRes,) $
+            runLabeled @"types" (evalState env.types) $
+                TC.run env.values $
+                    normalise $
+                        (\(_ :@ loc ::: ty) -> ty :@ loc) <$> infer afterFixityRes
 
     prettyVal val = do
         liftIO $ putDoc $ prettyAnsi PrettyOptions{printIds = False} val <> Pretty.line

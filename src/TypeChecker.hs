@@ -26,7 +26,7 @@ import Data.Traversable (for)
 import Diagnostic (internalError)
 import Effectful
 import Effectful.Reader.Static (ask, asks)
-import Effectful.State.Static.Local (State, execState, get, modify, put, runState)
+import Effectful.State.Static.Local (State, get, modify, put, runState)
 import Eval (ValueEnv)
 import Eval qualified as V
 import GHC.IsList qualified as IsList
@@ -37,6 +37,8 @@ import NameGen
 import Syntax
 import Syntax.Core qualified as C
 import Syntax.Declaration qualified as D
+import Syntax.Elaborated (EBinding, EPattern, ETerm, Typed (..))
+import Syntax.Elaborated qualified as El
 import Syntax.Row (ExtRow (..))
 import Syntax.Row qualified as Row
 import Syntax.Term hiding (Record, Variant)
@@ -50,24 +52,24 @@ import TypeChecker.TypeError
 inferDeclaration :: InfEffs es => Declaration 'Fixity -> Eff es (ValueEnv -> ValueEnv)
 inferDeclaration (Located loc decl) = case decl of
     D.Signature name sig -> do
-        sigV <- typeFromTerm sig
+        sigV <- generalise $ typeFromTerm sig
         modify $ Map.insert name sigV
         pure id
     D.Type name binders constrs -> do
         local' (define name (V.TyCon name)) do
-            typeKind <- mkTypeKind binders
+            typeKind <- generalise $ mkTypeKind binders
             modify $ Map.insert name typeKind
             for_ (mkConstrSigs name binders constrs) \(con, sig) -> do
-                sigV <- typeFromTerm sig
+                sigV <- generalise $ typeFromTerm sig
                 modify $ Map.insert con sigV
             pure $ insertVal name (V.TyCon name)
     D.GADT name mbKind constrs -> do
         local' (define name (V.TyCon name)) do
             kind <- maybe (pure type_) typeFromTerm mbKind
             modify $ Map.insert name kind
-            for_ constrs \con -> do
+            local' (declare name kind) $ for_ constrs \con -> do
                 checkGadtConstructor name con
-                conSig <- typeFromTerm con.sig
+                conSig <- generalise $ typeFromTerm con.sig
                 modify $ Map.insert con.name conSig
         pure $ insertVal name (V.TyCon name)
     D.Value binding (_ : _) -> internalError (getLoc binding) "todo: proper support for where clauses"
@@ -82,7 +84,7 @@ inferDeclaration (Located loc decl) = case decl of
 
     mkTypeKind = \case
         [] -> pure type_
-        (binder : rest) -> fmap (Located loc) $ V.Function <$> (unLoc <$> typeFromTerm (binderKind binder)) <*> (unLoc <$> mkTypeKind rest) -- ewww
+        (binder : rest) -> fmap (:@ loc) $ V.Function <$> (unLoc <$> typeFromTerm (binderKind binder)) <*> (unLoc <$> mkTypeKind rest) -- ewww
     type_ = V.TyCon (TypeName :@ loc) :@ loc
 
     mkConstrSigs :: Name -> [VarBinder 'Fixity] -> [Constructor 'Fixity] -> [(Name, Type 'Fixity)]
@@ -116,8 +118,8 @@ inferDeclaration (Located loc decl) = case decl of
 typeFromTerm :: InfEffs es => Type 'Fixity -> Eff es Type'
 typeFromTerm term = do
     values <- asks @Env (.values)
-    check term $ V.TyCon (TypeName :@ getLoc term) :@ getLoc term
-    Located (getLoc term) <$> V.eval values term
+    typedTerm@(_ :@ loc ::: _) <- check term $ V.TyCon (TypeName :@ getLoc term) :@ getLoc term
+    (:@ loc) . V.evalCore values <$> V.desugarElaborated typedTerm
 
 subtype :: InfEffs es => TypeDT -> TypeDT -> Eff es ()
 subtype (lhs_ :@ locL) (rhs_ :@ locR) = do
@@ -212,7 +214,7 @@ subtype (lhs_ :@ locL) (rhs_ :@ locR) = do
     solveOr :: InfEffs es => Eff es Monotype -> (Monotype -> Eff es ()) -> UniVar -> Eff es ()
     solveOr solveWith whenSolved uni = lookupUniVar uni >>= either (const $ solveUniVar uni =<< solveWith) whenSolved
 
-check :: InfEffs es => Expr 'Fixity -> TypeDT -> Eff es ()
+check :: InfEffs es => Expr 'Fixity -> TypeDT -> Eff es ETerm
 check (e :@ loc) (typeToCheck :@ tyLoc) = do
     valEnv <- asks @Env (.values)
     match e $ V.unstuck valEnv typeToCheck
@@ -221,37 +223,42 @@ check (e :@ loc) (typeToCheck :@ tyLoc) = do
     match = \cases
         -- the case for E.Name is redundant, since
         -- `infer` just looks up its type anyway
-        (Lambda arg body) (V.Q Forall Visible Retained closure) -> do
-            argVars <- checkPattern arg $ closure.ty :@ tyLoc
+        (Lambda arg body) ty@(V.Q Forall Visible Retained closure) -> do
+            (argVars, typedArg) <- checkPattern arg $ closure.ty :@ tyLoc
             (argVal, valDiff) <- skolemizePattern' arg
-            local' (defineMany valDiff . declareMany argVars) do
+            typedBody <- local' (defineMany valDiff . declareMany argVars) do
                 check body $ (closure `V.app` argVal) :@ tyLoc
-        (Lambda arg body) (V.Function from to) -> do
-            newTypes <- checkPattern arg $ from :@ tyLoc
+            pure $ El.Lambda typedArg typedBody :@ loc ::: ty
+        (Lambda arg body) ty@(V.Function from to) -> do
+            (newTypes, typedArg) <- checkPattern arg $ from :@ tyLoc
             (_, valDiff) <- skolemizePattern' arg
-            local' (defineMany valDiff . declareMany newTypes) do
+            typedBody <- local' (defineMany valDiff . declareMany newTypes) do
                 check_ body to
+            pure $ El.Lambda typedArg typedBody :@ loc ::: ty
         (Annotation expr annTy) ty -> do
             annTyV <- typeFromTerm annTy
-            check expr annTyV
-            subtype annTyV (ty :@ tyLoc)
+            check expr annTyV <* subtype annTyV (ty :@ tyLoc)
         (If cond true false) ty -> do
-            check_ cond $ V.TyCon (BoolName :@ loc)
-            check_ true ty
-            check_ false ty
+            cond' <- check_ cond $ V.TyCon (BoolName :@ loc)
+            true' <- check_ true ty
+            false' <- check_ false ty
+            pure $ (El.If cond' true' false' :@ loc) ::: ty
         (Case arg matches) ty -> do
-            argTy <- infer arg
-            for_ matches \(pat, body) -> do
-                typeMap <- checkPatternRelaxed pat argTy
+            typedArg@(_ :@ argLoc ::: argTy) <- infer arg
+            typedMatches <- for matches \(pat, body) -> do
+                (typeMap, _) <- checkPatternRelaxed pat $ argTy :@ argLoc
                 local' (declareMany typeMap) do
                     env <- ask @Env
-                    newValues <- execState env.values do
+                    (typedPat, newValues) <- runState env.values do
                         patValue <- skolemizePattern pat
-                        truePatTy <- snd <$> inferPattern pat
-                        localEquality (unLoc argTy) (unLoc truePatTy)
+                        typedPat@(_ ::: truePatTy) <- snd <$> inferPattern pat
+                        localEquality argTy truePatTy
                         traverse_ (`localEquality` patValue) (mbArgV env)
-                    local' (\tcenv -> tcenv{values = newValues}) do
-                        check_ body ty
+                        pure typedPat
+                    typedBody <- local' (\tcenv -> tcenv{values = newValues}) do
+                        check body $ ty :@ loc
+                    pure (typedPat, typedBody)
+            pure $ El.Case typedArg typedMatches :@ loc ::: ty
           where
             -- a special case for matching on a var seems janky, but apparently that's how Idris does this
             -- we can do better: eval the arg with the current scope, which would yield a skolem for unbound vars anyway
@@ -261,10 +268,12 @@ check (e :@ loc) (typeToCheck :@ tyLoc) = do
         (Match matches) ty -> do
             n <- whenNothing (getArgCount matches) $ typeError $ ArgCountMismatch loc
             (patTypes, bodyTy) <- unwrapFn n ty
-            for_ matches \(pats, body) -> do
-                typeMap <- fold <$> zipWithM checkPatternRelaxed pats (map (:@ tyLoc) patTypes)
+            typedMatches <- for matches \(pats, body) -> do
+                (typeMap, typedPatterns) <- traverseFold pure =<< zipWithM checkPatternRelaxed pats (map (:@ tyLoc) patTypes)
                 valDiff <- foldMap snd <$> traverse skolemizePattern' pats
-                local' (defineMany valDiff . declareMany typeMap) $ check_ body bodyTy
+                typedBody <- local' (defineMany valDiff . declareMany typeMap) $ check_ body bodyTy
+                pure (typedPatterns, typedBody)
+            pure $ El.Match typedMatches :@ loc ::: ty
           where
             unwrapFn 0 = pure . ([],)
             unwrapFn n =
@@ -281,42 +290,55 @@ check (e :@ loc) (typeToCheck :@ tyLoc) = do
                                 solveUniVar uni $ Located tyLoc $ foldr (MFn . MUniVar) (MUniVar bodyVar) argVars
                                 pure (V.UniVar <$> argVars, V.UniVar bodyVar)
                     _other -> typeError $ ArgCountMismatch loc
-        (List items) (V.TyCon (L ListName) `V.App` itemTy) -> for_ items (`check` Located tyLoc itemTy)
+        (List items) ty@(V.TyCon (L ListName) `V.App` itemTy) -> do
+            typedItems <- for items (`check` Located tyLoc itemTy)
+            pure $ (El.List typedItems :@ loc) ::: ty
         (E.Record row) ty@(V.RecordT tyRowUncompressed) -> do
             tyRow <- compress Record Out tyRowUncompressed
             let (inBoth, onlyVal, onlyTy) = Row.zipRows row tyRow.row
 
             for_ (IsList.toList onlyTy) \(name, _) -> typeError $ MissingField (Right $ Located loc e) name
-            traverse_ (uncurry check_) inBoth
+            typedRow <- traverse (uncurry check_) inBoth
 
             -- since the row is compressed, we only care about the unsolved univar case here
             -- in any other case, missing fields are truly missing
-            case Row.extension tyRow of
+            otherFields <- case Row.extension tyRow of
                 -- solved skolems?
-                Just v@V.UniVar{} -> check_ (Located loc e) v
-                _ -> for_ (IsList.toList onlyVal) \(name, _) -> typeError $ MissingField (Left $ ty :@ tyLoc) name
+                Just uniExt@V.UniVar{} -> do
+                    typedRest <- check_ (E.Record onlyVal :@ loc) uniExt
+                    case typedRest of
+                        (El.Record typedFields :@ _) ::: _ -> pure typedFields
+                        _ -> internalError loc "elaborated a record to something else. What?"
+                _ -> do
+                    for_ (IsList.toList onlyVal) \(name, _) -> typeError $ MissingField (Left $ ty :@ tyLoc) name
+                    pure Row.empty
+            pure $ (El.Record (typedRow <> otherFields) :@ loc) ::: ty
         expr (V.UniVar uni) ->
             lookupUniVar uni >>= \case
                 Right ty -> check (Located loc expr) $ unMono ty
                 Left _ -> do
-                    newTy <- mono In =<< infer (Located loc expr)
+                    typedExpr@(_ ::: polyTy) <- infer (expr :@ loc)
+                    newTy <- mono In $ polyTy :@ loc
                     lookupUniVar uni >>= \case
                         Left _ -> solveUniVar uni newTy
                         Right _ -> pass
-        (Sigma x y) (V.Q Exists Visible _e closure) -> do
-            check_ x closure.ty
+                    pure typedExpr
+        (Sigma x y) ty@(V.Q Exists Visible _e closure) -> do
+            x' <- check_ x closure.ty
             env <- asks @Env (.values)
-            -- I'm not sure 'V.eval' does the right thing here
+            -- I'm not sure 'V.evalCore' does the right thing here
             -- we should skolemize the unbound variables rather than failing
-            xVal <- V.eval env x
-            check_ y $ closure `V.app` xVal
+            xVal <- V.evalCore env <$> V.desugarElaborated x'
+            y' <- check_ y $ closure `V.app` xVal
+            pure $ (El.Sigma x' y' :@ loc) ::: ty
         expr (V.Q Forall Implicit _e closure) -> check_ (expr :@ loc) =<< substitute Out closure
         expr (V.Q Forall Hidden _e closure) -> check_ (expr :@ loc) =<< substitute Out closure
         expr (V.Q Exists _vis _e closure) -> check_ (expr :@ loc) =<< substitute In closure
         -- todo: a case for do-notation
         expr ty -> do
-            inferredTy <- infer (expr :@ loc)
-            subtype inferredTy $ ty :@ tyLoc
+            (typed ::: inferredTy) <- infer (expr :@ loc)
+            subtype (inferredTy :@ loc) $ ty :@ tyLoc
+            pure $ typed ::: ty
 
 -- a helper function for matches
 getArgCount :: [([Pat], Expr 'Fixity)] -> Maybe Int
@@ -413,176 +435,189 @@ skolemizePattern (Located loc pat') = case pat' of
 -- | given a map of related signatures, check or infer a declaration
 checkBinding :: InfEffs es => Binding 'Fixity -> IdMap Name TypeDT -> Eff es (IdMap Name TypeDT)
 checkBinding binding types = case binding of
-    _ | Map.null types -> inferBinding binding
+    _ | Map.null types -> fst <$> inferBinding binding
     FunctionB name args body -> case Map.lookup name types of
         Just ty -> Map.one name ty <$ check (foldr (\var -> Located (getLoc binding) . Lambda var) body args) ty
-        Nothing -> inferBinding binding
+        Nothing -> fst <$> inferBinding binding
     ValueB (L (VarP name)) body -> case Map.lookup name types of
         Just ty -> Map.one name ty <$ check body ty
-        Nothing -> inferBinding binding
+        Nothing -> fst <$> inferBinding binding
     ValueB pat _body -> do
         internalError (getLoc pat) "todo: type check destructuring bindings with partial signatures"
 
-infer :: InfEffs es => Expr 'Fixity -> Eff es TypeDT
+infer :: InfEffs es => Expr 'Fixity -> Eff es ETerm
 infer (Located loc e) = case e of
-    Name name -> Located loc . unLoc <$> lookupSig name
+    Name name -> (Located loc (El.Name name) :::) . unLoc <$> lookupSig name
     E.Variant name -> do
         var <- freshUniVar
         rowVar <- freshUniVar
         -- #a -> [Name #a | #r]
-        pure $ V.Function var (V.VariantT $ ExtRow (fromList [(name, var)]) rowVar) :@ loc
+        let ty = V.Function var (V.VariantT $ ExtRow (fromList [(name, var)]) rowVar)
+        pure $ (El.Variant name :@ loc) ::: ty
     App f x -> do
-        fTy <- Located loc . unLoc <$> infer f
-        inferApp loc fTy x
+        typedF <- infer f
+        inferApp loc typedF x
     TypeApp expr tyArg -> do
-        ty <- infer expr
-        inferTyApp expr ty tyArg
+        typedExpr <- infer expr
+        inferTyApp typedExpr tyArg
     Lambda arg body -> do
-        (typeMap, argTy) <- inferPattern arg
+        (typeMap, typedArg@(_ ::: argTy)) <- inferPattern arg
         (_, valDiff) <- skolemizePattern' arg
-        Located loc . V.Function (unLoc argTy) <$> local' (defineMany valDiff . declareMany typeMap) (unLoc <$> infer body)
+        typedBody@(_ ::: bodyTy) <- local' (defineMany valDiff . declareMany typeMap) do
+            infer body
+        pure $ El.Lambda typedArg typedBody :@ loc ::: V.Function argTy bodyTy
     -- chances are, I'd want to add some specific error messages or context for wildcard lambdas
     -- for now, they are just desugared to normal lambdas before inference
     WildcardLambda args body -> infer $ foldr (\var -> Located loc . Lambda (Located (getLoc var) $ VarP var)) body args
     Let binding body -> do
-        typeMap <- inferBinding binding
-        local' (declareMany typeMap) $ infer body
+        (typeMap, typedBinding) <- inferBinding binding
+        typedBody@(_ ::: bodyTy) <- local' (declareMany typeMap) $ infer body
+        pure $ El.Let typedBinding typedBody :@ loc ::: bodyTy
     LetRec _bindings _body -> internalError loc "todo: typecheck of recursive bindings is not supported yet"
     {- do
     declareAll =<< (inferDecls . map (\b -> Located loc $ D.Value b []) . NE.toList) bindings
     infer body -}
     Annotation expr ty -> do
         tyV <- typeFromTerm ty
-        tyV <$ check expr tyV
-    If cond true false -> do
-        check_ cond $ V.TyCon (BoolName :@ loc)
-        result <- fmap unMono . mono In =<< infer true
-        check false result
-        pure result
+        check expr tyV
+    expr@If{} -> do
+        -- since we have to unify the branches, we can't infer a polytype anyway
+        bodyTy <- freshUniVar
+        check_ (expr :@ loc) bodyTy
     Case arg matches -> do
         result <- freshUniVar
         check_ (Case arg matches :@ loc) result
-        pure $ result :@ loc
     Match [] -> typeError $ EmptyMatch loc
     Match matches@(_ : _) -> do
         argCount <- whenNothing (getArgCount matches) $ typeError $ ArgCountMismatch loc
         multArgFnTy <- foldr V.Function <$> freshUniVar <*> replicateM argCount freshUniVar
         check_ (Match matches :@ loc) multArgFnTy
-        pure $ multArgFnTy :@ loc
     List items -> do
         itemTy <- freshUniVar
-        traverse_ (`check_` itemTy) items
-        pure $ Located loc $ V.TyCon (ListName :@ loc) `V.App` itemTy
-    E.Record row -> Located loc . V.RecordT . NoExtRow <$> traverse (fmap unLoc . infer) row
+        typedItems <- traverse (`check_` itemTy) items
+        let listTy = V.TyCon (ListName :@ loc) `V.App` itemTy
+        pure $ El.List typedItems :@ loc ::: listTy
+    E.Record row -> do
+        typedRow <- traverse infer row
+        let fieldTypes = fmap (\(_ ::: t) -> t) typedRow
+        pure $ El.Record typedRow :@ loc ::: V.RecordT (NoExtRow fieldTypes)
     -- it's not clear whether we should special case dependent pairs where the first element is a variable, or always infer a non-dependent pair type
     Sigma x y -> do
         xName <- freshName_ $ Name' "x"
-        xTy <- infer x
-        yTy <- V.quote =<< infer y
+        x'@(_ ::: xTy) <- infer x
+        y'@(_ ::: yTy) <- infer y
+        yTy' <- V.quote $ yTy :@ loc
         env <- asks @Env (.values)
-        pure $ Located loc $ V.Q Exists Visible Retained V.Closure{var = xName :@ loc, ty = unLoc xTy, env, body = yTy}
+        pure $ El.Sigma x' y' :@ loc ::: V.Q Exists Visible Retained V.Closure{var = xName :@ loc, ty = xTy, env, body = yTy'}
     Do _ _ -> internalError loc "do-notation is not supported yet"
-    Literal (Located loc' lit) -> pure $ Located loc . V.TyCon . Located loc' $ case lit of
-        IntLiteral num
-            | num >= 0 -> NatName
-            | otherwise -> IntName
-        TextLiteral _ -> TextName
-        CharLiteral _ -> CharName
+    Literal lit@(L lit_) -> do
+        let litTypeName = case lit_ of
+                IntLiteral num
+                    | num >= 0 -> NatName
+                    | otherwise -> IntName
+                TextLiteral _ -> TextName
+                CharLiteral _ -> CharName
+        pure $ El.Literal lit :@ loc ::: V.TyCon (litTypeName :@ loc)
     Function lhs rhs -> do
-        check lhs type_
-        check rhs type_
-        pure type_ -- alpha-conversion?
-    Q _ _ _ binder body -> do
+        lhs' <- check_ lhs type_
+        rhs' <- check_ rhs type_
+        pure $ El.Function lhs' rhs' :@ loc ::: type_
+    -- do we need alpha-conversion?
+    Q q v er binder body -> do
         tyV <- maybe freshUniVar (fmap unLoc . typeFromTerm) binder.kind
-        local' (define binder.var tyV) $ check body type_
-
-        pure type_
+        -- a univar might make more sense for existential quantifiers, but I'm not sure yet
+        varV <- freshSkolem $ toSimpleName binder.var
+        typedBody <- local' (define binder.var varV . declare binder.var (tyV :@ getLoc binder)) $ check_ body type_
+        pure $ El.Q q v er binder.var tyV typedBody :@ loc ::: type_
     VariantT row -> do
-        traverse_ (`check` type_) row
-        pure type_
+        typedRow <- traverse (`check_` type_) row
+        pure $ El.VariantT typedRow :@ loc ::: type_
     RecordT row -> do
-        traverse_ (`check` type_) row
-        pure type_
+        typedRow <- traverse (`check_` type_) row
+        pure $ El.RecordT typedRow :@ loc ::: type_
   where
-    type_ = V.TyCon (TypeName :@ loc) :@ loc
+    type_ = V.TyCon (TypeName :@ loc)
     check_ expr ty = check expr (ty :@ loc)
 
-inferApp :: InfEffs es => Loc -> TypeDT -> Expr 'Fixity -> Eff es TypeDT
-inferApp appLoc (fTy :@ fLoc) arg = do
+inferApp :: InfEffs es => Loc -> ETerm -> Expr 'Fixity -> Eff es ETerm
+inferApp appLoc f@(_ :@ fLoc ::: fTy) arg = do
     monoLayer' In fTy >>= \case
         -- todo: this case is not ideal if the univar is already solved with a concrete function type
         V.UniVar uni -> do
-            from <- infer arg
+            typedArg@(_ ::: from) <- infer arg
             to <- freshUniVar
             var <- freshName $ Located fLoc $ Name' "x"
             values <- asks @Env (.values)
             body <- V.quote (to :@ fLoc)
-            let closure = V.Closure{var, env = values, ty = unLoc from, body}
-            to :@ fLoc <$ subtype (V.UniVar uni :@ fLoc) (V.Q Forall Visible Retained closure :@ fLoc)
+            let closure = V.Closure{var, env = values, ty = from, body}
+                typedApp = El.App f typedArg :@ appLoc ::: to
+            typedApp <$ subtype (V.UniVar uni :@ fLoc) (V.Q Forall Visible Retained closure :@ fLoc)
         V.Function from to -> do
-            to :@ fLoc <$ check arg (from :@ fLoc)
+            typedArg <- check arg (from :@ fLoc)
+            pure $ El.App f typedArg :@ appLoc ::: to
         -- todo: special case for erased args
         V.Q Forall Visible _e closure -> do
             values <- asks @Env (.values)
-            argV <- V.eval values arg
-            V.app closure argV :@ fLoc <$ check arg (closure.ty :@ fLoc)
-        _ -> typeError $ NotAFunction appLoc (fTy :@ fLoc)
+            typedArg <- check arg (closure.ty :@ fLoc)
+            argV <- V.evalCore values <$> V.desugarElaborated typedArg
+            pure $ El.App f typedArg :@ appLoc ::: V.app closure argV
+        _ -> typeError $ NotAFunction fLoc (fTy :@ fLoc)
 
-inferTyApp :: InfEffs es => Expr 'Fixity -> TypeDT -> Type 'Fixity -> Eff es TypeDT
-inferTyApp expr (ty :@ tyLoc) tyArg = case ty of
+inferTyApp :: InfEffs es => ETerm -> Type 'Fixity -> Eff es ETerm
+inferTyApp (expr :@ loc ::: ty) tyArg = case ty of
     V.Q Forall Implicit _e closure -> do
-        check tyArg $ closure.ty :@ getLoc expr
+        typedArg <- check tyArg $ closure.ty :@ loc
         Subst{var, result} <- substitute' In closure
         values <- asks @Env (.values)
-        tyArgV <- V.eval values tyArg
-        subtype (var :@ tyLoc) $ tyArgV :@ getLoc tyArg
-        pure $ result :@ getLoc expr
+        tyArgV <- V.evalCore values <$> V.desugarElaborated typedArg
+        subtype (var :@ loc) $ tyArgV :@ getLoc tyArg
+        pure $ expr :@ loc ::: result
     V.Q q Hidden _e closure -> do
         Subst{result} <- substitute' (qVariance q) closure
-        inferTyApp expr (result :@ tyLoc) tyArg
-    _ -> typeError $ NoVisibleTypeArgument expr tyArg (ty :@ tyLoc)
+        inferTyApp (expr :@ loc ::: result) tyArg
+    _ -> typeError $ NoVisibleTypeArgument loc tyArg (ty :@ loc)
   where
     qVariance = \case
         Forall -> In
         Exists -> Out
 
 -- infers the type of a function / variables in a pattern
-inferBinding :: InfEffs es => Binding 'Fixity -> Eff es (IdMap Name TypeDT)
+inferBinding :: InfEffs es => Binding 'Fixity -> Eff es (IdMap Name TypeDT, EBinding)
 inferBinding = \case
     ValueB pat body -> do
-        (typeMap, patTy) <- inferPattern pat
+        (typeMap, typedPat@(_ :@ loc ::: patTy)) <- inferPattern pat
         -- we need the pattern itself to be in scope in case the binding is recursive
-        bodyTy <- local' (declareMany typeMap) $ infer body
-        subtype patTy bodyTy
-        pure typeMap
+        typedBody@(_ :@ bloc ::: bodyTy) <- local' (declareMany typeMap) $ infer body
+        subtype (patTy :@ loc) (bodyTy :@ bloc)
+        pure (typeMap, El.ValueB typedPat typedBody)
     binding@(FunctionB name args body) -> do
         -- note: we can only infer monotypes for recursive functions
         -- while checking the body, the function itself is assigned a univar
         -- in the end, we check that the inferred type is compatible with the one in the univar (inferred from recursive calls)
         uni <- freshUniVar'
         local' (declare name (V.UniVar uni :@ getLoc binding)) do
-            (typeMap, argTypes) <- traverseFold inferPattern args
-            bodyTy <- local' (declareMany typeMap) $ infer body
+            (typeMap, typedArgs) <- traverseFold inferPattern args
+            typedBody@(_ ::: bodyTy) <- local' (declareMany typeMap) $ infer body
 
             -- todo: infer dependent functions
-            let ty = foldr (V.Function . unLoc) (unLoc bodyTy) argTypes :@ getLoc binding
+            let ty = foldr (V.Function . (\(_ ::: argTy) -> argTy)) bodyTy typedArgs :@ getLoc binding
             -- since we can still infer higher-rank types for non-recursive functions,
             -- we only need the subtype check when the univar is solved, i.e. when the
             -- function contains any recursive calls at all
             withUniVar uni (subtype ty . unMono)
-            pure $ Map.one name ty
+            pure (Map.one name ty, El.FunctionB name typedArgs typedBody)
 
-inferPattern :: InfEffs es => Pat -> Eff es (IdMap Name TypeDT, TypeDT)
+inferPattern :: InfEffs es => Pat -> Eff es (IdMap Name TypeDT, EPattern)
 inferPattern = snd (patternFuncs pure)
 
 -- | check a pattern, returning all of the newly bound vars
-checkPattern :: InfEffs es => Pat -> TypeDT -> Eff es (IdMap Name TypeDT)
+checkPattern :: InfEffs es => Pat -> TypeDT -> Eff es (IdMap Name TypeDT, EPattern)
 checkPattern = fst (patternFuncs pure)
 
 {- | check a pattern. A GADT constructor checks against a more specific type
 > check VNil (Vec ?n a)
 -}
-checkPatternRelaxed :: InfEffs es => Pat -> TypeDT -> Eff es (IdMap Name TypeDT)
+checkPatternRelaxed :: InfEffs es => Pat -> TypeDT -> Eff es (IdMap Name TypeDT, EPattern)
 checkPatternRelaxed = fst (patternFuncs go)
   where
     go = \case
@@ -590,67 +625,75 @@ checkPatternRelaxed = fst (patternFuncs go)
         lhs `V.App` _ -> V.App <$> go lhs <*> freshUniVar
         other -> pure other
 
-type CheckPattern es = Pat -> TypeDT -> Eff es (IdMap Name TypeDT)
-type InferPattern es = Pat -> Eff es (IdMap Name TypeDT, TypeDT)
-patternFuncs :: InfEffs es => (Type'_ -> Eff es Type'_) -> (CheckPattern es, InferPattern es)
+type CheckPattern es = Pat -> TypeDT -> Eff es (IdMap Name TypeDT, EPattern)
+type InferPattern es = Pat -> Eff es (IdMap Name TypeDT, EPattern)
+patternFuncs :: forall es. InfEffs es => (Type'_ -> Eff es Type'_) -> (CheckPattern es, InferPattern es)
 patternFuncs postprocess = (checkP, inferP)
   where
+    checkP :: CheckPattern es
     checkP (Located ploc outerPat) ty = case outerPat of
         -- we need this case, since inferPattern only infers monotypes for var patterns
-        VarP name -> pure $ Map.one name ty
+        VarP name -> pure (Map.one name ty, El.VarP name :@ ploc ::: unLoc ty)
         -- we probably do need a case for ConstructorP for the same reason
         VariantP name arg ->
             deepLookup Variant name ty >>= \case
                 Nothing -> typeError $ MissingVariant ty name
                 Just argTy -> checkP arg argTy
         RecordP patRow -> do
-            fold <$> for (IsList.toList patRow) \(name, pat) ->
+            diff <- flip Row.traverseWithName patRow \name pat ->
                 deepLookup Record name ty >>= \case
                     Nothing -> typeError $ MissingField (Left ty) name
                     Just fieldTy -> checkP pat fieldTy
-        _ -> do
-            (typeMap, inferredTy) <- inferP $ Located ploc outerPat
-            subtype inferredTy ty
-            pure typeMap
 
+            let newNames = foldMap fst diff
+                typePats = fmap snd diff
+            pure (newNames, El.RecordP typePats :@ ploc ::: unLoc ty)
+        _ -> do
+            (typeMap, elaborated ::: inferredTy) <- inferP $ Located ploc outerPat
+            subtype (inferredTy :@ ploc) ty
+            pure (typeMap, elaborated ::: unLoc ty)
+
+    inferP :: InferPattern es
     inferP (Located loc p) = case p of
         VarP name -> do
             uni <- freshUniVar
-            pure (Map.one name (uni :@ loc), uni :@ loc)
-        WildcardP _ -> (Map.empty,) . Located loc <$> freshUniVar
+            pure (Map.one name (uni :@ loc), El.VarP name :@ loc ::: uni)
+        WildcardP txt -> do
+            uni <- freshUniVar
+            pure (Map.empty, El.WildcardP txt :@ loc ::: uni)
         (AnnotationP pat ty) -> do
             tyV <- typeFromTerm ty
-            (,tyV) <$> checkP pat tyV
+            checkP pat tyV
         ConstructorP name args -> do
             (resultType, argTypes) <- conArgTypes name
             fixedResultType <- postprocess resultType
             unless (length argTypes == length args) do
                 typeError $ ArgCountMismatchPattern (Located loc p) (length argTypes) (length args)
-            typeMap <- fold <$> zipWithM checkP args (map (:@ loc) argTypes)
-            pure (typeMap, fixedResultType :@ loc)
+            (typeMap, typedArgs) <- traverseFold pure =<< zipWithM checkP args (map (:@ loc) argTypes)
+            pure (typeMap, El.ConstructorP name typedArgs :@ loc ::: fixedResultType)
         ListP pats -> do
             result <- freshUniVar
-            typeMap <- foldMapM (`checkP` (result :@ loc)) pats
+            (typeMap, typedPats) <- traverseFold (`checkP` (result :@ loc)) pats
             let listTy = V.TyCon (ListName :@ loc) `V.App` result
-            pure (typeMap, listTy :@ loc)
+            pure (typeMap, El.ListP typedPats :@ loc ::: listTy)
         VariantP name arg -> do
-            (typeMap, argTy) <- inferP arg
-            ty <- Located loc . V.VariantT . ExtRow (fromList [(name, unLoc argTy)]) <$> freshUniVar
-            pure (typeMap, ty)
+            (typeMap, typedArg@(_ ::: argTy)) <- inferP arg
+            ty <- V.VariantT . ExtRow (fromList [(name, argTy)]) <$> freshUniVar
+            pure (typeMap, El.VariantP name typedArg :@ loc ::: ty)
         RecordP row -> do
-            (typeMap, typeRow) <- traverseFold inferP row
-            ty <- Located loc . V.RecordT . ExtRow (fmap unLoc typeRow) <$> freshUniVar
-            pure (typeMap, ty)
-        LiteralP (L lit) ->
-            pure
-                ( Map.empty
-                , Located loc . V.TyCon . Located loc $ case lit of
+            (typeMap, typedRow) <- traverseFold inferP row
+            ext <- freshUniVar
+            let typeRow = fmap (\(_ ::: t) -> t) typedRow
+                openRecordTy = V.RecordT (ExtRow typeRow ext)
+            pure (typeMap, El.RecordP typedRow :@ loc ::: openRecordTy)
+        LiteralP lit@(L lit_) -> do
+            let litTypeName = case lit_ of
                     IntLiteral num
                         | num >= 0 -> NatName
                         | otherwise -> IntName
                     TextLiteral _ -> TextName
                     CharLiteral _ -> CharName
-                )
+            pure (Map.empty, El.LiteralP lit :@ loc ::: V.TyCon (litTypeName :@ loc))
 
 {- | splits the type singature of a value constructor into a list of args and the final type
 todo: this should really be computed before the typecheck pass and put into a table

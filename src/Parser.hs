@@ -21,7 +21,7 @@ import Common (
     unLoc,
     zipLocOf,
     pattern L,
-    pattern (:@),
+    pattern Located,
  )
 import Control.Monad.Combinators
 import Control.Monad.Combinators.NonEmpty qualified as NE

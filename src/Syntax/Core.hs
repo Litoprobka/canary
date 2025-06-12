@@ -14,6 +14,7 @@ import Common (
     keyword,
     specSym,
     pattern L,
+    pattern Located,
  )
 import Error.Diagnose (Position (..))
 import LangPrelude

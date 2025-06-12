@@ -5,7 +5,19 @@
 
 module Fixity (resolveFixity, run, traversal, parse, Fixity (..)) where
 
-import Common (Fixity (..), Loc (..), Located (..), Name, Pass (..), getLoc, mkNotes, unLoc, zipLocOf, pattern L, pattern (:@))
+import Common (
+    Fixity (..),
+    Loc (..),
+    Located (..),
+    Name,
+    Pass (..),
+    getLoc,
+    mkNotes,
+    unLoc,
+    zipLocOf,
+    pattern L,
+    pattern Located,
+ )
 import Control.Monad (foldM)
 import Data.List.NonEmpty qualified as NE
 import Data.Traversable (for)

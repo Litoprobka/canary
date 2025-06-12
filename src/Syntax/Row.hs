@@ -18,6 +18,7 @@ module Syntax.Row (
     zipRows,
     indexDuplicates,
     isEmpty,
+    traverseWithName,
 ) where
 
 import Common (SimpleName)
@@ -92,6 +93,9 @@ zipRows (Row lhs) (Row rhs) =
     fst3 (x, _, _) = x
     snd3 (_, x, _) = x
     thd (_, _, x) = x
+
+traverseWithName :: Applicative f => (OpenName -> a -> f b) -> Row a -> f (Row b)
+traverseWithName f (Row row) = Row <$> HashMap.traverseWithKey (traverse . f) row
 
 extension :: ExtRow a -> Maybe a
 extension (ExtRow _ ext) = Just ext

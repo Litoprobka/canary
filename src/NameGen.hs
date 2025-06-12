@@ -17,7 +17,7 @@ data NameGen :: Effect where
 makeEffect ''NameGen
 
 freshName :: NameGen :> es => SimpleName -> Eff es Name
-freshName (Located loc name) = Located loc <$> freshName_ name
+freshName (name :@ loc) = (:@ loc) <$> freshName_ name
 
 freshName_ :: NameGen :> es => SimpleName_ -> Eff es Name_
 freshName_ = \case

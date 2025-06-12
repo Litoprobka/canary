@@ -41,9 +41,11 @@ library
       Syntax.AstTraversal
       Syntax.Core
       Syntax.Declaration
+      Syntax.Elaborated
       Syntax.Row
       Syntax.Term
       Syntax.Token
+      Syntax.Value
       TypeChecker
       TypeChecker.Backend
       TypeChecker.TypeError

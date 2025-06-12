@@ -22,7 +22,7 @@ data TypeError
     | ArgCountMismatchPattern (Pattern 'Fixity) Int Int
     | NotAFunction Loc TypeDT -- pretty fTy <+> "is not a function type"
     | SelfReferential Loc UniVar TypeDT
-    | NoVisibleTypeArgument (Expr 'Fixity) (Type 'Fixity) TypeDT
+    | NoVisibleTypeArgument Loc (Type 'Fixity) TypeDT
     | ConstructorReturnType {con :: Name, expected :: Name, returned :: Name}
 
 typeError :: Diagnose :> es => TypeError -> Eff es a
@@ -86,12 +86,12 @@ typeError =
                 ("self-referential type" <+> prettyDef var <+> "~" <+> prettyDef ty)
                 (mkNotes [(loc, This "arising from"), (getLoc ty, Where "and from")])
                 []
-        NoVisibleTypeArgument expr tyArg ty ->
+        NoVisibleTypeArgument loc tyArg ty ->
             Err
                 Nothing
                 "no visible type argument"
                 ( mkNotes
-                    [ (getLoc expr, This "when applying this expression")
+                    [ (loc, This "when applying this expression")
                     , (getLoc tyArg, This "to this type")
                     , (getLoc ty, Where $ "where the expression has type" <+> prettyDef ty)
                     ]
