@@ -6,7 +6,7 @@
 {-# LANGUAGE PatternSynonyms #-}
 {-# OPTIONS_GHC -Wno-orphans #-}
 
-module Eval (quote, eval, evalCore, unstuck, modifyEnv, evalAll, mkLambda', app, module Reexport, desugarElaborated, substituteSkolem) where
+module Eval (quote, eval, evalCore, unstuck, modifyEnv, evalAll, mkLambda', app, module Reexport, desugarElaborated) where
 
 import Common (
     Loc (..),
@@ -16,7 +16,6 @@ import Common (
     Pass (..),
     PrettyAnsi (..),
     SimpleName_ (Name'),
-    Skolem,
     UnAnnotate (..),
     getLoc,
     prettyDef,
@@ -63,7 +62,6 @@ quoteForPrinting (Located loc value) = Located loc case value of
     RecordT row -> C.RecordT $ fmap quoteWithLoc row
     App lhs rhs -> C.App (quoteWithLoc lhs) (quoteWithLoc rhs)
     Case arg cases -> C.Case (quoteWithLoc arg) $ fmap (\PatternClosure{pat, body} -> (pat, body)) cases
-    Skolem skolem -> C.Skolem skolem
     UniVar uni -> C.UniVar uni
   where
     quoteWithLoc = quoteForPrinting . Located loc
@@ -101,7 +99,6 @@ quote (value :@ loc) =
         App lhs rhs -> C.App <$> quoteWithLoc lhs <*> quoteWithLoc rhs
         -- todo: not applying the closure here doesn't seem safe, but I'm not sure how to do that without running into infinite recursion
         Case arg cases -> C.Case <$> quoteWithLoc arg <*> traverse (\PatternClosure{pat, body} -> pure (pat, body)) cases
-        Skolem skolem -> pure $ C.Skolem skolem
         UniVar uni -> pure $ C.UniVar uni
   where
     quoteWithLoc = quote . Located loc
@@ -109,7 +106,7 @@ quote (value :@ loc) =
 evalCore :: ValueEnv -> CoreTerm -> Value
 evalCore !env (L term) = case term of
     -- note that env is a lazy enummap, so we only force the outer structure here
-    C.Name name -> fromMaybe (error . show $ "whoopsie, out of scope" <+> prettyDef name) $ LMap.lookup name env.values
+    C.Name name -> fromMaybe (Var name) $ LMap.lookup name env.values <|> LMap.lookup name env.skolems
     C.TyCon name -> TyCon name
     C.Con name args -> Con name $ map (evalCore env) args
     C.Lambda name body -> Lambda $ Closure{var = name, ty = (), env, body}
@@ -136,11 +133,10 @@ evalCore !env (L term) = case term of
     C.VariantT row -> VariantT $ evalCore env <$> row
     C.RecordT row -> RecordT $ evalCore env <$> row
     -- should normal evaluation resolve univars?
-    C.Skolem skolem -> Skolem skolem
+    -- probably not, but it should be able to traverse solved vars (wip)
     C.UniVar uni -> UniVar uni
   where
     mbStuckCase (Var x) matches = Just $ Case (Var x) (mkStuckBranches matches)
-    mbStuckCase (Skolem s) matches = Just $ Case (Skolem s) (mkStuckBranches matches)
     mbStuckCase (UniVar u) matches = Just $ Case (UniVar u) (mkStuckBranches matches)
     mbStuckCase (App lhs rhs) matches = Just $ Case (App lhs rhs) (mkStuckBranches matches)
     mbStuckCase _ _ = Nothing
@@ -157,41 +153,13 @@ unstuck !env = \case
     Case stuckArg matches ->
         let arg = unstuck env stuckArg
          in fromMaybe (Case arg matches) $ asum $ fmap (`tryApplyPatternClosure` arg) matches
-    Skolem skolem -> case LMap.lookup skolem env.skolems of
-        Nothing -> Skolem skolem
+    Var skolem -> case LMap.lookup skolem env.skolems of
+        Nothing -> Var skolem
         Just value -> unstuck env value
     nonStuck -> nonStuck
 
 app :: Closure ty -> Value -> Value
 app Closure{var, env, body} arg = evalCore (env{values = LMap.insert var arg env.values}) body
-
--- another case for merging Var and Skolem
--- this crutch is only needed because we want to construct closures from skolemised values,
--- which we need to infer pi types
-substituteSkolem :: Skolem -> CoreTerm -> CoreTerm -> CoreTerm
-substituteSkolem skolem replacement = go
-  where
-    go :: CoreTerm -> CoreTerm
-    go (C.Skolem sk :@ _) | sk == skolem = replacement
-    go (term :@ loc) = (:@ loc) case term of
-        C.Con name args -> C.Con name $ map go args
-        C.Lambda name body -> C.Lambda name (go body)
-        C.App lhs rhs -> C.App (go lhs) (go rhs)
-        C.Case arg matches -> C.Case (go arg) (map (second go) matches)
-        C.Let name expr body -> C.Let name (go expr) (go body)
-        C.Record row -> C.Record $ go <$> row
-        C.Sigma x y -> C.Sigma (go x) (go y)
-        C.Function lhs rhs -> C.Function (go lhs) (go rhs)
-        C.Q q vis e var ty body -> C.Q q vis e var ty (go body)
-        C.VariantT row -> C.VariantT $ go <$> row
-        C.RecordT row -> C.RecordT $ go <$> row
-        -- noop cases
-        C.TyCon name -> C.TyCon name
-        C.Literal lit -> C.Literal lit
-        C.Variant name -> C.Variant name
-        C.Name name -> C.Name name
-        C.UniVar uni -> C.UniVar uni
-        C.Skolem sk -> C.Skolem sk
 
 -- do we need a fresh name here?
 closureBody :: Closure a -> Value

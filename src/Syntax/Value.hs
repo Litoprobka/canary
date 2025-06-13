@@ -2,7 +2,7 @@
 
 module Syntax.Value where
 
-import Common (Skolem, UniVar)
+import Common (UniVar)
 import Common hiding (Skolem, UniVar)
 import LangPrelude
 import Syntax.Core (CorePattern, CoreTerm)
@@ -11,7 +11,7 @@ import Syntax.Term (Erasure, Quantifier, Visibility)
 
 data ValueEnv = ValueEnv
     { values :: IdMap Name Value
-    , skolems :: IdMap Skolem Value
+    , skolems :: IdMap Name Value -- does the split even make sense?
     }
 
 type Type' = Value
@@ -21,7 +21,7 @@ type Type' = Value
 -- in AST, the location corresponds to the source span where the AST node is written
 -- in Values, the location is the source space that the location is *arising from*
 data Value
-    = -- unbound variables and skolems seem really close in how they are treated. I wonder whether they can be unified
+    = -- unbound variables are pretty much the same as skolems
       Var Name
     | -- | a type constructor. unlike value constructors, `Either a b` is represented as a stuck application Either `App` a `App` b
       TyCon Name
@@ -45,7 +45,6 @@ data Value
     | Case Value [PatternClosure ()]
     | -- typechecking metavars
       UniVar UniVar
-    | Skolem Skolem
 
 data Closure ty = Closure {var :: Name, ty :: ty, env :: ValueEnv, body :: CoreTerm}
 data PatternClosure ty = PatternClosure {pat :: CorePattern, ty :: ty, env :: ValueEnv, body :: CoreTerm}

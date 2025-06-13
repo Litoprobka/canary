@@ -8,7 +8,6 @@ import Common (
     Name,
     Name_ (ConsName, NilName, TypeName),
     PrettyAnsi (..),
-    Skolem,
     UniVar,
     conColor,
     keyword,
@@ -70,7 +69,6 @@ data CoreTerm_
       -- actually, it should be cleaner to implement standalone prettyprinting for Value
       -- instead of using `quote` and keeping CoreTerm and Value in sync. This way will do for now, though
       UniVar UniVar
-    | Skolem Skolem
 
 instance PrettyAnsi CoreTerm_ where
     prettyAnsi opts = go 0 . Located (Loc Position{begin = (0, 0), end = (0, 0), file = "<none>"})
@@ -102,7 +100,6 @@ instance PrettyAnsi CoreTerm_ where
             Q q vis er name ty body -> parensWhen 1 $ kw q er <+> prettyBinder name ty <+> compressQ q vis er body
             VariantT row -> brackets . withExt row . sep . punctuate comma . map variantItem $ sortedRow row.row
             RecordT row -> braces . withExt row . sep . punctuate comma . map recordTyField $ sortedRow row.row
-            Skolem skolem -> prettyAnsi opts skolem
             UniVar uni -> prettyAnsi opts uni
           where
             parensWhen minPrec

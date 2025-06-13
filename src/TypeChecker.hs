@@ -130,15 +130,15 @@ subtype (lhs_ :@ locL) (rhs_ :@ locR) = do
     match = \cases
         (V.TyCon lhs) (V.TyCon rhs) | lhs == rhs -> pass
         (V.UniVar lhs) (V.UniVar rhs) | lhs == rhs -> pass
-        (V.Skolem lhs) (V.Skolem rhs) | lhs == rhs -> pass
+        (V.Var lhs) (V.Var rhs) | lhs == rhs -> pass
         lhs (V.UniVar uni) -> solveOr (Located locL <$> mono' In lhs) (subtype (lhs :@ locL) . unMono) uni
         (V.UniVar uni) rhs -> solveOr (Located locR <$> mono' Out rhs) ((`subtype` (rhs :@ locR)) . unMono) uni
-        lhs rhs@(V.Skolem skolem) -> do
+        lhs rhs@(V.Var skolem) -> do
             skolems <- asks @Env ((.skolems) . (.values))
             case LMap.lookup skolem skolems of
                 Nothing -> typeError $ NotASubtype (lhs :@ locL) (rhs :@ locR) Nothing
                 Just skolemTy -> subtype (lhs :@ locL) (skolemTy :@ locR)
-        lhs@(V.Skolem skolem) rhs -> do
+        lhs@(V.Var skolem) rhs -> do
             skolems <- asks @Env ((.skolems) . (.values))
             case LMap.lookup skolem skolems of
                 Nothing -> typeError $ NotASubtype (lhs :@ locL) (rhs :@ locR) Nothing
@@ -384,10 +384,10 @@ localEquality :: InfEffs es => V.Value -> V.Value -> Eff (State ValueEnv : es) (
 localEquality argVal patVal = do
     venv <- get
     case (argVal, patVal) of
-        (V.Skolem skolem, _) -> case LMap.lookup skolem venv.skolems of
+        (V.Var skolem, _) -> case LMap.lookup skolem venv.skolems of
             Just val' -> localEquality val' patVal
             Nothing -> put venv{V.skolems = LMap.insert skolem patVal $ V.skolems venv}
-        (_, V.Skolem skolem) -> case LMap.lookup skolem venv.skolems of
+        (_, V.Var skolem) -> case LMap.lookup skolem venv.skolems of
             Just val' -> localEquality argVal val'
             Nothing -> pass
         (lhsF `V.App` lhsArg, rhsF `V.App` rhsArg) -> do
@@ -465,15 +465,15 @@ infer (Located loc e) = case e of
     Lambda (VarP var :@ argLoc) body -> do
         argTy <- freshUniVar
         skolem <- freshSkolem' $ toSimpleName var
-        let argV = V.Skolem skolem
+        let argV = V.Var skolem
         typedBody@(_ :@ bodyLoc ::: bodyTy) <- local' (define var argV . declare var (argTy :@ argLoc)) do
             infer body
         env <- asks @Env (.values)
-        resultTy <- V.substituteSkolem skolem (C.Name var :@ argLoc) <$> V.quote (bodyTy :@ bodyLoc)
+        resultTy <- V.quote (bodyTy :@ bodyLoc)
         pure $
             El.Lambda (El.VarP var :@ argLoc ::: argTy) typedBody
                 :@ loc
-                ::: V.Q Forall Visible Retained (V.Closure{var, ty = argTy, env, body = resultTy})
+                ::: V.Q Forall Visible Retained (V.Closure{var = skolem, ty = argTy, env, body = resultTy})
     Lambda arg body -> do
         (typeMap, typedArg@(_ ::: argTy)) <- inferPattern arg
         (_, valDiff) <- skolemizePattern' arg
@@ -726,7 +726,7 @@ conArgTypes name = lookupSig name >>= go . unLoc
             V.Con cname args -> pure (V.Con cname args, [])
             V.TyCon cname -> pure (V.TyCon cname, [])
             app@V.App{} -> pure (app, [])
-            V.Skolem skolem -> pure (V.Skolem skolem, [])
+            V.Var skolem -> pure (V.Var skolem, [])
             _ -> internalError (getLoc name) "invalid constructor type signature"
 
 normalise :: InfEffs es => Eff es TypeDT -> Eff es Type'
@@ -747,7 +747,6 @@ normaliseAll = generaliseAll >=> traverse (eval' <=< go <=< V.quote)
                 lookupUniVar uni >>= \case
                     Left _ -> internalError loc $ "dangling univar" <+> prettyDef uni
                     Right body -> fmap unLoc . go =<< V.quote (unMono body)
-            C.Skolem skolem -> internalError (getLoc skolem) $ "skolem" <+> prettyDef (V.Skolem skolem) <+> "remains in code"
             -- other cases could be eliminated by a type changing uniplate
             C.App lhs rhs -> C.App <$> go lhs <*> go rhs
             C.Function lhs rhs -> C.Function <$> go lhs <*> go rhs
@@ -779,7 +778,6 @@ normaliseAll = generaliseAll >=> traverse (eval' <=< go <=< V.quote)
     occurs var (L ty) = case ty of
         C.Name name -> name == var
         C.UniVar{} -> False
-        C.Skolem{} -> False
         C.App lhs rhs -> occurs var lhs || occurs var rhs
         C.Function lhs rhs -> occurs var lhs || occurs var rhs
         C.Q _ _ _ qvar qty body -> occurs qvar qty || occurs var body
@@ -789,8 +787,8 @@ normaliseAll = generaliseAll >=> traverse (eval' <=< go <=< V.quote)
         C.Case arg matches -> occurs var arg || (any . any) (occurs var) matches
         C.Record row -> any (occurs var) row
         C.Sigma x y -> occurs var x || occurs var y
+        C.Con _ args -> any (occurs var) args
         C.TyCon{} -> False
-        C.Con{} -> False
         C.Variant{} -> False
         C.Literal{} -> False
         C.Let{} -> False

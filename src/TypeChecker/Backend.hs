@@ -63,7 +63,7 @@ data Monotype_
     | MCase Monotype_ [MonoPatternClosure ()]
     | -- typechecking metavars
       MUniVar UniVar
-    | MSkolem Skolem
+    | MSkolem Name
 
 data MonoClosure ty = MonoClosure {var :: Name, variance :: Variance, ty :: ty, env :: ValueEnv, body :: CoreTerm}
 data MonoPatternClosure ty = MonoPatternClosure {pat :: CorePattern, variance :: Variance, ty :: ty, env :: ValueEnv, body :: CoreTerm}
@@ -83,7 +83,7 @@ type InfEffs es =
     ( NameGen :> es
     , Labeled UniVar NameGen :> es
     , State UniVars :> es
-    , State (IdMap Skolem Scope) :> es
+    , State (IdMap Name Scope) :> es -- scopes of unbound vars
     , State TopLevel :> es
     , Reader Env :> es
     , Diagnose :> es
@@ -102,7 +102,7 @@ instance Pretty Monotype_ where
 
 run
     :: ValueEnv
-    -> Eff (Reader Env : State UniVars : State (IdMap Skolem Scope) : Labeled UniVar NameGen : es) a
+    -> Eff (Reader Env : State UniVars : State (IdMap Name Scope) : Labeled UniVar NameGen : es) a
     -> Eff es a
 run values action =
     runLabeled @UniVar runNameGen
@@ -128,11 +128,11 @@ freshUniVar' = do
     modify @UniVars $ EMap.insert var (Left scope)
     pure var
 
-freshSkolem' :: InfEffs es => SimpleName -> Eff es Skolem
+freshSkolem' :: InfEffs es => SimpleName -> Eff es Name
 freshSkolem' name = do
     -- skolems are generally derived from type variables, so they have names
     scope <- asks @Env (.scope)
-    skolem <- Skolem <$> mkName name
+    skolem <- mkName name
     modify $ Map.insert skolem scope
     pure skolem
   where
@@ -140,7 +140,7 @@ freshSkolem' name = do
     mkName _ = freshName (Located (getLoc name) $ Name' "what") -- why?
 
 freshSkolem :: InfEffs es => SimpleName -> Eff es TypeDT_
-freshSkolem name = V.Skolem <$> freshSkolem' name
+freshSkolem name = V.Var <$> freshSkolem' name
 
 lookupUniVar :: InfEffs es => UniVar -> Eff es (Either Scope Monotype)
 lookupUniVar uni = maybe (internalError' $ "missing univar" <+> prettyDef uni) pure . EMap.lookup uni =<< get @UniVars
@@ -219,11 +219,11 @@ alterUniVar override uni ty = do
                 Left{} -> pure uni2
         other -> pure other
 
-skolemScope :: InfEffs es => Skolem -> Eff es Scope
+skolemScope :: InfEffs es => Name -> Eff es Scope
 skolemScope skolem =
     maybe (internalError (getLoc skolem) $ "missing skolem" <+> pretty skolem) pure
         . Map.lookup skolem
-        =<< get @(_ Skolem _)
+        =<< get @(_ Name _)
 
 -- looks up a type of a binding. Global bindings take precedence over local ones (should they?)
 lookupSig :: InfEffs es => Name -> Eff es TypeDT
@@ -275,7 +275,7 @@ generaliseAll action = do
   where
     generaliseOne ty@(_ :@ loc) = do
         env <- ask @Env
-        (ty', vars) <- runState EMap.empty $ evalState 'a' $ go Out env.scope =<< V.quote ty
+        (ty', vars) <- runState EMap.empty $ evalState Map.empty $ evalState 'a' $ go Out env.scope =<< V.quote ty
         let forallVars = hashNub . lefts $ toList vars
         pure $
             Located loc $
@@ -283,7 +283,8 @@ generaliseAll action = do
                     foldr (\var body -> C.Q Forall Implicit Erased var (type_ loc) body :@ loc) ty' forallVars
     type_ loc = C.TyCon (TypeName :@ loc) :@ loc
 
-    go :: InfEffs es => Variance -> Scope -> CoreTerm -> Eff (State Char : State LocallySolved : es) CoreTerm
+    go
+        :: InfEffs es => Variance -> Scope -> CoreTerm -> Eff (State Char : State (IdMap Name ()) : State LocallySolved : es) CoreTerm
     go variance scope (term :@ loc) =
         (:@ loc) <$> case term of
             C.UniVar uni ->
@@ -297,23 +298,27 @@ generaliseAll action = do
                                 newTy <- bitraverse (const $ freshTypeVar loc) (go variance scope <=< V.quote . unMono) innerScoped
                                 modify @LocallySolved $ EMap.insert uni newTy
                                 pure $ typeVarOrBody newTy
-            C.Skolem skolem -> do
+            C.Name var -> do
+                knownVars <- get @(IdMap Name ())
                 env <- asks @Env (.values)
-                case Map.lookup skolem env.skolems of
-                    Just solved -> unLoc <$> V.quote (solved :@ loc)
-                    Nothing -> do
-                        skScope <- skolemScope skolem
+                case (Map.lookup var knownVars, Map.lookup var env.skolems) of
+                    -- if this var originated from 'generalise', a dependent binder or a lambda, we don't have to do anything
+                    (Just (), _) -> pure $ C.Name var
+                    (Nothing, Just solved) -> unLoc <$> V.quote (solved :@ loc)
+                    (Nothing, Nothing) -> do
+                        skScope <- skolemScope var
                         if skScope <= scope
-                            then pure $ C.Skolem skolem
+                            then pure $ C.Name var
                             else do
                                 -- if the skolem would escape its scope, we just convert it to an existential or a forall, depending on variance
                                 -- i.e. \x -> runST (newSTRef x) : forall a. a -> STRef (exists s. s) a
-                                var <- freshTypeVar loc
+                                newVar <- freshTypeVar loc
+                                modify $ Map.insert newVar ()
                                 let quantifier
                                         | variance == Out = Exists
                                         | otherwise = Forall
                                 -- todo: we should make a quantifier for the type of the skolem, not just Type
-                                pure $ C.Q quantifier Implicit Erased var (type_ loc) $ (:@ getLoc var) $ C.Name var
+                                pure $ C.Q quantifier Implicit Erased newVar (type_ loc) $ (:@ getLoc var) $ C.Name newVar
             -- simple recursive cases
             C.Function l r -> C.Function <$> go (flipVariance variance) scope l <*> go variance scope r
             C.App lhs rhs -> C.App <$> go variance scope lhs <*> go variance scope rhs
@@ -321,11 +326,16 @@ generaliseAll action = do
             C.VariantT row -> C.VariantT <$> traverse (go variance scope) row
             C.Record row -> C.Record <$> traverse (go variance scope) row
             C.Sigma x y -> C.Sigma <$> go variance scope x <*> go variance scope y
-            C.Q q vis e var ty body -> C.Q q vis e var <$> go variance scope ty <*> go variance scope body
-            C.Lambda var body -> C.Lambda var <$> go variance scope body
+            C.Q q vis e var ty body ->
+                C.Q q vis e var <$> go variance scope ty <*> do
+                    modify $ Map.insert var ()
+                    go variance scope body
+            C.Lambda var body ->
+                C.Lambda var <$> do
+                    modify $ Map.insert var ()
+                    go variance scope body
             C.Con name args -> C.Con name <$> traverse (go variance scope) args
             -- terminal cases
-            C.Name name -> pure $ C.Name name
             C.TyCon name -> pure $ C.TyCon name
             C.Literal v -> pure $ C.Literal v
             C.Variant con -> pure $ C.Variant con
@@ -359,10 +369,9 @@ mono variance = traverse (mono' variance)
 
 mono' :: InfEffs es => Variance -> TypeDT_ -> Eff es Monotype_
 mono' variance = \case
-    V.Var var -> internalError (getLoc var) $ "mono: dangling var" <+> prettyDef var
+    V.Var skolem -> pure $ MSkolem skolem
     V.Con name args -> MCon name <$> traverse go args
     V.TyCon name -> pure $ MTyCon name
-    V.Skolem skolem -> pure $ MSkolem skolem
     V.UniVar uni -> pure $ MUniVar uni
     V.App lhs rhs -> MApp <$> go lhs <*> go rhs
     V.Function from to -> MFn <$> mono' (flipVariance variance) from <*> go to
@@ -399,7 +408,7 @@ unMono' :: Monotype_ -> TypeDT_
 unMono' = \case
     MCon name args -> V.Con name (map unMono' args)
     MTyCon name -> V.TyCon name
-    MSkolem skolem -> V.Skolem skolem
+    MSkolem skolem -> V.Var skolem
     MUniVar uniVar -> V.UniVar uniVar
     MApp lhs rhs -> V.App (unMono' lhs) (unMono' rhs)
     MFn from to -> V.Function (unMono' from) (unMono' to)
