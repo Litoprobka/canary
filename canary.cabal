@@ -117,6 +117,7 @@ executable canary-exe
     , flatparse
     , isocline
     , nonempty-containers
+    , optparse-applicative
     , parser-combinators >=1.3 && <2
     , prettyprinter >=1.7 && <2
     , prettyprinter-ansi-terminal

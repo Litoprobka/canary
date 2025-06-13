@@ -1,3 +1,6 @@
+{-# LANGUAGE ApplicativeDo #-}
+{-# LANGUAGE DuplicateRecordFields #-}
+
 module Main (main) where
 
 import LangPrelude
@@ -10,6 +13,7 @@ import Eval (ValueEnv (..))
 import IdMap qualified as Map
 import NameGen (runNameGen)
 import NameResolution
+import Options.Applicative
 import Parser (parseModule)
 import Prettyprinter
 import Prettyprinter.Render.Terminal (putDoc)
@@ -18,22 +22,45 @@ import Repl qualified
 import System.Console.Isocline (setHistory)
 import System.Directory
 
+data Args = Args
+    { debug :: Bool
+    , cmd :: Command
+    }
+
+data Command = Run FilePath | Check FilePath | Load FilePath | Repl
+
+argParser :: Parser Args
+argParser = do
+    debug <- switch (short 'd' <> long "debug")
+    cmd <-
+        subparser
+            ( command "run" (info (Run <$> fileP) (progDesc "evaluate the 'main' binding of a file"))
+                <> command "check" (info (Check <$> fileP) (progDesc "typecheck bindings in a file"))
+                <> command "load" (info (Load <$> fileP) (progDesc "start the REPL and load definitions from a file"))
+                <> command "repl" (info (pure Repl) (progDesc "start the REPL"))
+            )
+            <|> Load
+            <$> fileP
+            <|> pure Repl
+    pure Args{debug, cmd}
+  where
+    fileP = argument str (metavar "FILE")
+
 main :: IO ()
 main = do
-    args <- liftIO getArgs
-    let (debug, otherArgs) = case args of
-            ("debug" : rest) -> (True, rest)
-            other -> (False, other)
-    case otherArgs of
-        [] -> runRepl
-        (path : _) -> runFile debug path =<< readFileBS path
+    args <- execParser (info argParser mempty)
+    case args.cmd of
+        Repl -> runRepl Nothing
+        Run path -> runFile args path =<< readFileBS path
+        Check path -> checkFile args path =<< readFileBS path
+        Load path -> loadFile args path =<< readFileBS path
 
-runFile :: Bool -> FilePath -> ByteString -> IO ()
-runFile debug fileName input = do
+runFile :: Args -> FilePath -> ByteString -> IO ()
+runFile args fileName input = do
     let inputText = decodeUtf8 input
     eval' <- fmap join . runEff . runDiagnose [(fileName, inputText)] $ runNameGen do
         decls <- parseModule (fileName, input)
-        prettyAST debug decls
+        prettyAST args.debug decls
         env <- Repl.mkDefaultEnv
         mbNewEnv <- Repl.replStep env $ Repl.Decls decls
         for mbNewEnv \newEnv -> do
@@ -44,12 +71,31 @@ runFile debug fileName input = do
                 Just mainExpr -> putDoc $ (<> line) $ pretty mainExpr
     sequence_ eval'
 
-runRepl :: IO ()
-runRepl = void $ runEff $ runDiagnose [] $ runNameGen do
+checkFile :: Args -> FilePath -> ByteString -> IO ()
+checkFile args fileName input = do
+    let inputText = decodeUtf8 input
+    void $ runEff . runDiagnose [(fileName, inputText)] $ runNameGen do
+        decls <- parseModule (fileName, input)
+        prettyAST args.debug decls
+        env <- Repl.mkDefaultEnv
+        void $ Repl.replStep env $ Repl.Decls decls
+
+loadFile :: Args -> FilePath -> ByteString -> IO ()
+loadFile args fileName input = do
+    let inputText = decodeUtf8 input
+    mbEnv <- fmap join . runEff . runDiagnose [(fileName, inputText)] $ runNameGen do
+        decls <- parseModule (fileName, input)
+        prettyAST args.debug decls
+        env <- Repl.mkDefaultEnv
+        Repl.replStep env $ Repl.Decls decls
+    runRepl mbEnv
+
+runRepl :: Maybe ReplEnv -> IO ()
+runRepl mbEnv = void $ runEff $ runDiagnose [] $ runNameGen do
     historyFile <- liftIO $ getXdgDirectory XdgCache "canary/history.txt"
     liftIO $ setHistory historyFile (-1)
     liftIO $ hSetBuffering stdout NoBuffering
-    replEnv <- Repl.mkDefaultEnv
+    replEnv <- maybe Repl.mkDefaultEnv pure mbEnv
     Repl.run replEnv
 
 prettyAST :: (Traversable t, PrettyAnsi a, MonadIO m) => Bool -> t a -> m ()
