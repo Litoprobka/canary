@@ -67,7 +67,7 @@ data Monotype_
 
 data MonoClosure ty = MonoClosure {var :: Name, variance :: Variance, ty :: ty, env :: ValueEnv, body :: CoreTerm}
 data MonoPatternClosure ty = MonoPatternClosure {pat :: CorePattern, variance :: Variance, ty :: ty, env :: ValueEnv, body :: CoreTerm}
-data Variance = In | Out | Inv
+data Variance = In | Out | Inv deriving (Eq)
 
 data Env = Env
     { scope :: Scope
@@ -128,16 +128,19 @@ freshUniVar' = do
     modify @UniVars $ EMap.insert var (Left scope)
     pure var
 
-freshSkolem :: InfEffs es => SimpleName -> Eff es TypeDT_
-freshSkolem name = do
+freshSkolem' :: InfEffs es => SimpleName -> Eff es Skolem
+freshSkolem' name = do
     -- skolems are generally derived from type variables, so they have names
     scope <- asks @Env (.scope)
     skolem <- Skolem <$> mkName name
     modify $ Map.insert skolem scope
-    pure $ V.Skolem skolem
+    pure skolem
   where
     mkName (Located loc (Name' txtName)) = Located loc <$> freshName_ (Name' txtName)
     mkName _ = freshName (Located (getLoc name) $ Name' "what") -- why?
+
+freshSkolem :: InfEffs es => SimpleName -> Eff es TypeDT_
+freshSkolem name = V.Skolem <$> freshSkolem' name
 
 lookupUniVar :: InfEffs es => UniVar -> Eff es (Either Scope Monotype)
 lookupUniVar uni = maybe (internalError' $ "missing univar" <+> prettyDef uni) pure . EMap.lookup uni =<< get @UniVars
@@ -259,11 +262,10 @@ define name val env = env{values = env.values{V.values = LMap.insert name val en
 defineMany :: IdMap Name Value -> Env -> Env
 defineMany valMap env = env{values = env.values{V.values = valMap <> env.values.values}}
 
--- defineMany :: EnumMap Name Value -> Env -> Env
--- defineMany vals env = env{values = env.values{V.values = vals <> env.values.values}}
-
 generalise :: InfEffs es => Eff es TypeDT -> Eff es TypeDT
 generalise = fmap runIdentity . generaliseAll . fmap Identity
+
+type LocallySolved = EnumMap UniVar (Either Name CoreTerm)
 
 generaliseAll :: (Traversable t, InfEffs es) => Eff es (t TypeDT) -> Eff es (t TypeDT)
 generaliseAll action = do
@@ -271,58 +273,66 @@ generaliseAll action = do
     types <- local' (\e -> e{scope = Scope $ succ n}) action
     traverse generaliseOne types
   where
-    generaliseOne ty@(Located loc _) = do
+    generaliseOne ty@(_ :@ loc) = do
         env <- ask @Env
-        (ty', vars) <- runState EMap.empty $ evalState 'a' $ go env.scope =<< V.quote ty
+        (ty', vars) <- runState EMap.empty $ evalState 'a' $ go Out env.scope =<< V.quote ty
         let forallVars = hashNub . lefts $ toList vars
         pure $
             Located loc $
                 V.evalCore env.values $
-                    foldr (\var body -> Located loc $ C.Q Forall Implicit Erased var (type_ loc) body) ty' forallVars
-    type_ loc = Located loc $ C.TyCon $ Located loc TypeName
+                    foldr (\var body -> C.Q Forall Implicit Erased var (type_ loc) body :@ loc) ty' forallVars
+    type_ loc = C.TyCon (TypeName :@ loc) :@ loc
 
-    go :: InfEffs es => Scope -> CoreTerm -> Eff (State Char : State (EnumMap UniVar (Either Name CoreTerm)) : es) CoreTerm
-    go scope (Located loc term) =
-        Located loc <$> case term of
-            C.UniVar uni -> do
-                whenNothingM (fmap toTypeVar <$> gets @(EnumMap UniVar (Either Name CoreTerm)) (EMap.lookup uni)) do
-                    lookupUniVar uni >>= \case
-                        -- don't generalise outer-scoped vars
-                        Left varScope | varScope <= scope -> pure $ C.UniVar uni
-                        innerScoped -> do
-                            newTy <- bitraverse (const $ freshTypeVar loc) (go scope <=< V.quote . unMono) innerScoped
-                            modify @(EnumMap UniVar (Either Name CoreTerm)) $ EMap.insert uni newTy
-                            pure $ toTypeVar newTy
+    go :: InfEffs es => Variance -> Scope -> CoreTerm -> Eff (State Char : State LocallySolved : es) CoreTerm
+    go variance scope (term :@ loc) =
+        (:@ loc) <$> case term of
+            C.UniVar uni ->
+                gets @LocallySolved (EMap.lookup uni) >>= \case
+                    Just solved -> pure $ typeVarOrBody solved
+                    Nothing ->
+                        lookupUniVar uni >>= \case
+                            -- don't generalise outer-scoped vars
+                            Left varScope | varScope <= scope -> pure $ C.UniVar uni
+                            innerScoped -> do
+                                newTy <- bitraverse (const $ freshTypeVar loc) (go variance scope <=< V.quote . unMono) innerScoped
+                                modify @LocallySolved $ EMap.insert uni newTy
+                                pure $ typeVarOrBody newTy
             C.Skolem skolem -> do
-                skScope <- skolemScope skolem
-                if skScope > scope
-                    then do
-                        -- if the skolem would escape its scope, we just convert it to an existential
-                        -- i.e. \x -> runST (newSTRef x) : forall a. a -> STRef (exists s. s) a
-                        -- wait, a skolem may occur to the left of a function arrow, so such a conversion
-                        -- is not always correct
-                        var <- freshTypeVar loc
-                        pure $ C.Q Exists Implicit Erased var (type_ loc) $ Located (getLoc var) $ C.Name var
-                    else pure $ C.Skolem skolem
+                env <- asks @Env (.values)
+                case Map.lookup skolem env.skolems of
+                    Just solved -> unLoc <$> V.quote (solved :@ loc)
+                    Nothing -> do
+                        skScope <- skolemScope skolem
+                        if skScope <= scope
+                            then pure $ C.Skolem skolem
+                            else do
+                                -- if the skolem would escape its scope, we just convert it to an existential or a forall, depending on variance
+                                -- i.e. \x -> runST (newSTRef x) : forall a. a -> STRef (exists s. s) a
+                                var <- freshTypeVar loc
+                                let quantifier
+                                        | variance == Out = Exists
+                                        | otherwise = Forall
+                                -- todo: we should make a quantifier for the type of the skolem, not just Type
+                                pure $ C.Q quantifier Implicit Erased var (type_ loc) $ (:@ getLoc var) $ C.Name var
             -- simple recursive cases
-            C.Function l r -> C.Function <$> go scope l <*> go scope r
-            C.App lhs rhs -> C.App <$> go scope lhs <*> go scope rhs
-            C.RecordT row -> C.RecordT <$> traverse (go scope) row
-            C.VariantT row -> C.VariantT <$> traverse (go scope) row
-            C.Record row -> C.Record <$> traverse (go scope) row
-            C.Sigma x y -> C.Sigma <$> go scope x <*> go scope y
-            C.Q q vis e var ty body -> C.Q q vis e var <$> go scope ty <*> go scope body
-            C.Lambda var body -> C.Lambda var <$> go scope body
-            C.Con name args -> C.Con name <$> traverse (go scope) args
+            C.Function l r -> C.Function <$> go (flipVariance variance) scope l <*> go variance scope r
+            C.App lhs rhs -> C.App <$> go variance scope lhs <*> go variance scope rhs
+            C.RecordT row -> C.RecordT <$> traverse (go variance scope) row
+            C.VariantT row -> C.VariantT <$> traverse (go variance scope) row
+            C.Record row -> C.Record <$> traverse (go variance scope) row
+            C.Sigma x y -> C.Sigma <$> go variance scope x <*> go variance scope y
+            C.Q q vis e var ty body -> C.Q q vis e var <$> go variance scope ty <*> go variance scope body
+            C.Lambda var body -> C.Lambda var <$> go variance scope body
+            C.Con name args -> C.Con name <$> traverse (go variance scope) args
             -- terminal cases
             C.Name name -> pure $ C.Name name
             C.TyCon name -> pure $ C.TyCon name
             C.Literal v -> pure $ C.Literal v
             C.Variant con -> pure $ C.Variant con
-            C.Case arg matches -> C.Case arg <$> for matches \(pat, body) -> (pat,) <$> go scope body
+            C.Case arg matches -> C.Case arg <$> for matches \(pat, body) -> (pat,) <$> go variance scope body
             C.Let name _ _ -> internalError (getLoc name) "unexpected let in a quoted type"
 
-    toTypeVar = either C.Name unLoc
+    typeVarOrBody = either C.Name unLoc
 
     freshTypeVar :: (State Char :> es, NameGen :> es) => Loc -> Eff es Name
     freshTypeVar loc = do

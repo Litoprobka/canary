@@ -52,15 +52,15 @@ import TypeChecker.TypeError
 inferDeclaration :: InfEffs es => Declaration 'Fixity -> Eff es (ValueEnv -> ValueEnv)
 inferDeclaration (Located loc decl) = case decl of
     D.Signature name sig -> do
-        sigV <- generalise $ typeFromTerm sig
+        sigV <- normalise $ typeFromTerm sig
         modify $ Map.insert name sigV
         pure id
     D.Type name binders constrs -> do
         local' (define name (V.TyCon name)) do
-            typeKind <- generalise $ mkTypeKind binders
+            typeKind <- normalise $ mkTypeKind binders
             modify $ Map.insert name typeKind
             for_ (mkConstrSigs name binders constrs) \(con, sig) -> do
-                sigV <- generalise $ typeFromTerm sig
+                sigV <- normalise $ typeFromTerm sig
                 modify $ Map.insert con sigV
             pure $ insertVal name (V.TyCon name)
     D.GADT name mbKind constrs -> do
@@ -69,14 +69,14 @@ inferDeclaration (Located loc decl) = case decl of
             modify $ Map.insert name kind
             local' (declare name kind) $ for_ constrs \con -> do
                 checkGadtConstructor name con
-                conSig <- generalise $ typeFromTerm con.sig
+                conSig <- normalise $ typeFromTerm con.sig
                 modify $ Map.insert con.name conSig
         pure $ insertVal name (V.TyCon name)
     D.Value binding (_ : _) -> internalError (getLoc binding) "todo: proper support for where clauses"
     D.Value binding [] -> do
         sigs <- get
         let relevantSigs = collectNamesInBinding binding & mapMaybe (\k -> (k,) <$> Map.lookup k sigs) & Map.fromList
-        typeMap <- generaliseAll (checkBinding binding relevantSigs)
+        typeMap <- normaliseAll (checkBinding binding relevantSigs)
         modify (typeMap <>)
         pure id
   where
@@ -460,6 +460,20 @@ infer (Located loc e) = case e of
     TypeApp expr tyArg -> do
         typedExpr <- infer expr
         inferTyApp typedExpr tyArg
+    -- todo: the way we construct the closure here is largely a crutch
+    -- were Skolem and Var merged, we'd just construct a closure directly, without an extra traversal
+    Lambda (VarP var :@ argLoc) body -> do
+        argTy <- freshUniVar
+        skolem <- freshSkolem' $ toSimpleName var
+        let argV = V.Skolem skolem
+        typedBody@(_ :@ bodyLoc ::: bodyTy) <- local' (define var argV . declare var (argTy :@ argLoc)) do
+            infer body
+        env <- asks @Env (.values)
+        resultTy <- V.substituteSkolem skolem (C.Name var :@ argLoc) <$> V.quote (bodyTy :@ bodyLoc)
+        pure $
+            El.Lambda (El.VarP var :@ argLoc ::: argTy) typedBody
+                :@ loc
+                ::: V.Q Forall Visible Retained (V.Closure{var, ty = argTy, env, body = resultTy})
     Lambda arg body -> do
         (typeMap, typedArg@(_ ::: argTy)) <- inferPattern arg
         (_, valDiff) <- skolemizePattern' arg
@@ -519,8 +533,8 @@ infer (Located loc e) = case e of
                 CharLiteral _ -> CharName
         pure $ El.Literal lit :@ loc ::: V.TyCon (litTypeName :@ loc)
     Function lhs rhs -> do
-        lhs' <- check_ lhs type_
-        rhs' <- check_ rhs type_
+        lhs' <- check lhs $ type_ :@ getLoc rhs
+        rhs' <- check rhs $ type_ :@ getLoc rhs
         pure $ El.Function lhs' rhs' :@ loc ::: type_
     -- do we need alpha-conversion?
     Q q v er binder body -> do

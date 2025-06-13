@@ -6,7 +6,7 @@
 {-# LANGUAGE PatternSynonyms #-}
 {-# OPTIONS_GHC -Wno-orphans #-}
 
-module Eval (quote, eval, evalCore, unstuck, modifyEnv, evalAll, mkLambda', app, module Reexport, desugarElaborated) where
+module Eval (quote, eval, evalCore, unstuck, modifyEnv, evalAll, mkLambda', app, module Reexport, desugarElaborated, substituteSkolem) where
 
 import Common (
     Loc (..),
@@ -16,6 +16,7 @@ import Common (
     Pass (..),
     PrettyAnsi (..),
     SimpleName_ (Name'),
+    Skolem,
     UnAnnotate (..),
     getLoc,
     prettyDef,
@@ -25,10 +26,11 @@ import Common (
     pattern Located,
  )
 
--- IdMap is currently lazy anyway, but it's up to change
 import Data.Traversable (for)
 import Diagnostic
 import Error.Diagnose (Position (..))
+
+-- IdMap is currently lazy anyway, but it's up to change
 import IdMap qualified as LMap
 import LangPrelude
 import NameGen (NameGen, freshName)
@@ -162,6 +164,34 @@ unstuck !env = \case
 
 app :: Closure ty -> Value -> Value
 app Closure{var, env, body} arg = evalCore (env{values = LMap.insert var arg env.values}) body
+
+-- another case for merging Var and Skolem
+-- this crutch is only needed because we want to construct closures from skolemised values,
+-- which we need to infer pi types
+substituteSkolem :: Skolem -> CoreTerm -> CoreTerm -> CoreTerm
+substituteSkolem skolem replacement = go
+  where
+    go :: CoreTerm -> CoreTerm
+    go (C.Skolem sk :@ _) | sk == skolem = replacement
+    go (term :@ loc) = (:@ loc) case term of
+        C.Con name args -> C.Con name $ map go args
+        C.Lambda name body -> C.Lambda name (go body)
+        C.App lhs rhs -> C.App (go lhs) (go rhs)
+        C.Case arg matches -> C.Case (go arg) (map (second go) matches)
+        C.Let name expr body -> C.Let name (go expr) (go body)
+        C.Record row -> C.Record $ go <$> row
+        C.Sigma x y -> C.Sigma (go x) (go y)
+        C.Function lhs rhs -> C.Function (go lhs) (go rhs)
+        C.Q q vis e var ty body -> C.Q q vis e var ty (go body)
+        C.VariantT row -> C.VariantT $ go <$> row
+        C.RecordT row -> C.RecordT $ go <$> row
+        -- noop cases
+        C.TyCon name -> C.TyCon name
+        C.Literal lit -> C.Literal lit
+        C.Variant name -> C.Variant name
+        C.Name name -> C.Name name
+        C.UniVar uni -> C.UniVar uni
+        C.Skolem sk -> C.Skolem sk
 
 -- do we need a fresh name here?
 closureBody :: Closure a -> Value
