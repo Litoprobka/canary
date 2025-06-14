@@ -93,7 +93,7 @@ noLoc = C.Located builtin
 emptyEnv :: ReplEnv
 emptyEnv = ReplEnv{loadedFiles = mempty, ..}
   where
-    values = ValueEnv{values = Map.one (noLoc TypeName) (V.TyCon (noLoc TypeName)), skolems = Map.empty}
+    values = ValueEnv{values = Map.one (noLoc TypeName) (V.TyCon (noLoc TypeName))}
     fixityMap = Map.one AppOp InfixL
     types = Map.one (noLoc TypeName) (noLoc $ V.TyCon (noLoc TypeName))
     scope = Scope $ HashMap.singleton (Name' "Type") (noLoc TypeName)

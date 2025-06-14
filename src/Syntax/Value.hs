@@ -9,9 +9,8 @@ import Syntax.Core (CorePattern, CoreTerm)
 import Syntax.Row
 import Syntax.Term (Erasure, Quantifier, Visibility)
 
-data ValueEnv = ValueEnv
+newtype ValueEnv = ValueEnv
     { values :: IdMap Name Value
-    , skolems :: IdMap Name Value -- does the split even make sense?
     }
 
 type Type' = Value

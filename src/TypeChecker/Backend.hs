@@ -301,7 +301,7 @@ generaliseAll action = do
             C.Name var -> do
                 knownVars <- get @(IdMap Name ())
                 env <- asks @Env (.values)
-                case (Map.lookup var knownVars, Map.lookup var env.skolems) of
+                case (Map.lookup var knownVars, Map.lookup var env.values) of
                     -- if this var originated from 'generalise', a dependent binder or a lambda, we don't have to do anything
                     (Just (), _) -> pure $ C.Name var
                     (Nothing, Just solved) -> unLoc <$> V.quote (solved :@ loc)

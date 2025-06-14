@@ -103,7 +103,7 @@ quote (value :@ loc) =
 evalCore :: ValueEnv -> CoreTerm -> Value
 evalCore !env (L term) = case term of
     -- note that env is a lazy enummap, so we only force the outer structure here
-    C.Name name -> fromMaybe (Var name) $ LMap.lookup name env.values <|> LMap.lookup name env.skolems
+    C.Name name -> LMap.lookupDefault (Var name) name env.values
     C.TyCon name -> TyCon name
     C.Con name args -> Con name $ map (evalCore env) args
     C.Lambda name body -> Lambda $ Closure{var = name, ty = (), env, body}
@@ -150,7 +150,7 @@ unstuck !env = \case
     Case stuckArg matches ->
         let arg = unstuck env stuckArg
          in fromMaybe (Case arg matches) $ asum $ fmap (`tryApplyPatternClosure` arg) matches
-    Var skolem -> case LMap.lookup skolem env.skolems of
+    Var skolem -> case LMap.lookup skolem env.values of
         Nothing -> Var skolem
         Just value -> unstuck env value
     nonStuck -> nonStuck
@@ -258,7 +258,7 @@ eval :: (Diagnose :> es, NameGen :> es) => ValueEnv -> ETerm -> Eff es Value
 eval env term = evalCore env <$> desugarElaborated term
 
 evalAll :: (Diagnose :> es, NameGen :> es) => [EDeclaration] -> Eff es ValueEnv
-evalAll = modifyEnv ValueEnv{values = LMap.empty, skolems = LMap.empty}
+evalAll = modifyEnv ValueEnv{values = LMap.empty}
 
 modifyEnv
     :: forall es

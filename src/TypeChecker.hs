@@ -145,12 +145,12 @@ subtype (lhs_ :@ locL) (rhs_ :@ locR) = do
         lhs (V.UniVar uni) -> solveOr (Located locL <$> mono' In lhs) (subtype (lhs :@ locL) . unMono) uni
         (V.UniVar uni) rhs -> solveOr (Located locR <$> mono' Out rhs) ((`subtype` (rhs :@ locR)) . unMono) uni
         lhs rhs@(V.Var skolem) -> do
-            skolems <- asks @Env ((.skolems) . (.values))
+            skolems <- asks @Env ((.values) . (.values))
             case LMap.lookup skolem skolems of
                 Nothing -> typeError $ NotASubtype (lhs :@ locL) (rhs :@ locR) Nothing
                 Just skolemTy -> subtype (lhs :@ locL) (skolemTy :@ locR)
         lhs@(V.Var skolem) rhs -> do
-            skolems <- asks @Env ((.skolems) . (.values))
+            skolems <- asks @Env ((.values) . (.values))
             case LMap.lookup skolem skolems of
                 Nothing -> typeError $ NotASubtype (lhs :@ locL) (rhs :@ locR) Nothing
                 Just skolemTy -> subtype (skolemTy :@ locL) (rhs :@ locR)
@@ -395,10 +395,10 @@ localEquality :: InfEffs es => V.Value -> V.Value -> Eff (State ValueEnv : es) (
 localEquality argVal patVal = do
     venv <- get
     case (argVal, patVal) of
-        (V.Var skolem, _) -> case LMap.lookup skolem venv.skolems of
+        (V.Var skolem, _) -> case LMap.lookup skolem venv.values of
             Just val' -> localEquality val' patVal
-            Nothing -> put venv{V.skolems = LMap.insert skolem patVal $ V.skolems venv}
-        (_, V.Var skolem) -> case LMap.lookup skolem venv.skolems of
+            Nothing -> put venv{V.values = LMap.insert skolem patVal $ V.values venv}
+        (_, V.Var skolem) -> case LMap.lookup skolem venv.values of
             Just val' -> localEquality argVal val'
             Nothing -> pass
         (lhsF `V.App` lhsArg, rhsF `V.App` rhsArg) -> do
@@ -422,7 +422,7 @@ localEquality argVal patVal = do
 
 skolemizePattern' :: InfEffs es => Pat -> Eff es (V.Value, IdMap Name V.Value)
 skolemizePattern' pat = do
-    (val, newEnv) <- runState V.ValueEnv{values = Map.empty, skolems = Map.empty} $ skolemizePattern pat
+    (val, newEnv) <- runState V.ValueEnv{values = Map.empty} $ skolemizePattern pat
     pure (val, newEnv.values)
 
 -- convert a pattern to a new skolemized value
