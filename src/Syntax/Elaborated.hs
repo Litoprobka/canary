@@ -13,7 +13,7 @@ The elaborated AST is halfway between core and pre-typecheck passes
 -}
 
 infix 3 :::
-data Typed a = a ::: Value
+data Typed a = a ::: ~Value
 
 type ETerm = Typed (Located ETerm_)
 
@@ -50,6 +50,7 @@ data EPattern_
     | ListP [EPattern]
     | LiteralP Literal
 
+-- where should the type info be?
 data EBinding
     = ValueB {pat :: EPattern, body :: ETerm}
     | FunctionB {name :: Name, args :: NonEmpty EPattern, body :: ETerm}
@@ -59,3 +60,10 @@ data EStatement
     | With EPattern ETerm
     | DoLet EBinding
     | Action ETerm
+
+type EDeclaration = Located EDeclaration_
+data EDeclaration_
+    = ValueD EBinding -- no local bindings for now
+    -- I'm not sure which representation for typechecked constructors makes more sense, this is the bare minimum
+    | TypeD Name [(Name, Int)]
+    | SignatureD Name Value

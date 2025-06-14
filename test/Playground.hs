@@ -62,7 +62,7 @@ testCheck
          -> Eff
                 '[ S.Reader Env
                  , State UniVars
-                 , State (IdMap Skolem Common.Scope)
+                 , State (IdMap Name Common.Scope)
                  , Labeled UniVar NameGen
                  , State TopLevel
                  , Diagnose

@@ -50,10 +50,10 @@ import Prettyprinter.Render.Terminal (putDoc)
 import Syntax
 import Syntax.AstTraversal
 import Syntax.Declaration qualified as D
-import Syntax.Elaborated (Typed (..))
+import Syntax.Elaborated (ETerm, Typed (..))
 import Syntax.Term
 import System.Console.Isocline
-import TypeChecker (infer, inferDeclaration, normalise)
+import TypeChecker (infer, inferDeclaration, normaliseAll)
 import TypeChecker.Backend qualified as TC
 
 data ReplCommand
@@ -130,8 +130,8 @@ mkDefaultEnv = do
             }
   where
     addDecl env decl = TC.local' (const env) do
-        envDiff <- inferDeclaration decl
-        newValues <- modifyEnv (envDiff env.values) [decl]
+        (typedDecl, envDiff) <- inferDeclaration decl
+        newValues <- modifyEnv (envDiff env.values) [typedDecl]
         pure env{TC.values = newValues}
 
     mkPreprelude :: NameGen :> es => Eff es ([Declaration 'NameRes], Scope)
@@ -220,12 +220,12 @@ replStep env@ReplEnv{loadedFiles} command = do
     case command of
         Decls decls -> processDecls env decls
         Expr expr -> do
-            (checkedExpr, _) <- runReader @"values" env.values $ processExpr env.types expr
+            checkedExpr <- runReader @"values" env.values $ processExpr env.types expr
             guardNoErrors
             prettyVal =<< eval env.values checkedExpr
             pure $ Just env
         Type_ expr -> do
-            (_, ty) <- runReader @"values" env.values $ processExpr env.types expr
+            (_ ::: ty) <- runReader @"values" env.values $ processExpr env.types expr
             prettyVal ty
             pure $ Just env
         Load path -> do
@@ -249,16 +249,17 @@ replStep env@ReplEnv{loadedFiles} command = do
         Quit -> pure Nothing
         UnknownCommand cmd -> fatal . one $ Err Nothing ("Unknown command:" <+> pretty cmd) [] []
   where
-    processExpr :: IdMap Name TC.Type' -> Term 'Parse -> Eff (Labeled "values" (Reader ValueEnv) ': es) (Term 'Fixity, TC.Type')
+    processExpr :: IdMap Name TC.Type' -> Term 'Parse -> Eff (Labeled "values" (Reader ValueEnv) ': es) ETerm
     processExpr types expr = evalState types do
         afterNameRes <- NameResolution.run env.scope $ resolveTerm expr
         skippedDepRes <- cast.term afterNameRes
         afterFixityRes <- Fixity.run env.fixityMap env.operatorPriorities $ Fixity.parse skippedDepRes
-        fmap (afterFixityRes,) $
-            runLabeled @"types" (evalState env.types) $
-                TC.run env.values $
-                    normalise $
-                        (\(_ :@ loc ::: ty) -> ty :@ loc) <$> infer afterFixityRes
+        runLabeled @"types" (evalState env.types) $
+            TC.run env.values do
+                (expr', ty :@ loc) <- normaliseAll do
+                    expr' :@ loc ::: ty <- infer afterFixityRes
+                    pure (expr', ty :@ loc)
+                pure $ expr' :@ loc ::: ty
 
     prettyVal val = do
         liftIO $ putDoc $ prettyAnsi PrettyOptions{printIds = False} val <> Pretty.line
@@ -296,8 +297,8 @@ processDecls env@ReplEnv{loadedFiles} decls = do
             }
   where
     addDecl tcenv decl = TC.local' (const tcenv) do
-        envDiff <- inferDeclaration decl
-        newValues <- modifyEnv (envDiff tcenv.values) [decl]
+        (typedDecl, envDiff) <- inferDeclaration decl
+        newValues <- modifyEnv (envDiff tcenv.values) [typedDecl]
         pure tcenv{TC.values = newValues}
 
 -- takes a line of input, or a bunch of lines in :{ }:

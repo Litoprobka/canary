@@ -15,6 +15,7 @@ module TypeChecker (
     checkPattern,
     subtype,
     normalise,
+    normaliseAll,
     Env (..),
     InfEffs,
     inferDeclaration,
@@ -37,7 +38,7 @@ import NameGen
 import Syntax
 import Syntax.Core qualified as C
 import Syntax.Declaration qualified as D
-import Syntax.Elaborated (EBinding, EPattern, ETerm, Typed (..))
+import Syntax.Elaborated (EBinding, EDeclaration, EPattern, ETerm, Typed (..))
 import Syntax.Elaborated qualified as El
 import Syntax.Row (ExtRow (..))
 import Syntax.Row qualified as Row
@@ -49,36 +50,37 @@ import TypeChecker.TypeError
 -- todo: properly handle where clauses
 -- data Locality = Local | NonLocal
 
-inferDeclaration :: InfEffs es => Declaration 'Fixity -> Eff es (ValueEnv -> ValueEnv)
-inferDeclaration (Located loc decl) = case decl of
-    D.Signature name sig -> do
-        sigV <- normalise $ typeFromTerm sig
-        modify $ Map.insert name sigV
-        pure id
-    D.Type name binders constrs -> do
-        local' (define name (V.TyCon name)) do
-            typeKind <- normalise $ mkTypeKind binders
-            modify $ Map.insert name typeKind
-            for_ (mkConstrSigs name binders constrs) \(con, sig) -> do
-                sigV <- normalise $ typeFromTerm sig
-                modify $ Map.insert con sigV
-            pure $ insertVal name (V.TyCon name)
-    D.GADT name mbKind constrs -> do
-        local' (define name (V.TyCon name)) do
-            kind <- maybe (pure type_) typeFromTerm mbKind
-            modify $ Map.insert name kind
-            local' (declare name kind) $ for_ constrs \con -> do
-                checkGadtConstructor name con
-                conSig <- normalise $ typeFromTerm con.sig
-                modify $ Map.insert con.name conSig
-        pure $ insertVal name (V.TyCon name)
-    D.Value binding (_ : _) -> internalError (getLoc binding) "todo: proper support for where clauses"
-    D.Value binding [] -> do
-        sigs <- get
-        let relevantSigs = collectNamesInBinding binding & mapMaybe (\k -> (k,) <$> Map.lookup k sigs) & Map.fromList
-        typeMap <- normaliseAll (checkBinding binding relevantSigs)
-        modify (typeMap <>)
-        pure id
+inferDeclaration :: InfEffs es => Declaration 'Fixity -> Eff es (EDeclaration, ValueEnv -> ValueEnv)
+inferDeclaration (decl :@ loc) =
+    first (:@ loc) <$> case decl of
+        D.Signature name sig -> do
+            sigV <- normalise $ typeFromTerm sig
+            modify $ Map.insert name sigV
+            pure (El.SignatureD name (unLoc sigV), id)
+        D.Type name binders constrs -> do
+            local' (define name (V.TyCon name)) do
+                typeKind <- normalise $ mkTypeKind binders
+                modify $ Map.insert name typeKind
+                for_ (mkConstrSigs name binders constrs) \(con, sig) -> do
+                    sigV <- normalise $ typeFromTerm sig
+                    modify $ Map.insert con sigV
+                pure (El.TypeD name (map (\con -> (con.name, length con.args)) constrs), insertVal name (V.TyCon name))
+        D.GADT name mbKind constrs -> do
+            local' (define name (V.TyCon name)) do
+                kind <- maybe (pure type_) typeFromTerm mbKind
+                modify $ Map.insert name kind
+                local' (declare name kind) $ for_ constrs \con -> do
+                    checkGadtConstructor name con
+                    conSig <- normalise $ typeFromTerm con.sig
+                    modify $ Map.insert con.name conSig
+            pure (El.TypeD name (map (\con -> (con.name, argCount con.sig)) constrs), insertVal name (V.TyCon name))
+        D.Value binding (_ : _) -> internalError (getLoc binding) "todo: proper support for where clauses"
+        D.Value binding [] -> do
+            sigs <- get
+            let relevantSigs = collectNamesInBinding binding & mapMaybe (\k -> (k,) <$> Map.lookup k sigs) & Map.fromList
+            Compose (typedBinding, typeMap) <- normaliseAll $ Compose . swap <$> checkBinding binding relevantSigs
+            modify (typeMap <>)
+            pure (El.ValueD typedBinding, id)
   where
     insertVal name val venv = venv{V.values = LMap.insert name val venv.values}
 
@@ -98,6 +100,15 @@ inferDeclaration (Located loc decl) = case decl of
             )
       where
         fullType loc' = foldl' (\lhs -> Located loc' . App lhs) (Located (getLoc name) $ Name name) (Located loc' . Name . (.var) <$> binders)
+
+    -- constructors should be reprocessed into a more convenenient form somewhere else, but I'm not sure where
+    argCount = go 0
+      where
+        go acc (L e) = case e of
+            Function _ rhs -> go (succ acc) rhs
+            Q Forall Visible _ _ body -> go (succ acc) body
+            Q _ _ _ _ body -> go acc body
+            _ -> acc
 
     checkGadtConstructor tyName con = case unwrapApp (fnResult con.sig) of
         (L (Name name), _)
@@ -433,21 +444,35 @@ skolemizePattern (Located loc pat') = case pat' of
     LiteralP lit -> pure $ V.PrimValue lit
 
 -- | given a map of related signatures, check or infer a declaration
-checkBinding :: InfEffs es => Binding 'Fixity -> IdMap Name TypeDT -> Eff es (IdMap Name TypeDT)
+checkBinding :: InfEffs es => Binding 'Fixity -> IdMap Name TypeDT -> Eff es (IdMap Name TypeDT, EBinding)
 checkBinding binding types = case binding of
-    _ | Map.null types -> fst <$> inferBinding binding
+    _ | Map.null types -> inferBinding binding
     FunctionB name args body -> case Map.lookup name types of
-        Just ty -> Map.one name ty <$ check (foldr (\var -> Located (getLoc binding) . Lambda var) body args) ty
-        Nothing -> fst <$> inferBinding binding
-    ValueB (L (VarP name)) body -> case Map.lookup name types of
-        Just ty -> Map.one name ty <$ check body ty
-        Nothing -> fst <$> inferBinding binding
+        Just ty -> do
+            bindingAsLambda <- check (foldr (\var -> (:@ getLoc binding) . Lambda var) body args) ty
+            (typedArgs, typedBody) <- unwrapArgs (length args) bindingAsLambda
+            pure (Map.one name ty, El.FunctionB name typedArgs typedBody)
+        Nothing -> inferBinding binding
+    ValueB (VarP name :@ nameLoc) body -> case Map.lookup name types of
+        Just ty -> do
+            typedBinding <- El.ValueB (El.VarP name :@ nameLoc ::: unLoc ty) <$> check body ty
+            pure (Map.one name ty, typedBinding)
+        Nothing -> inferBinding binding
     ValueB pat _body -> do
         internalError (getLoc pat) "todo: type check destructuring bindings with partial signatures"
+  where
+    unwrapArgs n term@(_ :@ loc ::: _) =
+        go n term >>= \case
+            ([], _) -> internalError loc "checkBinding: couldn't unwrap enough arguments"
+            (arg : args, body) -> pure (arg :| args, body)
+    go 0 term = pure ([], term)
+    go n (term :@ loc ::: _) = case term of
+        El.Lambda pat body -> first (pat :) <$> go (pred n) body
+        _ -> internalError loc "checkBinding: not enough arguments"
 
 infer :: InfEffs es => Expr 'Fixity -> Eff es ETerm
 infer (Located loc e) = case e of
-    Name name -> (Located loc (El.Name name) :::) . unLoc <$> lookupSig name
+    Name name -> ((El.Name name :@ loc) :::) . unLoc <$> lookupSig name
     E.Variant name -> do
         var <- freshUniVar
         rowVar <- freshUniVar
