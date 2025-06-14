@@ -50,7 +50,7 @@ main :: IO ()
 main = do
     args <- execParser (info argParser mempty)
     case args.cmd of
-        Repl -> runRepl Nothing
+        Repl -> runRepl
         Run path -> runFile args path =<< readFileBS path
         Check path -> checkFile args path =<< readFileBS path
         Load path -> loadFile args path =<< readFileBS path
@@ -83,20 +83,25 @@ checkFile args fileName input = do
 loadFile :: Args -> FilePath -> ByteString -> IO ()
 loadFile args fileName input = do
     let inputText = decodeUtf8 input
-    mbEnv <- fmap join . runEff . runDiagnose [(fileName, inputText)] $ runNameGen do
+    setupRepl
+    void . runEff . runDiagnose [(fileName, inputText)] $ runNameGen do
         decls <- parseModule (fileName, input)
         prettyAST args.debug decls
         env <- Repl.mkDefaultEnv
-        Repl.replStep env $ Repl.Decls decls
-    runRepl mbEnv
+        mbEnv <- Repl.replStep env $ Repl.Decls decls
+        traverse_ Repl.run mbEnv
 
-runRepl :: Maybe ReplEnv -> IO ()
-runRepl mbEnv = void $ runEff $ runDiagnose [] $ runNameGen do
+runRepl :: IO ()
+runRepl = void $ runEff $ runDiagnose [] $ runNameGen do
+    liftIO setupRepl
+    Repl.run =<< Repl.mkDefaultEnv
+
+-- | setup isocline settings and line buffering
+setupRepl :: IO ()
+setupRepl = do
     historyFile <- liftIO $ getXdgDirectory XdgCache "canary/history.txt"
     liftIO $ setHistory historyFile (-1)
     liftIO $ hSetBuffering stdout NoBuffering
-    replEnv <- maybe Repl.mkDefaultEnv pure mbEnv
-    Repl.run replEnv
 
 prettyAST :: (Traversable t, PrettyAnsi a, MonadIO m) => Bool -> t a -> m ()
 prettyAST debug = when debug . liftIO . traverse_ (putDoc . (<> line) . prettyDef)

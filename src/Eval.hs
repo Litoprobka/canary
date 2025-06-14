@@ -114,7 +114,7 @@ evalCore !env (L term) = case term of
     C.Case arg matches ->
         let val = evalCore env arg
          in fromMaybe
-                (error $ show $ "pattern mismatch when matching " <+> prettyDef val <+> "with:" <> line <> vsep (map (prettyDef . fst) matches))
+                (error $ show $ "pattern mismatch when matching" <+> prettyDef val <+> "with:" <> line <> vsep (map (prettyDef . fst) matches))
                 . (<|> mbStuckCase val matches)
                 . asum
                 $ matches <&> \(pat, body) -> evalCore <$> matchCore env pat val <*> pure body
