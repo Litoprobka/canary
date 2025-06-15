@@ -471,7 +471,7 @@ checkBinding binding types = case binding of
         _ -> internalError loc "checkBinding: not enough arguments"
 
 infer :: InfEffs es => Expr 'Fixity -> Eff es ETerm
-infer (Located loc e) = case e of
+infer (e :@ loc) = case e of
     Name name -> ((El.Name name :@ loc) :::) . unLoc <$> lookupSig name
     E.Variant name -> do
         var <- freshUniVar
@@ -485,8 +485,7 @@ infer (Located loc e) = case e of
     TypeApp expr tyArg -> do
         typedExpr <- infer expr
         inferTyApp typedExpr tyArg
-    -- todo: the way we construct the closure here is largely a crutch
-    -- were Skolem and Var merged, we'd just construct a closure directly, without an extra traversal
+    -- todo: is it possible to infer a pi type for more complex patterns?
     Lambda (VarP var :@ argLoc) body -> do
         argTy <- freshUniVar
         skolem <- freshSkolem' $ toSimpleName var

@@ -227,14 +227,20 @@ patternParens =
         , record
         , ListP <$> brackets (commaSep pattern')
         , LiteralP <$> literal
-        , -- todo: tightly-bound record
-          ConstructorP <$> upperName <*> pure []
-        , (\(con :@ loc) -> VariantP con (unit :@ loc)) <$> located variantConstructor -- some sugar for variants with a unit payload
+        , ConstructorP <$> upperName <*> option [] ((: []) <$> tightRecord)
+        , variant
         , unLoc <$> parens pattern'
         ]
   where
     record = RecordP <$> noExtRecord Token.Eq pattern' (Just $ \n -> Located (getLoc n) $ VarP n)
     unit = RecordP Row.empty
+    variant = do
+        con :@ loc <- located variantConstructor
+        payload <- option (unit :@ loc) tightRecord
+        pure $ VariantP con payload
+    tightRecord = do
+        lookAhead $ token Token.TightLBrace
+        located record
 
 binding :: Parser' (Binding 'Parse)
 binding = do
@@ -283,7 +289,7 @@ term = rightAssoc Token.Colon Annotation nonAnn
             pure case pairs of
                 [] -> unLoc firstExpr
                 [(Nothing, secondExpr)] -> firstExpr `App` secondExpr
-                [(Just op, secondExpr)] -> Located (zipLocOf firstExpr op) (Located (getLoc op) (Name op) `App` firstExpr) `App` secondExpr -- todo: a separate AST node for an infix application?
+                [(Just op, secondExpr)] -> (Name op :@ getLoc op `App` firstExpr) :@ zipLocOf firstExpr op `App` secondExpr -- todo: a separate AST node for an infix application?
                 (_ : _ : _) -> uncurry InfixE $ shift firstExpr pairs
         -- x [(+, y), (*, z), (+, w)] --> [(x, +), (y, *), (z, +)] w
         shift expr [] = ([], expr)
@@ -369,13 +375,10 @@ termParens =
         choice
             [ try record
             , recordType -- todo: ambiguity with empty record value
-            , try $ List <$> brackets (commaSep term)
-            , -- todo: since annotation expressions are a thing, variantType is pretty much always ambiguous
-              -- perhaps it should require a trailing |?
-              variantType
-            , -- , RecordLens <$> _recordLens
-              -- , tightConstructor
-              Variant <$> variantConstructor
+            , variantType
+            , List <$> brackets (commaSep term)
+            , tightConstructor
+            , Variant <$> variantConstructor
             , Literal <$> literal
             , Name <$> (identifier <|> located (Wildcard' <$> $(tok 'Token.Wildcard)))
             , ImplicitVar <$> mkName $(tok 'Token.ImplicitName)
@@ -389,17 +392,13 @@ termParens =
     record = Record <$> noExtRecord Token.Eq term (Just $ \n -> Located (getLoc n) $ Name n)
     recordType = RecordT <$> someRecord Token.Colon term Nothing
     variantType = brackets do
+        specialSymbol Token.Bar
         items <- fromList <$> commaSep variantItem
         VariantT <$> option (NoExtRow items) do
             specialSymbol Token.Bar
             ExtRow items <$> term
-
--- todo: tight record binding
-{-
-tightConstructor = do
-    name <- upperName
-    -- somehow check for no whitespace between the name and the record
-    optional (located record) <&> \case
-        Nothing -> Name name
-        Just arg -> Located (getLoc name) (Name name) `App` arg
--}
+    tightConstructor = do
+        name <- upperName
+        lookAhead $ token Token.TightLBrace
+        arg <- located record
+        pure $ (Name name :@ getLoc name) `App` arg

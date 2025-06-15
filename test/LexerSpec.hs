@@ -5,7 +5,7 @@ module LexerSpec (spec) where
 import Common (Literal_ (..))
 import FlatParse.Stateful
 import LangPrelude
-import Lexer
+import Lexer (lex')
 import NeatInterpolation
 import Syntax.Token
 import Test.Hspec

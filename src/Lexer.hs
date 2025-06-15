@@ -63,7 +63,7 @@ ctxKeyword kw = do
 
 {- | parse an indented block, starting with the given block keyword
 
-if a parsing failure occurs after the keyword, produce an throw an error
+if a parsing failure occurs after the keyword, produce and throw an error
 with the given error parser
 -}
 block :: BlockKeyword -> Parser e e -> Parser e p -> Parser e [p]
@@ -134,7 +134,7 @@ using anything that uses block rules, i.e. do notation, reintroduces strict newl
 parens, brackets, braces :: Parser e a -> Parser e a
 parens = between (token LParen) (token RParen)
 brackets = between (token LBracket) (token RBracket)
-braces = between (token LBrace) (token RBrace)
+braces = between (token LBrace <|> token TightLBrace) (token RBrace)
 
 -- leading commas, trailing commas, anything goes
 commaSep :: Parser e a -> Parser e [a]
@@ -201,11 +201,21 @@ mkTokenStream (fileName, fileContents) tokens = TokenStream $ V.fromList located
 
 {-# INLINE tokens #-}
 tokens :: Lexer [(Span, Token)]
-tokens = concatMap NE.toList <$> FP.many token'
+tokens = concatMap NE.toList <$> many token'
 
 {-# INLINE token' #-}
 token' :: Lexer (NonEmpty (Span, Token))
-token' = tokenNoWS <* spaceOrLineWrap
+token' = do
+    toks <- tokenNoWS
+    -- tight braces always follow some non-whitespace token, so we have to parse them before the trailing whitespace
+    --
+    -- since `token'` produces may produce multiple tokens anyway, it's fine that it may yield a token and a trailing
+    -- braced block in one go
+    withOption
+        (parenBlock (TightLBrace <$ $(char '{')) (RBrace <$ $(char '}')))
+        (pure . (toks <>))
+        (pure toks)
+        <* spaceOrLineWrap
   where
     tokenNoWS :: Lexer (NonEmpty (Span, Token))
     tokenNoWS =

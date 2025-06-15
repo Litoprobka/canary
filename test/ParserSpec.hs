@@ -5,7 +5,7 @@ module ParserSpec (spec) where
 
 import Data.Traversable (for)
 import FlatParse.Stateful qualified as FP
-import Lexer
+import Lexer (lex', mkTokenStream)
 import NeatInterpolation
 import Parser
 import Playground
@@ -19,7 +19,17 @@ import Syntax.Term qualified as E
 import System.Directory.OsPath
 import System.File.OsPath
 import System.OsPath
-import Test.Hspec
+import Test.Hspec (
+    Expectation,
+    Spec,
+    describe,
+    it,
+    runIO,
+    shouldBe,
+    shouldSatisfy,
+    xdescribe,
+    xit,
+ )
 
 parsePretty :: Parser' a -> Text -> Either String a
 parsePretty parser input =
@@ -284,8 +294,7 @@ spec = do
                 `shouldBePretty` Right
                     ( (-->) "'b" $
                         (-->) ("'a" --> "'b") $
-                            (-->) (($:) "Maybe" $ "'a") $
-                                "'b"
+                            (-->) (($:) "Maybe" "'a") "'b"
                     )
         it "record" do
             parsePretty term "{ x : Int, y : Int, z : Int }"
@@ -294,7 +303,7 @@ spec = do
             parsePretty term "{x : Int, y : Bool, x : Text}"
                 `shouldBePretty` Right (recordT $ NoExtRow [("y", "Bool"), ("x", "Int"), ("x", "Text")])
         it "variant" do
-            parsePretty term "['A Int, 'B, 'C Double]"
+            parsePretty term "[|'A Int, 'B, 'C Double]"
                 `shouldBePretty` Right (variantT $ NoExtRow [("'A", "Int"), ("'B", recordT (NoExtRow Row.empty)), ("'C", "Double")])
         it "type variable" do
             parsePretty term "'var" `shouldBePretty` Right "'var"
@@ -327,10 +336,9 @@ spec = do
                     b f g x = f (g x)
                     |]
             parsePretty code program `shouldSatisfy` isRight
-        join $
-            sequenceA_ <$> runIO do
-                let testDir = [osp|./lang-tests/should-compile|]
-                fileNames <- listDirectory testDir
-                for fileNames \file -> do
-                    fileContents <- decodeUtf8 <$> readFile (testDir </> file)
-                    pure $ it (show $ takeFileName file) (parsePretty code fileContents `shouldSatisfy` isRight)
+        sequenceA_ =<< runIO do
+            let testDir = [osp|./lang-tests/should-compile|]
+            fileNames <- listDirectory testDir
+            for fileNames \file -> do
+                fileContents <- decodeUtf8 <$> readFile (testDir </> file)
+                pure $ it (show $ takeFileName file) (parsePretty code fileContents `shouldSatisfy` isRight)

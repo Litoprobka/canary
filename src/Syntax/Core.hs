@@ -98,7 +98,7 @@ instance PrettyAnsi CoreTerm_ where
             Literal lit -> prettyAnsi opts lit
             Function from to -> parensWhen 2 $ go 2 from <+> specSym "->" <+> go 0 to
             Q q vis er name ty body -> parensWhen 1 $ kw q er <+> prettyBinder name ty <+> compressQ q vis er body
-            VariantT row -> brackets . withExt row . sep . punctuate comma . map variantItem $ sortedRow row.row
+            VariantT row -> brackets . ("|" <+>) . withExt row . sep . punctuate comma . map variantItem $ sortedRow row.row
             RecordT row -> braces . withExt row . sep . punctuate comma . map recordTyField $ sortedRow row.row
             UniVar uni -> prettyAnsi opts uni
           where

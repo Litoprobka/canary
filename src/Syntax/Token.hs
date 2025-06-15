@@ -27,6 +27,7 @@ data Token
     | Literal Literal_
     | LParen
     | RParen
+    | TightLBrace -- a brace with no leading whitespace
     | LBrace
     | RBrace
     | LBracket
@@ -53,6 +54,7 @@ instance PrettyAnsi Token where
         Literal literal -> prettyDef literal
         LParen -> "("
         RParen -> ")"
+        TightLBrace -> "{"
         LBrace -> "{"
         RBrace -> "}"
         LBracket -> "["

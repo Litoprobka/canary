@@ -322,9 +322,9 @@ parseCommand input = case FP.runParser cmdParser 0 0 input of
     _ -> Left (0, fmap Decls Parser.code <|> fmap Expr Parser.term)
   where
     cmdParser =
-        FP.optional Lexer.space1
+        FP.optional_ Lexer.space1
             *> $( FP.switchWithPost
-                    (Just [|FP.optional Lexer.space1|])
+                    (Just [|FP.optional_ Lexer.space1|])
                     [|
                         case _ of
                             ":t" -> pure $ Left (Type_ <$> Parser.term)

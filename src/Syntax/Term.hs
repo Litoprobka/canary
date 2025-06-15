@@ -153,7 +153,7 @@ instance PrettyAnsi (NameAt p) => PrettyAnsi (Expr_ p) where
             InfixE pairs last' -> "?(" <> sep (concatMap (\(lhs, op) -> go 3 lhs : maybe [] (pure . prettyAnsi opts) op) pairs <> [go 0 last']) <> ")"
             Function from to -> parensWhen 2 $ go 2 from <+> "->" <+> go 0 to
             Q q vis er binder body -> parensWhen 2 $ kw q er <+> prettyBinder opts binder <+> compressQ q vis er body
-            VariantT row -> brackets . withExt row . sep . punctuate comma . map variantItem $ sortedRow row.row
+            VariantT row -> brackets . ("|" <+>) . withExt row . sep . punctuate comma . map variantItem $ sortedRow row.row
             RecordT row -> braces . withExt row . sep . punctuate comma . map recordTyField $ sortedRow row.row
           where
             parensWhen minPrec
