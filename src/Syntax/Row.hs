@@ -19,11 +19,12 @@ module Syntax.Row (
     indexDuplicates,
     isEmpty,
     traverseWithName,
+    takeField,
 ) where
 
 import Common (SimpleName)
 import Data.HashMap.Strict qualified as HashMap
-import Data.Sequence.NonEmpty (NESeq)
+import Data.Sequence.NonEmpty (NESeq (..))
 import Data.Sequence.NonEmpty qualified as NESeq
 import GHC.IsList qualified as IsList
 import Relude hiding (empty)
@@ -50,6 +51,12 @@ lookup k (Row fields) = HashMap.lookup k fields <&> NESeq.head
 
 has :: Eq a => OpenName -> a -> Row a -> Bool
 has k v = (Just v ==) . lookup k
+
+-- | given a field name, returns the field value and the row with that field removed
+takeField :: OpenName -> Row a -> Maybe (a, Row a)
+takeField k (Row fields) = do
+    x :<|| rest <- HashMap.lookup k fields
+    pure (x, Row $ HashMap.update (const $ NESeq.nonEmptySeq rest) k fields)
 
 -- extend { a : Int } { a : Text, b : Int | r }
 -- -> { a : Int, a : Text, b : Int | r }

@@ -18,10 +18,10 @@ import Error.Diagnose (Note (..), Report (..))
 import Error.Diagnose qualified as M
 import IdMap qualified as Map
 import LangPrelude
-import Prettyprinter (hsep, parens, vsep)
+import Prettyprinter (braces, comma, hsep, parens, punctuate, sep, vsep)
 import Syntax.Elaborated (EPattern, Typed (..))
 import Syntax.Elaborated qualified as E
-import Syntax.Row (ExtRow (..))
+import Syntax.Row (ExtRow (..), OpenName, Row)
 import Syntax.Row qualified as Row
 import Syntax.Value qualified as V
 import TypeChecker.Backend
@@ -33,9 +33,9 @@ checkCompletePattern pat@(_ :@ loc ::: ty) = checkExhaustiveness loc ty [pat]
 checkExhaustiveness :: InfEffs es => Loc -> TypeDT_ -> [EPattern] -> Eff es ()
 checkExhaustiveness loc ty branches = do
     conMap <- get @ConstructorTable
-    branches' <- traverse simplifyPattern branches
     patternType <- simplifyPatternType ty
-    let tree = buildCaseTree conMap patternType
+    let branches' = fmap simplifyPattern branches
+        tree = buildCaseTree conMap patternType
         unmatched = checkCaseTree tree branches'
     unless (null unmatched) do
         nonFatal $
@@ -48,9 +48,9 @@ checkExhaustiveness loc ty branches = do
 checkExhaustiveness' :: InfEffs es => Loc -> [TypeDT_] -> [[EPattern]] -> Eff es ()
 checkExhaustiveness' loc ty branches = do
     conMap <- get @ConstructorTable
-    branches' <- (traverse . traverse) simplifyPattern branches
     patternTypes <- traverse simplifyPatternType ty
-    let nested = buildProdTree conMap patternTypes
+    let branches' = (fmap . fmap) simplifyPattern branches
+        nested = buildProdTree conMap patternTypes
         unmatched = checkMatch nested branches'
     unless (null unmatched) do
         nonFatal $
@@ -66,16 +66,15 @@ checkCaseTree initTree = missingPatterns const . foldl' (\tree pat -> prune pat 
 checkMatch :: Nested () -> [[Pattern]] -> [[Pattern]]
 checkMatch initTree = maybe [] (missingPatternsNested const) . foldr (\pats tree -> pruneNested pats (const Nothing) =<< tree) (Just initTree)
 
--- once all pattern types are supported, this function should be made pure
-simplifyPattern :: Diagnose :> es => EPattern -> Eff es Pattern
-simplifyPattern (p :@ loc ::: _) = case p of
-    E.VarP{} -> pure Wildcard
-    E.WildcardP{} -> pure Wildcard
-    E.ConstructorP name pats -> Con (unLoc name) <$> traverse simplifyPattern pats
-    E.ListP pats -> foldr (\x xs -> Con ConsName [x, xs]) (Con NilName []) <$> traverse simplifyPattern pats
-    E.VariantP name arg -> VariantP (unLoc name) <$> simplifyPattern arg
-    E.RecordP{} -> internalError loc "record patterns are not supported by exhaustiveness checker yet"
-    E.LiteralP lit -> pure $ LiteralP $ unLoc lit
+simplifyPattern :: EPattern -> Pattern
+simplifyPattern (p :@ _ ::: _) = case p of
+    E.VarP{} -> Wildcard
+    E.WildcardP{} -> Wildcard
+    E.ConstructorP name pats -> Con (unLoc name) $ fmap simplifyPattern pats
+    E.ListP pats -> foldr (\x xs -> Con ConsName [simplifyPattern x, xs]) (Con NilName []) pats
+    E.VariantP name arg -> VariantP (unLoc name) $ simplifyPattern arg
+    E.RecordP row -> RecordP $ fmap simplifyPattern row
+    E.LiteralP lit -> LiteralP $ unLoc lit
 
 -- anything fancy gets converted into an OpaqueTy
 -- however, most constructs cannot appear in a value of type Type at all,
@@ -91,6 +90,10 @@ simplifyPatternTypeWith = \case
         row' <- compress Variant Inv row
         fnRow <- traverse simplifyPatternTypeWith row'
         pure \args -> ExVariant (fmap ($ args) fnRow)
+    V.RecordT row -> do
+        row' <- compress Record Inv row
+        fnRow <- traverse simplifyPatternTypeWith row'
+        pure \args -> ExRecord (fmap ($ args) fnRow.row)
     V.App lhs rhs -> do
         lhsFn <- simplifyPatternTypeWith lhs
         rhsFn <- simplifyPatternTypeWith rhs
@@ -102,6 +105,25 @@ simplifyPatternTypeWith = \case
             Left{} -> pure $ const OpaqueTy
             Right body -> simplifyPatternTypeWith $ unLoc $ unMono body
     _ -> pure $ const OpaqueTy
+
+data Pattern
+    = Con Name_ [Pattern]
+    | VariantP SimpleName_ Pattern
+    | RecordP (Row Pattern)
+    | LiteralP Literal_
+    | Wildcard
+
+instance Show Pattern where
+    show = show . pretty
+instance Pretty Pattern where
+    pretty (Con name []) = pretty name
+    pretty (Con name args) = parens $ hsep (pretty name : map pretty args)
+    pretty (VariantP name arg) = parens $ pretty name <+> pretty arg
+    pretty (LiteralP lit) = pretty lit
+    pretty Wildcard = "_"
+    pretty (RecordP row) = braces . sep . punctuate comma . map recordField $ Row.sortedRow row
+      where
+        recordField (name, body) = pretty name <+> "=" <+> pretty body
 
 -- in normal branches and variant branches, the map contains
 -- all unmatched children, and NotVisited is used when all of the children branches are full
@@ -118,6 +140,7 @@ data CaseTree a
     | TextBranch (HashMap Text a) a
     | CharBranch (HashMap Text a) a
     | IntBranch (IntMap a) a
+    | RecordBranch (RecordBranch a)
     | Opaque a -- can be matched only by a wildcard
     | NotVisited (forall b. b -> CaseTree b) a
 
@@ -127,6 +150,12 @@ data Nested a
     = NotNested a
     | Nested (CaseTree (Nested a))
 
+-- with normal products, we know how much to descend based on the type
+-- when it comes to records, though, a pattern may match on a subset of the fields
+data RecordBranch a
+    = None a
+    | Field SimpleName (CaseTree (RecordBranch a))
+
 mapMaybeTree :: (a -> Maybe b) -> CaseTree a -> Maybe (CaseTree b)
 mapMaybeTree f = \case
     Branch tree -> Branch <$> Map.mapMaybe (mapMaybeProd f) tree
@@ -134,6 +163,7 @@ mapMaybeTree f = \case
     TextBranch tree fallback -> TextBranch (HashMap.mapMaybe f tree) <$> f fallback
     CharBranch tree fallback -> CharBranch (HashMap.mapMaybe f tree) <$> f fallback
     IntBranch tree fallback -> IntBranch (IntMap.mapMaybe f tree) <$> f fallback
+    RecordBranch branch -> RecordBranch <$> mapMaybeRecordBranch f branch
     Opaque x -> Opaque <$> f x
     NotVisited build x -> NotVisited build <$> f x
 
@@ -142,20 +172,10 @@ mapMaybeProd f = \case
     NotNested x -> NotNested <$> f x
     Nested nested -> Nested <$> mapMaybeTree (mapMaybeProd f) nested
 
-data Pattern
-    = Con Name_ [Pattern]
-    | VariantP SimpleName_ Pattern
-    | LiteralP Literal_
-    | Wildcard
-
-instance Show Pattern where
-    show = show . pretty
-instance Pretty Pattern where
-    pretty (Con name []) = pretty name
-    pretty (Con name args) = parens $ hsep (pretty name : map pretty args)
-    pretty (VariantP name arg) = parens $ pretty name <+> pretty arg
-    pretty (LiteralP lit) = pretty lit
-    pretty Wildcard = "_"
+mapMaybeRecordBranch :: (a -> Maybe b) -> RecordBranch a -> Maybe (RecordBranch b)
+mapMaybeRecordBranch f = \case
+    None x -> None <$> f x
+    Field name nested -> Field name <$> mapMaybeTree (mapMaybeRecordBranch f) nested
 
 prune :: Pattern -> (a -> Maybe a) -> CaseTree a -> Maybe (CaseTree a)
 prune = \cases
@@ -169,6 +189,7 @@ prune = \cases
     (LiteralP (IntLiteral n)) k (IntBranch tree fallback) -> Just $ IntBranch (IntMap.update k n tree) fallback
     (LiteralP (TextLiteral t)) k (TextBranch tree fallback) -> Just $ TextBranch (HashMap.alter (k . fromMaybe fallback) t tree) fallback
     (LiteralP (CharLiteral c)) k (CharBranch tree fallback) -> Just $ CharBranch (HashMap.alter (k . fromMaybe fallback) c tree) fallback
+    (RecordP row) k (RecordBranch branch) -> RecordBranch <$> pruneRecord row k branch
     _ _ (Opaque x) -> Just $ Opaque x
     _ _ _ -> error "pattern type mismatch (shouldn't happen for well-typed code)"
 
@@ -176,6 +197,23 @@ pruneNested :: [Pattern] -> (a -> Maybe a) -> Nested a -> Maybe (Nested a)
 pruneNested [] k (NotNested x) = NotNested <$> k x
 pruneNested (pat : pats) k (Nested nested) = Nested <$> prune pat (pruneNested pats k) nested
 pruneNested _ _ _ = error "pruneNested: length mismatch"
+
+{-
+pruneRecord should be something akin to
+- Field x   if we have x, prune it; set the continuation to recur
+-           if we don't, skip current depth and recur
+- None      if we still have some fields left - type error
+            if we don't, call the continuation
+-}
+pruneRecord :: Row Pattern -> (a -> Maybe a) -> RecordBranch a -> Maybe (RecordBranch a)
+pruneRecord row k = \case
+    None x
+        | Row.isEmpty row -> None <$> k x
+        | otherwise -> error "not enough fields in case tree"
+    Field name nested ->
+        Field name <$> case Row.takeField name row of
+            Just (pat, row') -> prune pat (pruneRecord row' k) nested
+            Nothing -> mapMaybeTree (pruneRecord row k) nested
 
 missingPatterns :: ([Pattern] -> a -> [r]) -> Maybe (CaseTree a) -> [r]
 missingPatterns _ Nothing = []
@@ -194,11 +232,23 @@ missingPatterns k (Just tree) = case tree of
     IntBranch branches fallback -> IntMap.foldMapWithKey (\n -> k [LiteralP (IntLiteral n)]) branches <> k [Wildcard] fallback
     TextBranch branches fallback -> HashMap.foldMapWithKey (\t -> k [LiteralP (TextLiteral t)]) branches <> k [Wildcard] fallback
     CharBranch branches fallback -> HashMap.foldMapWithKey (\c -> k [LiteralP (CharLiteral c)]) branches <> k [Wildcard] fallback
+    RecordBranch branches -> missingPatternsRecord (k . fmap RecordP) branches
 
 missingPatternsNested :: ([[Pattern]] -> a -> [r]) -> Nested a -> [r]
 missingPatternsNested k (NotNested x) = k [[]] x
 missingPatternsNested k (Nested tree) =
     missingPatterns (\lhses -> missingPatternsNested (k . liftA2 (:) lhses)) (Just tree)
+
+missingPatternsRecord :: ([Row Pattern] -> a -> [r]) -> RecordBranch a -> [r]
+missingPatternsRecord k = \case
+    None x -> k [Row.empty] x
+    Field name nested -> missingPatterns (\fieldVals -> missingPatternsRecord (k . addField name fieldVals)) (Just nested)
+  where
+    addField :: OpenName -> [Pattern] -> [Row Pattern] -> [Row Pattern]
+    addField name vals rows = do
+        val <- vals
+        row <- rows
+        pure $ one (name, val) <> row
 
 buildCaseTree :: ConstructorTable -> ExType -> Maybe (CaseTree ())
 buildCaseTree conMap ty = Just case buildCaseTree' conMap ty () of
@@ -222,7 +272,12 @@ buildCaseTree' conMap = \cases
         VariantBranch
             (fmap (\t -> buildCaseTree' conMap t k) $ HashMap.fromList $ map (first unLoc) $ Row.sortedRow row.row)
             (k <$ Row.extension row)
+    (ExRecord row) -> NotVisited $ RecordBranch . buildRecordTree conMap (Row.sortedRow row)
 
 buildProdTree' :: ConstructorTable -> [ExType] -> b -> Nested b
 buildProdTree' _ [] = NotNested
-buildProdTree' conMap (t : types) = Nested . NotVisited (buildCaseTree' conMap t) . buildProdTree' conMap types
+buildProdTree' conMap (ty : types) = Nested . NotVisited (buildCaseTree' conMap ty) . buildProdTree' conMap types
+
+buildRecordTree :: ConstructorTable -> [(OpenName, ExType)] -> a -> RecordBranch a
+buildRecordTree _ [] = None
+buildRecordTree conMap ((name, ty) : rest) = Field name . NotVisited (buildCaseTree' conMap ty) . buildRecordTree conMap rest
