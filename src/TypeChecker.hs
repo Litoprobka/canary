@@ -45,6 +45,8 @@ import Syntax.Row qualified as Row
 import Syntax.Term hiding (Record, Variant)
 import Syntax.Term qualified as E (Term_ (Record, Variant))
 import TypeChecker.Backend
+import TypeChecker.Exhaustiveness (checkExhaustiveness, checkExhaustiveness')
+import TypeChecker.Exhaustiveness qualified as Ex
 import TypeChecker.TypeError
 
 -- todo: properly handle where clauses
@@ -64,6 +66,8 @@ inferDeclaration (decl :@ loc) =
                 for_ (mkConstrSigs name binders constrs) \(con, sig) -> do
                     sigV <- normalise $ typeFromTerm sig
                     modify $ Map.insert con sigV
+                conMapEntry <- mkConstructorTableEntry (map (.var) binders) (map (\con -> (con.name, con.args)) constrs)
+                modify \ConstructorTable{table} -> ConstructorTable{table = Map.insert (unLoc name) conMapEntry table}
                 pure (El.TypeD name (map (\con -> (con.name, length con.args)) constrs), insertVal name (V.TyCon name))
         D.GADT name mbKind constrs -> do
             local' (define name (V.TyCon name)) do
@@ -73,6 +77,7 @@ inferDeclaration (decl :@ loc) =
                     checkGadtConstructor name con
                     conSig <- normalise $ typeFromTerm con.sig
                     modify $ Map.insert con.name conSig
+            -- todo: add GADT constructors to the constructor table
             pure (El.TypeD name (map (\con -> (con.name, argCount con.sig)) constrs), insertVal name (V.TyCon name))
         D.Value binding (_ : _) -> internalError (getLoc binding) "todo: proper support for where clauses"
         D.Value binding [] -> do
@@ -131,6 +136,16 @@ typeFromTerm term = do
     values <- asks @Env (.values)
     typedTerm@(_ :@ loc ::: _) <- check term $ V.TyCon (TypeName :@ getLoc term) :@ getLoc term
     (:@ loc) . V.evalCore values <$> V.desugarElaborated typedTerm
+
+mkConstructorTableEntry
+    :: forall es. InfEffs es => [Name] -> [(Name, [Type 'Fixity])] -> Eff es (IdMap Name_ ([ExType] -> [ExType]))
+mkConstructorTableEntry boundVars constrs =
+    Map.fromList . map (first unLoc) <$> (traverse . traverse) mkConstructorEntry constrs
+  where
+    mkConstructorEntry :: [Type 'Fixity] -> Eff es ([ExType] -> [ExType])
+    mkConstructorEntry args = do
+        conFns <- traverse (Ex.simplifyPatternTypeWith . unLoc <=< typeFromTerm) args
+        pure $ \types -> conFns <&> \fn -> fn $ Map.fromList (zip boundVars types)
 
 subtype :: InfEffs es => TypeDT -> TypeDT -> Eff es ()
 subtype (lhs_ :@ locL) (rhs_ :@ locR) = do
@@ -239,6 +254,7 @@ check (e :@ loc) (typeToCheck :@ tyLoc) = do
             (argVal, valDiff) <- skolemizePattern' arg
             typedBody <- local' (defineMany valDiff . declareMany argVars) do
                 check body $ (closure `V.app` argVal) :@ tyLoc
+            checkExhaustiveness loc closure.ty [typedArg]
             pure $ El.Lambda typedArg typedBody :@ loc ::: ty
         (Lambda arg body) ty@(V.Function from to) -> do
             (newTypes, typedArg) <- checkPattern arg $ from :@ tyLoc
@@ -269,6 +285,7 @@ check (e :@ loc) (typeToCheck :@ tyLoc) = do
                     typedBody <- local' (\tcenv -> tcenv{values = newValues}) do
                         check body $ ty :@ loc
                     pure (typedPat, typedBody)
+            checkExhaustiveness loc argTy (map fst typedMatches)
             pure $ El.Case typedArg typedMatches :@ loc ::: ty
           where
             -- a special case for matching on a var seems janky, but apparently that's how Idris does this
@@ -284,6 +301,7 @@ check (e :@ loc) (typeToCheck :@ tyLoc) = do
                 valDiff <- foldMap snd <$> traverse skolemizePattern' pats
                 typedBody <- local' (defineMany valDiff . declareMany typeMap) $ check_ body bodyTy
                 pure (typedPatterns, typedBody)
+            checkExhaustiveness' loc patTypes (map fst typedMatches)
             pure $ El.Match typedMatches :@ loc ::: ty
           where
             unwrapFn 0 = pure . ([],)
@@ -503,6 +521,7 @@ infer (e :@ loc) = case e of
         (_, valDiff) <- skolemizePattern' arg
         typedBody@(_ ::: bodyTy) <- local' (defineMany valDiff . declareMany typeMap) do
             infer body
+        checkExhaustiveness loc argTy [typedArg]
         pure $ El.Lambda typedArg typedBody :@ loc ::: V.Function argTy bodyTy
     -- chances are, I'd want to add some specific error messages or context for wildcard lambdas
     -- for now, they are just desugared to normal lambdas before inference

@@ -1,6 +1,6 @@
 module IdMap where
 
-import Relude hiding (toList)
+import Relude hiding (null, toList)
 
 import Data.Foldable qualified as Foldable
 import Data.IntMap.Strict qualified as IntMap
@@ -45,6 +45,15 @@ filter p (IdMap idmap) = IdMap $ IntMap.filter (p . snd) idmap
 
 adjust :: HasId k => (v -> v) -> k -> IdMap k v -> IdMap k v
 adjust f !k (IdMap idmap) = IdMap $ IntMap.adjust (second f) (toId k) idmap
+
+update :: HasId k => (v -> Maybe v) -> k -> IdMap k v -> IdMap k v
+update f !k (IdMap idmap) = IdMap $ IntMap.update (traverse f) (toId k) idmap
+
+mapWithKey :: (k -> a -> b) -> IdMap k a -> IdMap k b
+mapWithKey f (IdMap idmap) = IdMap $ IntMap.map (\(k, v) -> (k, f k v)) idmap
+
+mapMaybe :: (a -> Maybe b) -> IdMap k a -> Maybe (IdMap k b)
+mapMaybe f (IdMap idmap) = guarded (not . null) . IdMap $ IntMap.mapMaybe (\(k, v) -> (k,) <$> f v) idmap
 
 keys :: IdMap k v -> [k]
 keys = map fst . toList

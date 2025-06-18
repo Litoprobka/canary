@@ -102,11 +102,11 @@ quote (value :@ loc) =
 
 evalCore :: ValueEnv -> CoreTerm -> Value
 evalCore !env (L term) = case term of
-    -- note that env is a lazy enummap, so we only force the outer structure here
+    -- note that env is a lazy IdMap, so we only force the outer structure here
     C.Name name -> LMap.lookupDefault (Var name) name env.values
     C.TyCon name -> TyCon name
     C.Con name args -> Con name $ map (evalCore env) args
-    C.Lambda name body -> Lambda $ Closure{var = name, ty = (), env, body}
+    C.Lambda var body -> Lambda $ Closure{var, ty = (), env, body}
     C.App (L (C.Variant name)) arg -> Variant name $ evalCore env arg -- this is a bit of an ugly case
     C.App lhs rhs -> case (evalCore env lhs, evalCore env rhs) of
         (Lambda closure, arg) -> closure `app` arg

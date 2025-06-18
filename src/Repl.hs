@@ -72,6 +72,7 @@ data ReplEnv = ReplEnv
     , operatorPriorities :: Poset Op
     , scope :: Scope
     , types :: IdMap Name TC.Type'
+    , constructorTable :: TC.ConstructorTable
     , lastLoadedFile :: Maybe FilePath
     , loadedFiles :: forall msg. Diagnostic msg -- an empty diagnostic with files
     , input :: Text
@@ -99,6 +100,7 @@ emptyEnv = ReplEnv{loadedFiles = mempty, ..}
     scope = Scope $ HashMap.singleton (Name' "Type") (noLoc TypeName)
     (_, operatorPriorities) = Poset.eqClass AppOp Poset.empty
     lastLoadedFile = Nothing
+    constructorTable = TC.ConstructorTable Map.empty
     inputBS = BS.empty
     input = Text.empty
 
@@ -112,7 +114,7 @@ mkDefaultEnv = do
     depResOutput@SimpleOutput{fixityMap, operatorPriorities} <-
         resolveDependenciesSimplified' emptyEnv.fixityMap emptyEnv.operatorPriorities $ preDecls <> afterNameRes
     fixityDecls <- Fixity.resolveFixity fixityMap operatorPriorities depResOutput.declarations
-    (env, types) <- runState emptyEnv.types $ TC.run emptyEnv.values do
+    ((env, constructorTable), types) <- runState emptyEnv.types $ runState emptyEnv.constructorTable $ TC.run emptyEnv.values do
         env <- ask @TC.Env
         foldlM addDecl env fixityDecls
     guardNoErrors
@@ -127,6 +129,7 @@ mkDefaultEnv = do
             , loadedFiles = mempty
             , inputBS = BS.empty
             , input = Text.empty
+            , constructorTable
             }
   where
     addDecl env decl = TC.local' (const env) do
@@ -255,7 +258,7 @@ replStep env@ReplEnv{loadedFiles} command = do
         skippedDepRes <- cast.term afterNameRes
         afterFixityRes <- Fixity.run env.fixityMap env.operatorPriorities $ Fixity.parse skippedDepRes
         runLabeled @"types" (evalState env.types) $
-            TC.run env.values do
+            evalState env.constructorTable $ TC.run env.values do
                 (expr', ty :@ loc) <- normaliseAll do
                     expr' :@ loc ::: ty <- infer afterFixityRes
                     pure (expr', ty :@ loc)
@@ -279,7 +282,7 @@ processDecls env@ReplEnv{loadedFiles} decls = do
     depResOutput@SimpleOutput{fixityMap, operatorPriorities} <-
         resolveDependenciesSimplified' env.fixityMap env.operatorPriorities afterNameRes
     fixityDecls <- Fixity.resolveFixity fixityMap operatorPriorities depResOutput.declarations
-    (newEnv, types) <- runState env.types $ TC.run env.values do
+    ((newEnv, constructorTable), types) <- runState env.types $ runState env.constructorTable $ TC.run env.values do
         tenv <- ask @TC.Env
         foldlM addDecl tenv fixityDecls
     guardNoErrors
@@ -294,6 +297,7 @@ processDecls env@ReplEnv{loadedFiles} decls = do
             , loadedFiles = loadedFiles
             , input = env.input
             , inputBS = env.inputBS
+            , constructorTable
             }
   where
     addDecl tcenv decl = TC.local' (const tcenv) do

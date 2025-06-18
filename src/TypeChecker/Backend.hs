@@ -85,9 +85,16 @@ type InfEffs es =
     , State UniVars :> es
     , State (IdMap Name Scope) :> es -- scopes of unbound vars
     , State TopLevel :> es
+    , State ConstructorTable :> es
     , Reader Env :> es
     , Diagnose :> es
     )
+
+newtype ConstructorTable = ConstructorTable
+    { table :: IdMap Name_ (IdMap Name_ ([ExType] -> [ExType]))
+    }
+data ExType = TyCon Name_ [ExType] | OpaqueTy
+    deriving (Show)
 
 data Break err :: Effect where
     Break :: err -> Break err m a

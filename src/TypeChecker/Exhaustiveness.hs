@@ -1,143 +1,158 @@
-module TypeChecker.Exhaustiveness where
+module TypeChecker.Exhaustiveness (checkExhaustiveness, checkExhaustiveness', ConstructorTable (..), simplifyPatternType, simplifyPatternTypeWith) where
 
+import Common hiding (Wildcard)
+import Diagnostic
+import Effectful.State.Static.Local (get)
+import Error.Diagnose (Note (..), Report (..))
+import Error.Diagnose qualified as M
+import IdMap qualified as Map
 import LangPrelude
+import Prettyprinter (hsep, parens, vsep)
+import Syntax.Elaborated hiding (Name)
+import Syntax.Value qualified as V
+import TypeChecker.Backend
 
-{-
--- | a tree of unmatched patterns
-newtype MatchTree = SumMatch (IdMap Name MatchTree)
+checkExhaustiveness :: InfEffs es => Loc -> TypeDT_ -> [EPattern] -> Eff es ()
+checkExhaustiveness loc ty branches = do
+    conMap <- get @ConstructorTable
+    branches' <- traverse simplifyPattern branches
+    patternType <- simplifyPatternType ty
+    let tree = buildCaseTree conMap patternType
+        unmatched = checkCaseTree tree branches'
+    unless (null unmatched) do
+        nonFatal $
+            Err
+                Nothing
+                "non-exhaustive patterns"
+                (mkNotes [(loc, M.This "when checking this expression")])
+                [Note $ vsep ("patterns not matched:" : map pretty unmatched)]
 
-allMatched :: MatchTree -> Bool
-allMatched (SumMatch tree) = all allMatched tree
+checkExhaustiveness' :: InfEffs es => Loc -> [TypeDT_] -> [[EPattern]] -> Eff es ()
+checkExhaustiveness' loc ty branches = do
+    conMap <- get @ConstructorTable
+    branches' <- (traverse . traverse) simplifyPattern branches
+    patternTypes <- traverse simplifyPatternType ty
+    let nested = buildProdTree conMap patternTypes
+        unmatched = checkMatch nested branches'
+    unless (null unmatched) do
+        nonFatal $
+            Err
+                Nothing
+                "non-exhaustive patterns"
+                (mkNotes [(loc, M.This "when checking this expression")])
+                [Note $ vsep ("patterns not matched:" : map (hsep . map pretty) unmatched)]
 
-data Pat'
-    = Var
-    | Con Name Pat' -- multi-arg patterns are treated as `Pat name (Product [arg1, arg2])`
-    | Prod [Pat']
+checkCaseTree :: Maybe (CaseTree ()) -> [Pattern] -> [Pattern]
+checkCaseTree initTree = missingPatterns const . foldr (\pat tree -> prune pat (const Nothing) =<< tree) initTree
 
-prune :: Pat' -> MatchTree -> MatchTree
-prune Var _ = SumMatch Map.empty
-prune (Con name nested) (SumMatch tree) = SumMatch $ Map.adjust (prune nested) name tree
-prune (Prod (pat : pats)) (SumMatch tree) = SumMatch $ adjustMatching pat (prune $ Prod pats) tree
-prune (Prod []) tree = tree
+checkMatch :: Nested () -> [[Pattern]] -> [[Pattern]]
+checkMatch initTree = maybe [] (missingPatternsNested const) . foldr (\pats tree -> pruneNested pats (const Nothing) =<< tree) (Just initTree)
 
-adjustMatching :: Pat' -> (MatchTree -> MatchTree) -> IdMap Name MatchTree -> IdMap Name MatchTree
-adjustMatching Var f = fmap f
-adjustMatching (Con name nested) f = Map.mapWithKey \k (SumMatch matches) ->
-    SumMatch if k == name then adjustMatching nested f matches else matches
-adjustMatching (Prod (pat : pats)) f = adjustMatching pat (\(SumMatch tree) -> SumMatch $ adjustMatching (Prod pats) f tree)
-adjustMatching (Prod []) _ = id
+simplifyPattern :: Diagnose :> es => EPattern -> Eff es Pattern
+simplifyPattern (p :@ loc ::: _) = case p of
+    VarP{} -> pure Wildcard
+    WildcardP{} -> pure Wildcard
+    ConstructorP name pats -> Con (unLoc name) <$> traverse simplifyPattern pats
+    ListP pats -> foldr (\x xs -> Con ConsName [x, xs]) (Con NilName []) <$> traverse simplifyPattern pats
+    VariantP{} -> internalError loc "variants are not supported by exhaustiveness checker yet"
+    RecordP{} -> internalError loc "record patterns are not supported by exhaustiveness checker yet"
+    LiteralP{} -> internalError loc "literal patterns are not supported by exhaustiveness checker yet"
 
--- decay :: [Name] -> MatchTree -> MatchTree
--- decay names nested = SumMatch $ Map.fromList $ map (, nested) names
+-- anything fancy gets converted into an OpaqueTy
+-- however, most constructs cannot appear in a value of type Type at all,
+-- so it might make more sense to just throw an error if it happens
+simplifyPatternType :: forall es. InfEffs es => TypeDT_ -> Eff es ExType
+simplifyPatternType ty = ($ Map.empty) <$> simplifyPatternTypeWith ty
 
--}
-
-data Type
-    = Unit
-    | Tuple [Type]
-    | Either Type Type
-    | List Type
-    deriving (Show, Eq)
-
-data Pattern
-    = Var
-    | MkTuple [Pattern]
-    | L Pattern
-    | R Pattern
-    | Nil
-    | Cons Pattern -- contains a tuple of (head, tail) inside
-    deriving (Show, Eq)
+simplifyPatternTypeWith :: forall es. InfEffs es => TypeDT_ -> Eff es (IdMap Name ExType -> ExType)
+simplifyPatternTypeWith = \case
+    V.Var name -> pure $ Map.lookupDefault OpaqueTy name
+    V.TyCon name -> pure $ const $ TyCon (unLoc name) []
+    V.App lhs rhs -> do
+        lhsFn <- simplifyPatternTypeWith lhs
+        rhsFn <- simplifyPatternTypeWith rhs
+        pure \env -> case lhsFn env of
+            TyCon name args -> TyCon name (args <> [rhsFn env])
+            OpaqueTy -> OpaqueTy
+    V.UniVar uni ->
+        lookupUniVar uni >>= \case
+            Left{} -> pure $ const OpaqueTy
+            Right body -> simplifyPatternTypeWith $ unLoc $ unMono body
+    _ -> pure $ const OpaqueTy
 
 data CaseTree a
-    = UnitCase ~a
-    | TupleCase ~(Nested a)
-    | EitherCase ~(Maybe (CaseTree a)) ~(Maybe (CaseTree a))
-    | ListCase ~(Maybe (CaseTree a)) ~(Maybe a)
-    | NotVisited (forall b. b -> CaseTree b) ~a
-    deriving (Functor)
+    = Branch (IdMap Name_ (Nested a))
+    | Opaque a -- can be matched only by a wildcard
+    | NotVisited (forall b. b -> CaseTree b) a
+
+-- todo: variants, records and primitives
 
 data Nested a
-    = Nested (CaseTree (Nested a))
-    | NotNested a
-    --  | NestedEmpty
-    deriving (Functor)
+    = NotNested a
+    | Nested (CaseTree (Nested a))
 
-buildCaseTree' :: Type -> Maybe (CaseTree ())
-buildCaseTree' ty = Just case buildCaseTree ty () of
+mapMaybeTree :: (a -> Maybe b) -> CaseTree a -> Maybe (CaseTree b)
+mapMaybeTree f = \case
+    Branch tree -> Branch <$> Map.mapMaybe (mapMaybeProd f) tree
+    Opaque x -> Opaque <$> f x
+    NotVisited build x -> NotVisited build <$> f x
+
+mapMaybeProd :: (a -> Maybe b) -> Nested a -> Maybe (Nested b)
+mapMaybeProd f = \case
+    NotNested x -> NotNested <$> f x
+    Nested nested -> Nested <$> mapMaybeTree (mapMaybeProd f) nested
+
+data Pattern
+    = Con Name_ [Pattern]
+    | Wildcard
+    deriving (Show)
+instance Pretty Pattern where
+    pretty (Con name []) = pretty name
+    pretty (Con name args) = parens $ hsep (pretty name : map pretty args)
+    pretty Wildcard = "_"
+
+prune :: Pattern -> (a -> Maybe a) -> CaseTree a -> Maybe (CaseTree a)
+prune = \cases
+    Wildcard k tree -> mapMaybeTree k tree
+    pat k (NotVisited f x) -> prune pat k $ f x
+    (Con name args) k (Branch tree) -> Branch <$> guarded (not . Map.null) (Map.update (pruneNested args k) name tree)
+    Con{} _ (Opaque x) -> Just $ Opaque x
+
+pruneNested :: [Pattern] -> (a -> Maybe a) -> Nested a -> Maybe (Nested a)
+pruneNested [] k (NotNested x) = NotNested <$> k x
+pruneNested (pat : pats) k (Nested nested) = Nested <$> prune pat (pruneNested pats k) nested
+pruneNested _ _ _ = error "pruneNested: length mismatch"
+
+missingPatterns :: ([Pattern] -> a -> [r]) -> Maybe (CaseTree a) -> [r]
+missingPatterns _ Nothing = []
+missingPatterns k (Just tree) = case tree of
+    NotVisited _ x -> k [Wildcard] x
+    Opaque x -> k [Wildcard] x
+    Branch branches -> do
+        (con, argTree) <- Map.toList branches
+        missingPatternsNested (k . fmap (Con con)) argTree
+
+missingPatternsNested :: ([[Pattern]] -> a -> [r]) -> Nested a -> [r]
+missingPatternsNested k (NotNested x) = k [[]] x
+missingPatternsNested k (Nested tree) =
+    missingPatterns (\lhses -> missingPatternsNested (k . liftA2 (:) lhses)) (Just tree)
+
+buildCaseTree :: ConstructorTable -> ExType -> Maybe (CaseTree ())
+buildCaseTree conMap ty = Just case buildCaseTree' conMap ty () of
     NotVisited f x -> f x
     other -> other
 
-buildCaseTree :: Type -> k -> CaseTree k
-buildCaseTree = \case
-    Unit -> UnitCase
-    (Either l r) -> NotVisited (\k -> EitherCase (Just $ buildCaseTree l k) (Just $ buildCaseTree r k))
-    (Tuple xs) -> TupleCase . buildProdTree xs
-    (List x) -> NotVisited (\k -> ListCase (Just $ buildCaseTree (Tuple [x, List x]) k) (Just k))
+buildProdTree :: ConstructorTable -> [ExType] -> Nested ()
+buildProdTree conMap types = case buildProdTree' conMap types () of
+    Nested (NotVisited f x) -> Nested $ f x
+    other -> other
 
-buildProdTree :: [Type] -> k -> Nested k
-buildProdTree [] = NotNested
-buildProdTree (t : ts) = Nested . NotVisited (buildCaseTree t) . buildProdTree ts
-
-prunePattern :: Pattern -> (a -> Maybe a) -> CaseTree a -> Maybe (CaseTree a)
-prunePattern = \cases
-    _ _ (EitherCase Nothing Nothing) -> Nothing
-    _ _ (ListCase Nothing Nothing) -> Nothing
-    Var k (NotVisited f x) -> NotVisited f <$> k x
-    pat k (NotVisited f x) -> prunePattern pat k $ f x
-    Var k tree -> mapMaybeTree k tree
-    (L l) k (EitherCase lTree rTree) -> Just $ EitherCase (prunePattern l k =<< lTree) rTree
-    (R r) k (EitherCase lTree rTree) -> Just $ EitherCase lTree (prunePattern r k =<< rTree)
-    (MkTuple pats) k (TupleCase nested) -> TupleCase <$> pruneProduct pats k nested
-    (Cons inner) k (ListCase cons nil) -> Just $ ListCase (prunePattern inner k =<< cons) nil
-    Nil k (ListCase cons nil) -> Just $ ListCase cons (k =<< nil)
-    _ _ _ -> error "mismatch"
-
-pruneProduct :: [Pattern] -> (a -> Maybe a) -> Nested a -> Maybe (Nested a)
-pruneProduct [] k (NotNested x) = NotNested <$> k x
-pruneProduct (pat : pats) k (Nested nested) = Nested <$> prunePattern pat (pruneProduct pats k) nested
-pruneProduct _ _ _ = error "pruneProduct: length mismatch"
-
--- this looks like an instance of Filterable
-mapMaybeTree :: (a -> Maybe b) -> CaseTree a -> Maybe (CaseTree b)
-mapMaybeTree f = \case
-    UnitCase x -> UnitCase <$> f x
-    TupleCase nested -> TupleCase <$> mapMaybeNested f nested
-    EitherCase l r -> Just $ EitherCase (mapMaybeTree f =<< l) (mapMaybeTree f =<< r)
-    ListCase cons nil -> Just $ ListCase (mapMaybeTree f =<< cons) (f =<< nil)
-    NotVisited build x -> NotVisited build <$> f x
-
-mapMaybeNested :: (a -> Maybe b) -> Nested a -> Maybe (Nested b)
-mapMaybeNested f = \case
-    NotNested x -> NotNested <$> f x
-    Nested nested -> Nested <$> mapMaybeTree (mapMaybeNested f) nested
-
--- >>> checkCase (List (Either Unit Unit)) [Cons (MkTuple [L Var, Var])]
--- [Nil,Cons (MkTuple [R Var,Var])]
--- >>> checkCase (Tuple [Either Unit Unit, Either Unit Unit, Unit]) [MkTuple [L Var, R Var, Var]]
--- [MkTuple [L Var,L Var,Var],MkTuple [R Var,Var,Var]]
-checkCase :: Type -> [Pattern] -> [Pattern]
-checkCase t = missingPatterns (\_ x -> x) . foldr (\pat tree -> prunePattern pat (const Nothing) =<< tree) (buildCaseTree' t)
-
-missingPatterns :: (a -> [Pattern] -> [Pattern]) -> Maybe (CaseTree a) -> [Pattern]
-missingPatterns _ Nothing = []
-missingPatterns k (Just tree) = case tree of
-    (UnitCase x) -> k x [Var]
-    (NotVisited _ x) -> k x [Var]
-    (EitherCase l r) ->
-        missingPatterns (\x -> k x . fmap L) l
-            <> missingPatterns (\x -> k x . fmap R) r
-    (TupleCase nested) -> missingProducts k nested
-    (ListCase cons nil) -> maybe [] (`k` [Nil]) nil <> fmap Cons (missingPatterns k cons)
-
-missingProducts :: (a -> [Pattern] -> [Pattern]) -> Nested a -> [Pattern]
-missingProducts k (NotNested x) = k x [MkTuple []]
-missingProducts k (Nested tree) = missingPatterns (\nested lhs -> missingProducts (nestedCont lhs) nested) (Just tree)
+buildCaseTree' :: ConstructorTable -> ExType -> a -> CaseTree a
+buildCaseTree' _ OpaqueTy = Opaque
+buildCaseTree' conMap (TyCon name args) = NotVisited \k -> maybe (Opaque k) (Branch . fmap (flip (buildProdTree' conMap) k . ($ args))) constrs
   where
-    -- (\x -> k x . fmap UnTuple . liftA2 (:) lhs . fmap fromTuple)
-    nestedCont lhs x tailPats = k x do
-        head' <- lhs
-        tailPat' <- tailPats
-        pure $ MkTuple (head' : fromTuple tailPat')
+    constrs = Map.lookup name conMap.table
 
-    fromTuple (MkTuple pats) = pats
-    fromTuple _ = error "missingProducts: length mismatch"
+buildProdTree' :: ConstructorTable -> [ExType] -> b -> Nested b
+buildProdTree' _ [] = NotNested
+buildProdTree' conMap (t : types) = Nested . NotVisited (buildCaseTree' conMap t) . buildProdTree' conMap types

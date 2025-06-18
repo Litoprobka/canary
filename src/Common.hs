@@ -89,6 +89,7 @@ data Name_
     | CharName
     | TypeName
     deriving (Show, Eq, Generic, Hashable)
+    deriving (Pretty) via (UnAnnotate Name_)
 
 instance HasId Name_ where
     toId = \case
