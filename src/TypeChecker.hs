@@ -45,7 +45,7 @@ import Syntax.Row qualified as Row
 import Syntax.Term hiding (Record, Variant)
 import Syntax.Term qualified as E (Term_ (Record, Variant))
 import TypeChecker.Backend
-import TypeChecker.Exhaustiveness (checkExhaustiveness, checkExhaustiveness')
+import TypeChecker.Exhaustiveness (checkCompletePattern, checkExhaustiveness, checkExhaustiveness')
 import TypeChecker.Exhaustiveness qualified as Ex
 import TypeChecker.TypeError
 
@@ -254,13 +254,14 @@ check (e :@ loc) (typeToCheck :@ tyLoc) = do
             (argVal, valDiff) <- skolemizePattern' arg
             typedBody <- local' (defineMany valDiff . declareMany argVars) do
                 check body $ (closure `V.app` argVal) :@ tyLoc
-            checkExhaustiveness loc closure.ty [typedArg]
+            checkCompletePattern typedArg
             pure $ El.Lambda typedArg typedBody :@ loc ::: ty
         (Lambda arg body) ty@(V.Function from to) -> do
             (newTypes, typedArg) <- checkPattern arg $ from :@ tyLoc
             (_, valDiff) <- skolemizePattern' arg
             typedBody <- local' (defineMany valDiff . declareMany newTypes) do
                 check_ body to
+            checkCompletePattern typedArg
             pure $ El.Lambda typedArg typedBody :@ loc ::: ty
         (Annotation expr annTy) ty -> do
             annTyV <- typeFromTerm annTy
@@ -521,7 +522,7 @@ infer (e :@ loc) = case e of
         (_, valDiff) <- skolemizePattern' arg
         typedBody@(_ ::: bodyTy) <- local' (defineMany valDiff . declareMany typeMap) do
             infer body
-        checkExhaustiveness loc argTy [typedArg]
+        checkCompletePattern typedArg
         pure $ El.Lambda typedArg typedBody :@ loc ::: V.Function argTy bodyTy
     -- chances are, I'd want to add some specific error messages or context for wildcard lambdas
     -- for now, they are just desugared to normal lambdas before inference
@@ -662,6 +663,7 @@ inferBinding = \case
             -- we only need the subtype check when the univar is solved, i.e. when the
             -- function contains any recursive calls at all
             withUniVar uni (subtype ty . unMono)
+            traverse_ checkCompletePattern typedArgs
             pure (Map.one name ty, El.FunctionB name typedArgs typedBody)
 
 inferPattern :: InfEffs es => Pat -> Eff es (IdMap Name TypeDT, EPattern)
@@ -692,10 +694,12 @@ patternFuncs postprocess = (checkP, inferP)
         -- we need this case, since inferPattern only infers monotypes for var patterns
         VarP name -> pure (Map.one name ty, El.VarP name :@ ploc ::: unLoc ty)
         -- we probably do need a case for ConstructorP for the same reason
-        VariantP name arg ->
-            deepLookup Variant name ty >>= \case
-                Nothing -> typeError $ MissingVariant ty name
-                Just argTy -> checkP arg argTy
+        VariantP name arg -> do
+            (typeMap, typedArg) <-
+                deepLookup Variant name ty >>= \case
+                    Nothing -> typeError $ MissingVariant ty name
+                    Just argTy -> checkP arg argTy
+            pure (typeMap, El.VariantP name typedArg :@ ploc ::: unLoc ty)
         RecordP patRow -> do
             diff <- flip Row.traverseWithName patRow \name pat ->
                 deepLookup Record name ty >>= \case

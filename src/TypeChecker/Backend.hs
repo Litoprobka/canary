@@ -93,7 +93,7 @@ type InfEffs es =
 newtype ConstructorTable = ConstructorTable
     { table :: IdMap Name_ (IdMap Name_ ([ExType] -> [ExType]))
     }
-data ExType = TyCon Name_ [ExType] | OpaqueTy
+data ExType = TyCon Name_ [ExType] | ExVariant (ExtRow ExType) | OpaqueTy
     deriving (Show)
 
 data Break err :: Effect where

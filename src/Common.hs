@@ -214,6 +214,7 @@ data Literal_
     | TextLiteral Text
     | CharLiteral Text
     deriving (Eq, Ord)
+    deriving (Pretty) via UnAnnotate Literal_
 
 instance PrettyAnsi Literal_ where
     prettyAnsi _ = \case
