@@ -20,6 +20,8 @@ module Syntax.Row (
     isEmpty,
     traverseWithName,
     takeField,
+    prettyRecord,
+    prettyVariant,
 ) where
 
 import Common (SimpleName)
@@ -27,6 +29,7 @@ import Data.HashMap.Strict qualified as HashMap
 import Data.Sequence.NonEmpty (NESeq (..))
 import Data.Sequence.NonEmpty qualified as NESeq
 import GHC.IsList qualified as IsList
+import Prettyprinter (Doc, braces, brackets, comma, punctuate, sep, (<+>))
 import Relude hiding (empty)
 
 type OpenName = SimpleName
@@ -135,3 +138,20 @@ instance IsList (Row a) where
 -- Row (fromList [("a",fromList (1 :| [2,7])),("b",fromList (1 :| [4]))])
 instance Semigroup (Row a) where
     Row lhs <> Row rhs = Row $ HashMap.unionWith (<>) lhs rhs
+
+-- | pretty-print a record with an optional row extension
+prettyRecord :: Doc ann -> (SimpleName -> Doc ann) -> (a -> Doc ann) -> ExtRow a -> Doc ann
+prettyRecord separator prettyName prettyField row = braces . withExt prettyField row . sep . punctuate comma . map recordField $ sortedRow row.row
+  where
+    recordField (name, field) = prettyName name <+> separator <+> prettyField field
+
+-- | pretty-print a variant type with an optional row extension
+prettyVariant :: (SimpleName -> Doc ann) -> (a -> Doc ann) -> ExtRow a -> Doc ann
+prettyVariant prettyName prettyField row = brackets . ("|" <+>) . withExt prettyField row . sep . punctuate comma . map variantItem $ sortedRow row.row
+  where
+    -- todo: a special case for unit
+    variantItem (name, ty) = prettyName name <+> prettyField ty
+
+-- | a helper for the pretty-printing functions
+withExt :: (a -> Doc ann) -> ExtRow a -> Doc ann -> Doc ann
+withExt prettyField row = maybe id (\r doc -> doc <+> "|" <+> prettyField r) (extension row)

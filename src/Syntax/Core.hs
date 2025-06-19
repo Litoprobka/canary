@@ -19,7 +19,7 @@ import Error.Diagnose (Position (..))
 import LangPrelude
 import Prettyprinter
 import Prettyprinter.Render.Terminal (AnsiStyle)
-import Syntax.Row (ExtRow (..), OpenName, Row, extension, sortedRow)
+import Syntax.Row (ExtRow (..), OpenName, Row, prettyRecord, prettyVariant, sortedRow)
 import Syntax.Term (Erasure (..), Quantifier (..), Visibility (..))
 
 data CorePattern
@@ -84,7 +84,7 @@ instance PrettyAnsi CoreTerm_ where
             Con name args -> parensWhen 3 $ hsep (prettyAnsi opts name : map (go 3) args)
             Lambda name body -> parensWhen 1 $ specSym "λ" <> prettyAnsi opts name <+> compressLambda body
             App lhs rhs -> parensWhen 3 $ go 2 lhs <+> go 3 rhs
-            Record row -> braces . sep . punctuate comma . map recordField $ sortedRow row
+            Record row -> prettyRecord "=" (prettyAnsi opts) (go 0) (NoExtRow row)
             Sigma x y -> parensWhen 1 $ go 0 x <+> specSym "**" <+> go 0 y
             Variant name -> prettyAnsi opts name
             Case arg matches ->
@@ -98,23 +98,18 @@ instance PrettyAnsi CoreTerm_ where
             Literal lit -> prettyAnsi opts lit
             Function from to -> parensWhen 2 $ go 2 from <+> specSym "->" <+> go 0 to
             Q q vis er name ty body -> parensWhen 1 $ kw q er <+> prettyBinder name ty <+> compressQ q vis er body
-            VariantT row -> brackets . ("|" <+>) . withExt row . sep . punctuate comma . map variantItem $ sortedRow row.row
-            RecordT row -> braces . withExt row . sep . punctuate comma . map recordTyField $ sortedRow row.row
+            VariantT row -> prettyVariant (prettyAnsi opts) (go 0) row
+            RecordT row -> prettyRecord ":" (prettyAnsi opts) (go 0) row
             UniVar uni -> prettyAnsi opts uni
           where
             parensWhen minPrec
                 | n >= minPrec = parens
                 | otherwise = id
-            recordField (name, body) = prettyAnsi opts name <+> specSym "=" <+> go 0 body
-            withExt row = maybe id (\r doc -> doc <+> specSym "|" <+> go 0 r) (extension row)
 
             kw Forall Erased = keyword "∀"
             kw Forall Retained = keyword "Π"
             kw Exists Erased = keyword "∃"
             kw Exists Retained = keyword "Σ"
-
-            variantItem (name, ty) = conColor (prettyAnsi opts name) <+> go 0 ty
-            recordTyField (name, ty) = prettyAnsi opts name <+> specSym ":" <+> go 0 ty
 
         compressLambda (L term) = case term of
             Lambda name body -> prettyAnsi opts name <+> compressLambda body

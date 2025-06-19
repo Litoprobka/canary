@@ -1,14 +1,16 @@
 # A very WIP programming language
 
-An unnamed (as of yet) Haskell-like programming languge
+Canary (name subject to change), a Haskell-like programming languge
 
 There's no concrete plan for the language. For the most part, I'm just figuring out how compilers work.
 
 ## What is implemented
 
-- a parser that supports 90% of the syntax
+- a parser
 - name resolution
-- type checking
+- type checking with dependent types (but no higher order unification yet), pattern exhaustiveness checking
+- custom operators
+- a tree-walk interpeter that's used for elaboration
 
 ## What is lacking
 
@@ -32,13 +34,15 @@ map f = match
 
 Right away, you may notice some differences. Compared to Haskell,
 - type signatures use `:` instead of `::`.
-- Forall clauses are required. This way, type names don't have to be uppercase, and value-level identifiers may be used at the type level with no ambiguity (the plan is to have dependent type-esque facilities at compile time, if not outright dependent types).
+- Forall clauses are required. This way, type names don't have to be uppercase, and value-level identifiers may be used at the type level with no ambiguity, which is a most for dependent types.
 - functions may not have multiple bodies. Instead, there's a `match` expression that behaves the same as `\cases` in Haskell.
 - (currently unimplemented) types have their own namespaces, and constructors have to be qualified by default
 
 ### Type system
 
-The type system is based on *Complete And Easy Bidirectional Typechecking for Higher-Rank Polymorphism* with some elements of Hindley-Milner.
+Canary features a dependently-typed system with Type-In-Type and no higher order unification yet.
+
+The type checker algorithm was based on *Complete And Easy Bidirectional Typechecking for Higher-Rank Polymorphism* with some elements of Hindley-Milner, and was further extended with dependent type support.
 
 It can infer anything that HM can, but for higher-rank types, explicit annotations are required.
 
@@ -48,7 +52,7 @@ The language supports existential quantification as well as universal quantifica
 
 ```haskell
 listOfSomething : exists a. List a
-listOfSomething = ["'a", "is", "Text,", "actually"]
+listOfSomething = ["a", "is", "Text,", "actually"]
 ```
 In simple cases like this, existentials don't make much sense - we could have just annotated `listOfSomething` with `List Text` instead!
 
@@ -68,7 +72,7 @@ computation = runST <| do
 ```
 and there's no need to special case `<|` [like GHC used to have](https://gitlab.haskell.org/ghc/ghc/blob/795986aaf33e2ffc233836b86a92a77366c91db2/compiler/typecheck/TcExpr.hs#L323-L334) with `$`
 
-In general, wherever Haskell type checking failed with the funky message about a skolem escaping its scope, *language name* infers an existential instead.
+In general, wherever Haskell type checking failed with the funky message about a skolem escaping its scope, Canary tries to infer an existential or a bottom (`forall a. a`) depending on variance.
 
 Some other use cases:
 
@@ -111,11 +115,11 @@ There's a subtle quirk that makes this style possible - whenever a local binding
 
 #### Row polymorphism
 
-*TODO*. You may read *Extensible records with scoped labels* in the meantime.
+The usual polymorphic records and variants with support for duplicate labels and row extensions, as described in *Extensible records with scoped labels*. No dependently-typed records (yet?).
 
 ### Wildcard lambdas
 
-*name of the language* doesn't have operator sections (`(+3) :: Int -> Int`). Instead, there's a more general feature called wildcard lambdas (or something else if I come up with a better name).
+Canary doesn't have operator sections (`(+3) :: Int -> Int`). Instead, there's a more general feature called wildcard lambdas (or something else if I come up with a better name).
 
 ```haskell
 plus3 = (_ + 3)
@@ -142,7 +146,7 @@ someRecord = {x = 0, y = _}
 
 ### User-defined operators
 
-Just like Haskell, *language* features user-defined operators
+Just like Haskell, Canary features user-defined operators
 
 ```haskell
 infix %

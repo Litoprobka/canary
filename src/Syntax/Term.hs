@@ -145,7 +145,7 @@ instance PrettyAnsi (NameAt p) => PrettyAnsi (Expr_ p) where
             ImplicitVar var -> prettyAnsi opts var
             Parens expr -> parens $ go 0 expr
             Variant name -> prettyAnsi opts name
-            Record row -> braces . sep . punctuate comma . map recordField $ sortedRow row
+            Record row -> prettyRecord "=" (prettyAnsi opts) (go 0) (NoExtRow row)
             Sigma x y -> parensWhen 1 $ go 0 x <+> "**" <+> go 0 y
             List xs -> brackets . sep . punctuate comma $ go 0 <$> xs
             Do stmts lastAction -> nest 2 $ vsep ("do" : fmap (prettyAnsi opts) stmts <> [go 0 lastAction])
@@ -153,14 +153,12 @@ instance PrettyAnsi (NameAt p) => PrettyAnsi (Expr_ p) where
             InfixE pairs last' -> "?(" <> sep (concatMap (\(lhs, op) -> go 3 lhs : maybe [] (pure . prettyAnsi opts) op) pairs <> [go 0 last']) <> ")"
             Function from to -> parensWhen 2 $ go 2 from <+> "->" <+> go 0 to
             Q q vis er binder body -> parensWhen 2 $ kw q er <+> prettyBinder opts binder <+> compressQ q vis er body
-            VariantT row -> brackets . ("|" <+>) . withExt row . sep . punctuate comma . map variantItem $ sortedRow row.row
-            RecordT row -> braces . withExt row . sep . punctuate comma . map recordTyField $ sortedRow row.row
+            VariantT row -> prettyVariant (prettyAnsi opts) (go 0) row
+            RecordT row -> prettyRecord ":" (prettyAnsi opts) (go 0) row
           where
             parensWhen minPrec
                 | n >= minPrec = parens
                 | otherwise = id
-            recordField (name, body) = prettyAnsi opts name <+> "=" <+> go 0 body
-            withExt row = maybe id (\r doc -> doc <+> "|" <+> go 0 r) (extension row)
 
             kw Forall Erased = "∀"
             kw Forall Retained = "Π"
@@ -180,10 +178,6 @@ instance PrettyAnsi (NameAt p) => PrettyAnsi (Expr_ p) where
             arrOrDot Forall Visible = "->"
             arrOrDot Exists Visible = "**"
             arrOrDot _ _ = "."
-
-            -- todo: a special case for unit
-            variantItem (name, ty) = prettyAnsi opts name <+> go 0 ty
-            recordTyField (name, ty) = prettyAnsi opts name <+> ":" <+> go 0 ty
 
 dummyLoc :: Loc
 dummyLoc = C.Loc Position{file = "<none>", begin = (0, 0), end = (0, 0)}
