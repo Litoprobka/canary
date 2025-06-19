@@ -1,7 +1,16 @@
--- this example doesn't work yet, but should
 type Refl : Type -> Type -> Type where
     MkRefl : forall a. Refl a a
 
 indeed : forall a b. Refl a b -> a -> b
 indeed r x = case r of
+    MkRefl -> x
+
+type Maybe a = Just a | Nothing
+
+nested : forall a b. Refl a b -> Maybe a -> Maybe b
+nested r x = case r of
+    MkRefl -> x
+
+quirky : forall a b. Refl (Maybe a) (Maybe b) -> a -> b
+quirky r x = case r of
     MkRefl -> x

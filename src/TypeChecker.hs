@@ -196,14 +196,14 @@ subtype (lhs_ :@ locL) (rhs_ :@ locR) = do
             skolem <- freshSkolem $ toSimpleName closure.var
             subtypeLoc (V.app closure skolem) outr
         (V.App lhs rhs) (V.App lhs' rhs') -> do
-            -- note that we assume the same variance for all type parameters
             -- seems like we need to track variance in kinds for this to work properly
             -- higher-kinded types are also problematic when it comes to variance, i.e.
             -- is `f a` a subtype of `f b` when a is `a` subtype of `b` or the other way around?
             --
             -- QuickLook just assumes that all constructors are invariant and -> is a special case
-            subtypeLoc lhs lhs'
-            subtypeLoc rhs rhs'
+            -- for now, we do the same
+            join $ subtypeLoc <$> monoLayer' Inv lhs <*> monoLayer' Inv lhs'
+            join $ subtypeLoc <$> monoLayer' Inv rhs <*> monoLayer' Inv rhs'
         (V.VariantT lhs) (V.VariantT rhs) -> subtypeRows Variant lhs rhs
         (V.RecordT lhs) (V.RecordT rhs) -> subtypeRows Record lhs rhs
         lhs rhs -> typeError $ NotASubtype (lhs :@ locL) (rhs :@ locR) Nothing
@@ -280,7 +280,7 @@ check (e :@ loc) (typeToCheck :@ tyLoc) = do
                     (typedPat, newValues) <- runState env.values do
                         patValue <- skolemizePattern pat
                         typedPat@(_ ::: truePatTy) <- snd <$> inferPattern pat
-                        localEquality argTy truePatTy
+                        localEquality (argTy :@ argLoc) truePatTy
                         traverse_ (`localEquality` patValue) (mbArgV env)
                         pure typedPat
                     typedBody <- local' (\tcenv -> tcenv{values = newValues}) do
@@ -292,7 +292,7 @@ check (e :@ loc) (typeToCheck :@ tyLoc) = do
             -- a special case for matching on a var seems janky, but apparently that's how Idris does this
             -- we can do better: eval the arg with the current scope, which would yield a skolem for unbound vars anyway
             mbArgV env = case arg of
-                L (Name name) -> Map.lookup name env.values.values
+                L (Name name) -> (:@ getLoc arg) <$> Map.lookup name env.values.values
                 _ -> Nothing
         (Match matches) ty -> do
             n <- whenNothing (getArgCount matches) $ typeError $ ArgCountMismatch loc
@@ -410,34 +410,45 @@ To perform the refinement, we have to
 -- an implementation of depedendent pattern matching, pretty much
 -- invariant: two arguments are pattern-matching-compatible
 -- todo: seems like localEquality should require monotypes. When do we skolemise, do we do it by layer or all at once?
-localEquality :: InfEffs es => V.Value -> V.Value -> Eff (State ValueEnv : es) ()
-localEquality argVal patVal = do
+localEquality :: InfEffs es => Located V.Value -> V.Value -> Eff (State ValueEnv : es) ()
+localEquality argVal@(_ :@ loc) patVal = do
     venv <- get
-    case (argVal, patVal) of
+    case (unLoc argVal, patVal) of
         (V.Var skolem, _) -> case LMap.lookup skolem venv.values of
-            Just val' -> localEquality val' patVal
+            Just val' -> localEquality (val' :@ loc) patVal
             Nothing -> put venv{V.values = LMap.insert skolem patVal $ V.values venv}
         (_, V.Var skolem) -> case LMap.lookup skolem venv.values of
             Just val' -> localEquality argVal val'
             Nothing -> pass
         (lhsF `V.App` lhsArg, rhsF `V.App` rhsArg) -> do
-            localEquality lhsF rhsF
-            localEquality lhsArg rhsArg
+            localEquality (lhsF :@ loc) rhsF
+            localEquality (lhsArg :@ loc) rhsArg
         (V.Con lhsName lhsVals, V.Con rhsName rhsVals)
             | lhsName == rhsName ->
-                zipWithM_ localEquality lhsVals rhsVals
-        (V.Record lhs, V.Record rhs) -> void $ Row.unionWithM (\l r -> l <$ localEquality l r) lhs rhs
-        (V.Variant lhsName lhsArg, V.Variant rhsName rhsArg) | lhsName == rhsName -> localEquality lhsArg rhsArg
+                zipWithM_ localEquality (fmap (:@ loc) lhsVals) rhsVals
+        (V.Record lhs, V.Record rhs) -> void $ Row.unionWithM (\l r -> l <$ localEquality (l :@ loc) r) lhs rhs
+        (V.Variant lhsName lhsArg, V.Variant rhsName rhsArg) | lhsName == rhsName -> localEquality (lhsArg :@ loc) rhsArg
         (V.Sigma lhsX lhsY, V.Sigma rhsX rhsY) -> do
-            localEquality lhsX rhsX
-            localEquality lhsY rhsY
+            localEquality (lhsX :@ loc) rhsX
+            localEquality (lhsY :@ loc) rhsY
         (V.Function lhsFrom lhsTo, V.Function rhsFrom rhsTo) -> do
-            localEquality lhsFrom rhsFrom
-            localEquality lhsTo rhsTo
+            localEquality (lhsFrom :@ loc) rhsFrom
+            localEquality (lhsTo :@ loc) rhsTo
         -- todo: the rest of the cases
         -- RecordT and VariantT are complicated because of row extensions
         -- it's not clear whether we should touch UniVars at all
+        (_, V.UniVar uni) ->
+            lookupUniVar uni >>= \case
+                Right body -> localEquality argVal . unLoc $ unMono body
+                -- todo: because of this pesky Loc requirement I had to pollute the whole function with Loc propagation
+                -- I should probably rethink location information in types
+                Left _ -> solveUniVar uni =<< mono In argVal
         _ -> pass
+
+-- localEquality (Maybe a?) #a ---> #a ~ Maybe a?
+-- localEquality (Maybe b?) #a
+--   localEquality (Maybe b?) (Maybe a?)
+--     localEquality b? a?
 
 skolemizePattern' :: InfEffs es => Pat -> Eff es (V.Value, IdMap Name V.Value)
 skolemizePattern' pat = do
@@ -679,8 +690,9 @@ checkPattern = fst (patternFuncs pure)
 checkPatternRelaxed :: InfEffs es => Pat -> TypeDT -> Eff es (IdMap Name TypeDT, EPattern)
 checkPatternRelaxed = fst (patternFuncs go)
   where
+    -- we convert a restricted constructor type, like `VCons x xs : Vec (S 'n) 'a` or `VNil : Vec Z 'a`
+    -- to a relaxed one, like `VCons x xs : Vec 'm 'a` or `VNil : Vec 'n 'a`
     go = \case
-        lhs `V.App` u@V.UniVar{} -> V.App <$> go lhs <*> pure u
         lhs `V.App` _ -> V.App <$> go lhs <*> freshUniVar
         other -> pure other
 

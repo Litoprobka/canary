@@ -128,8 +128,6 @@ data CaseTree a
     | Opaque a -- can be matched only by a wildcard
     | NotVisited (forall b. b -> CaseTree b) a
 
--- todo: variants, records and primitives
-
 data Nested a
     = NotNested a
     | Nested (CaseTree (Nested a))
@@ -237,6 +235,8 @@ buildCaseTree conMap = \cases
     (TyCon NatName _) -> IntBranch IntMap.empty
     (TyCon CharName _) -> CharBranch HashMap.empty
     (TyCon TextName _) -> TextBranch HashMap.empty
+    -- todo: NotVisited nodes should never be empty, but these two cases may produce an empty branch
+    -- perhaps it would be cleaner to change NotVisited to `NotVisited (forall b. b -> Maybe (CaseTree b)) a`
     (TyCon name args) -> NotVisited \k -> maybe (Opaque k) (Branch . fmap (flip (buildProdTree' conMap) k . ($ args))) (Map.lookup name conMap.table)
     (ExVariant row) -> NotVisited \k ->
         VariantBranch
