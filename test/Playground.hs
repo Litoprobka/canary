@@ -225,8 +225,8 @@ literal_ :: Literal -> Term p
 literal_ = noLoc . E.Literal
 
 intLit :: Int -> Literal
-intLit = noLoc . IntLiteral
+intLit = IntLiteral
 textLit :: Text -> Literal
-textLit = noLoc . TextLiteral
+textLit = TextLiteral
 charLit :: Text -> Literal
-charLit = noLoc . CharLiteral
+charLit = CharLiteral

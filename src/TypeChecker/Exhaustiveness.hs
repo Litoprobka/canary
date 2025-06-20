@@ -59,7 +59,7 @@ simplifyPattern (p :@ _ ::: _) = case p of
     E.ListP pats -> foldr (\x xs -> Con ConsName [simplifyPattern x, xs]) (Con NilName []) pats
     E.VariantP name arg -> VariantP (unLoc name) $ simplifyPattern arg
     E.RecordP row -> RecordP $ fmap simplifyPattern row
-    E.LiteralP lit -> LiteralP $ unLoc lit
+    E.LiteralP lit -> LiteralP lit
 
 -- anything fancy gets converted into an OpaqueTy
 -- however, most constructs cannot appear in a value of type Type at all,
@@ -95,7 +95,7 @@ data Pattern
     = Con Name_ [Pattern]
     | VariantP SimpleName_ Pattern
     | RecordP (Row Pattern)
-    | LiteralP Literal_
+    | LiteralP Literal
     | Wildcard
 
 instance Show Pattern where

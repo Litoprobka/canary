@@ -9,6 +9,7 @@
 {-# LANGUAGE TypeFamilies #-}
 {-# LANGUAGE NoFieldSelectors #-}
 {-# OPTIONS_GHC -Wno-missing-export-lists #-}
+{-# OPTIONS_GHC -Wno-partial-fields #-}
 
 module TypeChecker.Backend where
 
@@ -53,6 +54,12 @@ data Monotype_
     | MSigma Monotype_ Monotype_
     | MVariant OpenName Monotype_
     | MPrim Literal
+    | MPrimFn
+        { name :: Name
+        , remaining :: Int
+        , captured :: [Monotype_]
+        , f :: NonEmpty Value -> Value
+        }
     | -- types
       MFn Monotype_ Monotype_
     | MQ Quantifier Erasure (MonoClosure Monotype_)
@@ -210,6 +217,7 @@ alterUniVar override uni ty = do
             MRecord row -> NoCycle <$ traverse_ (go (Indirect, acc)) row
             MSigma x y -> go (Indirect, acc) x >> go (Indirect, acc) y
             MLambda closure -> cycleCheckClosure acc closure
+            MPrimFn{captured} -> NoCycle <$ traverse_ (go (Indirect, acc)) captured
             MCase _arg _matches -> internalError' "todo: cycleCheck stuck MCase" -- go (Indirect, acc) arg <* traverse_ _what matches
             MTyCon{} -> pure NoCycle
             MSkolem{} -> pure NoCycle
@@ -427,6 +435,7 @@ unMono' = \case
     MLambda MonoClosure{var, ty, env, body} -> V.Lambda V.Closure{var, ty, env, body}
     MQ q e MonoClosure{var, ty, env, body} -> V.Q q Visible e V.Closure{var, ty = unMono' ty, env, body}
     MPrim val -> V.PrimValue val
+    MPrimFn{name, remaining, captured, f} -> V.PrimFunction{name, remaining, captured = map unMono' captured, f}
     MCase arg matches -> V.Case (unMono' arg) (fmap toPatternClosure matches)
   where
     toPatternClosure MonoPatternClosure{pat, ty, env, body} = V.PatternClosure{pat, ty, env, body}

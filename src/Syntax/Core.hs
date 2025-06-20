@@ -2,7 +2,6 @@ module Syntax.Core where
 
 import Common (
     Literal,
-    Literal_,
     Loc (..),
     Located (..),
     Name,
@@ -28,7 +27,7 @@ data CorePattern
     | ConstructorP Name [Name]
     | VariantP OpenName Name
     | RecordP (Row Name)
-    | LiteralP Literal_
+    | LiteralP Literal
 
 instance PrettyAnsi CorePattern where
     prettyAnsi opts = \case

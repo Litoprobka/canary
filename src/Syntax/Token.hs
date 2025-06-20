@@ -4,7 +4,7 @@
 
 module Syntax.Token where
 
-import Common (Literal_, PrettyAnsi (..), UnAnnotate (..), prettyDef, pattern L)
+import Common (Literal, PrettyAnsi (..), UnAnnotate (..), prettyDef, pattern L)
 import Data.Char (isAlphaNum)
 import LangPrelude
 import Language.Haskell.TH qualified as TH
@@ -24,7 +24,7 @@ data Token
     | SpecialSymbol SpecialSymbol
     | Op Text
     | ColonOp Text
-    | Literal Literal_
+    | Literal Literal
     | LParen
     | RParen
     | TightLBrace -- a brace with no leading whitespace

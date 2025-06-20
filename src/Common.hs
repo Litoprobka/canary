@@ -207,16 +207,14 @@ instance Eq Loc where
 
 instance Hashable Loc where
     hashWithSalt salt _ = salt
-
-type Literal = Located Literal_
-data Literal_
+data Literal
     = IntLiteral Int
     | TextLiteral Text
     | CharLiteral Text
     deriving (Eq, Ord)
-    deriving (Pretty) via UnAnnotate Literal_
+    deriving (Pretty) via UnAnnotate Literal
 
-instance PrettyAnsi Literal_ where
+instance PrettyAnsi Literal where
     prettyAnsi _ = \case
         IntLiteral num -> pretty num
         TextLiteral txt -> dquotes $ pretty txt

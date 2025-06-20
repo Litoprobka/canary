@@ -1,4 +1,3 @@
-{-# LANGUAGE OverloadedLists #-}
 {-# LANGUAGE OverloadedRecordDot #-}
 {-# LANGUAGE RecordWildCards #-}
 {-# LANGUAGE TemplateHaskell #-}
@@ -7,6 +6,7 @@ module Repl where
 
 import Common (
     Fixity (..),
+    Literal (..),
     Loc (..),
     Located (..),
     Name,
@@ -51,7 +51,9 @@ import Syntax
 import Syntax.AstTraversal
 import Syntax.Declaration qualified as D
 import Syntax.Elaborated (ETerm, Typed (..))
+import Syntax.Row (ExtRow (..))
 import Syntax.Term
+import Syntax.Term qualified as T
 import System.Console.Isocline
 import TypeChecker (infer, inferDeclaration, normaliseAll)
 import TypeChecker.Backend qualified as TC
@@ -118,30 +120,62 @@ mkDefaultEnv = do
         env <- ask @TC.Env
         foldlM addDecl env fixityDecls
     guardNoErrors
-    pure $
-        ReplEnv
-            { values = env.values
-            , fixityMap
-            , operatorPriorities
-            , scope = newScope
-            , types
-            , lastLoadedFile = Nothing
-            , loadedFiles = mempty
-            , inputBS = BS.empty
-            , input = Text.empty
-            , constructorTable
-            }
+    let newEnv =
+            ReplEnv
+                { values = env.values
+                , fixityMap
+                , operatorPriorities
+                , scope = newScope
+                , types
+                , lastLoadedFile = Nothing
+                , loadedFiles = mempty
+                , inputBS = BS.empty
+                , input = Text.empty
+                , constructorTable
+                }
+    foldlM (flip mkBuiltin) newEnv builtins
   where
     addDecl env decl = TC.local' (const env) do
         (typedDecl, envDiff) <- inferDeclaration decl
         newValues <- modifyEnv (envDiff env.values) [typedDecl]
         pure env{TC.values = newValues}
 
+    -- \| add a built-in function definition to the ReplEnv
+    mkBuiltin (rawName, argCount, rawTy, resolveF) env@ReplEnv{..} = do
+        ((name, ty, f), newScope) <- NameResolution.runWithEnv env.scope do
+            name <- NameResolution.declare $ Name' rawName :@ builtin
+            ty <- NameResolution.resolveTerm rawTy
+            f <- resolveF
+            pure (name, ty, f)
+        let val = V.PrimFunction{name, remaining = argCount, captured = [], f}
+        tyWithoutDepRes <- cast.term ty
+        afterFixityRes <- Fixity.run env.fixityMap env.operatorPriorities $ Fixity.parse tyWithoutDepRes
+        -- this is really janky
+        elaboratedTy <-
+            runReader @"values" env.values
+                . runLabeled @"types" (evalState env.types)
+                . evalState env.types
+                . evalState env.constructorTable
+                . TC.run env.values
+                $ do
+                    (expr, tyty :@ loc) <- normaliseAll do
+                        expr' :@ loc ::: tyty <- infer afterFixityRes
+                        pure (expr', tyty :@ loc)
+                    pure $ expr :@ loc ::: tyty
+        tyAsVal <- V.eval env.values elaboratedTy
+        pure
+            ReplEnv
+                { types = Map.insert name (tyAsVal :@ builtin) env.types
+                , values = ValueEnv $ Map.insert name val env.values.values
+                , scope = newScope
+                , ..
+                }
+
     mkPreprelude :: NameGen :> es => Eff es ([Declaration 'NameRes], Scope)
     mkPreprelude = do
         false <- freshName' "False"
         a <- freshName' "a"
-        let builtinTypes = [C.TypeName, C.IntName, C.NatName, C.TextName]
+        let builtinTypes = [C.TypeName, C.IntName, C.NatName, C.TextName, C.CharName]
             decls =
                 map
                     noLoc
@@ -166,12 +200,66 @@ mkDefaultEnv = do
                     , ("Int", noLoc C.IntName)
                     , ("Nat", noLoc C.NatName)
                     , ("Text", noLoc C.TextName)
+                    , ("Char", noLoc C.CharName)
                     ]
         pure (decls, scope)
     freshName' :: NameGen :> es => Text -> Eff es C.Name
     freshName' = freshName . noLoc . C.Name'
+    builtins =
+        [
+            ( "reverse"
+            , 1
+            , T.Function (nameTerm "Text") (nameTerm "Text") :@ builtin
+            , pure \case
+                V.PrimValue (TextLiteral txt) :| _ -> V.PrimValue $ TextLiteral (Text.reverse txt)
+                _ -> error "reverse applied to a non-text value"
+            )
+        ,
+            ( "uncons"
+            , 1
+            , T.Function
+                (nameTerm "Text")
+                (T.RecordT (NoExtRow $ fromList [(name' "head", nameTerm "Char"), (name' "tail", nameTerm "Text")]) :@ builtin)
+                :@ builtin
+            , do
+                just <- NameResolution.resolve $ name' "Just"
+                nothing <- NameResolution.resolve $ name' "Nothing"
+                pure \case
+                    V.PrimValue (TextLiteral txt) :| _ -> case Text.uncons txt of
+                        Nothing -> V.Con nothing []
+                        Just (h, t) ->
+                            V.Con
+                                just
+                                [V.Record $ fromList [(name' "head", V.PrimValue $ CharLiteral (one h)), (name' "tail", V.PrimValue $ TextLiteral t)]]
+                    _ -> error "uncons applied to a non-text value"
+            )
+        ,
+            ( "add"
+            , 2
+            , T.Function (nameTerm "Int") (T.Function (nameTerm "Int") (nameTerm "Int") :@ builtin) :@ builtin
+            , pure \case
+                V.PrimValue (IntLiteral rhs) :| V.PrimValue (IntLiteral lhs) : _ -> V.PrimValue $ IntLiteral (lhs + rhs)
+                _ -> error "invalid arguments to add"
+            )
+        ,
+            ( "sub"
+            , 2
+            , T.Function (nameTerm "Int") (T.Function (nameTerm "Int") (nameTerm "Int") :@ builtin) :@ builtin
+            , pure \case
+                V.PrimValue (IntLiteral rhs) :| V.PrimValue (IntLiteral lhs) : _ -> V.PrimValue $ IntLiteral (lhs - rhs)
+                _ -> error "invalid arguments to sub"
+            )
+        ]
+    prelude :: [Declaration 'Parse]
     prelude =
-        []
+        [ D.Type
+            (name' "Maybe")
+            [VarBinder{var = name' "a", kind = Nothing}]
+            [D.Constructor builtin (name' "Just") [nameTerm "a"], D.Constructor builtin (name' "Nothing") []]
+            :@ builtin
+        ]
+    name' txt = Name' txt :@ builtin
+    nameTerm txt = T.Name (name' txt) :@ builtin
 
 {- D.Type Blank "Unit" [] [D.Constructor Blank "MkUnit" []]
 -- , D.Value Blank (FunctionB "id" [VarP "x"] (Name "x")) []
@@ -257,8 +345,10 @@ replStep env@ReplEnv{loadedFiles} command = do
         afterNameRes <- NameResolution.run env.scope $ resolveTerm expr
         skippedDepRes <- cast.term afterNameRes
         afterFixityRes <- Fixity.run env.fixityMap env.operatorPriorities $ Fixity.parse skippedDepRes
-        runLabeled @"types" (evalState env.types) $
-            evalState env.constructorTable $ TC.run env.values do
+        runLabeled @"types" (evalState env.types)
+            . evalState env.constructorTable
+            . TC.run env.values
+            $ do
                 (expr', ty :@ loc) <- normaliseAll do
                     expr' :@ loc ::: ty <- infer afterFixityRes
                     pure (expr', ty :@ loc)

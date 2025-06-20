@@ -6,7 +6,7 @@
 
 module Lexer where
 
-import Common (Literal_ (..), Loc (..), Located (..), SimpleName, SimpleName_ (..), unLoc, zipLoc, pattern L, pattern Located)
+import Common (Literal (..), Loc (..), Located (..), SimpleName, SimpleName_ (..), unLoc, zipLoc, pattern L, pattern Located)
 import Common qualified as C
 import Control.Monad.Combinators (between, choice, sepBy, sepEndBy, sepEndBy1, skipManyTill, someTill_)
 import Control.Monad.Combinators qualified as P
@@ -103,7 +103,7 @@ variantConstructor :: Parser e SimpleName
 variantConstructor = mkName $(tok 'VariantName)
 
 literal :: Parser e C.Literal
-literal = located $(tok 'Literal)
+literal = $(tok 'Literal)
 
 anyOperator :: Parser e SimpleName
 anyOperator = termOperator <|> colonOperator
@@ -378,12 +378,12 @@ spaceOrLineWrap = void $ FP.skipMany space1 `sepBy` lineWrap
         currentIndent <- columnBytes
         guard $ currentIndent > blockIndent
 
-intLiteral :: Lexer Literal_
+intLiteral :: Lexer Literal
 intLiteral = IntLiteral <$> anyAsciiDecimalInt
 
 -- todo: handle escape sequences and interpolation
-textLiteral :: Lexer Literal_
+textLiteral :: Lexer Literal
 textLiteral = fmap (TextLiteral . Text.pack) $ between $(char '\"') $(char '\"') $ many (satisfy (/= '"'))
 
-charLiteral :: Lexer Literal_
+charLiteral :: Lexer Literal
 charLiteral = CharLiteral . one <$> between $(char '\'') $(char '\'') anyChar

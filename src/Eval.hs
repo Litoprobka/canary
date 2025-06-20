@@ -6,7 +6,7 @@
 {-# LANGUAGE PatternSynonyms #-}
 {-# OPTIONS_GHC -Wno-orphans #-}
 
-module Eval (quote, eval, evalCore, unstuck, modifyEnv, evalAll, mkLambda', app, module Reexport, desugarElaborated) where
+module Eval (quote, eval, evalCore, unstuck, modifyEnv, evalAll, app, module Reexport, desugarElaborated, mkLambda1, mkLambda2, mkLambda3) where
 
 import Common (
     Loc (..),
@@ -29,6 +29,8 @@ import Diagnostic
 import Error.Diagnose (Position (..))
 
 -- IdMap is currently lazy anyway, but it's up to change
+
+import Data.Foldable (foldrM)
 import IdMap qualified as LMap
 import LangPrelude
 import NameGen (NameGen, freshName)
@@ -48,7 +50,9 @@ quoteForPrinting (value :@ loc) = Located loc case value of
     TyCon name -> C.TyCon name
     Con con args -> C.Con con (map quoteWithLoc args)
     Lambda closure -> C.Lambda closure.var (quoteWithLoc $ closureBody closure)
-    PrimFunction name f -> unLoc . quoteWithLoc $ f (Var name)
+    PrimFunction{name, captured} ->
+        -- captured names are stored as a stack, i.e. backwards, so we fold right rather than left here
+        unLoc $ foldr (\arg acc -> C.App acc (quoteForPrinting $ arg :@ loc) :@ loc) (C.Name name :@ loc) captured
     Record vals -> C.Record $ fmap quoteWithLoc vals
     Sigma x y -> C.Sigma (quoteWithLoc x) (quoteWithLoc y)
     Variant name val -> C.App (C.Variant name :@ getLoc name) $ quoteWithLoc val
@@ -81,7 +85,12 @@ quote (value :@ loc) =
         Lambda closure -> do
             (var, body) <- closureBody' closure
             C.Lambda var <$> quoteWithLoc body
-        PrimFunction name f -> fmap unLoc . quoteWithLoc $ f (Var name)
+        PrimFunction{name, captured} ->
+            unLoc <$> foldrM mkApp (C.Name name :@ loc) captured
+          where
+            mkApp arg acc = do
+                argTerm <- quote $ arg :@ loc
+                pure $ C.App acc argTerm :@ loc
         Record vals -> C.Record <$> traverse quoteWithLoc vals
         Sigma x y -> C.Sigma <$> quoteWithLoc x <*> quoteWithLoc y
         Variant name val -> C.App (C.Variant name :@ getLoc name) <$> quoteWithLoc val
@@ -110,6 +119,9 @@ evalCore !env (L term) = case term of
     C.App (L (C.Variant name)) arg -> Variant name $ evalCore env arg -- this is a bit of an ugly case
     C.App lhs rhs -> case (evalCore env lhs, evalCore env rhs) of
         (Lambda closure, arg) -> closure `app` arg
+        (prim@PrimFunction{}, var) | isStuck var -> App prim var
+        (PrimFunction{remaining = 1, captured, f}, arg) -> f (arg :| captured)
+        (PrimFunction{name, remaining, captured, f}, arg) -> PrimFunction name (pred remaining) (arg : captured) f
         (other, arg) -> App other arg
     C.Case arg matches ->
         let val = evalCore env arg
@@ -180,7 +192,7 @@ matchCore env = \cases
     (C.RecordP varRow) (Record row) ->
         let (pairs, _, _) = Row.zipRows varRow row
          in Just $ env{values = foldl' (flip $ uncurry LMap.insert) env.values pairs}
-    (C.LiteralP lit) (PrimValue (L val)) -> env <$ guard (lit == val)
+    (C.LiteralP lit) (PrimValue val) -> env <$ guard (lit == val)
     _ _ -> Nothing
 
 tryApplyPatternClosure :: PatternClosure ty -> Value -> Maybe Value
@@ -248,7 +260,7 @@ desugarElaborated = go
         E.VariantP name pat -> C.VariantP name <$> asVar pat
         E.RecordP row -> C.RecordP <$> traverse asVar row
         E.ListP _ -> internalError loc "todo: list pattern desugaring"
-        E.LiteralP (L lit) -> pure $ C.LiteralP lit
+        E.LiteralP lit -> pure $ C.LiteralP lit
 
     asVar (L (E.VarP name) ::: _) = pure name
     asVar (E.WildcardP txt :@ loc ::: _) = freshName $ Name' txt :@ loc
@@ -298,7 +310,13 @@ mkConLambda n con env = do
             names
             env
 
-mkLambda' :: [Name] -> ([Value] -> Value) -> Value
-mkLambda' [] f = f []
-mkLambda' (name : names) f =
-    PrimFunction name \x -> mkLambda' names \args -> f (x : args)
+-- is template haskell worth it?
+
+mkLambda1 :: Name -> (Value -> Value) -> Value
+mkLambda1 name f = PrimFunction name 1 [] \(x :| _) -> f x
+
+mkLambda2 :: Name -> (Value -> Value -> Value) -> Value
+mkLambda2 name f = PrimFunction name 2 [] \(y :| x : _) -> f x y
+
+mkLambda3 :: Name -> (Value -> Value -> Value -> Value) -> Value
+mkLambda3 name f = PrimFunction name 3 [] \(z :| y : x : _) -> f x y z

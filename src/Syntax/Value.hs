@@ -1,4 +1,5 @@
 {-# LANGUAGE DuplicateRecordFields #-}
+{-# OPTIONS_GHC -Wno-partial-fields #-}
 
 module Syntax.Value where
 
@@ -28,7 +29,13 @@ data Value
       Con Name [Value]
     | Lambda (Closure ())
     | -- | an escape hatch for interpreter primitives and similar stuff
-      PrimFunction Name (Value -> Value)
+      -- the Int field is the expected argument count, the list is current partially applied arguments
+      PrimFunction
+        { name :: Name
+        , remaining :: Int
+        , captured :: [Value]
+        , f :: NonEmpty Value -> Value
+        }
     | Record (Row Value)
     | Sigma Value Value
     | Variant OpenName Value
@@ -44,6 +51,14 @@ data Value
     | Case Value [PatternClosure ()]
     | -- typechecking metavars
       UniVar UniVar
+
+isStuck :: Value -> Bool
+isStuck = \case
+    Var{} -> True
+    App{} -> True
+    Case{} -> True
+    UniVar{} -> True
+    _ -> False
 
 data Closure ty = Closure {var :: Name, ty :: ty, env :: ValueEnv, body :: CoreTerm}
 data PatternClosure ty = PatternClosure {pat :: CorePattern, ty :: ty, env :: ValueEnv, body :: CoreTerm}

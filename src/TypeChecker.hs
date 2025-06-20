@@ -579,8 +579,8 @@ infer (e :@ loc) = case e of
         env <- asks @Env (.values)
         pure $ El.Sigma x' y' :@ loc ::: V.Q Exists Visible Retained V.Closure{var = xName :@ loc, ty = xTy, env, body = yTy'}
     Do _ _ -> internalError loc "do-notation is not supported yet"
-    Literal lit@(L lit_) -> do
-        let litTypeName = case lit_ of
+    Literal lit -> do
+        let litTypeName = case lit of
                 IntLiteral num
                     | num >= 0 -> NatName
                     | otherwise -> IntName
@@ -759,8 +759,8 @@ patternFuncs postprocess = (checkP, inferP)
             let typeRow = fmap (\(_ ::: t) -> t) typedRow
                 openRecordTy = V.RecordT (ExtRow typeRow ext)
             pure (typeMap, El.RecordP typedRow :@ loc ::: openRecordTy)
-        LiteralP lit@(L lit_) -> do
-            let litTypeName = case lit_ of
+        LiteralP lit -> do
+            let litTypeName = case lit of
                     IntLiteral num
                         | num >= 0 -> NatName
                         | otherwise -> IntName

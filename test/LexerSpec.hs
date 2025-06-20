@@ -2,7 +2,7 @@
 
 module LexerSpec (spec) where
 
-import Common (Literal_ (..))
+import Common (Literal (..))
 import FlatParse.Stateful
 import LangPrelude
 import Lexer (lex')

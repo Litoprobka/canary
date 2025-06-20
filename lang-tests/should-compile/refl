@@ -5,8 +5,6 @@ indeed : forall a b. Refl a b -> a -> b
 indeed r x = case r of
     MkRefl -> x
 
-type Maybe a = Just a | Nothing
-
 nested : forall a b. Refl a b -> Maybe a -> Maybe b
 nested r x = case r of
     MkRefl -> x
