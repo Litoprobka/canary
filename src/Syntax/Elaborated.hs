@@ -32,6 +32,7 @@ data ETerm_
     | If ETerm ETerm ETerm
     | Variant OpenName
     | Record (Row ETerm)
+    | RecordAccess ETerm OpenName
     | List [ETerm]
     | Sigma ETerm ETerm
     | Do [EStatement] ETerm

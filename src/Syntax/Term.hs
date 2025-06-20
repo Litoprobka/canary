@@ -51,6 +51,7 @@ data Term_ p
       -- don't need any kind of name resolution
       Variant OpenName
     | Record (Row (Expr p))
+    | RecordAccess (Expr p) OpenName
     | -- | unlike lambdas, which may have a normal function type as well as a pi type, dependent pairs are distinct from records
       Sigma (Expr p) (Expr p)
     | List [Expr p]
@@ -146,6 +147,7 @@ instance PrettyAnsi (NameAt p) => PrettyAnsi (Expr_ p) where
             Parens expr -> parens $ go 0 expr
             Variant name -> prettyAnsi opts name
             Record row -> prettyRecord "=" (prettyAnsi opts) (go 0) (NoExtRow row)
+            RecordAccess record field -> go 4 record <> "." <> pretty field
             Sigma x y -> parensWhen 1 $ go 0 x <+> "**" <+> go 0 y
             List xs -> brackets . sep . punctuate comma $ go 0 <$> xs
             Do stmts lastAction -> nest 2 $ vsep ("do" : fmap (prettyAnsi opts) stmts <> [go 0 lastAction])
@@ -261,6 +263,7 @@ collectReferencedNames = go
         VariantT row -> foldMap go $ toList row
         RecordT row -> foldMap go $ toList row
         Record row -> foldMap go $ toList row
+        RecordAccess record _ -> go record
         InfixE pairs lastE -> foldMap (\(e, mbName) -> go e <> maybeToList mbName) pairs <> go lastE
         Do _stmts _action -> error "collectReferencedNames: local bindings are not supported yet"
 

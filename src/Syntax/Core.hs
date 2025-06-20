@@ -2,8 +2,6 @@ module Syntax.Core where
 
 import Common (
     Literal,
-    Loc (..),
-    Located (..),
     Name,
     Name_ (ConsName, NilName, TypeName),
     PrettyAnsi (..),
@@ -12,9 +10,7 @@ import Common (
     keyword,
     specSym,
     pattern L,
-    pattern Located,
  )
-import Error.Diagnose (Position (..))
 import LangPrelude
 import Prettyprinter
 import Prettyprinter.Render.Terminal (AnsiStyle)
@@ -43,9 +39,8 @@ instance PrettyAnsi CorePattern where
         recordField (name, pat) = prettyAnsi opts name <+> "=" <+> prettyAnsi opts pat
 
 type CoreType = CoreTerm
-type CoreTerm = Located CoreTerm_
 
-data CoreTerm_
+data CoreTerm
     = Name Name
     | TyCon Name
     | Con Name [CoreTerm] -- a fully-applied constructor. may only be produced by `quote`
@@ -55,6 +50,7 @@ data CoreTerm_
     | Let Name CoreTerm CoreTerm
     | Literal Literal
     | Record (Row CoreTerm)
+    | RecordAccess CoreTerm OpenName
     | Sigma CoreTerm CoreTerm
     | Variant OpenName
     | -- types
@@ -69,14 +65,14 @@ data CoreTerm_
       -- instead of using `quote` and keeping CoreTerm and Value in sync. This way will do for now, though
       UniVar UniVar
 
-instance PrettyAnsi CoreTerm_ where
-    prettyAnsi opts = go 0 . Located (Loc Position{begin = (0, 0), end = (0, 0), file = "<none>"})
+instance PrettyAnsi CoreTerm where
+    prettyAnsi opts = go 0
       where
         go :: Int -> CoreTerm -> Doc AnsiStyle
-        go n (L term) = case term of
+        go n term = case term of
             Name name -> prettyAnsi opts name
             TyCon name -> prettyAnsi opts name
-            Con (L ConsName) [x, L (Con (L NilName) [])] -> brackets $ go 0 x
+            Con (L ConsName) [x, Con (L NilName) []] -> brackets $ go 0 x
             Con (L ConsName) [x, xs] | Just output <- prettyConsNil xs -> brackets $ go 0 x <> output
             Con (L NilName) [] -> "[]"
             Con name [] -> prettyAnsi opts name
@@ -84,6 +80,7 @@ instance PrettyAnsi CoreTerm_ where
             Lambda name body -> parensWhen 1 $ specSym "λ" <> prettyAnsi opts name <+> compressLambda body
             App lhs rhs -> parensWhen 3 $ go 2 lhs <+> go 3 rhs
             Record row -> prettyRecord "=" (prettyAnsi opts) (go 0) (NoExtRow row)
+            RecordAccess record field -> go 4 record <> "." <> pretty field
             Sigma x y -> parensWhen 1 $ go 0 x <+> specSym "**" <+> go 0 y
             Variant name -> prettyAnsi opts name
             Case arg matches ->
@@ -110,16 +107,16 @@ instance PrettyAnsi CoreTerm_ where
             kw Exists Erased = keyword "∃"
             kw Exists Retained = keyword "Σ"
 
-        compressLambda (L term) = case term of
+        compressLambda term = case term of
             Lambda name body -> prettyAnsi opts name <+> compressLambda body
             other -> specSym "->" <+> prettyAnsi opts other
-        compressQ q vis e (L term) = case term of
+        compressQ q vis e term = case term of
             Q q' vis' e' name ty body
                 | q == q' && vis == vis' && e == e' ->
                     prettyBinder name ty <+> compressQ q vis e body
             other -> arrOrDot q vis <+> prettyAnsi opts other
 
-        prettyBinder name (L (TyCon (L TypeName))) = prettyAnsi opts name
+        prettyBinder name (TyCon (L TypeName)) = prettyAnsi opts name
         prettyBinder name ty = parens $ prettyAnsi opts name <+> specSym ":" <+> go 0 ty
 
         arrOrDot Forall Visible = specSym "->"
@@ -127,6 +124,6 @@ instance PrettyAnsi CoreTerm_ where
         arrOrDot _ _ = specSym "."
 
         prettyConsNil = \case
-            L (Con (L ConsName) [x', xs']) -> (("," <+> go 0 x') <>) <$> prettyConsNil xs'
-            L (Con (L NilName) []) -> Just ""
+            Con (L ConsName) [x', xs'] -> (("," <+> go 0 x') <>) <$> prettyConsNil xs'
+            Con (L NilName) [] -> Just ""
             _ -> Nothing

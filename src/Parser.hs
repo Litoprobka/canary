@@ -371,19 +371,20 @@ doBlock = do
 -- that is, it does not contain any unparenthesized spaces
 termParens :: Parser' (Expr 'Parse)
 termParens =
-    located $
-        choice
-            [ try record
-            , recordType -- todo: ambiguity with empty record value
-            , variantType
-            , List <$> brackets (commaSep term)
-            , tightConstructor
-            , Variant <$> variantConstructor
-            , Literal <$> literal
-            , Name <$> (identifier <|> located (Wildcard' <$> $(tok 'Token.Wildcard)))
-            , ImplicitVar <$> mkName $(tok 'Token.ImplicitName)
-            , Parens <$> parens term
-            ]
+    recordAccess $
+        located $
+            choice
+                [ try record
+                , recordType -- todo: ambiguity with empty record value
+                , variantType
+                , List <$> brackets (commaSep term)
+                , tightConstructor
+                , Variant <$> variantConstructor
+                , Literal <$> literal
+                , Name <$> (identifier <|> located (Wildcard' <$> $(tok 'Token.Wildcard)))
+                , ImplicitVar <$> mkName $(tok 'Token.ImplicitName)
+                , Parens <$> parens term
+                ]
   where
     variantItem = do
         con :@ loc <- variantConstructor
@@ -402,3 +403,9 @@ termParens =
         lookAhead $ token Token.TightLBrace
         arg <- located record
         pure $ (Name name :@ getLoc name) `App` arg
+    recordAccess nested = do
+        name <- nested
+        fieldAccesses <- many do
+            specialSymbol Token.Dot
+            identifier
+        pure $ foldl' (\lhs field -> RecordAccess lhs field :@ zipLocOf lhs field) name fieldAccesses

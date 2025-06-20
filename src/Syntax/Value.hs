@@ -49,6 +49,7 @@ data Value
     | -- stuck computations
       App Value ~Value
     | Case Value [PatternClosure ()]
+    | StuckRecordAccess Value OpenName
     | -- typechecking metavars
       UniVar UniVar
 

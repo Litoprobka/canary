@@ -24,7 +24,7 @@ module TypeChecker (
 import Common (Name)
 import Common hiding (Name)
 import Data.Traversable (for)
-import Diagnostic (internalError)
+import Diagnostic (internalError, internalError')
 import Effectful
 import Effectful.Reader.Static (ask, asks)
 import Effectful.State.Static.Local (State, get, modify, put, runState)
@@ -58,7 +58,7 @@ inferDeclaration (decl :@ loc) =
         D.Signature name sig -> do
             sigV <- normalise $ typeFromTerm sig
             modify $ Map.insert name sigV
-            pure (El.SignatureD name (unLoc sigV), id)
+            pure (El.SignatureD name sigV, id)
         D.Type name binders constrs -> do
             local' (define name (V.TyCon name)) do
                 typeKind <- normalise $ mkTypeKind binders
@@ -72,7 +72,7 @@ inferDeclaration (decl :@ loc) =
         D.GADT name mbKind constrs -> do
             local' (define name (V.TyCon name)) do
                 kind <- maybe (pure type_) typeFromTerm mbKind
-                modify $ Map.insert name kind
+                modify $ Map.insert name $ unLoc kind
                 local' (declare name kind) $ for_ constrs \con -> do
                     checkGadtConstructor name con
                     conSig <- normalise $ typeFromTerm con.sig
@@ -82,7 +82,7 @@ inferDeclaration (decl :@ loc) =
         D.Value binding (_ : _) -> internalError (getLoc binding) "todo: proper support for where clauses"
         D.Value binding [] -> do
             sigs <- get
-            let relevantSigs = collectNamesInBinding binding & mapMaybe (\k -> (k,) <$> Map.lookup k sigs) & Map.fromList
+            let relevantSigs = collectNamesInBinding binding & mapMaybe (\k -> (k,) . (:@ getLoc k) <$> Map.lookup k sigs) & Map.fromList
             Compose (typedBinding, typeMap) <- normaliseAll $ Compose . swap <$> checkBinding binding relevantSigs
             modify (typeMap <>)
             pure (El.ValueD typedBinding, id)
@@ -502,7 +502,7 @@ checkBinding binding types = case binding of
 
 infer :: InfEffs es => Expr 'Fixity -> Eff es ETerm
 infer (e :@ loc) = case e of
-    Name name -> ((El.Name name :@ loc) :::) . unLoc <$> lookupSig name
+    Name name -> ((El.Name name :@ loc) :::) <$> lookupSig name
     E.Variant name -> do
         var <- freshUniVar
         rowVar <- freshUniVar
@@ -520,10 +520,10 @@ infer (e :@ loc) = case e of
         argTy <- freshUniVar
         skolem <- freshSkolem' $ toSimpleName var
         let argV = V.Var skolem
-        typedBody@(_ :@ bodyLoc ::: bodyTy) <- local' (define var argV . declare var (argTy :@ argLoc)) do
+        typedBody@(_ :@ _ ::: bodyTy) <- local' (define var argV . declare var (argTy :@ argLoc)) do
             infer body
         env <- asks @Env (.values)
-        resultTy <- V.quote (bodyTy :@ bodyLoc)
+        resultTy <- V.quote bodyTy
         pure $
             El.Lambda (El.VarP var :@ argLoc ::: argTy) typedBody
                 :@ loc
@@ -570,12 +570,18 @@ infer (e :@ loc) = case e of
         typedRow <- traverse infer row
         let fieldTypes = fmap (\(_ ::: t) -> t) typedRow
         pure $ El.Record typedRow :@ loc ::: V.RecordT (NoExtRow fieldTypes)
+    RecordAccess record field -> do
+        typedRecord@(_ ::: recordTy) <- infer record
+        monoLayer' In recordTy >>= deepLookup Record field . (:@ loc) >>= \case
+            Nothing -> typeError $ MissingField (Left $ recordTy :@ loc) field
+            Just fieldTy -> pure $ El.RecordAccess typedRecord field :@ loc ::: unLoc fieldTy
+
     -- it's not clear whether we should special case dependent pairs where the first element is a variable, or always infer a non-dependent pair type
     Sigma x y -> do
         xName <- freshName_ $ Name' "x"
         x'@(_ ::: xTy) <- infer x
         y'@(_ ::: yTy) <- infer y
-        yTy' <- V.quote $ yTy :@ loc
+        yTy' <- V.quote yTy
         env <- asks @Env (.values)
         pure $ El.Sigma x' y' :@ loc ::: V.Q Exists Visible Retained V.Closure{var = xName :@ loc, ty = xTy, env, body = yTy'}
     Do _ _ -> internalError loc "do-notation is not supported yet"
@@ -617,7 +623,7 @@ inferApp appLoc f@(_ :@ fLoc ::: fTy) arg = do
             to <- freshUniVar
             var <- freshName $ Located fLoc $ Name' "x"
             values <- asks @Env (.values)
-            body <- V.quote (to :@ fLoc)
+            body <- V.quote to
             let closure = V.Closure{var, env = values, ty = from, body}
                 typedApp = El.App f typedArg :@ appLoc ::: to
             typedApp <$ subtype (V.UniVar uni :@ fLoc) (V.Q Forall Visible Retained closure :@ fLoc)
@@ -772,7 +778,7 @@ patternFuncs postprocess = (checkP, inferP)
 todo: this should really be computed before the typecheck pass and put into a table
 -}
 conArgTypes :: InfEffs es => Name -> Eff es (V.Value, [V.Type'])
-conArgTypes name = lookupSig name >>= go . unLoc
+conArgTypes name = lookupSig name >>= go
   where
     go =
         monoLayer' In >=> \case
@@ -788,53 +794,53 @@ conArgTypes name = lookupSig name >>= go . unLoc
             V.Var skolem -> pure (V.Var skolem, [])
             _ -> internalError (getLoc name) "invalid constructor type signature"
 
-normalise :: InfEffs es => Eff es TypeDT -> Eff es Type'
+normalise :: InfEffs es => Eff es TypeDT -> Eff es Type'_
 normalise = fmap runIdentity . normaliseAll . fmap Identity
 
 -- gets rid of all univars
-normaliseAll :: (Traversable t, InfEffs es) => Eff es (t TypeDT) -> Eff es (t Type')
-normaliseAll = generaliseAll >=> traverse (eval' <=< go <=< V.quote)
+normaliseAll :: (Traversable t, InfEffs es) => Eff es (t TypeDT) -> Eff es (t Type'_)
+normaliseAll = generaliseAll >=> traverse (eval' <=< go <=< V.quote . unLoc)
   where
-    eval' :: InfEffs es => CoreTerm -> Eff es Type'
+    eval' :: InfEffs es => CoreTerm -> Eff es Type'_
     eval' term = do
         values <- asks @Env (.values)
-        pure $ V.evalCore values term :@ getLoc term
+        pure $ V.evalCore values term
     go :: InfEffs es => CoreTerm -> Eff es CoreTerm
-    go (term :@ loc) =
-        Located loc <$> case term of
-            C.UniVar uni ->
-                lookupUniVar uni >>= \case
-                    Left _ -> internalError loc $ "dangling univar" <+> prettyDef uni
-                    Right body -> fmap unLoc . go =<< V.quote (unMono body)
-            -- other cases could be eliminated by a type changing uniplate
-            C.App lhs rhs -> C.App <$> go lhs <*> go rhs
-            C.Function lhs rhs -> C.Function <$> go lhs <*> go rhs
-            -- this might produce incorrect results if we ever share a single forall in multiple places
-            C.Q Forall Visible e var ty body -> do
-                ty' <- go ty
-                body' <- go body
-                pure
-                    if occurs var body'
-                        then C.Q Forall Visible e var ty' body'
-                        else C.Function ty' body'
-            C.Q q v e var ty body -> C.Q q v e var <$> go ty <*> go body
-            C.VariantT row -> C.VariantT <$> traverse go row
-            C.RecordT row -> C.RecordT <$> traverse go row
-            C.Lambda name body -> C.Lambda name <$> go body
-            C.Case arg matches -> C.Case <$> go arg <*> traverse (traverse go) matches
-            C.Record row -> C.Record <$> traverse go row
-            C.Sigma x y -> C.Sigma <$> go x <*> go y
-            -- and these are just boilerplate
-            C.Name name -> pure $ C.Name name
-            C.TyCon name -> pure $ C.TyCon name
-            C.Con name args -> pure $ C.Con name args
-            C.Variant name -> pure $ C.Variant name
-            C.Literal lit -> pure $ C.Literal lit
-            C.Let name _ _ -> internalError (getLoc name) "unexpected let in a quoted value"
+    go = \case
+        C.UniVar uni ->
+            lookupUniVar uni >>= \case
+                Left _ -> internalError' $ "dangling univar" <+> prettyDef uni
+                Right body -> go =<< V.quote (unMono' $ unLoc body)
+        -- other cases could be eliminated by a type changing uniplate
+        C.App lhs rhs -> C.App <$> go lhs <*> go rhs
+        C.Function lhs rhs -> C.Function <$> go lhs <*> go rhs
+        -- this might produce incorrect results if we ever share a single forall in multiple places
+        C.Q Forall Visible e var ty body -> do
+            ty' <- go ty
+            body' <- go body
+            pure
+                if occurs var body'
+                    then C.Q Forall Visible e var ty' body'
+                    else C.Function ty' body'
+        C.Q q v e var ty body -> C.Q q v e var <$> go ty <*> go body
+        C.VariantT row -> C.VariantT <$> traverse go row
+        C.RecordT row -> C.RecordT <$> traverse go row
+        C.Lambda name body -> C.Lambda name <$> go body
+        C.Case arg matches -> C.Case <$> go arg <*> traverse (traverse go) matches
+        C.Record row -> C.Record <$> traverse go row
+        C.RecordAccess record field -> C.RecordAccess <$> go record <*> pure field
+        C.Sigma x y -> C.Sigma <$> go x <*> go y
+        -- and these are just boilerplate
+        C.Name name -> pure $ C.Name name
+        C.TyCon name -> pure $ C.TyCon name
+        C.Con name args -> pure $ C.Con name args
+        C.Variant name -> pure $ C.Variant name
+        C.Literal lit -> pure $ C.Literal lit
+        C.Let name _ _ -> internalError (getLoc name) "unexpected let in a quoted value"
 
     -- check whether a variable occurs in a term
     occurs :: Name -> CoreTerm -> Bool
-    occurs var (L ty) = case ty of
+    occurs var = \case
         C.Name name -> name == var
         C.UniVar{} -> False
         C.App lhs rhs -> occurs var lhs || occurs var rhs
@@ -845,6 +851,7 @@ normaliseAll = generaliseAll >=> traverse (eval' <=< go <=< V.quote)
         C.Lambda _ body -> occurs var body
         C.Case arg matches -> occurs var arg || (any . any) (occurs var) matches
         C.Record row -> any (occurs var) row
+        C.RecordAccess record _ -> occurs var record
         C.Sigma x y -> occurs var x || occurs var y
         C.Con _ args -> any (occurs var) args
         C.TyCon{} -> False

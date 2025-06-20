@@ -73,7 +73,7 @@ data ReplEnv = ReplEnv
     , fixityMap :: FixityMap
     , operatorPriorities :: Poset Op
     , scope :: Scope
-    , types :: IdMap Name TC.Type'
+    , types :: IdMap Name TC.Type'_
     , constructorTable :: TC.ConstructorTable
     , lastLoadedFile :: Maybe FilePath
     , loadedFiles :: forall msg. Diagnostic msg -- an empty diagnostic with files
@@ -98,7 +98,7 @@ emptyEnv = ReplEnv{loadedFiles = mempty, ..}
   where
     values = ValueEnv{values = Map.one (noLoc TypeName) (V.TyCon (noLoc TypeName))}
     fixityMap = Map.one AppOp InfixL
-    types = Map.one (noLoc TypeName) (noLoc $ V.TyCon (noLoc TypeName))
+    types = Map.one (noLoc TypeName) (V.TyCon (noLoc TypeName))
     scope = Scope $ HashMap.singleton (Name' "Type") (noLoc TypeName)
     (_, operatorPriorities) = Poset.eqClass AppOp Poset.empty
     lastLoadedFile = Nothing
@@ -158,14 +158,14 @@ mkDefaultEnv = do
                 . evalState env.constructorTable
                 . TC.run env.values
                 $ do
-                    (expr, tyty :@ loc) <- normaliseAll do
+                    (expr, tyty) <- normaliseAll do
                         expr' :@ loc ::: tyty <- infer afterFixityRes
-                        pure (expr', tyty :@ loc)
-                    pure $ expr :@ loc ::: tyty
+                        pure (expr' :@ loc, tyty :@ loc)
+                    pure $ expr ::: tyty
         tyAsVal <- V.eval env.values elaboratedTy
         pure
             ReplEnv
-                { types = Map.insert name (tyAsVal :@ builtin) env.types
+                { types = Map.insert name tyAsVal env.types
                 , values = ValueEnv $ Map.insert name val env.values.values
                 , scope = newScope
                 , ..
@@ -340,7 +340,7 @@ replStep env@ReplEnv{loadedFiles} command = do
         Quit -> pure Nothing
         UnknownCommand cmd -> fatal . one $ Err Nothing ("Unknown command:" <+> pretty cmd) [] []
   where
-    processExpr :: IdMap Name TC.Type' -> Term 'Parse -> Eff (Labeled "values" (Reader ValueEnv) ': es) ETerm
+    processExpr :: IdMap Name TC.Type'_ -> Term 'Parse -> Eff (Labeled "values" (Reader ValueEnv) ': es) ETerm
     processExpr types expr = evalState types do
         afterNameRes <- NameResolution.run env.scope $ resolveTerm expr
         skippedDepRes <- cast.term afterNameRes
@@ -349,10 +349,10 @@ replStep env@ReplEnv{loadedFiles} command = do
             . evalState env.constructorTable
             . TC.run env.values
             $ do
-                (expr', ty :@ loc) <- normaliseAll do
+                (expr', ty) <- normaliseAll do
                     expr' :@ loc ::: ty <- infer afterFixityRes
-                    pure (expr', ty :@ loc)
-                pure $ expr' :@ loc ::: ty
+                    pure (expr' :@ loc, ty :@ loc)
+                pure $ expr' ::: ty
 
     prettyVal val = do
         liftIO $ putDoc $ prettyAnsi PrettyOptions{printIds = False} val <> Pretty.line

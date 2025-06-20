@@ -79,6 +79,7 @@ partialTravTerm trav (term' :@ loc) =
         If cond true false -> If <$> trav.term cond <*> trav.term true <*> trav.term false
         T.Variant oname -> pure $ T.Variant oname
         Record row -> Record <$> traverse trav.term row
+        RecordAccess record field -> RecordAccess <$> trav.term record <*> pure field
         Sigma x y -> Sigma <$> trav.term x <*> trav.term y
         List terms -> List <$> traverse trav.term terms
         Do statements term -> Do <$> traverse trav.statement statements <*> trav.term term
