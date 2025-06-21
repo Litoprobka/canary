@@ -56,7 +56,6 @@ quoteForPrinting = \case
     RecordT row -> C.RecordT $ fmap quoteForPrinting row
     App lhs rhs -> C.App (quoteForPrinting lhs) (quoteForPrinting rhs)
     Case arg cases -> C.Case (quoteForPrinting arg) $ fmap (\PatternClosure{pat, body} -> (pat, body)) cases
-    StuckRecordAccess record field -> C.RecordAccess (quoteForPrinting record) field
     UniVar uni -> C.UniVar uni
 
 -- an orphan instance, since otherwise we'd have a cyclic dependency between elaborated terms, which are typed, and values
@@ -92,7 +91,6 @@ quote = \case
     App lhs rhs -> C.App <$> quote lhs <*> quote rhs
     -- todo: not applying the closure here doesn't seem safe, but I'm not sure how to do that without running into infinite recursion
     Case arg cases -> C.Case <$> quote arg <*> traverse (\PatternClosure{pat, body} -> pure (pat, body)) cases
-    StuckRecordAccess record field -> C.RecordAccess <$> quote record <*> pure field
     UniVar uni -> pure $ C.UniVar uni
 
 evalCore :: ValueEnv -> CoreTerm -> Value
@@ -121,11 +119,6 @@ evalCore !env = \case
          in evalCore newEnv body
     C.Literal lit -> PrimValue lit
     C.Record row -> Record $ evalCore env <$> row
-    C.RecordAccess record field -> case evalCore env record of
-        Record row -> case Row.lookup field row of
-            Just fieldValue -> fieldValue
-            Nothing -> error . show $ "ill-typed record access:" <+> pretty (evalCore env record) <+> "does not have field" <+> pretty field
-        other -> StuckRecordAccess other field
     C.Sigma x y -> Sigma (evalCore env x) (evalCore env y)
     C.Variant _name -> error "todo: seems like evalCore needs namegen" -- Lambda (Located Blank $ Name' "x") $ C.Variant name `C.App`
     C.Function lhs rhs -> Function (evalCore env lhs) (evalCore env rhs)
@@ -156,11 +149,6 @@ unstuck !env = \case
     Var skolem -> case LMap.lookup skolem env.values of
         Nothing -> Var skolem
         Just value -> unstuck env value
-    StuckRecordAccess record field -> case unstuck env record of
-        Record row -> case Row.lookup field row of
-            Just fieldValue -> fieldValue
-            Nothing -> error . show $ "ill-typed record access:" <+> pretty (Record row) <+> "does not have field" <+> pretty field
-        other -> StuckRecordAccess other field
     nonStuck -> nonStuck
 
 app :: Closure ty -> Value -> Value
@@ -233,7 +221,14 @@ desugarElaborated = go
                 ]
         E.Variant name -> pure $ C.Variant name
         E.Record fields -> C.Record <$> traverse go fields
-        E.RecordAccess record field -> C.RecordAccess <$> go record <*> pure field
+        E.RecordAccess record field -> do
+            arg <- desugarElaborated record
+            fieldVar <- freshName field
+            pure $ C.Case arg [(C.RecordP (one (field, fieldVar)), C.Name fieldVar)]
+        {- `record.field` gets desugared to
+            case record of
+                {field} -> field
+        -}
         E.Sigma x y -> C.Sigma <$> go x <*> go y
         E.List xs -> foldr (C.App . C.App cons) nil <$> traverse go xs
         E.Do{} -> error "todo: desugar do blocks"

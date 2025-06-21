@@ -68,7 +68,6 @@ data Monotype_
     | -- stuck computations
       MApp Monotype_ ~Monotype_
     | MCase Monotype_ [MonoPatternClosure ()]
-    | MRecordAccess Monotype_ OpenName
     | -- typechecking metavars
       MUniVar UniVar
     | MSkolem Name
@@ -220,7 +219,6 @@ alterUniVar override uni ty = do
             MLambda closure -> cycleCheckClosure acc closure
             MPrimFn{captured} -> NoCycle <$ traverse_ (go (Indirect, acc)) captured
             MCase _arg _matches -> internalError' "todo: cycleCheck stuck MCase" -- go (Indirect, acc) arg <* traverse_ _what matches
-            MRecordAccess record _ -> NoCycle <$ go (Indirect, acc) record
             MTyCon{} -> pure NoCycle
             MSkolem{} -> pure NoCycle
             MPrim{} -> pure NoCycle
@@ -346,7 +344,6 @@ generaliseAll action = do
         C.RecordT row -> C.RecordT <$> traverse (go loc variance scope) row
         C.VariantT row -> C.VariantT <$> traverse (go loc variance scope) row
         C.Record row -> C.Record <$> traverse (go loc variance scope) row
-        C.RecordAccess record field -> C.RecordAccess <$> go loc variance scope record <*> pure field
         C.Sigma x y -> C.Sigma <$> go loc variance scope x <*> go loc variance scope y
         C.Q q vis e var ty body ->
             C.Q q vis e var <$> go loc variance scope ty <*> do
@@ -410,7 +407,6 @@ mono' variance = \case
     V.Sigma x y -> MSigma <$> go x <*> go y
     V.Variant name arg -> MVariant name <$> go arg
     V.Case arg matches -> MCase <$> go arg <*> pure (fmap monoPatternClosure matches)
-    V.StuckRecordAccess record field -> MRecordAccess <$> go record <*> pure field
     V.Lambda closure -> pure $ MLambda MonoClosure{var = closure.var, variance, env = closure.env, ty = (), body = closure.body}
   where
     go = mono' variance
@@ -445,7 +441,6 @@ unMono' = \case
     MPrim val -> V.PrimValue val
     MPrimFn{name, remaining, captured, f} -> V.PrimFunction{name, remaining, captured = map unMono' captured, f}
     MCase arg matches -> V.Case (unMono' arg) (fmap toPatternClosure matches)
-    MRecordAccess record field -> V.StuckRecordAccess (unMono' record) field
   where
     toPatternClosure MonoPatternClosure{pat, ty, env, body} = V.PatternClosure{pat, ty, env, body}
 

@@ -50,7 +50,6 @@ data CoreTerm
     | Let Name CoreTerm CoreTerm
     | Literal Literal
     | Record (Row CoreTerm)
-    | RecordAccess CoreTerm OpenName
     | Sigma CoreTerm CoreTerm
     | Variant OpenName
     | -- types
@@ -80,7 +79,6 @@ instance PrettyAnsi CoreTerm where
             Lambda name body -> parensWhen 1 $ specSym "λ" <> prettyAnsi opts name <+> compressLambda body
             App lhs rhs -> parensWhen 3 $ go 2 lhs <+> go 3 rhs
             Record row -> prettyRecord "=" (prettyAnsi opts) (go 0) (NoExtRow row)
-            RecordAccess record field -> go 4 record <> "." <> pretty field
             Sigma x y -> parensWhen 1 $ go 0 x <+> specSym "**" <+> go 0 y
             Variant name -> prettyAnsi opts name
             Case arg matches ->

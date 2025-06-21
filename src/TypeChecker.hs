@@ -445,11 +445,6 @@ localEquality argVal@(_ :@ loc) patVal = do
                 Left _ -> solveUniVar uni =<< mono In argVal
         _ -> pass
 
--- localEquality (Maybe a?) #a ---> #a ~ Maybe a?
--- localEquality (Maybe b?) #a
---   localEquality (Maybe b?) (Maybe a?)
---     localEquality b? a?
-
 skolemizePattern' :: InfEffs es => Pat -> Eff es (V.Value, IdMap Name V.Value)
 skolemizePattern' pat = do
     (val, newEnv) <- runState V.ValueEnv{values = Map.empty} $ skolemizePattern pat
@@ -828,7 +823,6 @@ normaliseAll = generaliseAll >=> traverse (eval' <=< go <=< V.quote . unLoc)
         C.Lambda name body -> C.Lambda name <$> go body
         C.Case arg matches -> C.Case <$> go arg <*> traverse (traverse go) matches
         C.Record row -> C.Record <$> traverse go row
-        C.RecordAccess record field -> C.RecordAccess <$> go record <*> pure field
         C.Sigma x y -> C.Sigma <$> go x <*> go y
         -- and these are just boilerplate
         C.Name name -> pure $ C.Name name
@@ -851,7 +845,6 @@ normaliseAll = generaliseAll >=> traverse (eval' <=< go <=< V.quote . unLoc)
         C.Lambda _ body -> occurs var body
         C.Case arg matches -> occurs var arg || (any . any) (occurs var) matches
         C.Record row -> any (occurs var) row
-        C.RecordAccess record _ -> occurs var record
         C.Sigma x y -> occurs var x || occurs var y
         C.Con _ args -> any (occurs var) args
         C.TyCon{} -> False
