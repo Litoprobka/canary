@@ -1,4 +1,4 @@
-{-# LANGUAGE DerivingVia #-}
+{-# LANGUAGE NoFieldSelectors #-}
 
 module TypeChecker.Exhaustiveness (
     checkExhaustiveness,
@@ -39,17 +39,34 @@ checkExhaustiveness' loc ty branches = do
     patternTypes <- traverse simplifyPatternType ty
     let branches' = (fmap . fmap) simplifyPattern branches
         nested = buildProdTree conMap patternTypes
-        unmatched = checkMatch nested branches'
-    unless (null unmatched) do
+        result = checkMatch nested branches'
+    unless (null result.missing) do
         nonFatal $
             Err
                 Nothing
                 "non-exhaustive patterns"
                 (mkNotes [(loc, M.This "when checking these patterns")])
-                [Note $ vsep ("patterns not matched:" : map (hsep . map pretty) unmatched)]
+                [Note $ vsep ("patterns not matched:" : map (hsep . map pretty) result.missing)]
+    unless (null result.redundants) do
+        nonFatal $
+            Warn
+                Nothing
+                "redundant patterns"
+                (mkNotes [(loc, M.This "when checking these patterns")])
+                [Note $ vsep ("these patterns will never match:" : map (hsep . map pretty) result.redundants)]
 
-checkMatch :: Nested () -> [[Pattern]] -> [[Pattern]]
-checkMatch initTree = maybe [] (missingPatternsNested const) . foldl' (\tree pats -> pruneNested pats (const Nothing) =<< tree) (Just initTree)
+data CheckResult = CheckResult
+    { missing :: [[Pattern]]
+    , redundants :: [[Pattern]]
+    }
+
+checkMatch :: Nested () -> [[Pattern]] -> CheckResult
+checkMatch initTree = toResult . first (maybe [] (missingPatternsNested const)) . foldl' checkAndPruneBranch (Just initTree, [])
+  where
+    checkAndPruneBranch (tree, redundants) pats
+        | maybe True (redundantNested pats (const False)) tree = (tree, redundants <> [pats]) -- we could use a DList for redundant patterns, but I don't think it's worth it
+        | otherwise = (pruneNested pats (const Nothing) =<< tree, redundants)
+    toResult (missing, redundants) = CheckResult{missing, redundants}
 
 simplifyPattern :: EPattern -> Pattern
 simplifyPattern (p :@ _ ::: _) = case p of
@@ -114,37 +131,38 @@ instance Pretty Pattern where
 --
 -- Variant branches also contain a catchall case for a row extension
 --
--- TextBranch and IntBranch cannot ever be matched fully without a catch-all case,
+-- TextBranch, CharBranch and IntBranch cannot ever be matched fully without a catch-all case,
 -- so they contain a fallback case and the map of all children *that have been matched on*
--- I don't really *need* the maps until I implement the check for redundant patterns,
--- but I'm going to do it at some point
 data CaseTree a
     = Branch (IdMap Name_ (Nested a))
     | VariantBranch (HashMap SimpleName_ (CaseTree a)) (Maybe a)
-    | TextBranch (HashMap Text a) a
-    | CharBranch (HashMap Text a) a
-    | IntBranch (IntMap a) a
+    | TextBranch (HashMap Text (Maybe a)) a
+    | CharBranch (HashMap Text (Maybe a)) a
+    | IntBranch (IntMap (Maybe a)) a
     | RecordBranch (RecordBranch a)
     | Opaque a -- can be matched only by a wildcard
     | NotVisited (forall b. b -> CaseTree b) a
+    deriving (Foldable)
 
 data Nested a
     = NotNested a
     | Nested (CaseTree (Nested a))
+    deriving (Foldable)
 
 -- with normal products, we know how much to descend based on the type
 -- when it comes to records, though, a pattern may match on a subset of the fields
 data RecordBranch a
     = None a
     | Field SimpleName (CaseTree (RecordBranch a))
+    deriving (Foldable)
 
 mapMaybeTree :: (a -> Maybe b) -> CaseTree a -> Maybe (CaseTree b)
 mapMaybeTree f = \case
     Branch tree -> Branch <$> Map.mapMaybe (mapMaybeProd f) tree
     VariantBranch tree fallback -> Just $ VariantBranch (HashMap.mapMaybe (mapMaybeTree f) tree) (f =<< fallback)
-    TextBranch tree fallback -> TextBranch (HashMap.mapMaybe f tree) <$> f fallback
-    CharBranch tree fallback -> CharBranch (HashMap.mapMaybe f tree) <$> f fallback
-    IntBranch tree fallback -> IntBranch (IntMap.mapMaybe f tree) <$> f fallback
+    TextBranch tree fallback -> TextBranch (fmap (>>= f) tree) <$> f fallback
+    CharBranch tree fallback -> CharBranch (fmap (>>= f) tree) <$> f fallback
+    IntBranch tree fallback -> IntBranch (fmap (>>= f) tree) <$> f fallback
     RecordBranch branch -> RecordBranch <$> mapMaybeRecordBranch f branch
     Opaque x -> Opaque <$> f x
     NotVisited build x -> NotVisited build <$> f x
@@ -168,12 +186,18 @@ prune = \cases
     (VariantP name arg) k (VariantBranch tree Nothing) -> VariantBranch <$> guarded (not . HashMap.null) (HashMap.update (prune arg k) name tree) <*> pure Nothing
     -- when we *do* have a fallback though, only a Wilcard can eliminate this branch
     (VariantP name arg) k (VariantBranch tree (Just fallback)) -> Just $ VariantBranch (HashMap.update (prune arg k) name tree) (Just fallback)
-    (LiteralP (IntLiteral n)) k (IntBranch tree fallback) -> Just $ IntBranch (IntMap.update k n tree) fallback
-    (LiteralP (TextLiteral t)) k (TextBranch tree fallback) -> Just $ TextBranch (HashMap.alter (k . fromMaybe fallback) t tree) fallback
-    (LiteralP (CharLiteral c)) k (CharBranch tree fallback) -> Just $ CharBranch (HashMap.alter (k . fromMaybe fallback) c tree) fallback
+    (LiteralP (IntLiteral n)) k (IntBranch tree fallback) -> Just $ IntBranch (IntMap.alter (pruneWithFallback k fallback) n tree) fallback
+    (LiteralP (TextLiteral t)) k (TextBranch tree fallback) -> Just $ TextBranch (HashMap.alter (pruneWithFallback k fallback) t tree) fallback
+    (LiteralP (CharLiteral c)) k (CharBranch tree fallback) -> Just $ CharBranch (HashMap.alter (pruneWithFallback k fallback) c tree) fallback
     (RecordP row) k (RecordBranch branch) -> RecordBranch <$> pruneRecord row k branch
     _ _ (Opaque x) -> Just $ Opaque x
     _ _ _ -> error "pattern type mismatch (shouldn't happen for well-typed code)"
+  where
+    -- prune a literal branch, use the fallback if there is none
+    pruneWithFallback :: (a -> Maybe b) -> a -> (Maybe (Maybe a) -> Maybe (Maybe b))
+    pruneWithFallback k fallback = \case
+        Nothing -> Just $ k fallback
+        Just branch -> Just $ k =<< branch
 
 pruneNested :: [Pattern] -> (a -> Maybe a) -> Nested a -> Maybe (Nested a)
 pruneNested [] k (NotNested x) = NotNested <$> k x
@@ -187,6 +211,48 @@ pruneRecord row k = \case
         Field name <$> case Row.takeField name row of
             Just (pat, row') -> prune pat (pruneRecord row' k) nested
             Nothing -> mapMaybeTree (pruneRecord row k) nested
+
+-- * patterns redundancy check
+
+{- | returns True if the given pattern wouldn't prune any branches
+from the case tree
+-}
+redundant :: Pattern -> (a -> Bool) -> CaseTree a -> Bool
+redundant = \cases
+    Wildcard k tree -> all k tree
+    -- is a match against `NotVisited` ever redundant?
+    -- the only case I can think of is when NotVisited produces an empty branch, e.g. Void
+    -- perhaps I should rewrite NotVisited to guarantee that it always contains a non-empty branch
+    pat k (NotVisited f x) -> redundant pat k $ f x
+    (Con name args) k (Branch branch) -> case Map.lookup name branch of
+        Nothing -> True
+        Just child -> redundantNested args k child
+    (VariantP name arg) k (VariantBranch tree _) -> maybe True (redundant arg k) $ HashMap.lookup name tree
+    (LiteralP (IntLiteral n)) k (IntBranch tree fallback) -> redundantLiteral k fallback $ IntMap.lookup n tree
+    (LiteralP (TextLiteral t)) k (TextBranch tree fallback) -> redundantLiteral k fallback $ HashMap.lookup t tree
+    (LiteralP (CharLiteral c)) k (CharBranch tree fallback) -> redundantLiteral k fallback $ HashMap.lookup c tree
+    (RecordP row) k (RecordBranch branch) -> redundantRecord row k branch
+    _ _ Opaque{} -> True
+    _ _ _ -> error "redundant: pattern type mismatch"
+  where
+    redundantLiteral k fallback = \case
+        Nothing -> k fallback
+        Just Nothing -> True
+        Just (Just child) -> k child
+
+redundantNested :: [Pattern] -> (a -> Bool) -> Nested a -> Bool
+redundantNested [] k (NotNested x) = k x
+redundantNested (pat : pats) k (Nested nested) = redundant pat (redundantNested pats k) nested
+redundantNested _ _ _ = error "redundantNested: length mismatch"
+
+redundantRecord :: Row Pattern -> (a -> Bool) -> RecordBranch a -> Bool
+redundantRecord row k = \case
+    None x -> k x
+    Field name nested -> case Row.takeField name row of
+        Just (pat, row') -> redundant pat (redundantRecord row' k) nested
+        Nothing -> all (redundantRecord row k) nested
+
+-- * collecting uncovered patterns
 
 missingPatterns :: ([Pattern] -> a -> [r]) -> Maybe (CaseTree a) -> [r]
 missingPatterns _ Nothing = []
@@ -202,9 +268,9 @@ missingPatterns k (Just tree) = case tree of
             missingPatterns (k . fmap (VariantP con)) (Just argBranch)
         )
             <> concatMap (k [Wildcard]) fallback
-    IntBranch branches fallback -> IntMap.foldMapWithKey (\n -> k [LiteralP (IntLiteral n)]) branches <> k [Wildcard] fallback
-    TextBranch branches fallback -> HashMap.foldMapWithKey (\t -> k [LiteralP (TextLiteral t)]) branches <> k [Wildcard] fallback
-    CharBranch branches fallback -> HashMap.foldMapWithKey (\c -> k [LiteralP (CharLiteral c)]) branches <> k [Wildcard] fallback
+    IntBranch branches fallback -> IntMap.foldMapWithKey (\n -> maybe [] (k [LiteralP (IntLiteral n)])) branches <> k [Wildcard] fallback
+    TextBranch branches fallback -> HashMap.foldMapWithKey (\t -> maybe [] (k [LiteralP (TextLiteral t)])) branches <> k [Wildcard] fallback
+    CharBranch branches fallback -> HashMap.foldMapWithKey (\c -> maybe [] (k [LiteralP (CharLiteral c)])) branches <> k [Wildcard] fallback
     RecordBranch branches -> missingPatternsRecord (k . fmap RecordP) branches
 
 missingPatternsNested :: ([[Pattern]] -> a -> [r]) -> Nested a -> [r]
@@ -222,6 +288,8 @@ missingPatternsRecord k = \case
         val <- vals
         row <- rows
         pure $ one (name, val) <> row
+
+-- * building a CaseTree
 
 buildProdTree :: ConstructorTable -> [ExType] -> Nested ()
 buildProdTree conMap types = case buildProdTree' conMap types () of
