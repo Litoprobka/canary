@@ -230,6 +230,9 @@ unLoc (L x) = x
 zipLoc :: Loc -> Loc -> Loc
 zipLoc (Loc lhs) (Loc rhs) = Loc $ lhs{begin = min lhs.begin rhs.begin, end = max rhs.begin rhs.end}
 
+instance Semigroup Loc where
+    (<>) = zipLoc
+
 zipLocOf :: (HasLoc a, HasLoc b) => a -> b -> Loc
 zipLocOf lhs rhs = zipLoc (getLoc lhs) (getLoc rhs)
 

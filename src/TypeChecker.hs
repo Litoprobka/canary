@@ -45,7 +45,7 @@ import Syntax.Row qualified as Row
 import Syntax.Term hiding (Record, Variant)
 import Syntax.Term qualified as E (Term_ (Record, Variant))
 import TypeChecker.Backend
-import TypeChecker.Exhaustiveness (checkCompletePattern, checkExhaustiveness, checkExhaustiveness')
+import TypeChecker.Exhaustiveness (checkCaseExhaustiveness, checkCompletePattern, checkMatchExhaustiveness)
 import TypeChecker.Exhaustiveness qualified as Ex
 import TypeChecker.TypeError
 
@@ -286,7 +286,7 @@ check (e :@ loc) (typeToCheck :@ tyLoc) = do
                     typedBody <- local' (\tcenv -> tcenv{values = newValues}) do
                         check body $ ty :@ loc
                     pure (typedPat, typedBody)
-            checkExhaustiveness loc argTy (map fst typedMatches)
+            checkCaseExhaustiveness loc argTy (map fst typedMatches)
             pure $ El.Case typedArg typedMatches :@ loc ::: ty
           where
             -- a special case for matching on a var seems janky, but apparently that's how Idris does this
@@ -296,15 +296,22 @@ check (e :@ loc) (typeToCheck :@ tyLoc) = do
                 _ -> Nothing
         (Match matches) ty -> do
             n <- whenNothing (getArgCount matches) $ typeError $ ArgCountMismatch loc
-            (patTypes, bodyTy) <- unwrapFn n ty
+            (mbPatTypes, bodyTy) <- unwrapFn n ty
+            patTypes <- case nonEmpty mbPatTypes of
+                Just types -> pure types
+                Nothing -> internalError' "unwrapFn returned the wrong amount of pattern types"
+
             typedMatches <- for matches \(pats, body) -> do
-                (typeMap, typedPatterns) <- traverseFold pure =<< zipWithM checkPatternRelaxed pats (map (:@ tyLoc) patTypes)
+                (typeMap, typedPatterns) <- traverseFold pure =<< zipWithM1 checkPatternRelaxed pats (fmap (:@ tyLoc) patTypes)
                 valDiff <- foldMap snd <$> traverse skolemizePattern' pats
                 typedBody <- local' (defineMany valDiff . declareMany typeMap) $ check_ body bodyTy
                 pure (typedPatterns, typedBody)
-            checkExhaustiveness' loc patTypes (map fst typedMatches)
+            checkMatchExhaustiveness loc patTypes (fmap fst typedMatches)
             pure $ El.Match typedMatches :@ loc ::: ty
           where
+            zipWithM1 :: Applicative m => (a -> b -> m c) -> NonEmpty a -> NonEmpty b -> m (NonEmpty c)
+            zipWithM1 f (x :| xs) (y :| ys) = liftA2 (:|) (f x y) (zipWithM f xs ys)
+
             unwrapFn 0 = pure . ([],)
             unwrapFn n =
                 monoLayer' Out >=> \case
@@ -371,7 +378,7 @@ check (e :@ loc) (typeToCheck :@ tyLoc) = do
             pure $ typed ::: ty
 
 -- a helper function for matches
-getArgCount :: [([Pat], Expr 'Fixity)] -> Maybe Int
+getArgCount :: [(NonEmpty Pat, Expr 'Fixity)] -> Maybe Int
 getArgCount [] = Just 0
 getArgCount ((firstPats, _) : matches) = argCount <$ guard (all ((== argCount) . length . fst) matches)
   where
@@ -476,6 +483,7 @@ checkBinding binding types = case binding of
         Just ty -> do
             bindingAsLambda <- check (foldr (\var -> (:@ getLoc binding) . Lambda var) body args) ty
             (typedArgs, typedBody) <- unwrapArgs (length args) bindingAsLambda
+            traverse_ checkCompletePattern typedArgs
             pure (Map.one name ty, El.FunctionB name typedArgs typedBody)
         Nothing -> inferBinding binding
     ValueB (VarP name :@ nameLoc) body -> case Map.lookup name types of
@@ -659,6 +667,7 @@ inferBinding = \case
         -- we need the pattern itself to be in scope in case the binding is recursive
         typedBody@(_ :@ bloc ::: bodyTy) <- local' (declareMany typeMap) $ infer body
         subtype (patTy :@ loc) (bodyTy :@ bloc)
+        checkCompletePattern typedPat
         pure (typeMap, El.ValueB typedPat typedBody)
     binding@(FunctionB name args body) -> do
         -- note: we can only infer monotypes for recursive functions

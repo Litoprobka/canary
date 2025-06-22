@@ -1,15 +1,16 @@
 {-# LANGUAGE NoFieldSelectors #-}
 
 module TypeChecker.Exhaustiveness (
-    checkExhaustiveness,
-    checkExhaustiveness',
+    checkCompletePattern,
+    checkCaseExhaustiveness,
+    checkMatchExhaustiveness,
     ConstructorTable (..),
     simplifyPatternType,
     simplifyPatternTypeWith,
-    checkCompletePattern,
 ) where
 
 import Common hiding (Wildcard)
+import Data.Foldable1 (foldMap1)
 import Data.HashMap.Strict qualified as HashMap
 import Data.IntMap qualified as IntMap
 import Diagnostic
@@ -28,43 +29,72 @@ import TypeChecker.Backend
 import Prelude qualified (show)
 
 checkCompletePattern :: InfEffs es => EPattern -> Eff es ()
-checkCompletePattern pat@(_ :@ loc ::: ty) = checkExhaustiveness loc ty [pat]
-
-checkExhaustiveness :: InfEffs es => Loc -> TypeDT_ -> [EPattern] -> Eff es ()
-checkExhaustiveness loc ty branches = checkExhaustiveness' loc [ty] (map one branches)
-
-checkExhaustiveness' :: InfEffs es => Loc -> [TypeDT_] -> [[EPattern]] -> Eff es ()
-checkExhaustiveness' loc ty branches = do
-    conMap <- get @ConstructorTable
-    patternTypes <- traverse simplifyPatternType ty
-    let branches' = (fmap . fmap) simplifyPattern branches
-        nested = buildProdTree conMap patternTypes
-        result = checkMatch nested branches'
+checkCompletePattern pat@(_ :@ loc ::: ty) = do
+    result <- checkExhaustiveness (one ty) [one pat]
     unless (null result.missing) do
         nonFatal $
-            Err
+            Warn
+                Nothing
+                "incomplete pattern"
+                (mkNotes [(loc, M.This "this pattern doesn't cover all cases")])
+                [Note $ vsep ("cases not covered:" : map (hsep . map pretty) result.missing)]
+
+checkCaseExhaustiveness :: InfEffs es => Loc -> TypeDT_ -> [EPattern] -> Eff es ()
+checkCaseExhaustiveness loc ty branches = do
+    result <- checkExhaustiveness (one ty) (map one branches)
+    unless (null result.missing) do
+        nonFatal $
+            -- in the future, this should be changed back to an error
+            Warn
                 Nothing
                 "non-exhaustive patterns"
-                (mkNotes [(loc, M.This "when checking these patterns")])
+                (mkNotes [(loc, M.This "when checking this case expression")])
                 [Note $ vsep ("patterns not matched:" : map (hsep . map pretty) result.missing)]
     unless (null result.redundants) do
         nonFatal $
             Warn
                 Nothing
                 "redundant patterns"
-                (mkNotes [(loc, M.This "when checking these patterns")])
-                [Note $ vsep ("these patterns will never match:" : map (hsep . map pretty) result.redundants)]
+                (mkNotes $ map (\(_ :@ patLoc) -> (patLoc, M.This "this pattern will never match")) result.redundants)
+                []
+
+checkMatchExhaustiveness :: InfEffs es => Loc -> NonEmpty TypeDT_ -> [NonEmpty EPattern] -> Eff es ()
+checkMatchExhaustiveness loc types branches = do
+    result <- checkExhaustiveness types branches
+    unless (null result.missing) do
+        nonFatal $
+            Warn
+                Nothing
+                "non-exhaustive patterns"
+                (mkNotes [(loc, M.This "when checking this match expression")])
+                [Note $ vsep ("patterns not matched:" : map (hsep . map pretty) result.missing)]
+    unless (null result.redundants) do
+        nonFatal $
+            Warn
+                Nothing
+                "redundant patterns"
+                (mkNotes $ map (\(_ :@ patLoc) -> (patLoc, M.This "these patterns will never match")) result.redundants)
+                []
 
 data CheckResult = CheckResult
     { missing :: [[Pattern]]
-    , redundants :: [[Pattern]]
+    , redundants :: [Located [Pattern]]
     }
 
-checkMatch :: Nested () -> [[Pattern]] -> CheckResult
+checkExhaustiveness :: InfEffs es => NonEmpty TypeDT_ -> [NonEmpty EPattern] -> Eff es CheckResult
+checkExhaustiveness types branches = do
+    conMap <- get @ConstructorTable
+    patternTypes <- traverse simplifyPatternType types
+    -- perhaps checkExhaustiveness should take a list of non-empty lists, I'm not sure
+    let branches' = map (\pats -> map simplifyPattern (toList pats) :@ foldMap1 getLoc pats) branches
+        nested = buildProdTree conMap $ toList patternTypes
+    pure $ checkMatch nested branches'
+
+checkMatch :: Nested () -> [Located [Pattern]] -> CheckResult
 checkMatch initTree = toResult . first (maybe [] (missingPatternsNested const)) . foldl' checkAndPruneBranch (Just initTree, [])
   where
-    checkAndPruneBranch (tree, redundants) pats
-        | maybe True (redundantNested pats (const False)) tree = (tree, redundants <> [pats]) -- we could use a DList for redundant patterns, but I don't think it's worth it
+    checkAndPruneBranch (tree, redundants) (pats :@ loc)
+        | maybe True (redundantNested pats (const False)) tree = (tree, redundants <> [pats :@ loc]) -- we could use a DList for redundant patterns, but I don't think it's worth it
         | otherwise = (pruneNested pats (const Nothing) =<< tree, redundants)
     toResult (missing, redundants) = CheckResult{missing, redundants}
 
@@ -212,7 +242,7 @@ pruneRecord row k = \case
             Just (pat, row') -> prune pat (pruneRecord row' k) nested
             Nothing -> mapMaybeTree (pruneRecord row k) nested
 
--- * patterns redundancy check
+-- * pattern redundancy check
 
 {- | returns True if the given pattern wouldn't prune any branches
 from the case tree

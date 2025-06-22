@@ -204,10 +204,10 @@ desugarElaborated = go
             E.FunctionB name args body -> C.Let name <$> go (foldr (\x -> (::: error "tedium") . (:@ loc) . E.Lambda x) body args) <*> go expr
         E.LetRec _bindings _body -> internalError loc "todo: letrec desugar"
         E.Case arg matches -> C.Case <$> go arg <*> traverse (bitraverse flattenPattern go) matches
-        E.Match matches@(([_], _) : _) -> do
+        E.Match matches@((_ :| [], _) : _) -> do
             name <- freshName $ Name' "matchArg" :@ loc
             matches' <- for matches \case
-                ([pat], body) -> bitraverse flattenPattern desugarElaborated (pat, body)
+                (pat :| [], body) -> bitraverse flattenPattern desugarElaborated (pat, body)
                 _ -> internalError loc "inconsistent pattern count in a match expression"
             pure $ C.Lambda name $ C.Case (C.Name name) matches'
         E.Match _ -> internalError loc "todo: multi-arg match desugar"

@@ -337,7 +337,8 @@ case' = do
     pure $ Case arg matches
 
 match' :: Parser' (Expr_ Parse)
-match' = Match <$> block Token.Match (parseError "pattern matches") ((,) <$> some patternParens <* specialSymbol Token.Arrow <*> term)
+match' =
+    Match <$> block Token.Match (parseError "pattern matches") ((,) <$> NE.some patternParens <* specialSymbol Token.Arrow <*> term)
 
 if' :: Parser' (Expr_ Parse)
 if' = do

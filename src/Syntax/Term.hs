@@ -44,7 +44,7 @@ data Term_ p
     | TypeApp (Expr p) (Type p)
     | Case (Expr p) [(Pattern p, Expr p)]
     | -- | Haskell's \cases
-      Match [([Pattern p], Expr p)]
+      Match [((NonEmpty (Pattern p)), Expr p)]
     | If (Expr p) (Expr p) (Expr p)
     | -- | 'Constructor
       -- unlike the rest of the cases, variant tags and record fields
@@ -139,7 +139,10 @@ instance PrettyAnsi (NameAt p) => PrettyAnsi (Expr_ p) where
             Let binding body -> "let" <+> prettyAnsi opts binding <> ";" <+> go 0 body
             LetRec bindings body -> "let rec" <+> sep ((<> ";") . prettyAnsi opts <$> NE.toList bindings) <+> go 0 body
             Case arg matches -> nest 4 (vsep $ ("case" <+> go 0 arg <+> "of" :) $ matches <&> \(pat, body) -> prettyAnsi opts pat <+> "->" <+> go 0 body)
-            Match matches -> nest 4 (vsep $ ("match" :) $ matches <&> \(pats, body) -> sep (parens . prettyAnsi opts <$> pats) <+> "->" <+> go 0 body)
+            Match matches ->
+                nest
+                    4
+                    (vsep $ ("match" :) $ matches <&> \(pats, body) -> (sep . toList) (parens . prettyAnsi opts <$> pats) <+> "->" <+> go 0 body)
             If cond true false -> "if" <+> go 0 cond <+> "then" <+> go 0 true <+> "else" <+> go 0 false
             Annotation expr ty -> parensWhen 1 $ go 0 expr <+> ":" <+> go 0 ty
             Name name -> prettyAnsi opts name

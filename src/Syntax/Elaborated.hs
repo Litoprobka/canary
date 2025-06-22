@@ -28,7 +28,7 @@ data ETerm_
     | Let EBinding ETerm
     | LetRec (NonEmpty EBinding) ETerm
     | Case ETerm [(EPattern, ETerm)]
-    | Match [([EPattern], ETerm)]
+    | Match [(NonEmpty EPattern, ETerm)]
     | If ETerm ETerm ETerm
     | Variant OpenName
     | Record (Row ETerm)
@@ -68,3 +68,6 @@ data EDeclaration_
     -- I'm not sure which representation for typechecked constructors makes more sense, this is the bare minimum
     | TypeD Name [(Name, Int)]
     | SignatureD Name Value
+
+instance HasLoc a => HasLoc (Typed a) where
+    getLoc (x ::: _) = getLoc x
