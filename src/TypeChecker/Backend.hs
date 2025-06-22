@@ -5,7 +5,6 @@
 {-# LANGUAGE GADTs #-}
 {-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE OverloadedRecordDot #-}
-{-# LANGUAGE TemplateHaskell #-}
 {-# LANGUAGE TypeFamilies #-}
 {-# LANGUAGE NoFieldSelectors #-}
 {-# OPTIONS_GHC -Wno-missing-export-lists #-}
@@ -19,12 +18,9 @@ import Data.EnumSet qualified as Set
 import Data.Traversable (for)
 import Diagnostic (Diagnose, internalError, internalError')
 import Effectful
-import Effectful.Dispatch.Dynamic (reinterpret)
-import Effectful.Error.Static (runErrorNoCallStack, throwError_)
 import Effectful.Labeled
 import Effectful.Reader.Static (Reader, ask, asks, local, runReader)
 import Effectful.State.Static.Local (State, evalState, get, gets, modify, runState)
-import Effectful.TH
 import Error.Diagnose (Position (..))
 import Eval (Value, ValueEnv)
 import Eval qualified as V
@@ -74,7 +70,15 @@ data Monotype_
 
 data MonoClosure ty = MonoClosure {var :: Name, variance :: Variance, ty :: ty, env :: ValueEnv, body :: CoreTerm}
 data MonoPatternClosure ty = MonoPatternClosure {pat :: CorePattern, variance :: Variance, ty :: ty, env :: ValueEnv, body :: CoreTerm}
-data Variance = In | Out | Inv deriving (Eq)
+
+data Variance
+    = -- | negative variance, forall in a negative position gets instantiated to univars
+      In
+    | -- | positive variance, forall in a positive position gets instantiated to skolems
+      Out
+    | -- | invariance, both forall and exists get instantiated to skolems no matter what
+      Inv
+    deriving (Eq)
 
 data Env = Env
     { scope :: Scope
@@ -102,14 +106,6 @@ newtype ConstructorTable = ConstructorTable
     }
 data ExType = TyCon Name_ [ExType] | ExVariant (ExtRow ExType) | ExRecord (Row ExType) | OpaqueTy
     deriving (Show)
-
-data Break err :: Effect where
-    Break :: err -> Break err m a
-
-makeEffect ''Break
-
-runBreak :: forall err a es. Eff (Break err : es) a -> Eff es (Either err a)
-runBreak = reinterpret (runErrorNoCallStack @err) \_ (Break val) -> throwError_ @err val
 
 instance Pretty Monotype_ where
     pretty = pretty . unMono'

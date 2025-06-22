@@ -190,7 +190,7 @@ tryApplyPatternClosure PatternClosure{pat, env, body} arg = do
 desugarElaborated :: forall es. (NameGen :> es, Diagnose :> es) => ETerm -> Eff es CoreTerm
 desugarElaborated = go
   where
-    go (e :@ loc ::: _) = case e of
+    go (e :@ loc ::: ty) = case e of
         E.Name name -> pure $ C.Name name
         E.Literal lit -> pure $ C.Literal lit
         E.App lhs rhs -> C.App <$> go lhs <*> go rhs
@@ -200,7 +200,7 @@ desugarElaborated = go
             C.Lambda name <$> go (E.Case (E.Name name :@ getLoc name ::: patTy) [(pat, body)] :@ loc ::: bodyTy)
         E.Let binding expr -> case binding of
             E.ValueB (L (E.VarP name) ::: _) body -> C.Let name <$> go body <*> go expr
-            E.ValueB _ _ -> internalError loc "todo: desugar pattern bindings"
+            E.ValueB pat body -> desugarElaborated $ E.Case body [(pat, expr)] :@ loc ::: ty
             E.FunctionB name args body -> C.Let name <$> go (foldr (\x -> (::: error "tedium") . (:@ loc) . E.Lambda x) body args) <*> go expr
         E.LetRec _bindings _body -> internalError loc "todo: letrec desugar"
         E.Case arg matches -> C.Case <$> go arg <*> traverse (bitraverse flattenPattern go) matches
