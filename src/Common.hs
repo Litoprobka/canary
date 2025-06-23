@@ -152,7 +152,6 @@ isInfixConstructor :: Name -> Bool
 isInfixConstructor (L (Name name _)) = Text.head name == ':'
 isInfixConstructor _ = False
 
--- univars use a different range of ids, so it's not clear whether they should use the same Id newtype
 newtype UniVar = UniVar Id
     deriving (Show, Eq)
     deriving newtype (Hashable, Enum)
@@ -160,9 +159,6 @@ newtype UniVar = UniVar Id
 newtype Id = Id {id :: Int}
     deriving (Show, Eq)
     deriving newtype (Hashable, Pretty, Enum)
-
-inc :: Id -> Id
-inc (Id n) = Id $ n + 1
 
 newtype Skolem = Skolem Name
     deriving (Show, Eq)

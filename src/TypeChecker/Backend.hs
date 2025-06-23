@@ -5,6 +5,7 @@
 {-# LANGUAGE GADTs #-}
 {-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE OverloadedRecordDot #-}
+{-# LANGUAGE TemplateHaskell #-}
 {-# LANGUAGE TypeFamilies #-}
 {-# LANGUAGE NoFieldSelectors #-}
 {-# OPTIONS_GHC -Wno-missing-export-lists #-}
@@ -18,6 +19,7 @@ import Data.EnumSet qualified as Set
 import Data.Traversable (for)
 import Diagnostic (Diagnose, internalError, internalError')
 import Effectful
+import Effectful.Dispatch.Dynamic (reinterpret_)
 import Effectful.Labeled
 import Effectful.Reader.Static (Reader, ask, asks, local, runReader)
 import Effectful.State.Static.Local (State, evalState, get, gets, modify, runState)
@@ -92,10 +94,10 @@ type TopLevel = IdMap Name Type'_
 type UniVars = EnumMap UniVar (Either Scope Monotype) -- should we use located Monotypes here? I'm not sure
 type InfEffs es =
     ( NameGen :> es
-    , Labeled UniVar NameGen :> es
-    , State UniVars :> es
-    , State (IdMap Name Scope) :> es -- scopes of unbound vars
-    , State TopLevel :> es
+    , TC :> es
+    , -- todo: most of the typecheck actions only need TopLevel and ConstructorTable read-only
+      -- however, when they are called from inferDecl, TopLevel and ConstructorTable are needed in State context
+      State TopLevel :> es
     , State ConstructorTable :> es
     , Reader Env :> es
     , Diagnose :> es
@@ -107,18 +109,51 @@ newtype ConstructorTable = ConstructorTable
 data ExType = TyCon Name_ [ExType] | ExVariant (ExtRow ExType) | ExRecord (Row ExType) | OpaqueTy
     deriving (Show)
 
+data TC :: Effect where
+    FreshUniVar' :: TC m UniVar
+    LookupUniVar :: UniVar -> TC m (Either Scope Monotype)
+    -- | a helper for `alterUniVar`, shouldn't be used directly
+    SetUniVar :: UniVar -> (Either Scope Monotype) -> TC m ()
+    FreshSkolem' :: SimpleName -> TC m Name
+    SkolemScope :: Name -> TC m Scope
+
+makeEffect ''TC
+
 instance Pretty Monotype_ where
     pretty = pretty . unMono'
 
-run
-    :: ValueEnv
-    -> Eff (Reader Env : State UniVars : State (IdMap Name Scope) : Labeled UniVar NameGen : es) a
-    -> Eff es a
-run values action =
-    runLabeled @UniVar runNameGen
-        . evalState Map.empty
+runTC :: (NameGen :> es, Diagnose :> es, Reader Env :> es) => Eff (TC : es) a -> Eff es a
+runTC = reinterpret_
+    ( runLabeled @UniVar runNameGen
+        . evalState @(IdMap Name Scope) Map.empty
         . evalState @UniVars EMap.empty
-        $ runReader initState action
+    )
+    \case
+        FreshUniVar' -> do
+            -- c'mon effectful
+            var <- UniVar <$> labeled @UniVar @NameGen freshId
+            scope <- asks @Env (.scope)
+            modify @UniVars $ EMap.insert var (Left scope)
+            pure var
+        LookupUniVar uni -> maybe (internalError' $ "missing univar" <+> prettyDef uni) pure . EMap.lookup uni =<< get @UniVars
+        SetUniVar uni scopeOrTy -> modify @UniVars $ EMap.insert uni scopeOrTy
+        FreshSkolem' name -> do
+            -- skolems are generally derived from type variables, so they have names
+            scope <- asks @Env (.scope)
+            skolem <- freshName name
+            modify $ Map.insert skolem scope
+            pure skolem
+        SkolemScope skolem ->
+            maybe (internalError (getLoc skolem) $ "missing skolem" <+> pretty skolem) pure
+                . Map.lookup skolem
+                =<< get @(_ Name _)
+
+run
+    :: (NameGen :> es, Diagnose :> es)
+    => ValueEnv
+    -> Eff (TC : Reader Env : es) a
+    -> Eff es a
+run values action = runReader initState $ runTC action
   where
     initState =
         Env
@@ -127,35 +162,13 @@ run values action =
             , locals = Map.empty
             }
 
-freshUniVar :: InfEffs es => Eff es TypeDT_
+freshUniVar :: TC :> es => Eff es TypeDT_
 freshUniVar = V.UniVar <$> freshUniVar'
 
-freshUniVar' :: InfEffs es => Eff es UniVar
-freshUniVar' = do
-    -- c'mon effectful
-    var <- UniVar <$> labeled @UniVar @NameGen freshId
-    scope <- asks @Env (.scope)
-    modify @UniVars $ EMap.insert var (Left scope)
-    pure var
-
-freshSkolem' :: InfEffs es => SimpleName -> Eff es Name
-freshSkolem' name = do
-    -- skolems are generally derived from type variables, so they have names
-    scope <- asks @Env (.scope)
-    skolem <- mkName name
-    modify $ Map.insert skolem scope
-    pure skolem
-  where
-    mkName (Located loc (Name' txtName)) = Located loc <$> freshName_ (Name' txtName)
-    mkName _ = freshName (Located (getLoc name) $ Name' "what") -- why?
-
-freshSkolem :: InfEffs es => SimpleName -> Eff es TypeDT_
+freshSkolem :: TC :> es => SimpleName -> Eff es TypeDT_
 freshSkolem name = V.Var <$> freshSkolem' name
 
-lookupUniVar :: InfEffs es => UniVar -> Eff es (Either Scope Monotype)
-lookupUniVar uni = maybe (internalError' $ "missing univar" <+> prettyDef uni) pure . EMap.lookup uni =<< get @UniVars
-
-withUniVar :: InfEffs es => UniVar -> (Monotype -> Eff es a) -> Eff es ()
+withUniVar :: TC :> es => UniVar -> (Monotype -> Eff es a) -> Eff es ()
 withUniVar uni f =
     lookupUniVar uni >>= \case
         Left _ -> pass
@@ -179,7 +192,7 @@ alterUniVar override uni ty = do
             Right _ -> pure Nothing
             Left scope -> pure $ Just scope
     cycle <- cycleCheck mbScope (Direct, Set.singleton uni) ty
-    when (cycle == NoCycle) $ modify @UniVars $ EMap.insert uni (Right ty)
+    when (cycle == NoCycle) $ setUniVar uni (Right ty)
   where
     -- errors out on indirect cycles (i.e. a ~ Maybe a)
     -- returns False on direct univar cycles (i.e. a ~ b, b ~ c, c ~ a)
@@ -200,18 +213,18 @@ alterUniVar override uni ty = do
                     Right ty' -> go (selfRefType, Set.insert uni2 acc) $ unLoc ty'
                     Left scope' -> do
                         case mbScope of
-                            Just scope | scope' > scope -> modify @UniVars $ EMap.insert uni2 (Left scope')
+                            Just scope | scope' > scope -> setUniVar uni2 (Left scope')
                             _ -> pass
                         pure NoCycle
-            MFn from to -> go (Indirect, acc) from >> go (Indirect, acc) to
+            MFn from to -> go (Indirect, acc) from *> go (Indirect, acc) to
             MQ _q _e closure -> go (Indirect, acc) closure.ty *> cycleCheckClosure acc closure
             MCon _ args -> NoCycle <$ traverse_ (go (Indirect, acc)) args
-            MApp lhs rhs -> go (Indirect, acc) lhs >> go (Indirect, acc) rhs
+            MApp lhs rhs -> go (Indirect, acc) lhs *> go (Indirect, acc) rhs
             MVariantT row -> NoCycle <$ traverse_ (go (Indirect, acc)) row
             MRecordT row -> NoCycle <$ traverse_ (go (Indirect, acc)) row
             MVariant _ val -> go (Indirect, acc) val
             MRecord row -> NoCycle <$ traverse_ (go (Indirect, acc)) row
-            MSigma x y -> go (Indirect, acc) x >> go (Indirect, acc) y
+            MSigma x y -> go (Indirect, acc) x *> go (Indirect, acc) y
             MLambda closure -> cycleCheckClosure acc closure
             MPrimFn{captured} -> NoCycle <$ traverse_ (go (Indirect, acc)) captured
             MCase _arg _matches -> internalError' "todo: cycleCheck stuck MCase" -- go (Indirect, acc) arg <* traverse_ _what matches
@@ -230,14 +243,8 @@ alterUniVar override uni ty = do
                 Left{} -> pure uni2
         other -> pure other
 
-skolemScope :: InfEffs es => Name -> Eff es Scope
-skolemScope skolem =
-    maybe (internalError (getLoc skolem) $ "missing skolem" <+> pretty skolem) pure
-        . Map.lookup skolem
-        =<< get @(_ Name _)
-
 -- looks up a type of a binding. Global bindings take precedence over local ones (should they?)
-lookupSig :: InfEffs es => Name -> Eff es TypeDT_
+lookupSig :: (TC :> es, State TopLevel :> es, Reader Env :> es) => Name -> Eff es TypeDT_
 lookupSig name = do
     topLevel <- get
     locals <- asks @Env (.locals)

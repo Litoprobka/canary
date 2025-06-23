@@ -52,7 +52,7 @@ import Syntax.Term qualified as E
 import Syntax.Term qualified as T
 import TypeChecker (Env)
 import TypeChecker qualified as TC (run)
-import TypeChecker.Backend (TopLevel, Type', UniVars)
+import TypeChecker.Backend (TC, TopLevel, Type')
 
 -- some wrappers and syntactic niceties for testing
 
@@ -60,10 +60,8 @@ testCheck
     :: Eff [NameResolution.Declare, State ImplicitVars, State [DList Name], State Scope, Diagnose, NameGen] resolved
     -> ( resolved
          -> Eff
-                '[ S.Reader Env
-                 , State UniVars
-                 , State (IdMap Name Common.Scope)
-                 , Labeled UniVar NameGen
+                '[ TC
+                 , S.Reader Env
                  , State TopLevel
                  , Diagnose
                  , NameGen
@@ -185,7 +183,7 @@ list xs = Located loc $ E.List xs
         (first' : _, last' : _) -> zipLocOf first' last'
         _ -> pgLoc
 
-match :: [([Pattern p], Expr p)] -> Expr p
+match :: [(NonEmpty (Pattern p), Expr p)] -> Expr p
 match = noLoc . E.Match
 
 case_ :: Expr p -> [(Pattern p, Expr p)] -> Expr p

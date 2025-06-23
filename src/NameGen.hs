@@ -6,8 +6,8 @@
 
 module NameGen (runNameGen, freshId, freshName, freshName_, NameGen) where
 
-import Common (Id (..), Located (..), Name, Name_ (..), SimpleName, SimpleName_ (..), inc)
-import Effectful.Dispatch.Dynamic (reinterpret)
+import Common (Id (..), Located (..), Name, Name_ (..), SimpleName, SimpleName_ (..))
+import Effectful.Dispatch.Dynamic (reinterpret_)
 import Effectful.State.Static.Local (evalState, get, modify)
 import LangPrelude
 
@@ -25,4 +25,4 @@ freshName_ = \case
     Wildcard' name -> Wildcard name <$> freshId
 
 runNameGen :: Eff (NameGen : es) a -> Eff es a
-runNameGen = reinterpret (evalState $ Id 0) \_ FreshId -> get <* modify inc
+runNameGen = reinterpret_ (evalState $ Id 0) \FreshId -> get <* modify (succ @Id)
