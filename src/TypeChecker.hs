@@ -60,7 +60,7 @@ inferDeclaration (decl :@ loc) =
             modify $ Map.insert name sigV
             pure (El.SignatureD name sigV, id)
         D.Type name binders constrs -> do
-            local' (define name (V.TyCon name)) do
+            local' (define name (V.TyCon name [])) do
                 typeKind <- normalise $ mkTypeKind binders
                 modify $ Map.insert name typeKind
                 for_ (mkConstrSigs name binders constrs) \(con, sig) -> do
@@ -68,9 +68,9 @@ inferDeclaration (decl :@ loc) =
                     modify $ Map.insert con sigV
                 conMapEntry <- mkConstructorTableEntry (map (.var) binders) (map (\con -> (con.name, con.args)) constrs)
                 modify \ConstructorTable{table} -> ConstructorTable{table = Map.insert (unLoc name) conMapEntry table}
-                pure (El.TypeD name (map (\con -> (con.name, length con.args)) constrs), insertVal name (V.TyCon name))
+                pure (El.TypeD name (map (\con -> (con.name, length con.args)) constrs), insertVal name (V.TyCon name []))
         D.GADT name mbKind constrs -> do
-            local' (define name (V.TyCon name)) do
+            local' (define name (V.TyCon name [])) do
                 kind <- maybe (pure type_) typeFromTerm mbKind
                 modify $ Map.insert name $ unLoc kind
                 local' (declare name kind) $ for_ constrs \con -> do
@@ -78,7 +78,7 @@ inferDeclaration (decl :@ loc) =
                     conSig <- normalise $ typeFromTerm con.sig
                     modify $ Map.insert con.name conSig
             -- todo: add GADT constructors to the constructor table
-            pure (El.TypeD name (map (\con -> (con.name, argCount con.sig)) constrs), insertVal name (V.TyCon name))
+            pure (El.TypeD name (map (\con -> (con.name, argCount con.sig)) constrs), insertVal name (V.TyCon name []))
         D.Value binding (_ : _) -> internalError (getLoc binding) "todo: proper support for where clauses"
         D.Value binding [] -> do
             sigs <- get
@@ -92,7 +92,8 @@ inferDeclaration (decl :@ loc) =
     mkTypeKind = \case
         [] -> pure type_
         (binder : rest) -> fmap (:@ loc) $ V.Function <$> (unLoc <$> typeFromTerm (binderKind binder)) <*> (unLoc <$> mkTypeKind rest) -- ewww
-    type_ = V.TyCon (TypeName :@ loc) :@ loc
+    type_ :: Type'
+    type_ = V.TyCon (TypeName :@ loc) [] :@ loc
 
     mkConstrSigs :: Name -> [VarBinder 'Fixity] -> [Constructor 'Fixity] -> [(Name, Type 'Fixity)]
     mkConstrSigs name binders constrs =
@@ -134,7 +135,7 @@ inferDeclaration (decl :@ loc) =
 typeFromTerm :: InfEffs es => Type 'Fixity -> Eff es Type'
 typeFromTerm term = do
     values <- asks @Env (.values)
-    typedTerm@(_ :@ loc ::: _) <- check term $ V.TyCon (TypeName :@ getLoc term) :@ getLoc term
+    typedTerm@(_ :@ loc ::: _) <- check term $ V.TyCon (TypeName :@ getLoc term) [] :@ getLoc term
     (:@ loc) . V.evalCore values <$> V.desugarElaborated typedTerm
 
 mkConstructorTableEntry
@@ -147,6 +148,7 @@ mkConstructorTableEntry boundVars constrs =
         conFns <- traverse (Ex.simplifyPatternTypeWith . unLoc <=< typeFromTerm) args
         pure $ \types -> conFns <&> \fn -> fn $ Map.fromList (zip boundVars types)
 
+-- this is more of a subsumption check than a subtype check
 subtype :: InfEffs es => TypeDT -> TypeDT -> Eff es ()
 subtype (lhs_ :@ locL) (rhs_ :@ locR) = do
     _valEnv <- asks @Env (.values)
@@ -154,7 +156,13 @@ subtype (lhs_ :@ locL) (rhs_ :@ locR) = do
     join $ match <$> ({- V.unstuck valEnv <$> -} monoLayer' In lhs_) <*> ({- V.unstuck valEnv <$> -} monoLayer' Out rhs_)
   where
     match = \cases
-        (V.TyCon lhs) (V.TyCon rhs) | lhs == rhs -> pass
+        -- Nat is mostly an example to test whether this kind of subtyping
+        -- would even make sense in a system with no subtype inference
+        (V.TyCon (L NatName) []) (V.TyCon (L IntName) []) -> pass
+        lhs@(V.TyCon lhsCon lhsArgs) rhs@(V.TyCon rhsCon rhsArgs) -> do
+            unless (lhsCon == rhsCon) $ typeError $ CannotUnify (lhs :@ locL) (rhs :@ locR)
+            unless (length lhsArgs == length rhsArgs) $ internalError locL "attempted to unify TyCons with different arg counts"
+            zipWithM_ subtypeLoc lhsArgs rhsArgs
         (V.UniVar lhs) (V.UniVar rhs) | lhs == rhs -> pass
         (V.Var lhs) (V.Var rhs) | lhs == rhs -> pass
         lhs (V.UniVar uni) -> solveOr (Located locL <$> mono' In lhs) (subtype (lhs :@ locL) . unMono) uni
@@ -169,7 +177,6 @@ subtype (lhs_ :@ locL) (rhs_ :@ locR) = do
             case LMap.lookup skolem skolems of
                 Nothing -> typeError $ NotASubtype (lhs :@ locL) (rhs :@ locR) Nothing
                 Just skolemTy -> subtype (skolemTy :@ locL) (rhs :@ locR)
-        (V.TyCon (L NatName)) (V.TyCon (L IntName)) -> pass
         lhs@(V.Con lhsCon lhsArgs) rhs@(V.Con rhsCon rhsArgs) -> do
             unless (lhsCon == rhsCon) $ typeError $ CannotUnify (lhs :@ locL) (rhs :@ locR)
             -- we assume that the arg count is correct
@@ -195,17 +202,10 @@ subtype (lhs_ :@ locL) (rhs_ :@ locR) = do
             subtypeFlipped inr closure.ty
             skolem <- freshSkolem $ toSimpleName closure.var
             subtypeLoc (V.app closure skolem) outr
-        (V.App lhs rhs) (V.App lhs' rhs') -> do
-            -- seems like we need to track variance in kinds for this to work properly
-            -- higher-kinded types are also problematic when it comes to variance, i.e.
-            -- is `f a` a subtype of `f b` when a is `a` subtype of `b` or the other way around?
-            --
-            -- QuickLook just assumes that all constructors are invariant and -> is a special case
-            -- for now, we do the same
-            join $ subtypeLoc <$> monoLayer' Inv lhs <*> monoLayer' Inv lhs'
-            join $ subtypeLoc <$> monoLayer' Inv rhs <*> monoLayer' Inv rhs'
         (V.VariantT lhs) (V.VariantT rhs) -> subtypeRows Variant lhs rhs
         (V.RecordT lhs) (V.RecordT rhs) -> subtypeRows Record lhs rhs
+        -- todo: unify applied univars with parametrised type constructors
+        -- #1 Int <: List Int     #1 := List
         lhs rhs -> typeError $ NotASubtype (lhs :@ locL) (rhs :@ locR) Nothing
       where
         subtypeLoc :: InfEffs es => TypeDT_ -> TypeDT_ -> Eff es ()
@@ -243,7 +243,7 @@ subtype (lhs_ :@ locL) (rhs_ :@ locR) = do
 check :: InfEffs es => Expr 'Fixity -> TypeDT -> Eff es ETerm
 check (e :@ loc) (typeToCheck :@ tyLoc) = do
     valEnv <- asks @Env (.values)
-    match e $ V.unstuck valEnv typeToCheck
+    match e $ V.force valEnv typeToCheck
   where
     check_ expr ty = check expr (ty :@ tyLoc)
     match = \cases
@@ -266,8 +266,9 @@ check (e :@ loc) (typeToCheck :@ tyLoc) = do
         (Annotation expr annTy) ty -> do
             annTyV <- typeFromTerm annTy
             check expr annTyV <* subtype annTyV (ty :@ tyLoc)
+        -- todo: if 'cond' is a variable, it should be known in the branches that 'cond ~ True' or 'cond ~ False'
         (If cond true false) ty -> do
-            cond' <- check_ cond $ V.TyCon (BoolName :@ loc)
+            cond' <- check_ cond $ V.TyCon (BoolName :@ loc) []
             true' <- check_ true ty
             false' <- check_ false ty
             pure $ (El.If cond' true' false' :@ loc) ::: ty
@@ -327,7 +328,7 @@ check (e :@ loc) (typeToCheck :@ tyLoc) = do
                                 solveUniVar uni $ Located tyLoc $ foldr (MFn . MUniVar) (MUniVar bodyVar) argVars
                                 pure (V.UniVar <$> argVars, V.UniVar bodyVar)
                     _other -> typeError $ ArgCountMismatch loc
-        (List items) ty@(V.TyCon (L ListName) `V.App` itemTy) -> do
+        (List items) ty@(V.TyCon (L ListName) [itemTy]) -> do
             typedItems <- for items (`check` Located tyLoc itemTy)
             pure $ (El.List typedItems :@ loc) ::: ty
         (E.Record row) ty@(V.RecordT tyRowUncompressed) -> do
@@ -427,9 +428,9 @@ localEquality argVal@(_ :@ loc) patVal = do
         (_, V.Var skolem) -> case LMap.lookup skolem venv.values of
             Just val' -> localEquality argVal val'
             Nothing -> pass
-        (lhsF `V.App` lhsArg, rhsF `V.App` rhsArg) -> do
-            localEquality (lhsF :@ loc) rhsF
-            localEquality (lhsArg :@ loc) rhsArg
+        (V.TyCon lhsCon lhsArgs, V.TyCon rhsCon rhsArgs)
+            | lhsCon == rhsCon ->
+                zipWithM_ localEquality (fmap (:@ loc) lhsArgs) rhsArgs
         (V.Con lhsName lhsVals, V.Con rhsName rhsVals)
             | lhsName == rhsName ->
                 zipWithM_ localEquality (fmap (:@ loc) lhsVals) rhsVals
@@ -441,7 +442,7 @@ localEquality argVal@(_ :@ loc) patVal = do
         (V.Function lhsFrom lhsTo, V.Function rhsFrom rhsTo) -> do
             localEquality (lhsFrom :@ loc) rhsFrom
             localEquality (lhsTo :@ loc) rhsTo
-        -- todo: the rest of the cases
+        -- todo: the rest of the cases, including Stuck
         -- RecordT and VariantT are complicated because of row extensions
         -- it's not clear whether we should touch UniVars at all
         (_, V.UniVar uni) ->
@@ -567,7 +568,7 @@ infer (e :@ loc) = case e of
     List items -> do
         itemTy <- freshUniVar
         typedItems <- traverse (`check_` itemTy) items
-        let listTy = V.TyCon (ListName :@ loc) `V.App` itemTy
+        let listTy = V.TyCon (ListName :@ loc) [itemTy]
         pure $ El.List typedItems :@ loc ::: listTy
     E.Record row -> do
         typedRow <- traverse infer row
@@ -595,7 +596,7 @@ infer (e :@ loc) = case e of
                     | otherwise -> IntName
                 TextLiteral _ -> TextName
                 CharLiteral _ -> CharName
-        pure $ El.Literal lit :@ loc ::: V.TyCon (litTypeName :@ loc)
+        pure $ El.Literal lit :@ loc ::: V.TyCon (litTypeName :@ loc) []
     Function lhs rhs -> do
         lhs' <- check lhs $ type_ :@ getLoc rhs
         rhs' <- check rhs $ type_ :@ getLoc rhs
@@ -614,7 +615,8 @@ infer (e :@ loc) = case e of
         typedRow <- traverse (`check_` type_) row
         pure $ El.RecordT typedRow :@ loc ::: type_
   where
-    type_ = V.TyCon (TypeName :@ loc)
+    type_ :: TypeDT_
+    type_ = V.TyCon (TypeName :@ loc) []
     check_ expr ty = check expr (ty :@ loc)
 
 inferApp :: InfEffs es => Loc -> ETerm -> Expr 'Fixity -> Eff es ETerm
@@ -703,7 +705,7 @@ checkPatternRelaxed = fst (patternFuncs go)
     -- we convert a restricted constructor type, like `VCons x xs : Vec (S 'n) 'a` or `VNil : Vec Z 'a`
     -- to a relaxed one, like `VCons x xs : Vec 'm 'a` or `VNil : Vec 'n 'a`
     go = \case
-        lhs `V.App` _ -> V.App <$> go lhs <*> freshUniVar
+        V.TyCon name args -> V.TyCon name <$> traverse (const freshUniVar) args
         other -> pure other
 
 type CheckPattern es = Pat -> TypeDT -> Eff es (IdMap Name TypeDT, EPattern)
@@ -757,7 +759,7 @@ patternFuncs postprocess = (checkP, inferP)
         ListP pats -> do
             result <- freshUniVar
             (typeMap, typedPats) <- traverseFold (`checkP` (result :@ loc)) pats
-            let listTy = V.TyCon (ListName :@ loc) `V.App` result
+            let listTy = V.TyCon (ListName :@ loc) [result]
             pure (typeMap, El.ListP typedPats :@ loc ::: listTy)
         VariantP name arg -> do
             (typeMap, typedArg@(_ ::: argTy)) <- inferP arg
@@ -776,7 +778,7 @@ patternFuncs postprocess = (checkP, inferP)
                         | otherwise -> IntName
                     TextLiteral _ -> TextName
                     CharLiteral _ -> CharName
-            pure (Map.empty, El.LiteralP lit :@ loc ::: V.TyCon (litTypeName :@ loc))
+            pure (Map.empty, El.LiteralP lit :@ loc ::: V.TyCon (litTypeName :@ loc) [])
 
 {- | splits the type singature of a value constructor into a list of args and the final type
 todo: this should really be computed before the typecheck pass and put into a table
@@ -793,8 +795,7 @@ conArgTypes name = lookupSig name >>= go
             -- i.e. types of value constructors have the shape `a -> b -> c -> d -> ConcreteType a b c d`
             --
             V.Con cname args -> pure (V.Con cname args, [])
-            V.TyCon cname -> pure (V.TyCon cname, [])
-            app@V.App{} -> pure (app, [])
+            V.TyCon cname args -> pure (V.TyCon cname args, [])
             V.Var skolem -> pure (V.Var skolem, [])
             _ -> internalError (getLoc name) "invalid constructor type signature"
 

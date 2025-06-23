@@ -6,7 +6,7 @@
 {-# LANGUAGE PatternSynonyms #-}
 {-# OPTIONS_GHC -Wno-orphans #-}
 
-module Eval (quote, eval, evalCore, unstuck, modifyEnv, evalAll, app, module Reexport, desugarElaborated) where
+module Eval (quote, eval, evalCore {-unstuck,-}, modifyEnv, evalAll, app, evalApp, module Reexport, desugarElaborated, force) where
 
 import Common (
     Located (..),
@@ -22,10 +22,14 @@ import Common (
  )
 
 import Data.Foldable (foldrM)
+
+-- IdMap is currently lazy anyway, but it's up to change
+
+import Data.Sequence (pattern (:|>))
 import Data.Traversable (for)
 import Diagnostic
-import IdMap qualified as LMap -- IdMap is currently lazy anyway, but it's up to change
-import LangPrelude
+import IdMap qualified as LMap
+import LangPrelude hiding (force)
 import NameGen (NameGen, freshName)
 import Prettyprinter (line, vsep)
 import Syntax
@@ -39,11 +43,10 @@ import Syntax.Value as Reexport
 -- quote a value for pretty-printing
 quoteForPrinting :: Value -> CoreTerm
 quoteForPrinting = \case
-    Var x -> C.Name x
-    TyCon name -> C.TyCon name
+    TyCon name args -> foldl' C.App (C.TyCon name) (map quoteForPrinting args)
     Con con args -> C.Con con (map quoteForPrinting args)
     Lambda closure -> C.Lambda closure.var (quoteForPrinting $ closureBody closure)
-    PrimFunction{name, captured} ->
+    PrimFunction PrimFunc{name, captured} ->
         -- captured names are stored as a stack, i.e. backwards, so we fold right rather than left here
         foldr (\arg acc -> C.App acc (quoteForPrinting arg)) (C.Name name) captured
     Record vals -> C.Record $ fmap quoteForPrinting vals
@@ -54,9 +57,16 @@ quoteForPrinting = \case
     Q q vis e closure -> C.Q q vis e closure.var (quoteForPrinting closure.ty) $ quoteForPrinting (closureBody closure)
     VariantT row -> C.VariantT $ fmap quoteForPrinting row
     RecordT row -> C.RecordT $ fmap quoteForPrinting row
-    App lhs rhs -> C.App (quoteForPrinting lhs) (quoteForPrinting rhs)
-    Case arg cases -> C.Case (quoteForPrinting arg) $ fmap (\PatternClosure{pat, body} -> (pat, body)) cases
-    UniVar uni -> C.UniVar uni
+    Stuck reason spine ->
+        let initAcc = case reason of
+                OnVar name -> C.Name name
+                OnUniVar uni -> C.UniVar uni
+         in foldl' quoteSpine initAcc spine
+  where
+    quoteSpine acc = \case
+        App rhs -> C.App acc $ quoteForPrinting rhs
+        Fn PrimFunc{name, captured} -> C.App (foldr (\arg acc' -> C.App acc' (quoteForPrinting arg)) (C.Name name) captured) acc
+        Case cases -> C.Case acc $ fmap (\PatternClosure{pat, body} -> (pat, body)) cases
 
 -- an orphan instance, since otherwise we'd have a cyclic dependency between elaborated terms, which are typed, and values
 -- perhaps elaborated terms should be parametrised by the type instead?..
@@ -69,13 +79,12 @@ deriving via (UnAnnotate Value) instance Show Value
 -- quote a value into a normal form expression
 quote :: NameGen :> es => Value -> Eff es CoreTerm
 quote = \case
-    Var x -> pure $ C.Name x
-    TyCon name -> pure $ C.TyCon name
+    TyCon name args -> foldl' C.App (C.TyCon name) <$> traverse quote args
     Con con args -> C.Con con <$> traverse quote args
     Lambda closure -> do
         (var, body) <- closureBody' closure
         C.Lambda var <$> quote body
-    PrimFunction{name, captured} ->
+    PrimFunction PrimFunc{name, captured} ->
         foldrM (\arg acc -> C.App acc <$> quote arg) (C.Name name) captured
     Record vals -> C.Record <$> traverse quote vals
     Sigma x y -> C.Sigma <$> quote x <*> quote y
@@ -88,30 +97,31 @@ quote = \case
         C.Q q vis e var ty <$> quote body
     VariantT row -> C.VariantT <$> traverse quote row
     RecordT row -> C.RecordT <$> traverse quote row
-    App lhs rhs -> C.App <$> quote lhs <*> quote rhs
-    -- todo: not applying the closure here doesn't seem safe, but I'm not sure how to do that without running into infinite recursion
-    Case arg cases -> C.Case <$> quote arg <*> traverse (\PatternClosure{pat, body} -> pure (pat, body)) cases
-    UniVar uni -> pure $ C.UniVar uni
+    Stuck reason spine ->
+        let initAcc = case reason of
+                OnVar name -> C.Name name
+                OnUniVar uni -> C.UniVar uni
+         in foldlM quoteSpine initAcc spine
+  where
+    quoteSpine acc = \case
+        App rhs -> C.App acc <$> quote rhs
+        Fn PrimFunc{name, captured} -> C.App <$> foldrM (\arg acc' -> C.App acc' <$> quote arg) (C.Name name) captured <*> pure acc
+        Case cases -> C.Case acc <$> traverse (\PatternClosure{pat, body} -> pure (pat, body)) cases
 
 evalCore :: ValueEnv -> CoreTerm -> Value
 evalCore !env = \case
     -- note that env is a lazy IdMap, so we only force the outer structure here
     C.Name name -> LMap.lookupDefault (Var name) name env.values
-    C.TyCon name -> TyCon name
+    C.TyCon name -> TyCon name []
     C.Con name args -> Con name $ map (evalCore env) args
     C.Lambda var body -> Lambda $ Closure{var, ty = (), env, body}
     C.App (C.Variant name) arg -> Variant name $ evalCore env arg -- this is a bit of an ugly case
-    C.App lhs rhs -> case (evalCore env lhs, evalCore env rhs) of
-        (Lambda closure, arg) -> closure `app` arg
-        (prim@PrimFunction{}, var) | isStuck var -> App prim var
-        (PrimFunction{remaining = 1, captured, f}, arg) -> f (arg :| captured)
-        (PrimFunction{name, remaining, captured, f}, arg) -> PrimFunction name (pred remaining) (arg : captured) f
-        (other, arg) -> App other arg
-    C.Case arg matches ->
-        let val = evalCore env arg
-         in fromMaybe
+    C.App lhs rhs -> evalApp (evalCore env lhs) (evalCore env rhs)
+    C.Case arg matches -> case evalCore env arg of
+        Stuck stuck spine -> Stuck stuck $ spine :|> Case (mkStuckBranches matches)
+        val ->
+            fromMaybe
                 (error $ show $ "pattern mismatch when matching" <+> prettyDef val <+> "with:" <> line <> vsep (map (prettyDef . fst) matches))
-                . (<|> mbStuckCase val matches)
                 . asum
                 $ matches <&> \(pat, body) -> evalCore <$> matchCore env pat val <*> pure body
     C.Let name expr body ->
@@ -129,27 +139,34 @@ evalCore !env = \case
     -- probably not, but it should be able to traverse solved vars (wip)
     C.UniVar uni -> UniVar uni
   where
-    mbStuckCase (Var x) matches = Just $ Case (Var x) (mkStuckBranches matches)
-    mbStuckCase (UniVar u) matches = Just $ Case (UniVar u) (mkStuckBranches matches)
-    mbStuckCase (App lhs rhs) matches = Just $ Case (App lhs rhs) (mkStuckBranches matches)
-    mbStuckCase _ _ = Nothing
-
     mkStuckBranches :: [(CorePattern, CoreTerm)] -> [PatternClosure ()]
     mkStuckBranches = map \(pat, body) -> PatternClosure{pat, ty = (), env, body}
 
+evalApp :: Value -> Value -> Value
+evalApp = \cases
+    (Lambda closure) arg -> closure `app` arg
+    -- this is slightly janky, but I'm not sure whether I want to represent type constructors as lambdas yet
+    (TyCon name args) arg -> TyCon name (args <> [arg])
+    (PrimFunction fn) (Stuck stuck spine) -> Stuck stuck $ spine :|> Fn fn
+    (PrimFunction PrimFunc{remaining = 1, captured, f}) arg -> f (arg :| captured)
+    (PrimFunction PrimFunc{name, remaining, captured, f}) arg -> PrimFunction $ PrimFunc name (pred remaining) (arg : captured) f
+    (Stuck stuck spine) arg -> Stuck stuck $ spine :|> App arg
+    nonFunc arg -> error . show $ "attempted to apply" <+> pretty nonFunc <+> "to" <+> pretty arg
+
 -- try to evaluate an expression that was previously stuck on an unsolved skolem
-unstuck :: ValueEnv -> Value -> Value
-unstuck !env = \case
-    App stuckLhs rhs -> case unstuck env stuckLhs of
-        Lambda closure -> unstuck env $ closure `app` rhs
-        other -> App other rhs
-    Case stuckArg matches ->
-        let arg = unstuck env stuckArg
-         in fromMaybe (Case arg matches) $ asum $ fmap (`tryApplyPatternClosure` arg) matches
-    Var skolem -> case LMap.lookup skolem env.values of
-        Nothing -> Var skolem
-        Just value -> unstuck env value
-    nonStuck -> nonStuck
+force :: ValueEnv -> Value -> Value
+force !env = \case
+    Stuck (OnUniVar uni) spine -> Stuck (OnUniVar uni) spine
+    Stuck (OnVar name) spine -> case force env <$> LMap.lookup name env.values of
+        Nothing -> Stuck (OnVar name) spine
+        Just (Stuck reason spine') -> Stuck reason $ spine' <> spine
+        Just val -> force env $ foldl' applySpine val spine
+    other -> other
+  where
+    applySpine acc = \case
+        App rhs -> evalApp acc rhs
+        Fn fn -> evalApp (PrimFunction fn) acc
+        Case cases -> fromMaybe (error "failed to match pattern") $ asum $ fmap (`tryApplyPatternClosure` acc) cases
 
 app :: Closure ty -> Value -> Value
 app Closure{var, env, body} arg = evalCore (env{values = LMap.insert var arg env.values}) body

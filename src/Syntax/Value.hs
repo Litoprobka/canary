@@ -5,6 +5,7 @@ module Syntax.Value where
 
 import Common (UniVar)
 import Common hiding (Skolem, UniVar)
+import Data.Sequence qualified as Seq
 import LangPrelude
 import Syntax.Core (CorePattern, CoreTerm)
 import Syntax.Row
@@ -21,21 +22,13 @@ type Type' = Value
 -- in AST, the location corresponds to the source span where the AST node is written
 -- in Values, the location is the source space that the location is *arising from*
 data Value
-    = -- unbound variables are pretty much the same as skolems
-      Var Name
-    | -- | a type constructor. unlike value constructors, `Either a b` is represented as a stuck application Either `App` a `App` b
-      TyCon Name
+    = -- | a type constructor. Unlike value constructors, they don't keep track of arity and may be applied to values
+      TyCon Name [Value]
     | -- | a fully-applied counstructor
       Con Name [Value]
     | Lambda (Closure ())
     | -- | an escape hatch for interpreter primitives and similar stuff
-      -- the Int field is the expected argument count, the list is current partially applied arguments
-      PrimFunction
-        { name :: Name
-        , remaining :: Int
-        , captured :: [Value]
-        , f :: NonEmpty Value -> Value
-        }
+      PrimFunction PrimFunc
     | Record (Row Value)
     | Sigma Value Value
     | Variant OpenName Value
@@ -46,19 +39,35 @@ data Value
     | Q Quantifier Visibility Erasure (Closure Type')
     | VariantT (ExtRow Type')
     | RecordT (ExtRow Type')
-    | -- stuck computations
-      App Value ~Value
-    | Case Value [PatternClosure ()]
-    | -- typechecking metavars
-      UniVar UniVar
+    | Stuck Stuck (Seq StuckPart)
 
-isStuck :: Value -> Bool
-isStuck = \case
-    Var{} -> True
-    App{} -> True
-    Case{} -> True
-    UniVar{} -> True
-    _ -> False
+pattern Var :: Name -> Value
+pattern Var name <- Stuck (OnVar name) Seq.Empty
+    where
+        Var name = Stuck (OnVar name) Seq.Empty
+
+pattern UniVar :: UniVar -> Value
+pattern UniVar uni <- Stuck (OnUniVar uni) Seq.Empty
+    where
+        UniVar uni = Stuck (OnUniVar uni) Seq.Empty
+
+data PrimFunc = PrimFunc
+    { name :: Name
+    , remaining :: Int
+    , captured :: [Value]
+    , f :: NonEmpty Value -> Value
+    }
+
+data Stuck
+    = OnVar Name
+    | OnUniVar UniVar
+
+-- `Stuck (OnVar f) [App x, App y, Fn prim]`
+-- represents `prim ((f x) y)`
+data StuckPart
+    = App ~Value -- _ x
+    | Fn PrimFunc -- f _
+    | Case [PatternClosure ()] -- case _ of
 
 data Closure ty = Closure {var :: Name, ty :: ty, env :: ValueEnv, body :: CoreTerm}
 data PatternClosure ty = PatternClosure {pat :: CorePattern, ty :: ty, env :: ValueEnv, body :: CoreTerm}

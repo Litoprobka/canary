@@ -117,7 +117,9 @@ simplifyPatternType ty = ($ Map.empty) <$> simplifyPatternTypeWith ty
 simplifyPatternTypeWith :: forall es. InfEffs es => TypeDT_ -> Eff es (IdMap Name ExType -> ExType)
 simplifyPatternTypeWith = \case
     V.Var name -> pure $ Map.lookupDefault OpaqueTy name
-    V.TyCon name -> pure $ const $ TyCon (unLoc name) []
+    V.TyCon name args -> do
+        argFns <- traverse simplifyPatternTypeWith args
+        pure $ \env -> TyCon (unLoc name) $ map ($ env) argFns
     V.VariantT row -> do
         row' <- compress Variant Inv row
         fnRow <- traverse simplifyPatternTypeWith row'
@@ -126,12 +128,6 @@ simplifyPatternTypeWith = \case
         row' <- compress Record Inv row
         fnRow <- traverse simplifyPatternTypeWith row'
         pure \args -> ExRecord (fmap ($ args) fnRow.row)
-    V.App lhs rhs -> do
-        lhsFn <- simplifyPatternTypeWith lhs
-        rhsFn <- simplifyPatternTypeWith rhs
-        pure \env -> case lhsFn env of
-            TyCon name args -> TyCon name (args <> [rhsFn env])
-            _ -> OpaqueTy
     V.UniVar uni ->
         lookupUniVar uni >>= \case
             Left{} -> pure $ const OpaqueTy

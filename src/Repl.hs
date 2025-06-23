@@ -96,9 +96,9 @@ noLoc = C.Located builtin
 emptyEnv :: ReplEnv
 emptyEnv = ReplEnv{loadedFiles = mempty, ..}
   where
-    values = ValueEnv{values = Map.one (noLoc TypeName) (V.TyCon (noLoc TypeName))}
+    values = ValueEnv{values = Map.one (noLoc TypeName) (V.TyCon (noLoc TypeName) [])}
     fixityMap = Map.one AppOp InfixL
-    types = Map.one (noLoc TypeName) (V.TyCon (noLoc TypeName))
+    types = Map.one (noLoc TypeName) (V.TyCon (noLoc TypeName) [])
     scope = Scope $ HashMap.singleton (Name' "Type") (noLoc TypeName)
     (_, operatorPriorities) = Poset.eqClass AppOp Poset.empty
     lastLoadedFile = Nothing
@@ -147,7 +147,7 @@ mkDefaultEnv = do
             ty <- NameResolution.resolveTerm rawTy
             f <- resolveF
             pure (name, ty, f)
-        let val = V.PrimFunction{name, remaining = argCount, captured = [], f}
+        let val = V.PrimFunction V.PrimFunc{name, remaining = argCount, captured = [], f}
         tyWithoutDepRes <- cast.term ty
         afterFixityRes <- Fixity.run env.fixityMap env.operatorPriorities $ Fixity.parse tyWithoutDepRes
         -- this is really janky

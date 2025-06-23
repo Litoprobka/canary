@@ -16,6 +16,7 @@ module TypeChecker.Backend where
 import Common
 import Data.EnumMap.Strict qualified as EMap
 import Data.EnumSet qualified as Set
+import Data.Sequence qualified as Seq
 import Data.Traversable (for)
 import Diagnostic (Diagnose, internalError, internalError')
 import Effectful
@@ -46,32 +47,55 @@ type Type'_ = Value
 type Monotype = Located Monotype_
 data Monotype_
     = MCon Name [Monotype_]
-    | MTyCon Name
+    | MTyCon Name [Monotype_]
     | MLambda (MonoClosure ())
     | MRecord (Row Monotype_)
     | MSigma Monotype_ Monotype_
     | MVariant OpenName Monotype_
     | MPrim Literal
-    | MPrimFn
-        { name :: Name
-        , remaining :: Int
-        , captured :: [Monotype_]
-        , f :: NonEmpty Value -> Value
-        }
+    | MPrimFn MonoPrimFunc
     | -- types
       MFn Monotype_ Monotype_
     | MQ Quantifier Erasure (MonoClosure Monotype_)
     | MVariantT (ExtRow Monotype_)
     | MRecordT (ExtRow Monotype_)
-    | -- stuck computations
-      MApp Monotype_ ~Monotype_
-    | MCase Monotype_ [MonoPatternClosure ()]
-    | -- typechecking metavars
-      MUniVar UniVar
-    | MSkolem Name
+    | MStuck V.Stuck (Seq MonoStuckPart)
 
-data MonoClosure ty = MonoClosure {var :: Name, variance :: Variance, ty :: ty, env :: ValueEnv, body :: CoreTerm}
-data MonoPatternClosure ty = MonoPatternClosure {pat :: CorePattern, variance :: Variance, ty :: ty, env :: ValueEnv, body :: CoreTerm}
+data MonoStuckPart
+    = MApp ~Monotype_
+    | MStuckFn MonoPrimFunc
+    | MCase [MonoPatternClosure ()]
+
+pattern MUniVar :: UniVar -> Monotype_
+pattern MUniVar uni <- MStuck (V.OnUniVar uni) Seq.Empty
+    where
+        MUniVar uni = MStuck (V.OnUniVar uni) Seq.Empty
+
+pattern MSkolem :: Name -> Monotype_
+pattern MSkolem name <- MStuck (V.OnVar name) Seq.Empty
+    where
+        MSkolem name = MStuck (V.OnVar name) Seq.Empty
+
+data MonoPrimFunc = MonoPrimFunc
+    { name :: Name
+    , remaining :: Int
+    , captured :: [Monotype_]
+    , f :: NonEmpty Value -> Value
+    }
+data MonoClosure ty = MonoClosure
+    { var :: Name
+    , variance :: Variance
+    , ty :: ty
+    , env :: ValueEnv
+    , body :: CoreTerm
+    }
+data MonoPatternClosure ty = MonoPatternClosure
+    { pat :: CorePattern
+    , variance :: Variance
+    , ty :: ty
+    , env :: ValueEnv
+    , body :: CoreTerm
+    }
 
 data Variance
     = -- | negative variance, forall in a negative position gets instantiated to univars
@@ -219,23 +243,31 @@ alterUniVar override uni ty = do
             MFn from to -> go (Indirect, acc) from *> go (Indirect, acc) to
             MQ _q _e closure -> go (Indirect, acc) closure.ty *> cycleCheckClosure acc closure
             MCon _ args -> NoCycle <$ traverse_ (go (Indirect, acc)) args
-            MApp lhs rhs -> go (Indirect, acc) lhs *> go (Indirect, acc) rhs
+            -- MApp lhs rhs -> go (Indirect, acc) lhs *> go (Indirect, acc) rhs
             MVariantT row -> NoCycle <$ traverse_ (go (Indirect, acc)) row
             MRecordT row -> NoCycle <$ traverse_ (go (Indirect, acc)) row
             MVariant _ val -> go (Indirect, acc) val
             MRecord row -> NoCycle <$ traverse_ (go (Indirect, acc)) row
             MSigma x y -> go (Indirect, acc) x *> go (Indirect, acc) y
             MLambda closure -> cycleCheckClosure acc closure
-            MPrimFn{captured} -> NoCycle <$ traverse_ (go (Indirect, acc)) captured
-            MCase _arg _matches -> internalError' "todo: cycleCheck stuck MCase" -- go (Indirect, acc) arg <* traverse_ _what matches
+            MPrimFn MonoPrimFunc{captured} -> NoCycle <$ traverse_ (go (Indirect, acc)) captured
             MTyCon{} -> pure NoCycle
-            MSkolem{} -> pure NoCycle
+            MStuck V.OnVar{} spine -> NoCycle <$ traverse_ (cycleCheckSpine acc) spine -- todo: recur into solved skolems
+            MStuck (V.OnUniVar uni2) spine -> do
+                traverse_ (cycleCheckSpine acc) spine
+                NoCycle <$ go (Indirect, acc) (MUniVar uni2)
             MPrim{} -> pure NoCycle
 
         cycleCheckClosure :: EnumSet UniVar -> MonoClosure a -> Eff es Cycle
         cycleCheckClosure acc closure = do
             skolem <- freshSkolem $ toSimpleName closure.var
             go (Indirect, acc) =<< appMono closure skolem
+
+        cycleCheckSpine acc = \case
+            MApp rhs -> go (Indirect, acc) rhs
+            MCase{} -> internalError' "todo: cycleCheck stuck MCase"
+            MStuckFn{} -> pure NoCycle
+
     unwrap = traverse \case
         uni2@(MUniVar var) ->
             lookupUniVar var >>= \case
@@ -391,11 +423,9 @@ mono variance = traverse (mono' variance)
 
 mono' :: InfEffs es => Variance -> TypeDT_ -> Eff es Monotype_
 mono' variance = \case
-    V.Var skolem -> pure $ MSkolem skolem
     V.Con name args -> MCon name <$> traverse go args
-    V.TyCon name -> pure $ MTyCon name
-    V.UniVar uni -> pure $ MUniVar uni
-    V.App lhs rhs -> MApp <$> go lhs <*> go rhs
+    V.TyCon name args -> MTyCon name <$> traverse go args
+    -- V.App lhs rhs -> MApp <$> go lhs <*> go rhs
     V.Function from to -> MFn <$> mono' (flipVariance variance) from <*> go to
     V.VariantT row -> MVariantT <$> traverse go row
     V.RecordT row -> MRecordT <$> traverse go row
@@ -409,10 +439,15 @@ mono' variance = \case
     V.Record row -> MRecord <$> traverse go row
     V.Sigma x y -> MSigma <$> go x <*> go y
     V.Variant name arg -> MVariant name <$> go arg
-    V.Case arg matches -> MCase <$> go arg <*> pure (fmap monoPatternClosure matches)
+    -- V.Case arg matches -> MCase <$> go arg <*> pure (fmap monoPatternClosure matches)
     V.Lambda closure -> pure $ MLambda MonoClosure{var = closure.var, variance, env = closure.env, ty = (), body = closure.body}
+    V.Stuck reason spine -> MStuck reason <$> traverse monoSpine spine
   where
     go = mono' variance
+    monoSpine = \case
+        V.App rhs -> MApp <$> go rhs
+        V.Case matches -> pure $ MCase $ fmap monoPatternClosure matches
+        V.Fn{} -> internalError' "mono: prim function" -- todo
     monoPatternClosure V.PatternClosure{pat, ty, env, body} = MonoPatternClosure{pat, ty, variance, env, body}
 
 appMono :: InfEffs es => MonoClosure a -> Value -> Eff es Monotype_
@@ -429,10 +464,7 @@ unMono = fmap unMono'
 unMono' :: Monotype_ -> TypeDT_
 unMono' = \case
     MCon name args -> V.Con name (map unMono' args)
-    MTyCon name -> V.TyCon name
-    MSkolem skolem -> V.Var skolem
-    MUniVar uniVar -> V.UniVar uniVar
-    MApp lhs rhs -> V.App (unMono' lhs) (unMono' rhs)
+    MTyCon name args -> V.TyCon name (map unMono' args)
     MFn from to -> V.Function (unMono' from) (unMono' to)
     MVariantT row -> V.VariantT $ fmap unMono' row
     MRecordT row -> V.RecordT $ fmap unMono' row
@@ -442,10 +474,15 @@ unMono' = \case
     MLambda MonoClosure{var, ty, env, body} -> V.Lambda V.Closure{var, ty, env, body}
     MQ q e MonoClosure{var, ty, env, body} -> V.Q q Visible e V.Closure{var, ty = unMono' ty, env, body}
     MPrim val -> V.PrimValue val
-    MPrimFn{name, remaining, captured, f} -> V.PrimFunction{name, remaining, captured = map unMono' captured, f}
-    MCase arg matches -> V.Case (unMono' arg) (fmap toPatternClosure matches)
+    MPrimFn fn -> V.PrimFunction $ monoPrimFn fn
+    MStuck reason spine -> V.Stuck reason $ fmap unMonoSpine spine
   where
+    unMonoSpine = \case
+        MApp rhs -> V.App (unMono' rhs)
+        MCase matches -> V.Case $ fmap toPatternClosure matches
+        MStuckFn fn -> V.Fn $ monoPrimFn fn
     toPatternClosure MonoPatternClosure{pat, ty, env, body} = V.PatternClosure{pat, ty, env, body}
+    monoPrimFn MonoPrimFunc{name, remaining, captured, f} = V.PrimFunc{name, remaining, captured = map unMono' captured, f}
 
 {- unwraps forall/exists clauses in a type until a monomorphic constructor is encountered
 
