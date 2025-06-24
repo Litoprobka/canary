@@ -132,6 +132,7 @@ inferDeclaration (decl :@ loc) =
                 L (App lhs rhs) -> go (rhs : acc) lhs
                 other -> (other, acc)
 
+-- | check a term against Type and evaluate it
 typeFromTerm :: InfEffs es => Type 'Fixity -> Eff es Type'
 typeFromTerm term = do
     values <- asks @Env (.values)
@@ -282,19 +283,14 @@ check (e :@ loc) (typeToCheck :@ tyLoc) = do
                         patValue <- skolemizePattern pat
                         typedPat@(_ ::: truePatTy) <- snd <$> inferPattern pat
                         localEquality (argTy :@ argLoc) truePatTy
-                        traverse_ (`localEquality` patValue) (mbArgV env)
+                        argV <- V.eval env.values typedArg
+                        localEquality (argV :@ argLoc) patValue
                         pure typedPat
                     typedBody <- local' (\tcenv -> tcenv{values = newValues}) do
                         check body $ ty :@ loc
                     pure (typedPat, typedBody)
             checkCaseExhaustiveness loc argTy (map fst typedMatches)
             pure $ El.Case typedArg typedMatches :@ loc ::: ty
-          where
-            -- a special case for matching on a var seems janky, but apparently that's how Idris does this
-            -- we can do better: eval the arg with the current scope, which would yield a skolem for unbound vars anyway
-            mbArgV env = case arg of
-                L (Name name) -> (:@ getLoc arg) <$> Map.lookup name env.values.values
-                _ -> Nothing
         (Match matches) ty -> do
             n <- whenNothing (getArgCount matches) $ typeError $ ArgCountMismatch loc
             (mbPatTypes, bodyTy) <- unwrapFn n ty

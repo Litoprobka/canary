@@ -18,7 +18,7 @@ data TypeError
     | MissingField (Either TypeDT (Term 'Fixity)) OpenName
     | MissingVariant TypeDT OpenName
     | EmptyMatch Loc -- empty match expression
-    | ArgCountMismatch Loc -- "different amount of arguments in a match statement"
+    | ArgCountMismatch Loc -- "different amount of arguments in a match expression"
     | ArgCountMismatchPattern (Pattern 'Fixity) Int Int
     | NotAFunction Loc TypeDT -- pretty fTy <+> "is not a function type"
     | SelfReferential Loc UniVar TypeDT
@@ -65,7 +65,7 @@ typeError =
         ArgCountMismatch loc ->
             Err
                 Nothing
-                "different amount of arguments in a match statement"
+                "different amount of arguments in a match expression"
                 (mkNotes [(loc, Blank)])
                 []
         ArgCountMismatchPattern pat expected got ->
