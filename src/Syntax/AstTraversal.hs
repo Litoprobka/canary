@@ -107,6 +107,7 @@ partialTravPattern trav (pat' :@ loc) =
         ConstructorP name pats -> ConstructorP <$> trav.name name <*> traverse trav.pattern_ pats
         VariantP oname pat -> VariantP oname <$> trav.pattern_ pat
         RecordP row -> RecordP <$> traverse trav.pattern_ row
+        SigmaP lhs rhs -> SigmaP <$> trav.pattern_ lhs <*> trav.pattern_ rhs
         ListP pats -> ListP <$> traverse trav.pattern_ pats
         LiteralP lit -> pure $ LiteralP lit
         InfixP{} -> error "partialTravPattern: encountered InfixP"

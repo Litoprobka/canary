@@ -23,6 +23,7 @@ data CorePattern
     | ConstructorP Name [Name]
     | VariantP OpenName Name
     | RecordP (Row Name)
+    | SigmaP Name Name
     | LiteralP Literal
 
 instance PrettyAnsi CorePattern where
@@ -33,6 +34,7 @@ instance PrettyAnsi CorePattern where
         ConstructorP name args -> parens $ hsep (prettyCon name : map (prettyAnsi opts) args)
         VariantP name arg -> parens $ prettyCon name <+> prettyAnsi opts arg
         RecordP row -> braces . sep . punctuate comma . map recordField $ sortedRow row
+        SigmaP lhs rhs -> parens $ pretty lhs <+> "**" <+> pretty rhs
         LiteralP lit -> prettyAnsi opts lit
       where
         prettyCon name = conColor $ prettyAnsi opts name

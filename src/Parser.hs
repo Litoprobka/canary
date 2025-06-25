@@ -90,8 +90,14 @@ declaration = located $ choice [typeDec, fixityDec, signature, valueDec]
 
     simpleTypeDec name = do
         vars <- many varBinder
-        pats <- option [] $ specialSymbol Token.Eq *> typePattern `sepBy1` specialSymbol Token.Bar
+        pats <- option [] $ specialSymbol Token.Eq *> constructorDecl `sepBy1` specialSymbol Token.Bar
         pure $ D.Type name vars pats
+      where
+        constructorDecl :: Parser' (Constructor 'Parse)
+        constructorDecl = withLoc do
+            conName <- upperName
+            args <- many termParens
+            pure \loc -> D.Constructor loc conName args
 
     gadtDec :: SimpleName -> Parser' (Declaration_ 'Parse)
     gadtDec name = do
@@ -102,12 +108,6 @@ declaration = located $ choice [typeDec, fixityDec, signature, valueDec]
             sig <- term
             pure \loc -> D.GadtConstructor loc con sig
         pure $ D.GADT name mbKind constrs
-
-    typePattern :: Parser' (Constructor 'Parse)
-    typePattern = withLoc do
-        name <- upperName
-        args <- many termParens
-        pure \loc -> D.Constructor loc name args
 
     signature = do
         name <- identifier <* specialSymbol Token.Colon
@@ -137,8 +137,7 @@ declaration = located $ choice [typeDec, fixityDec, signature, valueDec]
 varBinder :: Parser' (VarBinder 'Parse)
 varBinder =
     parens (VarBinder <$> var <* specialSymbol Token.Colon <*> fmap Just term)
-        <|> flip VarBinder Nothing
-            <$> var
+        <|> VarBinder <$> var <*> pure Nothing
   where
     var = identifier <|> mkName $(tok 'Token.ImplicitName)
 
@@ -192,11 +191,14 @@ quantifier = withLoc do
 
 pattern' :: Parser' (Pattern 'Parse)
 pattern' = located do
-    pat <- infixPattern
+    pat <- sigma
     option (unLoc pat) do
         specialSymbol Token.Colon
         AnnotationP pat <$> term
   where
+    -- for now, dependent pairs have a precedence lower than any of the operators
+    sigma = rightAssoc Token.DepPair SigmaP infixPattern
+
     infixPattern = located do
         firstPat <- nonOpPattern
         pairs <- many $ (,) <$> colonOperator <*> nonOpPattern
@@ -256,22 +258,23 @@ binding = do
     -- > f $ x = f x
     funcName = identifier
 
+-- | a helper for pattern and expression parsers
+rightAssoc :: Token.SpecialSymbol -> (Located expr -> Located expr -> expr) -> Parser' (Located expr) -> Parser' (Located expr)
+rightAssoc opToken con argParser = parser
+  where
+    parser = located do
+        lhs <- argParser
+        option (unLoc lhs) do
+            specialSymbol opToken
+            rhs <- parser
+            pure $ con lhs rhs
+
 -- an expression with infix operators and unresolved priorities
 -- the `E.Infix` constructor is only used when there is more than one operator
 -- function arrows are a special case that is handled directly in the parser
 term :: Parser' (Expr 'Parse)
 term = rightAssoc Token.Colon Annotation nonAnn
   where
-    rightAssoc :: Token.SpecialSymbol -> (Located expr -> Located expr -> expr) -> Parser' (Located expr) -> Parser' (Located expr)
-    rightAssoc opToken con argParser = parser
-      where
-        parser = located do
-            lhs <- argParser
-            option (unLoc lhs) do
-                specialSymbol opToken
-                rhs <- parser
-                pure $ con lhs rhs
-
     -- second lowest level of precedence, 'anything but annotations'
     -- so far, this level has only right-associative dependent pairs
     -- 'depPairArg' ** 'nonAnn'
@@ -298,7 +301,8 @@ term = rightAssoc Token.Colon Annotation nonAnn
     typeApp = do
         expr <- termParens
         -- type applications bind tighther than anything else
-        -- this might not work well with higher-than-application precedence operators, though
+        -- now that I think about it, they shouldn't have a higher precedence than normal function application
+        -- perhaps we should parse visible type arguments as a separate AST node and only get rid of them at Fixity?
         apps <- many do
             specialSymbol Token.At
             termParens

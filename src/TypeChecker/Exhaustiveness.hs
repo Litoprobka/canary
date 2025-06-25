@@ -106,6 +106,7 @@ simplifyPattern (p :@ _ ::: _) = case p of
     E.ListP pats -> foldr (\x xs -> Con ConsName [simplifyPattern x, xs]) (Con NilName []) pats
     E.VariantP name arg -> VariantP (unLoc name) $ simplifyPattern arg
     E.RecordP row -> RecordP $ fmap simplifyPattern row
+    E.SigmaP{} -> Wildcard -- todo: proper support for sigma types
     E.LiteralP lit -> LiteralP lit
 
 -- anything fancy gets converted into an OpaqueTy

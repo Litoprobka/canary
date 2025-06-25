@@ -193,6 +193,7 @@ matchCore env = \cases
     (C.RecordP varRow) (Record row) ->
         let (pairs, _, _) = Row.zipRows varRow row
          in Just $ env{values = foldl' (flip $ uncurry LMap.insert) env.values pairs}
+    (C.SigmaP lhsP rhsP) (Sigma lhs rhs) -> Just env{values = LMap.insert lhsP lhs $ LMap.insert rhsP rhs env.values}
     (C.LiteralP lit) (PrimValue val) -> env <$ guard (lit == val)
     _ _ -> Nothing
 
@@ -265,6 +266,7 @@ desugarElaborated = go
         E.ConstructorP name pats -> C.ConstructorP name <$> traverse asVar pats
         E.VariantP name pat -> C.VariantP name <$> asVar pat
         E.RecordP row -> C.RecordP <$> traverse asVar row
+        E.SigmaP lhs rhs -> C.SigmaP <$> asVar lhs <*> asVar rhs
         E.ListP _ -> internalError loc "todo: list pattern desugaring"
         E.LiteralP lit -> pure $ C.LiteralP lit
 

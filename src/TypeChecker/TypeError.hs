@@ -21,6 +21,7 @@ data TypeError
     | ArgCountMismatch Loc -- "different amount of arguments in a match expression"
     | ArgCountMismatchPattern (Pattern 'Fixity) Int Int
     | NotAFunction Loc TypeDT -- pretty fTy <+> "is not a function type"
+    | NotASigma Loc TypeDT
     | SelfReferential Loc UniVar TypeDT
     | NoVisibleTypeArgument Loc (Type 'Fixity) TypeDT
     | ConstructorReturnType {con :: Name, expected :: Name, returned :: Name}
@@ -79,6 +80,12 @@ typeError =
                 Nothing
                 (prettyDef ty <+> "is not a function type")
                 (mkNotes [(loc, This "arising from function application")])
+                []
+        NotASigma loc ty ->
+            Err
+                Nothing
+                (prettyDef ty <+> "is not a dependent pair type")
+                (mkNotes [(loc, This "arising from this dependent pair")])
                 []
         SelfReferential loc var ty ->
             Err

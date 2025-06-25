@@ -44,7 +44,7 @@ data Term_ p
     | TypeApp (Expr p) (Type p)
     | Case (Expr p) [(Pattern p, Expr p)]
     | -- | Haskell's \cases
-      Match [((NonEmpty (Pattern p)), Expr p)]
+      Match [(NonEmpty (Pattern p), Expr p)]
     | If (Expr p) (Expr p) (Expr p)
     | -- | 'Constructor
       -- unlike the rest of the cases, variant tags and record fields
@@ -108,6 +108,7 @@ data Pattern_ (p :: Pass)
     | ConstructorP (NameAt p) [Pattern p]
     | VariantP OpenName (Pattern p)
     | RecordP (Row (Pattern p))
+    | SigmaP (Pattern p) (Pattern p)
     | ListP [Pattern p]
     | LiteralP Literal
     | -- infix constructors cannot have a higher-than-pattern precedence
@@ -224,6 +225,7 @@ instance PrettyAnsi (NameAt pass) => PrettyAnsi (Pattern_ pass) where
             ConstructorP name args -> parensWhen 1 $ sep (prettyAnsi opts name : map (go 1) args)
             VariantP name body -> parensWhen 1 $ prettyAnsi opts name <+> go 1 body -- todo: special case for unit?
             RecordP row -> braces . sep . punctuate comma . map recordField $ sortedRow row
+            SigmaP lhs rhs -> parensWhen 1 $ go 0 lhs <+> "**" <+> go 0 rhs
             ListP items -> brackets . sep $ map (go 0) items
             LiteralP lit -> prettyAnsi opts lit
             InfixP pairs last' -> "?(" <> sep (concatMap (\(lhs, op) -> go 3 lhs : (pure . prettyAnsi opts) op) pairs <> [go 0 last']) <> ")"
@@ -280,6 +282,7 @@ collectNamesInPat (L p) = case p of
     ConstructorP _ pats -> foldMap collectNamesInPat pats
     ListP pats -> foldMap collectNamesInPat pats
     RecordP row -> foldMap collectNamesInPat $ toList row
+    SigmaP lhs rhs -> collectNamesInPat lhs <> collectNamesInPat rhs
     LiteralP _ -> []
     InfixP pairs l -> foldMap (collectNamesInPat . fst) pairs <> collectNamesInPat l
 
@@ -294,6 +297,7 @@ collectReferencedNamesInPat = go
         ConstructorP con pats -> con : foldMap go pats
         ListP pats -> foldMap go pats
         RecordP row -> foldMap go $ toList row
+        SigmaP lhs rhs -> collectReferencedNamesInPat lhs <> collectReferencedNamesInPat rhs
         LiteralP _ -> []
         InfixP pairs l -> foldMap (\(pat, conOp) -> go pat <> [conOp]) pairs <> go l
 

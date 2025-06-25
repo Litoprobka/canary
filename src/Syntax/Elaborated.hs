@@ -48,6 +48,7 @@ data EPattern_
     | ConstructorP Name [EPattern]
     | VariantP OpenName EPattern
     | RecordP (Row EPattern)
+    | SigmaP EPattern EPattern
     | ListP [EPattern]
     | LiteralP Literal
 

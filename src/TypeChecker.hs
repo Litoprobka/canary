@@ -367,7 +367,8 @@ check (e :@ loc) (typeToCheck :@ tyLoc) = do
             pure $ (El.Sigma x' y' :@ loc) ::: ty
         expr (V.Q Forall Implicit _e closure) -> check_ (expr :@ loc) =<< substitute Out closure
         expr (V.Q Forall Hidden _e closure) -> check_ (expr :@ loc) =<< substitute Out closure
-        expr (V.Q Exists _vis _e closure) -> check_ (expr :@ loc) =<< substitute In closure
+        expr (V.Q Exists Implicit _e closure) -> check_ (expr :@ loc) =<< substitute In closure
+        expr (V.Q Exists Hidden _e closure) -> check_ (expr :@ loc) =<< substitute In closure
         -- todo: a case for do-notation
         expr ty -> do
             (typed ::: inferredTy) <- infer (expr :@ loc)
@@ -470,6 +471,7 @@ skolemizePattern (Located loc pat') = case pat' of
         pure $ foldr (\h t -> V.Con (Located loc ConsName) [h, t]) (V.Con (Located loc NilName) []) argVs
     VariantP con arg -> V.Variant con <$> skolemizePattern arg
     RecordP row -> V.Record <$> traverse skolemizePattern row
+    SigmaP lhs rhs -> V.Sigma <$> skolemizePattern lhs <*> skolemizePattern rhs
     LiteralP lit -> pure $ V.PrimValue lit
 
 -- | given a map of related signatures, check or infer a declaration
@@ -577,6 +579,7 @@ infer (e :@ loc) = case e of
             Just fieldTy -> pure $ El.RecordAccess typedRecord field :@ loc ::: unLoc fieldTy
 
     -- it's not clear whether we should special case dependent pairs where the first element is a variable, or always infer a non-dependent pair type
+    -- in a way, a non-dependent type is *more* precise
     Sigma x y -> do
         xName <- freshName_ $ Name' "x"
         x'@(_ ::: xTy) <- infer x
@@ -729,7 +732,20 @@ patternFuncs postprocess = (checkP, inferP)
             let newNames = foldMap fst diff
                 typePats = fmap snd diff
             pure (newNames, El.RecordP typePats :@ ploc ::: unLoc ty)
-        _ -> do
+        SigmaP lhs rhs ->
+            monoLayer In ty >>= \case
+                V.Q Exists Visible Retained closure :@ loc -> do
+                    (lhsTypes, checkedLhs) <- checkP lhs $ closure.ty :@ loc
+                    (lhsVal, valDiff) <- skolemizePattern' lhs
+                    (rhsTypes, checkedRhs) <- local' (defineMany valDiff . declareMany lhsTypes) do
+                        let rhsTy = closure `V.app` lhsVal
+                        checkP rhs $ rhsTy :@ loc
+                    pure (lhsTypes <> rhsTypes, El.SigmaP checkedLhs checkedRhs :@ ploc ::: unLoc ty)
+                V.UniVar{} :@ _ -> fallthroughToInfer
+                other -> typeError $ NotASigma ploc other
+        _ -> fallthroughToInfer
+      where
+        fallthroughToInfer = do
             (typeMap, elaborated ::: inferredTy) <- inferP $ Located ploc outerPat
             subtype (inferredTy :@ ploc) ty
             pure (typeMap, elaborated ::: unLoc ty)
@@ -767,6 +783,19 @@ patternFuncs postprocess = (checkP, inferP)
             let typeRow = fmap (\(_ ::: t) -> t) typedRow
                 openRecordTy = V.RecordT (ExtRow typeRow ext)
             pure (typeMap, El.RecordP typedRow :@ loc ::: openRecordTy)
+        SigmaP (VarP name :@ varLoc) rhs -> do
+            varTy <- freshUniVar
+            var <- freshSkolem' $ toSimpleName name
+            (typeMap, typedRhs@(_ ::: rhsTy)) <- local' (define name (V.Var var) . declare name (varTy :@ varLoc)) do
+                inferP rhs
+            env <- asks @Env (.values)
+            body <- V.quote rhsTy
+            let closure = V.Closure{var, ty = varTy, env, body}
+            pure
+                ( Map.insert name (varTy :@ varLoc) typeMap
+                , El.SigmaP (El.VarP name :@ varLoc ::: varTy) typedRhs :@ loc ::: V.Q Exists Visible Retained closure
+                )
+        SigmaP{} -> internalError loc "can't infer the type of a sigma with non-var lhs pattern (yet?)"
         LiteralP lit -> do
             let litTypeName = case lit of
                     IntLiteral num
