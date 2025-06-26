@@ -24,7 +24,6 @@ module TypeChecker (
 import Common (Name)
 import Common hiding (Name)
 import Data.List.NonEmpty (unzip)
-import Data.Traversable (for)
 import Diagnostic (internalError, internalError')
 import Effectful
 import Effectful.Reader.Static (ask, asks)

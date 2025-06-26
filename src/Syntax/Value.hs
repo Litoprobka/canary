@@ -69,5 +69,25 @@ data StuckPart
     | Fn PrimFunc -- f _
     | Case [PatternClosure ()] -- case _ of
 
-data Closure ty = Closure {var :: Name, ty :: ty, env :: ValueEnv, body :: CoreTerm}
-data PatternClosure ty = PatternClosure {pat :: CorePattern, ty :: ty, env :: ValueEnv, body :: CoreTerm}
+-- does it make sense to represent all stuck values like this,
+-- rather than optimising only the common case of nested applications?
+{-
+data Stuck
+  = VarApp Name [Value]
+  | UniVarApp UniVar [Value]
+  | Fn PrimFunc Stuck
+  | Case Stuck [PatternClosure ()]
+-}
+
+data Closure ty = Closure
+    { var :: Name
+    , ty :: ty
+    , env :: ValueEnv
+    , body :: CoreTerm
+    }
+data PatternClosure ty = PatternClosure
+    { pat :: CorePattern
+    , ty :: ty
+    , env :: ValueEnv
+    , body :: CoreTerm
+    }

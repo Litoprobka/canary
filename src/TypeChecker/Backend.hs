@@ -17,7 +17,6 @@ import Common
 import Data.EnumMap.Strict qualified as EMap
 import Data.EnumSet qualified as Set
 import Data.Sequence qualified as Seq
-import Data.Traversable (for)
 import Diagnostic (Diagnose, internalError, internalError')
 import Effectful
 import Effectful.Dispatch.Dynamic (reinterpret_)
@@ -219,8 +218,8 @@ alterUniVar override uni ty = do
     when (cycle == NoCycle) $ setUniVar uni (Right ty)
   where
     -- errors out on indirect cycles (i.e. a ~ Maybe a)
-    -- returns False on direct univar cycles (i.e. a ~ b, b ~ c, c ~ a)
-    -- returns True when there are no cycles
+    -- returns DirectCycle on direct univar cycles (i.e. a ~ b, b ~ c, c ~ a)
+    -- returns NoCycle when there are no cycles (duh)
     -- todo: we can infer equirecursive types (mu) when a cycle goes through a record / variant
     cycleCheck :: Maybe Scope -> (SelfRef, EnumSet UniVar) -> Monotype -> Eff es Cycle
     cycleCheck mbScope state (L mty) = go state mty
@@ -243,7 +242,6 @@ alterUniVar override uni ty = do
             MFn from to -> go (Indirect, acc) from *> go (Indirect, acc) to
             MQ _q _e closure -> go (Indirect, acc) closure.ty *> cycleCheckClosure acc closure
             MCon _ args -> NoCycle <$ traverse_ (go (Indirect, acc)) args
-            -- MApp lhs rhs -> go (Indirect, acc) lhs *> go (Indirect, acc) rhs
             MVariantT row -> NoCycle <$ traverse_ (go (Indirect, acc)) row
             MRecordT row -> NoCycle <$ traverse_ (go (Indirect, acc)) row
             MVariant _ val -> go (Indirect, acc) val
@@ -251,7 +249,7 @@ alterUniVar override uni ty = do
             MSigma x y -> go (Indirect, acc) x *> go (Indirect, acc) y
             MLambda closure -> cycleCheckClosure acc closure
             MPrimFn MonoPrimFunc{captured} -> NoCycle <$ traverse_ (go (Indirect, acc)) captured
-            MTyCon{} -> pure NoCycle
+            MTyCon _ args -> NoCycle <$ traverse_ (go (Indirect, acc)) args
             MStuck V.OnVar{} spine -> NoCycle <$ traverse_ (cycleCheckSpine acc) spine -- todo: recur into solved skolems
             MStuck (V.OnUniVar uni2) spine -> do
                 traverse_ (cycleCheckSpine acc) spine
@@ -373,13 +371,7 @@ generaliseAll action = do
                                     | otherwise = Forall
                             -- todo: we should make a quantifier for the type of the skolem, not just Type
                             pure $ C.Q quantifier Implicit Erased newVar (type_ loc) $ C.Name newVar
-        -- simple recursive cases
         C.Function l r -> C.Function <$> go loc (flipVariance variance) scope l <*> go loc variance scope r
-        C.App lhs rhs -> C.App <$> go loc variance scope lhs <*> go loc variance scope rhs
-        C.RecordT row -> C.RecordT <$> traverse (go loc variance scope) row
-        C.VariantT row -> C.VariantT <$> traverse (go loc variance scope) row
-        C.Record row -> C.Record <$> traverse (go loc variance scope) row
-        C.Sigma x y -> C.Sigma <$> go loc variance scope x <*> go loc variance scope y
         C.Q q vis e var ty body ->
             C.Q q vis e var <$> go loc variance scope ty <*> do
                 modify $ Map.insert var ()
@@ -388,14 +380,8 @@ generaliseAll action = do
             C.Lambda var <$> do
                 modify $ Map.insert var ()
                 go loc variance scope body
-        C.Con name args -> C.Con name <$> traverse (go loc variance scope) args
-        -- terminal cases
-        C.TyCon name -> pure $ C.TyCon name
-        C.Literal v -> pure $ C.Literal v
-        C.Variant con -> pure $ C.Variant con
-        C.Case arg matches -> C.Case arg <$> for matches \(pat, body) -> (pat,) <$> go loc variance scope body
         C.Let name _ _ -> internalError (getLoc name) "unexpected let in a quoted type"
-
+        other -> C.coreTraversal (go loc variance scope) other
     typeVarOrBody = either C.Name id
 
     freshTypeVar :: (State Char :> es, NameGen :> es) => Loc -> Eff es Name

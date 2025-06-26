@@ -6,6 +6,7 @@ module LangPrelude (module Reexport, (.>), traverseFold) where
 
 import Data.EnumMap as Reexport (EnumMap)
 import Data.EnumSet as Reexport (EnumSet)
+import Data.Traversable as Reexport (for)
 import Effectful as Reexport
 import Effectful.TH as Reexport
 import IdMap as Reexport (IdMap)

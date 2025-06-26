@@ -26,7 +26,6 @@ import Data.Foldable (foldrM)
 -- IdMap is currently lazy anyway, but it's up to change
 
 import Data.Sequence (pattern (:|>))
-import Data.Traversable (for)
 import Diagnostic
 import IdMap qualified as LMap
 import LangPrelude hiding (force)
