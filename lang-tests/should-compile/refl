@@ -1,14 +1,33 @@
-type Refl : Type -> Type -> Type where
-    MkRefl : forall a. Refl a a
+type (===) : Type -> Type -> Type where
+    Refl : forall a. a === a
 
-indeed : forall a b. Refl a b -> a -> b
+indeed : forall a b. a === b -> a -> b
 indeed r x = case r of
-    MkRefl -> x
+    Refl -> x
 
-nested : forall a b. Refl a b -> Maybe a -> Maybe b
+nested : forall a b. a === b -> Maybe a -> Maybe b
 nested r x = case r of
-    MkRefl -> x
+    Refl -> x
 
-quirky : forall a b. Refl (Maybe a) (Maybe b) -> a -> b
-quirky r x = case r of
-    MkRefl -> x
+nestedRefl : forall a b. a === b -> Maybe a === Maybe b
+nestedRefl r = case r of
+    Refl -> Refl
+
+unnested : forall a b. Maybe a === Maybe b -> a -> b
+unnested r x = case r of
+    Refl -> x
+
+symmetric : forall a b. a === b -> b === a
+symmetric r = case r of
+    Refl -> Refl
+
+transitive : forall a b c. a === b -> b === c -> a === c
+transitive ab bc = case ab of
+    Refl -> case bc of
+        Refl -> Refl
+
+---
+underApp : forall a b f. a === b -> f a === f b
+underApp r = case r of
+    Refl -> Refl
+---

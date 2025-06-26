@@ -20,7 +20,7 @@ import Error.Diagnose qualified as M
 import IdMap qualified as Map
 import LangPrelude
 import Prettyprinter (hsep, parens, vsep)
-import Syntax.Elaborated (EPattern, Typed (..))
+import Syntax.Elaborated (EPattern, Typed (..), unTyped)
 import Syntax.Elaborated qualified as E
 import Syntax.Row (ExtRow (..), OpenName, Row, prettyRecord)
 import Syntax.Row qualified as Row
@@ -28,9 +28,9 @@ import Syntax.Value qualified as V
 import TypeChecker.Backend
 import Prelude qualified (show)
 
-checkCompletePattern :: InfEffs es => EPattern -> Eff es ()
+checkCompletePattern :: InfEffs es => Typed EPattern -> Eff es ()
 checkCompletePattern pat@(_ :@ loc ::: ty) = do
-    result <- checkExhaustiveness (one ty) [one pat]
+    result <- checkExhaustiveness (one ty) [one $ unTyped pat]
     unless (null result.missing) do
         nonFatal $
             Warn
@@ -99,7 +99,7 @@ checkMatch initTree = toResult . first (maybe [] (missingPatternsNested const)) 
     toResult (missing, redundants) = CheckResult{missing, redundants}
 
 simplifyPattern :: EPattern -> Pattern
-simplifyPattern (p :@ _ ::: _) = case p of
+simplifyPattern (p :@ _) = case p of
     E.VarP{} -> Wildcard
     E.WildcardP{} -> Wildcard
     E.ConstructorP name pats -> Con (unLoc name) $ fmap simplifyPattern pats

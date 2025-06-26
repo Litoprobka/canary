@@ -208,28 +208,28 @@ tryApplyPatternClosure PatternClosure{pat, env, body} arg = do
 desugarElaborated :: forall es. (NameGen :> es, Diagnose :> es) => ETerm -> Eff es CoreTerm
 desugarElaborated = go
   where
-    go (e :@ loc ::: ty) = case e of
+    go (e :@ loc) = case e of
         E.Name name -> pure $ C.Name name
         E.Literal lit -> pure $ C.Literal lit
         E.App lhs rhs -> C.App <$> go lhs <*> go rhs
         E.Lambda (L (E.VarP arg) ::: _) body -> C.Lambda arg <$> go body
-        E.Lambda pat@(_ ::: patTy) body@(_ ::: bodyTy) -> do
+        E.Lambda (pat ::: _) body -> do
             name <- freshName $ Name' "lamArg" :@ loc
-            C.Lambda name <$> go (E.Case (E.Name name :@ getLoc name ::: patTy) [(pat, body)] :@ loc ::: bodyTy)
+            C.Lambda name <$> go (E.Case (E.Name name :@ getLoc name) [(pat, body)] :@ loc)
         E.Let binding expr -> case binding of
             E.ValueB (L (E.VarP name) ::: _) body -> C.Let name <$> go body <*> go expr
-            E.ValueB pat body -> desugarElaborated $ E.Case body [(pat, expr)] :@ loc ::: ty
-            E.FunctionB name args body -> C.Let name <$> go (foldr (\x -> (::: error "tedium") . (:@ loc) . E.Lambda x) body args) <*> go expr
+            E.ValueB (pat ::: _) body -> desugarElaborated $ E.Case body [(pat, expr)] :@ loc
+            E.FunctionB name args body -> C.Let name <$> go (foldr (\x -> (:@ loc) . E.Lambda x) body args) <*> go expr
         E.LetRec _bindings _body -> internalError loc "todo: letrec desugar"
         E.Case arg matches -> C.Case <$> go arg <*> traverse (bitraverse flattenPattern go) matches
         E.Match matches@((_ :| [], _) : _) -> do
             name <- freshName $ Name' "matchArg" :@ loc
             matches' <- for matches \case
-                (pat :| [], body) -> bitraverse flattenPattern desugarElaborated (pat, body)
+                ((pat ::: _) :| [], body) -> bitraverse flattenPattern desugarElaborated (pat, body)
                 _ -> internalError loc "inconsistent pattern count in a match expression"
             pure $ C.Lambda name $ C.Case (C.Name name) matches'
         E.Match _ -> internalError loc "todo: multi-arg match desugar"
-        E.If cond@(_ :@ condLoc ::: _) true false -> do
+        E.If cond@(_ :@ condLoc) true false -> do
             cond' <- go cond
             true' <- go true
             false' <- go false
@@ -260,7 +260,7 @@ desugarElaborated = go
 
     -- we only support non-nested patterns for now
     flattenPattern :: EPattern -> Eff es CorePattern
-    flattenPattern (p :@ loc ::: _) = case p of
+    flattenPattern (p :@ loc) = case p of
         E.VarP name -> pure $ C.VarP name
         E.WildcardP name -> pure $ C.WildcardP name
         E.ConstructorP name pats -> C.ConstructorP name <$> traverse asVar pats
@@ -270,9 +270,9 @@ desugarElaborated = go
         E.ListP _ -> internalError loc "todo: list pattern desugaring"
         E.LiteralP lit -> pure $ C.LiteralP lit
 
-    asVar (L (E.VarP name) ::: _) = pure name
-    asVar (E.WildcardP txt :@ loc ::: _) = freshName $ Name' txt :@ loc
-    asVar (_ :@ loc ::: _) = internalError loc "todo: nested patterns"
+    asVar (L (E.VarP name)) = pure name
+    asVar (E.WildcardP txt :@ loc) = freshName $ Name' txt :@ loc
+    asVar (_ :@ loc) = internalError loc "todo: nested patterns"
 
 eval :: (Diagnose :> es, NameGen :> es) => ValueEnv -> ETerm -> Eff es Value
 eval env term = evalCore env <$> desugarElaborated term
@@ -295,7 +295,7 @@ modifyEnv env decls = do
     collectBindings (decl :@ loc) = case decl of
         D.ValueD (E.ValueB (L (E.VarP name) ::: _) body) -> pure [(name, Right body)]
         D.ValueD (E.ValueB _ _) -> internalError loc "whoops, destructuring bindings are not supported yet"
-        D.ValueD (E.FunctionB name args body) -> pure [(name, Right $ foldr (\x -> (::: error "todo: types in function binding desugar") . (:@ loc) . E.Lambda x) body args)]
+        D.ValueD (E.FunctionB name args body) -> pure [(name, Right $ foldr (\x -> (:@ loc) . E.Lambda x) body args)]
         -- todo: value constructors have to be in scope by the time we typecheck definitions that depend on them (say, GADTs)
         -- the easiest way is to just apply `typecheck` and `modifyEnv` declaration-by-declaration
         D.TypeD _ constrs -> traverse mkConstr constrs

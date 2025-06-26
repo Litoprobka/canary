@@ -158,10 +158,8 @@ mkDefaultEnv = do
                 . evalState env.constructorTable
                 . TC.run env.values
                 $ do
-                    (expr, tyty) <- normaliseAll do
-                        expr' :@ loc ::: tyty <- infer afterFixityRes
-                        pure (expr' :@ loc, tyty :@ loc)
-                    pure $ expr ::: tyty
+                    expr' :@ loc ::: _ <- infer afterFixityRes
+                    pure $ expr' :@ loc
         tyAsVal <- V.eval env.values elaboratedTy
         pure
             ReplEnv
@@ -311,7 +309,7 @@ replStep env@ReplEnv{loadedFiles} command = do
     case command of
         Decls decls -> processDecls env decls
         Expr expr -> do
-            checkedExpr <- runReader @"values" env.values $ processExpr env.types expr
+            checkedExpr ::: _ <- runReader @"values" env.values $ processExpr env.types expr
             guardNoErrors
             prettyVal =<< eval env.values checkedExpr
             pure $ Just env
@@ -340,7 +338,7 @@ replStep env@ReplEnv{loadedFiles} command = do
         Quit -> pure Nothing
         UnknownCommand cmd -> fatal . one $ Err Nothing ("Unknown command:" <+> pretty cmd) [] []
   where
-    processExpr :: IdMap Name TC.Type'_ -> Term 'Parse -> Eff (Labeled "values" (Reader ValueEnv) ': es) ETerm
+    processExpr :: IdMap Name TC.Type'_ -> Term 'Parse -> Eff (Labeled "values" (Reader ValueEnv) ': es) (Typed ETerm)
     processExpr types expr = evalState types do
         afterNameRes <- NameResolution.run env.scope $ resolveTerm expr
         skippedDepRes <- cast.term afterNameRes
