@@ -127,3 +127,22 @@ instance PrettyAnsi CoreTerm where
             Con (L ConsName) [x', xs'] -> (("," <+> go 0 x') <>) <$> prettyConsNil xs'
             Con (L NilName) [] -> Just ""
             _ -> Nothing
+
+coreTraversal :: Applicative f => (CoreTerm -> f CoreTerm) -> CoreTerm -> f CoreTerm
+coreTraversal recur = \case
+    Con name args -> Con name <$> traverse recur args
+    Lambda var body -> Lambda var <$> recur body
+    App lhs rhs -> App <$> recur lhs <*> recur rhs
+    Case arg matches -> Case <$> recur arg <*> (traverse . traverse) recur matches
+    Let name defn body -> Let name <$> recur defn <*> recur body
+    Record row -> Record <$> traverse recur row
+    RecordT row -> RecordT <$> traverse recur row
+    VariantT row -> VariantT <$> traverse recur row
+    Sigma x y -> Sigma <$> recur x <*> recur y
+    Function from to -> Function <$> recur from <*> recur to
+    Q q v e name ty body -> Q q v e name <$> recur ty <*> recur body
+    Name name -> pure $ Name name
+    TyCon name -> pure $ TyCon name
+    Literal lit -> pure $ Literal lit
+    Variant name -> pure $ Variant name
+    UniVar uni -> pure $ UniVar uni

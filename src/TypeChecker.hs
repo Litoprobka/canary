@@ -841,9 +841,6 @@ normaliseAll = generaliseAll >=> traverse (eval' <=< go <=< V.quote . unLoc)
             lookupUniVar uni >>= \case
                 Left _ -> internalError' $ "dangling univar" <+> prettyDef uni
                 Right body -> go =<< V.quote (unMono' $ unLoc body)
-        -- other cases could be eliminated by a type changing uniplate
-        C.App lhs rhs -> C.App <$> go lhs <*> go rhs
-        C.Function lhs rhs -> C.Function <$> go lhs <*> go rhs
         -- this might produce incorrect results if we ever share a single forall in multiple places
         C.Q Forall Visible e var ty body -> do
             ty' <- go ty
@@ -852,37 +849,14 @@ normaliseAll = generaliseAll >=> traverse (eval' <=< go <=< V.quote . unLoc)
                 if occurs var body'
                     then C.Q Forall Visible e var ty' body'
                     else C.Function ty' body'
-        C.Q q v e var ty body -> C.Q q v e var <$> go ty <*> go body
-        C.VariantT row -> C.VariantT <$> traverse go row
-        C.RecordT row -> C.RecordT <$> traverse go row
-        C.Lambda name body -> C.Lambda name <$> go body
-        C.Case arg matches -> C.Case <$> go arg <*> traverse (traverse go) matches
-        C.Record row -> C.Record <$> traverse go row
-        C.Sigma x y -> C.Sigma <$> go x <*> go y
-        -- and these are just boilerplate
-        C.Name name -> pure $ C.Name name
-        C.TyCon name -> pure $ C.TyCon name
-        C.Con name args -> pure $ C.Con name args
-        C.Variant name -> pure $ C.Variant name
-        C.Literal lit -> pure $ C.Literal lit
         C.Let name _ _ -> internalError (getLoc name) "unexpected let in a quoted value"
+        other -> C.coreTraversal go other
 
     -- check whether a variable occurs in a term
     occurs :: Name -> CoreTerm -> Bool
-    occurs var = \case
-        C.Name name -> name == var
-        C.UniVar{} -> False
-        C.App lhs rhs -> occurs var lhs || occurs var rhs
-        C.Function lhs rhs -> occurs var lhs || occurs var rhs
-        C.Q _ _ _ qvar qty body -> occurs qvar qty || occurs var body
-        C.VariantT row -> any (occurs var) row
-        C.RecordT row -> any (occurs var) row
-        C.Lambda _ body -> occurs var body
-        C.Case arg matches -> occurs var arg || (any . any) (occurs var) matches
-        C.Record row -> any (occurs var) row
-        C.Sigma x y -> occurs var x || occurs var y
-        C.Con _ args -> any (occurs var) args
-        C.TyCon{} -> False
-        C.Variant{} -> False
-        C.Literal{} -> False
-        C.Let{} -> False
+    occurs var = getAny . getConst . goOC
+      where
+        goOC :: CoreTerm -> Const Any CoreTerm
+        goOC = \case
+            C.Name name -> Const $ Any $ name == var
+            other -> C.coreTraversal goOC other
