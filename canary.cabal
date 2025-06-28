@@ -49,6 +49,7 @@ library
       TypeChecker
       TypeChecker.Backend
       TypeChecker.Exhaustiveness
+      TypeChecker.SmallChecker
       TypeChecker.TypeError
   other-modules:
       Paths_canary

@@ -354,6 +354,7 @@ check (e :@ loc) (typeToCheck :@ tyLoc) = do
                     for_ (IsList.toList onlyVal) \(name, _) -> typeError $ MissingField (Left $ ty :@ tyLoc) name
                     pure Row.empty
             pure $ (El.Record (typedRow <> otherFields) :@ loc)
+        -- v this case would get eliminated by 'force'
         expr (V.UniVar uni) ->
             lookupUniVar uni >>= \case
                 Right ty -> check (Located loc expr) $ unMono ty
