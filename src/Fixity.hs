@@ -20,7 +20,6 @@ import Common (
  )
 import Control.Monad (foldM)
 import Data.List.NonEmpty qualified as NE
-import Data.Traversable (for)
 import DependencyResolution (FixityMap, Op (..))
 import Diagnostic (Diagnose, fatal)
 import Effectful.Error.Static (runErrorNoCallStackWith)

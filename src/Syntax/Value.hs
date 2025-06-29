@@ -5,14 +5,14 @@ module Syntax.Value where
 
 import Common (UniVar)
 import Common hiding (Skolem, UniVar)
-import Data.Sequence qualified as Seq
 import LangPrelude
 import Syntax.Core (CorePattern, CoreTerm)
 import Syntax.Row
 import Syntax.Term (Erasure, Quantifier, Visibility)
 
-newtype ValueEnv = ValueEnv
-    { values :: IdMap Name Value
+data ValueEnv = ValueEnv
+    { topLevel :: IdMap Name Value
+    , locals :: [Value] -- accessed via de bruijn indexes
     }
 
 type Type' = Value
@@ -39,17 +39,17 @@ data Value
     | Q Quantifier Visibility Erasure (Closure Type')
     | VariantT (ExtRow Type')
     | RecordT (ExtRow Type')
-    | Stuck Stuck (Seq StuckPart)
+    | Stuck Stuck
 
-pattern Var :: Name -> Value
-pattern Var name <- Stuck (OnVar name) Seq.Empty
+pattern Var :: Level -> Value
+pattern Var lvl <- Stuck (VarApp lvl [])
     where
-        Var name = Stuck (OnVar name) Seq.Empty
+        Var lvl = Stuck (VarApp lvl [])
 
 pattern UniVar :: UniVar -> Value
-pattern UniVar uni <- Stuck (OnUniVar uni) Seq.Empty
+pattern UniVar uni <- Stuck (UniVarApp uni [])
     where
-        UniVar uni = Stuck (OnUniVar uni) Seq.Empty
+        UniVar uni = Stuck (UniVarApp uni [])
 
 data PrimFunc = PrimFunc
     { name :: Name
@@ -58,29 +58,18 @@ data PrimFunc = PrimFunc
     , f :: NonEmpty Value -> Value
     }
 
-data Stuck
-    = OnVar Name
-    | OnUniVar UniVar
+-- a reversed list of applications
+-- OnVar x [a, b, c] ~ x c b a
+type Spine = [Value] -- todo: [(Visibility, Value)]
 
--- `Stuck (OnVar f) [App x, App y, Fn prim]`
--- represents `prim ((f x) y)`
-data StuckPart
-    = App ~Value -- _ x
-    | Fn PrimFunc -- f _
-    | Case [PatternClosure ()] -- case _ of
-
--- does it make sense to represent all stuck values like this,
--- rather than optimising only the common case of nested applications?
-{-
 data Stuck
-  = VarApp Name [Value]
-  | UniVarApp UniVar [Value]
-  | Fn PrimFunc Stuck
-  | Case Stuck [PatternClosure ()]
--}
+    = VarApp Level Spine
+    | UniVarApp UniVar Spine
+    | Fn PrimFunc Stuck
+    | Case Stuck [PatternClosure ()]
 
 data Closure ty = Closure
-    { var :: Name
+    { var :: SimpleName_
     , ty :: ty
     , env :: ValueEnv
     , body :: CoreTerm

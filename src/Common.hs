@@ -155,6 +155,7 @@ isInfixConstructor _ = False
 newtype UniVar = UniVar Id
     deriving (Show, Eq)
     deriving newtype (Hashable, Enum)
+    deriving (Pretty) via (UnAnnotate UniVar)
 
 newtype Id = Id {id :: Int}
     deriving (Show, Eq)
@@ -232,6 +233,12 @@ instance Semigroup Loc where
 zipLocOf :: (HasLoc a, HasLoc b) => a -> b -> Loc
 zipLocOf lhs rhs = zipLoc (getLoc lhs) (getLoc rhs)
 
+newtype Index = Index {getIndex :: Int} deriving (Show, Eq, Enum)
+newtype Level = Level {getLevel :: Int} deriving (Show, Eq, Enum)
+
+levelToIndex :: Level -> Level -> Index
+levelToIndex (Level l) (Level x) = Index $ l - x - 1
+
 toSimpleName :: Name -> SimpleName
 toSimpleName (Located loc name) = Located loc case name of
     Name txt _ -> Name' txt
@@ -254,7 +261,6 @@ newtype PrettyOptions = PrettyOptions {printIds :: Bool}
 
 defaultPrettyOptions :: PrettyOptions
 defaultPrettyOptions = PrettyOptions{printIds = True}
-
 class PrettyAnsi a where
     prettyAnsi :: PrettyOptions -> a -> Doc AnsiStyle
 

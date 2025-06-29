@@ -30,7 +30,6 @@ import Data.HashMap.Strict qualified as Map
 import Data.List (partition)
 import Data.List qualified as List
 import Data.List.NonEmpty qualified as NE
-import Data.Traversable (for)
 import Diagnostic
 import Effectful.Dispatch.Dynamic (interpret)
 import Effectful.State.Static.Local (State, evalState, get, gets, modify, put, runState, state)

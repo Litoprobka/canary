@@ -13,18 +13,18 @@ The elaborated AST is halfway between core and pre-typecheck passes
 -}
 
 infix 3 :::
-data Typed a = a ::: ~Value
+data Typed a = a ::: EType
+type EType = ETerm
 
 unTyped :: Typed a -> a
 unTyped (x ::: _) = x
 
-type ETerm = (Located ETerm_)
-
 -- another thing I might want to add are big lambdas (or rather, implicit lambdas)
 -- > id : forall a. a -> a
 -- > id = Λa. λ(x : a). x
-data ETerm_
-    = Name Name
+data ETerm
+    = Var Index
+    | Name Name -- top-level binding
     | Literal Literal
     | App ETerm ETerm
     | Lambda (Typed EPattern) ETerm
@@ -40,13 +40,12 @@ data ETerm_
     | Sigma ETerm ETerm
     | Do [EStatement] ETerm
     | Function ETerm ETerm
-    | Q Quantifier Visibility Erasure Name Value ETerm
+    | Q Quantifier Visibility Erasure (Typed SimpleName_) ETerm
     | VariantT (ExtRow ETerm)
     | RecordT (ExtRow ETerm)
 
-type EPattern = (Located EPattern_)
-data EPattern_
-    = VarP Name
+data EPattern
+    = VarP SimpleName_
     | WildcardP Text
     | ConstructorP Name [EPattern]
     | VariantP OpenName EPattern
@@ -57,7 +56,7 @@ data EPattern_
 
 -- where should the type info be?
 data EBinding
-    = ValueB {pat :: Typed EPattern, body :: ETerm}
+    = ValueB {name :: Name, body :: ETerm}
     | FunctionB {name :: Name, args :: NonEmpty (Typed EPattern), body :: ETerm}
 
 data EStatement
@@ -66,8 +65,7 @@ data EStatement
     | DoLet EBinding
     | Action ETerm
 
-type EDeclaration = Located EDeclaration_
-data EDeclaration_
+data EDeclaration
     = ValueD EBinding -- no local bindings for now
     -- I'm not sure which representation for typechecked constructors makes more sense, this is the bare minimum
     | TypeD Name [(Name, Int)]

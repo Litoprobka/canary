@@ -1,10 +1,13 @@
 module Syntax.Core where
 
 import Common (
+    Index (..),
+    Level (..),
     Literal,
     Name,
     Name_ (ConsName, NilName, TypeName),
     PrettyAnsi (..),
+    SimpleName_,
     UniVar,
     conColor,
     keyword,
@@ -18,12 +21,12 @@ import Syntax.Row (ExtRow (..), OpenName, Row, prettyRecord, prettyVariant, sort
 import Syntax.Term (Erasure (..), Quantifier (..), Visibility (..))
 
 data CorePattern
-    = VarP Name
+    = VarP SimpleName_
     | WildcardP Text
-    | ConstructorP Name [Name]
-    | VariantP OpenName Name
-    | RecordP (Row Name)
-    | SigmaP Name Name
+    | ConstructorP Name [SimpleName_]
+    | VariantP OpenName SimpleName_
+    | RecordP (Row SimpleName_)
+    | SigmaP SimpleName_ SimpleName_
     | LiteralP Literal
 
 instance PrettyAnsi CorePattern where
@@ -43,34 +46,31 @@ instance PrettyAnsi CorePattern where
 type CoreType = CoreTerm
 
 data CoreTerm
-    = Name Name
+    = Var Index
+    | Name Name
     | TyCon Name
     | Con Name [CoreTerm] -- a fully-applied constructor. may only be produced by `quote`
-    | Lambda Name CoreTerm
+    | Lambda SimpleName_ CoreTerm
     | App CoreTerm CoreTerm
     | Case CoreTerm [(CorePattern, CoreTerm)]
-    | Let Name CoreTerm CoreTerm
+    | Let SimpleName_ CoreTerm CoreTerm
     | Literal Literal
     | Record (Row CoreTerm)
     | Sigma CoreTerm CoreTerm
     | Variant OpenName
     | -- types
       Function CoreTerm CoreTerm
-    | Q Quantifier Visibility Erasure Name CoreTerm CoreTerm
-    | VariantT (ExtRow CoreTerm)
-    | RecordT (ExtRow CoreTerm)
-    | -- typechecking metavars
-      -- it might be a good idea to split terms-for-typecheck
-      -- from normal desugared terms
-      -- actually, it should be cleaner to implement standalone prettyprinting for Value
-      -- instead of using `quote` and keeping CoreTerm and Value in sync. This way will do for now, though
-      UniVar UniVar
+    | Q Quantifier Visibility Erasure SimpleName_ CoreType CoreTerm
+    | VariantT (ExtRow CoreType)
+    | RecordT (ExtRow CoreType)
+    | UniVar UniVar
 
 instance PrettyAnsi CoreTerm where
     prettyAnsi opts = go 0
       where
         go :: Int -> CoreTerm -> Doc AnsiStyle
         go n term = case term of
+            Var index -> "#" <> pretty index.getIndex
             Name name -> prettyAnsi opts name
             TyCon name -> prettyAnsi opts name
             Con (L ConsName) [x, Con (L NilName) []] -> brackets $ go 0 x
@@ -141,8 +141,26 @@ coreTraversal recur = \case
     Sigma x y -> Sigma <$> recur x <*> recur y
     Function from to -> Function <$> recur from <*> recur to
     Q q v e name ty body -> Q q v e name <$> recur ty <*> recur body
+    Var index -> pure $ Var index
     Name name -> pure $ Name name
     TyCon name -> pure $ TyCon name
     Literal lit -> pure $ Literal lit
     Variant name -> pure $ Variant name
     UniVar uni -> pure $ UniVar uni
+
+coreTraversalPure :: (CoreTerm -> CoreTerm) -> CoreTerm -> CoreTerm
+coreTraversalPure recur = runIdentity . coreTraversal (pure . recur)
+
+{- | lift a term through N lambda binders, adjusting local variable indices
+
+I don't think it should traverse univars, since they are not supposed to reference any local variables
+-}
+lift :: Int -> CoreTerm -> CoreTerm
+lift n = go (Level 0)
+  where
+    go depth = \case
+        Var (Index index)
+            | index >= depth.getLevel -> Var (Index $ index + n)
+            | otherwise -> Var (Index index)
+        Lambda var body -> Lambda var $ go (succ depth) body
+        other -> coreTraversalPure (go depth) other
