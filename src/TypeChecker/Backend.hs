@@ -66,12 +66,12 @@ data MonoStuckPart
     | MCase [MonoPatternClosure ()]
 
 pattern MUniVar :: UniVar -> Monotype_
-pattern MUniVar uni <- MStuck (V.OnUniVar uni) Seq.Empty
+pattern MUniVar uni <- MStuck (V.UniVarApp uni) Seq.Empty
     where
-        MUniVar uni = MStuck (V.OnUniVar uni) Seq.Empty
+        MUniVar uni = MStuck (V.UniVarApp uni) Seq.Empty
 
 pattern MSkolem :: Name -> Monotype_
-pattern MSkolem name <- MStuck (V.OnVar name) Seq.Empty
+pattern MSkolem name <- MStuck (V.VarApp name) Seq.Empty
     where
         MSkolem name = MStuck (V.OnVar name) Seq.Empty
 

@@ -8,14 +8,14 @@ import Common hiding (Skolem, UniVar)
 import LangPrelude
 import Syntax.Core (CorePattern, CoreTerm)
 import Syntax.Row
-import Syntax.Term (Erasure, Quantifier, Visibility)
+import Syntax.Term (Erasure (..), Quantifier (..), Visibility (Visible))
 
 data ValueEnv = ValueEnv
-    { topLevel :: IdMap Name Value
+    { topLevel :: IdMap Name_ Value
     , locals :: [Value] -- accessed via de bruijn indexes
     }
 
-type Type' = Value
+type VType = Value
 
 -- unlike the AST types, the location information on Values are shallow, since
 -- the way we use it is different from the AST nodes
@@ -35,10 +35,10 @@ data Value
     | -- | A primitive (Text, Char or Int) value. The name 'Literal' is slightly misleading here
       PrimValue Literal
     | -- types
-      Function Type' Type'
-    | Q Quantifier Visibility Erasure (Closure Type')
-    | VariantT (ExtRow Type')
-    | RecordT (ExtRow Type')
+      Function VType VType
+    | Q Quantifier Visibility Erasure (Closure VType)
+    | VariantT (ExtRow VType)
+    | RecordT (ExtRow VType)
     | Stuck Stuck
 
 pattern Var :: Level -> Value
@@ -50,6 +50,16 @@ pattern UniVar :: UniVar -> Value
 pattern UniVar uni <- Stuck (UniVarApp uni [])
     where
         UniVar uni = Stuck (UniVarApp uni [])
+
+pattern Type :: Name -> Value
+pattern Type name <- TyCon name []
+    where
+        Type name = TyCon name []
+
+pattern Pi :: Closure VType -> Value
+pattern Pi closure <- Q Forall Visible Retained closure
+    where
+        Pi closure = Q Forall Visible Retained closure
 
 data PrimFunc = PrimFunc
     { name :: Name

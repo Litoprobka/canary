@@ -626,7 +626,7 @@ infer (e :@ loc) = case e of
     type_ = V.TyCon (TypeName :@ loc) []
     check_ expr ty = check expr (ty :@ loc)
 
-inferApp :: InfEffs es => Loc -> (Typed ETerm) -> Expr 'Fixity -> Eff es (Typed ETerm)
+inferApp :: InfEffs es => Loc -> Typed ETerm -> Expr 'Fixity -> Eff es (Typed ETerm)
 inferApp appLoc (f@(_ :@ fLoc) ::: fTy) arg = do
     monoLayer' In fTy >>= \case
         -- todo: this case is not ideal if the univar is already solved with a concrete function type

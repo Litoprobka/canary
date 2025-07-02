@@ -4,9 +4,9 @@ module Syntax.Elaborated where
 
 import Common
 import LangPrelude
+import Syntax.Core (BoundDefined)
 import Syntax.Row
 import Syntax.Term (Erasure, Quantifier, Visibility)
-import Syntax.Value (Value)
 
 {-
 The elaborated AST is halfway between core and pre-typecheck passes
@@ -43,6 +43,8 @@ data ETerm
     | Q Quantifier Visibility Erasure (Typed SimpleName_) ETerm
     | VariantT (ExtRow ETerm)
     | RecordT (ExtRow ETerm)
+    | UniVar UniVar
+    | InsertedUniVar UniVar [BoundDefined]
 
 data EPattern
     = VarP SimpleName_
@@ -69,7 +71,7 @@ data EDeclaration
     = ValueD EBinding -- no local bindings for now
     -- I'm not sure which representation for typechecked constructors makes more sense, this is the bare minimum
     | TypeD Name [(Name, Int)]
-    | SignatureD Name Value
+    | SignatureD Name EType
 
 instance HasLoc a => HasLoc (Typed a) where
     getLoc (x ::: _) = getLoc x

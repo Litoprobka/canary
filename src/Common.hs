@@ -240,7 +240,10 @@ levelToIndex :: Level -> Level -> Index
 levelToIndex (Level l) (Level x) = Index $ l - x - 1
 
 toSimpleName :: Name -> SimpleName
-toSimpleName (Located loc name) = Located loc case name of
+toSimpleName (name :@ loc) = toSimpleName_ name :@ loc
+
+toSimpleName_ :: Name_ -> SimpleName_
+toSimpleName_ = \case
     Name txt _ -> Name' txt
     Wildcard n _ -> Wildcard' n
     BoolName -> Name' "Bool"

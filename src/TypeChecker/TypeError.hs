@@ -5,25 +5,25 @@ module TypeChecker.TypeError (TypeError (..), typeError) where
 import Common
 import Diagnostic
 import Error.Diagnose (Marker (..), Report (..))
-import Eval (Value)
 import LangPrelude
 import Syntax
+import Syntax.Core (CoreType)
 import Syntax.Row (OpenName)
 
-type TypeDT = Located Value
+type CType = Located CoreType
 
 data TypeError
-    = CannotUnify TypeDT TypeDT
-    | NotASubtype TypeDT TypeDT (Maybe OpenName)
-    | MissingField (Either TypeDT (Term 'Fixity)) OpenName
-    | MissingVariant TypeDT OpenName
+    = CannotUnify CType CType
+    | NotASubtype CType CType (Maybe OpenName)
+    | MissingField (Either CType (Term 'Fixity)) OpenName
+    | MissingVariant CType OpenName
     | EmptyMatch Loc -- empty match expression
     | ArgCountMismatch Loc -- "different amount of arguments in a match expression"
     | ArgCountMismatchPattern (Pattern 'Fixity) Int Int
-    | NotAFunction Loc TypeDT -- pretty fTy <+> "is not a function type"
-    | NotASigma Loc TypeDT
-    | SelfReferential Loc UniVar TypeDT
-    | NoVisibleTypeArgument Loc (Type 'Fixity) TypeDT
+    | NotAFunction Loc CType -- pretty fTy <+> "is not a function type"
+    | NotASigma Loc CType
+    | SelfReferential Loc UniVar CType
+    | NoVisibleTypeArgument Loc (Type 'Fixity) CType
     | ConstructorReturnType {con :: Name, expected :: Name, returned :: Name}
 
 typeError :: Diagnose :> es => TypeError -> Eff es a

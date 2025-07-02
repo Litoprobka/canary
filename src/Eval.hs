@@ -6,7 +6,22 @@
 {-# LANGUAGE RecordWildCards #-}
 {-# OPTIONS_GHC -Wno-orphans #-}
 
-module Eval (evalCore, quote, module Reexport, desugarElaborated, force, eval, modifyEnv) where
+module Eval (
+    evalCore,
+    quote,
+    module Reexport,
+    desugar,
+    force,
+    eval,
+    modifyEnv,
+    UniVars,
+    UniVarState (..),
+    app',
+    evalApp',
+    force',
+    ExtendedEnv (..),
+    resugar,
+) where
 
 import Common (
     Index (..),
@@ -29,12 +44,13 @@ import Common (
 import Data.EnumMap.Lazy qualified as EMap
 import Data.List ((!!))
 import Diagnostic
+import Effectful.State.Static.Local (State, get)
 import IdMap qualified as LMap
 import LangPrelude hiding (force)
 import Prettyprinter (line, vsep)
 import Syntax
 import Syntax.Core qualified as C
-import Syntax.Elaborated (EDeclaration, EPattern, ETerm, Typed (..))
+import Syntax.Elaborated (Typed (..))
 import Syntax.Elaborated qualified as D
 import Syntax.Elaborated qualified as E
 import Syntax.Value as Reexport
@@ -44,7 +60,7 @@ type UniVars = EnumMap UniVar UniVarState
 
 data ExtendedEnv = ExtendedEnv
     { locals :: [Value]
-    , topLevel :: IdMap Name Value
+    , topLevel :: IdMap Name_ Value
     , univars :: UniVars
     }
 
@@ -88,7 +104,7 @@ quote univars = go
 evalCore :: ExtendedEnv -> CoreTerm -> Value
 evalCore env@ExtendedEnv{..} = \case
     -- note that env.topLevel is a lazy IdMap, so we only force the outer structure here
-    C.Name name -> LMap.lookupDefault (error . show $ "unbound top-level name" <+> pretty name) name env.topLevel
+    C.Name name -> LMap.lookupDefault (error . show $ "unbound top-level name" <+> pretty name) (unLoc name) env.topLevel
     C.Var index -> env.locals !! index.getIndex
     C.TyCon name -> TyCon name []
     C.Con name args -> Con name $ map (evalCore env) args
@@ -112,9 +128,23 @@ evalCore env@ExtendedEnv{..} = \case
     C.VariantT row -> VariantT $ evalCore env <$> row
     C.RecordT row -> RecordT $ evalCore env <$> row
     C.UniVar uni -> force univars (UniVar uni)
+    C.InsertedUniVar uni bds -> appBDs env.locals (force univars $ UniVar uni) bds
   where
     mkStuckBranches :: [(CorePattern, CoreTerm)] -> [PatternClosure ()]
     mkStuckBranches = map \(pat, body) -> PatternClosure{pat, ty = (), env = ValueEnv{..}, body}
+
+    -- \| apply a univar to all variables in scope, skipping those whose value is known
+    appBDs :: [Value] -> Value -> [C.BoundDefined] -> Value
+    appBDs = \cases
+        [] val [] -> val
+        (t : rest) val (C.Bound : bds) -> evalApp univars (appBDs rest val bds) t
+        (_ : rest) val (C.Defined : bds) -> appBDs rest val bds
+        _ _ _ -> error "bound-defined / env mismatch"
+
+evalApp' :: State UniVars :> es => Value -> Value -> Eff es Value
+evalApp' lhs rhs = do
+    univars <- get @UniVars
+    pure $ evalApp univars lhs rhs
 
 evalApp :: UniVars -> Value -> Value -> Value
 evalApp univars = \cases
@@ -128,10 +158,16 @@ evalApp univars = \cases
     (Stuck (UniVarApp uni spine)) arg -> Stuck $ UniVarApp uni (arg : spine)
     nonFunc arg -> error . show $ "attempted to apply" <+> pretty nonFunc <+> "to" <+> pretty arg
 
+force' :: State UniVars :> es => Value -> Eff es Value
+force' val = do
+    univars <- get @UniVars
+    pure $ force univars val
+
 -- try to evaluate an expression that was previously stuck on an unsolved skolem
 force :: UniVars -> Value -> Value
 force !univars = \case
     Stuck (UniVarApp uni spine) -> case EMap.lookup uni univars of
+        -- an out of scope univar indicates a bug, but a non-fatal one
         Nothing -> traceShow ("out of scope univar:" <+> pretty uni) (UniVar uni)
         Just Unsolved -> UniVar uni
         Just (Solved val) -> force univars $ applySpine val spine
@@ -147,6 +183,11 @@ force !univars = \case
 
 app :: UniVars -> Closure ty -> Value -> Value
 app univars Closure{env = ValueEnv{..}, body} arg = evalCore (ExtendedEnv{locals = arg : locals, ..}) body
+
+app' :: State UniVars :> es => Closure ty -> Value -> Eff es Value
+app' closure arg = do
+    univars <- get @UniVars
+    pure $ app univars closure arg
 
 quoteClosure :: UniVars -> Level -> Closure a -> CoreTerm
 quoteClosure univars lvl closure = quote univars (succ lvl) $ app univars closure (Var lvl)
@@ -177,8 +218,8 @@ tryApplyPatternClosure univars PatternClosure{pat, env = ValueEnv{..}, body} arg
 -- desugar could *almost* be pure, but unfortunately, we need name gen here
 -- perhaps we should use something akin to locally nameless?
 -- TODO: properly handle recursive bindings (that is, don't infinitely loop on them)
-desugarElaborated :: forall es. Diagnose :> es => Loc -> ETerm -> Eff es CoreTerm
-desugarElaborated loc = go
+desugar :: forall es. Diagnose :> es => Loc -> ETerm -> Eff es CoreTerm
+desugar loc = go
   where
     go = \case
         E.Var index -> pure $ C.Var index
@@ -227,6 +268,8 @@ desugarElaborated loc = go
         E.Q q vis er (var ::: kind) body -> C.Q q vis er var <$> go kind <*> go body
         E.VariantT row -> C.VariantT <$> traverse go row
         E.RecordT row -> C.RecordT <$> traverse go row
+        E.UniVar uni -> pure $ C.UniVar uni
+        E.InsertedUniVar uni bds -> pure $ C.InsertedUniVar uni bds
       where
         cons = C.Name $ ConsName :@ loc
         nil = C.Name $ NilName :@ loc
@@ -247,8 +290,39 @@ desugarElaborated loc = go
     asVar (E.WildcardP txt) = pure $ Wildcard' txt
     asVar _ = internalError loc "todo: nested patterns"
 
+-- idk, perhaps typecheck should produce CoreTerm right away
+resugar :: CoreTerm -> ETerm
+resugar = \case
+    C.Var index -> E.Var index
+    C.Name name -> E.Name name
+    C.TyCon name -> E.Name name
+    C.Con name args -> foldl' E.App (E.Name name) (fmap resugar args)
+    C.Lambda var body -> E.Lambda (E.VarP var ::: error "what") $ resugar body
+    C.App lhs rhs -> E.App (resugar lhs) (resugar rhs)
+    C.Case arg matches -> E.Case (resugar arg) $ fmap (bimap resugarPattern resugar) matches
+    C.Let _name _expr _body -> error "bindings are annoying" -- E.Let (E.VarP name) (resugar expr) (resugar body)
+    C.Literal lit -> E.Literal lit
+    C.Record row -> E.Record (fmap resugar row)
+    C.Sigma lhs rhs -> E.Sigma (resugar lhs) (resugar rhs)
+    C.Variant name -> E.Variant name
+    C.Function from to -> E.Function (resugar from) (resugar to)
+    C.Q q v e var ty body -> E.Q q v e (var ::: resugar ty) (resugar body)
+    C.VariantT row -> E.VariantT $ fmap resugar row
+    C.RecordT row -> E.RecordT $ fmap resugar row
+    C.UniVar uni -> E.UniVar uni
+    C.InsertedUniVar uni bds -> E.InsertedUniVar uni bds
+  where
+    resugarPattern = \case
+        C.VarP name -> E.VarP name
+        C.WildcardP txt -> E.WildcardP txt
+        C.ConstructorP name args -> E.ConstructorP name $ fmap E.VarP args
+        C.VariantP name arg -> E.VariantP name $ E.VarP arg
+        C.RecordP nameRow -> E.RecordP $ fmap E.VarP nameRow
+        C.SigmaP lhs rhs -> E.SigmaP (E.VarP lhs) (E.VarP rhs)
+        C.LiteralP lit -> E.LiteralP lit
+
 eval :: Diagnose :> es => Loc -> ExtendedEnv -> ETerm -> Eff es Value
-eval loc env term = evalCore env <$> desugarElaborated loc term
+eval loc env term = evalCore env <$> desugar loc term
 
 modifyEnv
     :: forall es
@@ -258,21 +332,21 @@ modifyEnv
     -> [EDeclaration]
     -> Eff es ValueEnv
 modifyEnv loc ValueEnv{..} decls = do
-    desugared <- (traverse . traverse) (desugarElaborated loc) . LMap.fromList =<< foldMapM collectBindings decls
+    desugared <- (traverse . traverse) (desugar loc) . LMap.fromList =<< foldMapM collectBindings decls
     let newEnv = ExtendedEnv{topLevel = newTopLevel, univars = EMap.empty, ..}
         newTopLevel = fmap (either id (evalCore newEnv)) desugared <> topLevel
     pure ValueEnv{topLevel = newTopLevel, ..}
   where
-    collectBindings :: EDeclaration -> Eff es [(Name, Either Value ETerm)]
+    collectBindings :: EDeclaration -> Eff es [(Name_, Either Value ETerm)]
     collectBindings decl = case decl of
-        D.ValueD (E.ValueB name body) -> pure [(name, Right body)]
-        D.ValueD (E.FunctionB name args body) -> pure [(name, Right $ foldr E.Lambda body args)]
+        D.ValueD (E.ValueB name body) -> pure [(unLoc name, Right body)]
+        D.ValueD (E.FunctionB name args body) -> pure [(unLoc name, Right $ foldr E.Lambda body args)]
         -- todo: value constructors have to be in scope by the time we typecheck definitions that depend on them (say, GADTs)
         -- the easiest way is to just apply `typecheck` and `modifyEnv` declaration-by-declaration
         D.TypeD _ constrs -> pure $ fmap mkConstr constrs
         D.SignatureD{} -> pure mempty
 
-    mkConstr (name, count) = (name, Left $ mkConLambda count name)
+    mkConstr (name, count) = (unLoc name, Left $ mkConLambda count name)
 
 mkConLambda :: Int -> Name -> Value
 mkConLambda n con = evalCore emptyEnv lambdas
