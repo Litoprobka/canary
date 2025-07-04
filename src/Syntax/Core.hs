@@ -62,8 +62,7 @@ data CoreTerm
     | Sigma CoreTerm CoreTerm
     | Variant OpenName
     | -- types
-      Function CoreTerm CoreTerm
-    | Q Quantifier Visibility Erasure SimpleName_ CoreType CoreTerm
+      Q Quantifier Visibility Erasure SimpleName_ CoreType CoreTerm
     | VariantT (ExtRow CoreType)
     | RecordT (ExtRow CoreType)
     | UniVar UniVar
@@ -100,7 +99,6 @@ instance PrettyAnsi CoreTerm where
                     )
             Let name body expr -> keyword "let" <+> prettyAnsi opts name <+> specSym "=" <+> go 0 body <> ";" <+> go 0 expr
             Literal lit -> prettyAnsi opts lit
-            Function from to -> parensWhen 2 $ go 2 from <+> specSym "->" <+> go 0 to
             Q q vis er name ty body -> parensWhen 1 $ kw q er <+> prettyBinder name ty <+> compressQ q vis er body
             VariantT row -> prettyVariant (prettyAnsi opts) (go 0) row
             RecordT row -> prettyRecord ":" (prettyAnsi opts) (go 0) row
@@ -148,7 +146,6 @@ coreTraversal recur = \case
     RecordT row -> RecordT <$> traverse recur row
     VariantT row -> VariantT <$> traverse recur row
     Sigma x y -> Sigma <$> recur x <*> recur y
-    Function from to -> Function <$> recur from <*> recur to
     Q q v e name ty body -> Q q v e name <$> recur ty <*> recur body
     Var index -> pure $ Var index
     Name name -> pure $ Name name

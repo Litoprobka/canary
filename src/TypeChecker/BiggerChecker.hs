@@ -8,7 +8,7 @@ import Diagnostic
 import Effectful.Labeled (Labeled, runLabeled)
 import Effectful.Reader.Static
 import Effectful.State.Static.Local (State, evalState, get, modify, runState)
-import Eval (ExtendedEnv (..), UniVarState (..), UniVars, ValueEnv, app', captured, eval, force', quote, resugar)
+import Eval (ExtendedEnv (..), UniVarState (..), UniVars, ValueEnv, app', captured, desugar, eval, force', quote, resugar)
 import IdMap qualified as Map
 import LangPrelude
 import NameGen (NameGen, freshName_, runNameGen)
@@ -73,44 +73,49 @@ processDeclaration ctx (decl :@ loc) = case decl of
         -- we can probably infer the kind of a type from its constructors, but we don't do that for now
         kind <- withTopLevel $ maybe (pure $ V.Type (TypeName :@ getLoc name)) (typeFromTerm ctx) mbKind
         modify @TopLevel $ Map.insert (unLoc name) kind
-        topLevel <- get @TopLevel
-        let newCtx = ctx{env = ctx.env{V.topLevel = Map.insert (unLoc name) (V.TyCon name []) ctx.env.topLevel}}
-        runReader topLevel $ for_ constrs \con -> do
+        let newCtx = ctx{env = ctx.env{V.topLevel = Map.insert (unLoc name) (V.Type name) ctx.env.topLevel}}
+        withTopLevel $ for_ constrs \con -> do
             conSig <- removeUniVars newCtx.level =<< typeFromTerm newCtx con.sig
             checkGadtConstructor ctx.level name con.name conSig
             modify @TopLevel $ Map.insert (unLoc con.name) conSig
         -- todo: add GADT constructors to the constructor table
-        pure (E.TypeD name (map (\con -> (con.name, argCount con.sig)) constrs), Map.insert (unLoc name) (V.TyCon name []))
+        pure (E.TypeD name (map (\con -> (con.name, argCount con.sig)) constrs), Map.insert (unLoc name) (V.Type name))
     D.Type name binders constrs -> do
-        kind <- withTopLevel $ removeUniVars ctx.level =<< mkTypeKind binders
+        kind <- withTopLevel $ removeUniVars ctx.level =<< typeFromTerm ctx (mkTypeKind binders)
+        traceShowM $ pretty kind <+> "ok"
         modify $ Map.insert (unLoc name) kind
-        let newCtx = ctx{env = ctx.env{V.topLevel = Map.insert (unLoc name) (V.TyCon name []) ctx.env.topLevel}}
-        topLevel <- get @TopLevel
-        runReader topLevel $ for_ (mkConstrSigs name binders constrs) \(con, sig) -> do
+        let newCtx = ctx{env = ctx.env{V.topLevel = Map.insert (unLoc name) (V.Type name) ctx.env.topLevel}}
+        withTopLevel $ for_ (mkConstrSigs name binders constrs) \(con, sig) -> do
+            traceShowM $ "checking con" <+> pretty con <+> ":" <+> pretty sig
             sigV <- removeUniVars newCtx.level =<< typeFromTerm newCtx sig
             modify @TopLevel $ Map.insert (unLoc con) sigV
         -- _conMapEntry <- mkConstructorTableEntry (map (.var) binders) (map (\con -> (con.name, con.args)) constrs)
-        pure (E.TypeD name (map (\con -> (con.name, length con.args)) constrs), Map.insert (unLoc name) (V.TyCon name []))
+        pure (E.TypeD name (map (\con -> (con.name, length con.args)) constrs), Map.insert (unLoc name) (V.Type name))
   where
     withTopLevel action = do
         topLevel <- get @TopLevel
         runReader topLevel action
-    -- no dependent kinds for now
+
+    -- convert a list of binders to a type term
+    -- e.g. a b (c : Int) d
+    -- ===> foreach (a : Type) (b : Type) (c : Int) (d : Type) -> Type
     mkTypeKind = \case
-        [] -> pure $ V.Type (TypeName :@ loc)
-        (binder : rest) -> V.Function <$> typeFromTerm ctx (T.binderKind binder) <*> mkTypeKind rest
+        [] -> T.Name (TypeName :@ loc) :@ loc
+        (binder : rest) ->
+            let newKind = T.binderKind binder
+             in T.Q Forall Visible Retained binder{T.kind = Just newKind} (mkTypeKind rest) :@ loc
 
     mkConstrSigs :: Name -> [VarBinder 'Fixity] -> [Constructor 'Fixity] -> [(Name, Type 'Fixity)]
     mkConstrSigs name binders constrs =
         constrs <&> \(D.Constructor loc' con params) ->
             ( con
             , foldr
-                (\var -> Located loc' . T.Q Forall Implicit Erased var)
-                (foldr (\lhs -> Located loc' . T.Function lhs) (fullType loc') params)
+                (\var acc -> T.Q Forall Implicit Erased var acc :@ loc')
+                (foldr (\lhs acc -> T.Function lhs acc :@ loc') (fullType loc') params)
                 binders
             )
       where
-        fullType loc' = foldl' (\lhs -> Located loc' . T.App lhs) (Located (getLoc name) $ T.Name name) (Located loc' . T.Name . (.var) <$> binders)
+        fullType loc' = foldl' (\lhs -> (:@ loc') . T.App lhs) (T.Name name :@ getLoc name) ((:@ loc') . T.Name . (.var) <$> binders)
 
     -- constructors should be reprocessed into a more convenenient form somewhere else, but I'm not sure where
     argCount = go 0
@@ -132,8 +137,7 @@ processDeclaration ctx (decl :@ loc) = case decl of
             _ -> internalError (getLoc con) "something weird in a GADT constructor type"
       where
         fnResult = \case
-            (C.Function _ rhs) -> fnResult rhs
-            (C.Q _ _ _ _ _ rhs) -> fnResult rhs
+            C.Q _ _ _ _ _ rhs -> fnResult rhs
             other -> other
         unwrapApp = go []
           where
@@ -213,9 +217,12 @@ infer ctx (t :@ loc) = case t of
         pure (E.If eCond eTrue eFalse, trueTy)
     T.Variant con -> do
         payloadTy <- freshUniVarV ctx
-        rowExt <- freshUniVarV ctx
-        -- todo: we can infer '(x : ?a) -> [| Con ?a | ?r x ]'
-        pure (E.Variant con, V.Function rowExt (V.VariantT $ ExtRow (fromList [(con, payloadTy)]) rowExt))
+        payload <- freshName_ $ Name' "payload"
+        rowExt <- freshUniVar (bind payload payloadTy ctx)
+        univars <- get @UniVars
+        let body = C.VariantT $ ExtRow (fromList [(con, quote univars ctx.level payloadTy)]) rowExt
+        -- '(x : ?a) -> [| Con ?a | ?r x ]'
+        pure (E.Variant con, V.Pi V.Closure{env = ctx.env, ty = payloadTy, var = toSimpleName_ payload, body})
     T.RecordAccess{} -> internalError loc "wip: record access"
     T.Record{} -> internalError loc "wip: record"
     T.Sigma lhs rhs -> do
@@ -238,25 +245,23 @@ infer ctx (t :@ loc) = case t of
     T.VariantT row -> do
         eRow <- traverse (\field -> check ctx field type_) row
         pure (E.VariantT eRow, type_)
+    -- normal function syntax is just sugar for '(_ : a) -> b'
     T.Function from to -> do
         eFrom <- check ctx from type_
-        eTo <- check ctx to type_
-        pure (E.Function eFrom eTo, type_)
-    T.Q q v e binder body -> do
+        env <- extendEnv ctx.env
+        fromV <- eval loc env eFrom
+        x <- freshName_ $ Name' "x"
+        eTo <- check (bind x fromV ctx) to type_
+        pure (E.Q Forall Visible Retained (toSimpleName_ x ::: eFrom) eTo, type_)
+    qq@(T.Q q v e binder body) -> do
+        traceShowM $ "inferring" <+> pretty qq
         tyV <- maybe (freshUniVarV ctx) (typeFromTerm ctx) binder.kind
+        traceShowM $ "got binder" <+> pretty tyV
         eBody <- check (bind (unLoc binder.var) tyV ctx) body type_
         univars <- get @UniVars
         let eTy = resugar $ quote univars ctx.level tyV
         pure (E.Q q v e (unLoc (toSimpleName binder.var) ::: eTy) eBody, type_)
   where
-    {-
-    type Sigma : (a : Type) -> (f : a -> Type) -> Type where
-        Pair : (x : 'a) -> 'f x -> Sigma 'a 'f
-
-    type Sigma a (f : a -> Type) =
-        Pair (x : a) (f x)
-    -}
-
     type_ = V.Type $ TypeName :@ loc
 
 -- check a term against Type and evaluate it
@@ -327,7 +332,6 @@ removeUniVars lvl = go
             V.Variant name arg -> V.Variant name <$> go arg
             V.Sigma lhs rhs -> V.Sigma <$> go lhs <*> go rhs
             V.PrimValue lit -> pure $ V.PrimValue lit
-            V.Function from to -> V.Function <$> go from <*> go to
             V.Q q v e closure@V.Closure{var, env = V.ValueEnv{topLevel}} -> do
                 ty <- go closure.ty
                 newBody <- removeUniVars (succ lvl) =<< closure `app'` V.Var lvl
@@ -379,7 +383,6 @@ removeUniVarsT lvl = go
         E.List items -> E.List <$> traverse go items
         E.Sigma lhs rhs -> E.Sigma <$> go lhs <*> go rhs
         E.Do{} -> internalError' "do not supported yet"
-        E.Function from to -> E.Function <$> go from <*> go to
         E.Q q v e (var ::: ty) body -> do
             ty' <- go ty
             body' <- removeUniVarsT (succ lvl) body

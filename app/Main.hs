@@ -9,7 +9,7 @@ import Common
 import Data.Traversable (for)
 import Diagnostic
 import Error.Diagnose (Position (..))
-import Eval (Value, ValueEnv (..))
+import Eval (ValueEnv (..))
 import IdMap qualified as Map
 import NameGen (runNameGen)
 import NameResolution

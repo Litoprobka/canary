@@ -60,12 +60,6 @@ unify topLevel lvl lhsTy rhsTy = do
             body <- closure `app'` Var lvl
             body2 <- closure2 `app'` Var lvl
             unify topLevel (succ lvl) body body2
-        (Q Forall _v _e closure) (Function from to) -> do
-            unify topLevel lvl closure.ty from
-            body <- closure `app'` Var lvl
-            -- does an increased level make sense here? I'm not sure
-            unify topLevel (succ lvl) body to
-        fn@Function{} q@(Q Forall _ _ _) -> unify topLevel lvl fn q
         (Stuck (VarApp vlvl spine)) (Stuck (VarApp vlvl2 spine2)) | vlvl == vlvl2 -> do
             unifySpine topLevel lvl spine spine2
         (Stuck (UniVarApp uni spine)) ty -> solve topLevel lvl uni spine ty
@@ -173,11 +167,10 @@ rename uni = go
             RecordT row -> C.RecordT <$> traverse (go pren) row
             VariantT row -> C.VariantT <$> traverse (go pren) row
             Sigma x y -> C.Sigma <$> go pren x <*> go pren y
-            Function from to -> C.Function <$> go pren from <*> go pren to
             PrimValue lit -> pure $ C.Literal lit
             Variant name arg -> C.App (C.Variant name) <$> go pren arg
             Stuck (Fn fn stuck) -> C.App <$> go pren (PrimFunction fn) <*> go pren (Stuck stuck)
-            Stuck Case{} -> error "idk"
+            Stuck Case{} -> error "todo: rename stuck case"
 
 -- wrap a term in lambdas
 lambdas :: Level -> CoreTerm -> CoreTerm

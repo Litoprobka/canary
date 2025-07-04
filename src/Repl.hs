@@ -6,7 +6,6 @@ module Repl where
 
 import Common (
     Fixity (..),
-    Literal (..),
     Loc (..),
     Located (..),
     Name_ (TypeName),
@@ -48,9 +47,7 @@ import Prettyprinter.Render.Terminal (putDoc)
 import Syntax
 import Syntax.AstTraversal
 import Syntax.Declaration qualified as D
-import Syntax.Row (ExtRow (..))
 import Syntax.Term
-import Syntax.Term qualified as T
 import System.Console.Isocline
 import TypeChecker.BiggerChecker qualified as TC
 import TypeChecker.Unification (Context (..), emptyContext)
@@ -93,9 +90,9 @@ noLoc = C.Located builtin
 emptyEnv :: ReplEnv
 emptyEnv = ReplEnv{loadedFiles = mempty, ..}
   where
-    values = ValueEnv{topLevel = Map.one TypeName (V.TyCon (noLoc TypeName) []), locals = []}
+    values = ValueEnv{topLevel = Map.one TypeName (V.Type (noLoc TypeName)), locals = []}
     fixityMap = Map.one AppOp InfixL
-    types = Map.one TypeName (V.TyCon (noLoc TypeName) [])
+    types = Map.one TypeName (V.Type (noLoc TypeName))
     scope = Scope $ HashMap.singleton (Name' "Type") (noLoc TypeName)
     (_, operatorPriorities) = Poset.eqClass AppOp Poset.empty
     lastLoadedFile = Nothing
@@ -167,12 +164,11 @@ mkDefaultEnv = do
                     <> map
                         noLoc
                         [ D.Type (noLoc C.BoolName) [] [D.Constructor builtin (noLoc C.TrueName) [], D.Constructor builtin false []]
-                        , -- as a temporary hack, list defaults to Bool, because polymorphism is kinda borked at the moment
-                          D.Type
+                        , D.Type
                             (noLoc C.ListName)
-                            [] -- [plainBinder a]
+                            [plainBinder a]
                             [ D.Constructor builtin (noLoc C.ConsName) $
-                                map noLoc [Name (noLoc C.BoolName), (Name (noLoc C.ListName {-`App` noLoc (Name a)-}))]
+                                map noLoc [Name a, noLoc (Name (noLoc C.ListName)) `App` noLoc (Name a)]
                             , D.Constructor builtin (noLoc C.NilName) []
                             ]
                         ]

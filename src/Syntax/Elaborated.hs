@@ -39,7 +39,6 @@ data ETerm
     | List [ETerm]
     | Sigma ETerm ETerm
     | Do [EStatement] ETerm
-    | Function ETerm ETerm
     | Q Quantifier Visibility Erasure (Typed SimpleName_) ETerm
     | VariantT (ExtRow ETerm)
     | RecordT (ExtRow ETerm)

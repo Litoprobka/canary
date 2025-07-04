@@ -35,8 +35,7 @@ data Value
     | -- | A primitive (Text, Char or Int) value. The name 'Literal' is slightly misleading here
       PrimValue Literal
     | -- types
-      Function VType VType
-    | Q Quantifier Visibility Erasure (Closure VType)
+      Q Quantifier Visibility Erasure (Closure VType)
     | VariantT (ExtRow VType)
     | RecordT (ExtRow VType)
     | Stuck Stuck

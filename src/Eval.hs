@@ -26,6 +26,7 @@ module Eval (
 import Common (
     Index (..),
     Level (..),
+    Literal (..),
     Loc,
     Located (..),
     Name,
@@ -86,7 +87,6 @@ quote univars = go
         Sigma x y -> C.Sigma (go lvl x) (go lvl y)
         Variant name val -> C.App (C.Variant name) (go lvl val)
         PrimValue lit -> C.Literal lit
-        Function from to -> C.Function (go lvl from) (go lvl to)
         Q q v e closure -> C.Q q v e closure.var (go lvl closure.ty) $ quoteClosure univars lvl closure
         VariantT row -> C.VariantT $ fmap (go lvl) row
         RecordT row -> C.RecordT $ fmap (go lvl) row
@@ -105,7 +105,9 @@ evalCore :: ExtendedEnv -> CoreTerm -> Value
 evalCore env@ExtendedEnv{..} = \case
     -- note that env.topLevel is a lazy IdMap, so we only force the outer structure here
     C.Name name -> LMap.lookupDefault (error . show $ "unbound top-level name" <+> pretty name) (unLoc name) env.topLevel
-    C.Var index -> env.locals !! index.getIndex
+    C.Var index
+        | index.getIndex >= length env.locals -> PrimValue (IntLiteral $ negate index.getIndex) -- error $ show $ pretty index.getIndex <+> "out of scope, max is" <+> pretty (length env.locals)
+        | otherwise -> env.locals !! index.getIndex
     C.TyCon name -> TyCon name []
     C.Con name args -> Con name $ map (evalCore env) args
     C.Lambda var body -> Lambda $ Closure{var, ty = (), env = ValueEnv{..}, body}
@@ -123,7 +125,6 @@ evalCore env@ExtendedEnv{..} = \case
     C.Record row -> Record $ evalCore env <$> row
     C.Sigma x y -> Sigma (evalCore env x) (evalCore env y)
     C.Variant name -> Lambda $ Closure{var = Name' "x", ty = (), env = ValueEnv{..}, body = C.Variant name `C.App` C.Var (Index 0)}
-    C.Function lhs rhs -> Function (evalCore env lhs) (evalCore env rhs)
     C.Q q vis e var ty body -> Q q vis e $ Closure{var, ty = evalCore env ty, env = ValueEnv{..}, body}
     C.VariantT row -> VariantT $ evalCore env <$> row
     C.RecordT row -> RecordT $ evalCore env <$> row
@@ -133,7 +134,7 @@ evalCore env@ExtendedEnv{..} = \case
     mkStuckBranches :: [(CorePattern, CoreTerm)] -> [PatternClosure ()]
     mkStuckBranches = map \(pat, body) -> PatternClosure{pat, ty = (), env = ValueEnv{..}, body}
 
-    -- \| apply a univar to all variables in scope, skipping those whose value is known
+    -- apply a univar to all variables in scope, skipping those whose value is known
     appBDs :: [Value] -> Value -> [C.BoundDefined] -> Value
     appBDs = \cases
         [] val [] -> val
@@ -153,7 +154,7 @@ evalApp univars = \cases
     (TyCon name args) arg -> TyCon name (args <> [arg])
     (PrimFunction fn) (Stuck stuck) -> Stuck $ Fn fn stuck
     (PrimFunction PrimFunc{remaining = 1, captured, f}) arg -> f (arg :| captured)
-    (PrimFunction PrimFunc{name, remaining, captured, f}) arg -> PrimFunction $ PrimFunc name (pred remaining) (arg : captured) f
+    (PrimFunction PrimFunc{name, remaining, captured, f}) arg -> PrimFunction PrimFunc{name, remaining = pred remaining, captured = arg : captured, f}
     (Stuck (VarApp lvl spine)) arg -> Stuck $ VarApp lvl (arg : spine)
     (Stuck (UniVarApp uni spine)) arg -> Stuck $ UniVarApp uni (arg : spine)
     nonFunc arg -> error . show $ "attempted to apply" <+> pretty nonFunc <+> "to" <+> pretty arg
@@ -264,7 +265,6 @@ desugar loc = go
         E.Sigma x y -> C.Sigma <$> go x <*> go y
         E.List xs -> foldr (C.App . C.App cons) nil <$> traverse go xs
         E.Do{} -> error "todo: desugar do blocks"
-        E.Function from to -> C.Function <$> go from <*> go to
         E.Q q vis er (var ::: kind) body -> C.Q q vis er var <$> go kind <*> go body
         E.VariantT row -> C.VariantT <$> traverse go row
         E.RecordT row -> C.RecordT <$> traverse go row
@@ -305,7 +305,6 @@ resugar = \case
     C.Record row -> E.Record (fmap resugar row)
     C.Sigma lhs rhs -> E.Sigma (resugar lhs) (resugar rhs)
     C.Variant name -> E.Variant name
-    C.Function from to -> E.Function (resugar from) (resugar to)
     C.Q q v e var ty body -> E.Q q v e (var ::: resugar ty) (resugar body)
     C.VariantT row -> E.VariantT $ fmap resugar row
     C.RecordT row -> E.RecordT $ fmap resugar row
@@ -333,7 +332,7 @@ modifyEnv
     -> Eff es ValueEnv
 modifyEnv loc ValueEnv{..} decls = do
     desugared <- (traverse . traverse) (desugar loc) . LMap.fromList =<< foldMapM collectBindings decls
-    let newEnv = ExtendedEnv{topLevel = newTopLevel, univars = EMap.empty, ..}
+    let newEnv = ExtendedEnv{topLevel = newTopLevel, univars = EMap.empty, locals = []}
         newTopLevel = fmap (either id (evalCore newEnv)) desugared <> topLevel
     pure ValueEnv{topLevel = newTopLevel, ..}
   where

@@ -78,7 +78,7 @@ plainBinder :: NameAt p -> VarBinder p
 plainBinder = flip VarBinder Nothing
 
 binderKind :: NameAt p ~ C.Name => VarBinder p -> Type p
-binderKind binder = fromMaybe (Located (getLoc binder) $ Name $ Located (getLoc binder) TypeName) binder.kind
+binderKind binder = fromMaybe (Name (TypeName :@ getLoc binder) :@ getLoc binder) binder.kind
 
 type DoStatement p = Located (DoStatement_ p)
 data DoStatement_ (p :: Pass)
