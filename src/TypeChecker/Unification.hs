@@ -9,7 +9,8 @@ import Diagnostic (Diagnose, internalError')
 import Effectful.Labeled
 import Effectful.Reader.Static (Reader)
 import Effectful.State.Static.Local (State, get, modify)
-import Eval (ExtendedEnv (..), UniVarState (..), UniVars, app', evalApp', evalCore, force')
+import Eval (ExtendedEnv (..), UniVarState (..), UniVars, app', evalApp', evalCore, force', quote)
+import IdMap qualified as Map
 import LangPrelude hiding (force, lift)
 import NameGen
 import Syntax.Core (CoreTerm)
@@ -27,39 +28,55 @@ data Context = Context
     , bounds :: [C.BoundDefined]
     }
 
+emptyContext :: ValueEnv -> Context
+emptyContext env = Context{env, level = Level 0, types = Map.empty, bounds = []}
+
 type TC es = (Labeled UniVar NameGen :> es, NameGen :> es, Diagnose :> es, State UniVars :> es, Reader TopLevel :> es)
 
 -- passing around topLevel like this is a bit ugly, perhaps unify should just take a Context?
 unify :: TC es => IdMap Name_ Value -> Level -> Value -> Value -> Eff es ()
-unify topLevel lvl = \cases
-    (Lambda lhsClosure) (Lambda rhsClosure) -> do
-        lhsBody <- lhsClosure `app'` V.Var lvl
-        rhsBody <- rhsClosure `app'` V.Var lvl
-        unify topLevel (succ lvl) lhsBody rhsBody
-    -- these two cases seem kinda redundant
-    nonLambda (Lambda rhsClosure) -> do
-        lhsBody <- nonLambda `evalApp'` V.Var lvl
-        rhsBody <- rhsClosure `app'` V.Var lvl
-        unify topLevel (succ lvl) lhsBody rhsBody
-    (Lambda lhsClosure) nonLambda -> do
-        lhsBody <- lhsClosure `app'` V.Var lvl
-        rhsBody <- nonLambda `evalApp'` V.Var lvl
-        unify topLevel (succ lvl) lhsBody rhsBody
-    (TyCon lhs lhsArgs) (TyCon rhs rhsArgs) | lhs == rhs -> zipWithM_ (unify topLevel lvl) lhsArgs rhsArgs
-    (Q Forall v _e closure) (Q Forall v2 _e2 closure2) | v == v2 -> do
-        unify topLevel lvl closure.ty closure2.ty
-        body <- closure `app'` Var lvl
-        body2 <- closure2 `app'` Var lvl
-        unify topLevel (succ lvl) body body2
-    (Stuck (VarApp vlvl spine)) (Stuck (VarApp vlvl2 spine2)) | vlvl == vlvl2 -> do
-        unifySpine topLevel lvl spine spine2
-    (Stuck (UniVarApp uni spine)) ty -> solve topLevel lvl uni spine ty
-    ty (Stuck (UniVarApp uni spine)) -> solve topLevel lvl uni spine ty
-    (Stuck (Fn fn arg)) (Stuck (Fn fn2 arg2))
-        | fn.name == fn2.name && length fn.captured == length fn2.captured -> do
-            zipWithM_ (unify topLevel lvl) fn.captured fn2.captured
-            unify topLevel lvl (Stuck arg) (Stuck arg2)
-    _lhs _rhs -> internalError' "unification error"
+unify topLevel lvl lhsTy rhsTy = do
+    lhs' <- force' lhsTy
+    rhs' <- force' rhsTy
+    match lhs' rhs'
+  where
+    match = \cases
+        (Lambda lhsClosure) (Lambda rhsClosure) -> do
+            lhsBody <- lhsClosure `app'` V.Var lvl
+            rhsBody <- rhsClosure `app'` V.Var lvl
+            unify topLevel (succ lvl) lhsBody rhsBody
+        -- these two cases seem kinda redundant
+        nonLambda (Lambda rhsClosure) -> do
+            lhsBody <- nonLambda `evalApp'` V.Var lvl
+            rhsBody <- rhsClosure `app'` V.Var lvl
+            unify topLevel (succ lvl) lhsBody rhsBody
+        (Lambda lhsClosure) nonLambda -> do
+            lhsBody <- lhsClosure `app'` V.Var lvl
+            rhsBody <- nonLambda `evalApp'` V.Var lvl
+            unify topLevel (succ lvl) lhsBody rhsBody
+        (TyCon lhs lhsArgs) (TyCon rhs rhsArgs) | lhs == rhs -> zipWithM_ (unify topLevel lvl) lhsArgs rhsArgs
+        (Q Forall v _e closure) (Q Forall v2 _e2 closure2) | v == v2 -> do
+            unify topLevel lvl closure.ty closure2.ty
+            body <- closure `app'` Var lvl
+            body2 <- closure2 `app'` Var lvl
+            unify topLevel (succ lvl) body body2
+        (Q Forall _v _e closure) (Function from to) -> do
+            unify topLevel lvl closure.ty from
+            body <- closure `app'` Var lvl
+            -- does an increased level make sense here? I'm not sure
+            unify topLevel (succ lvl) body to
+        fn@Function{} q@(Q Forall _ _ _) -> unify topLevel lvl fn q
+        (Stuck (VarApp vlvl spine)) (Stuck (VarApp vlvl2 spine2)) | vlvl == vlvl2 -> do
+            unifySpine topLevel lvl spine spine2
+        (Stuck (UniVarApp uni spine)) ty -> solve topLevel lvl uni spine ty
+        ty (Stuck (UniVarApp uni spine)) -> solve topLevel lvl uni spine ty
+        (Stuck (Fn fn arg)) (Stuck (Fn fn2 arg2))
+            | fn.name == fn2.name && length fn.captured == length fn2.captured -> do
+                zipWithM_ (unify topLevel lvl) fn.captured fn2.captured
+                unify topLevel lvl (Stuck arg) (Stuck arg2)
+        lhs rhs -> do
+            univars <- get @UniVars
+            internalError' $ "cannot unify" <+> pretty (quote univars lvl lhs) <+> "with" <+> pretty (quote univars lvl rhs)
 
 unifySpine :: TC es => IdMap Name_ Value -> Level -> Spine -> Spine -> Eff es ()
 unifySpine topLevel lvl = \cases

@@ -3,13 +3,15 @@
 module TypeChecker.BiggerChecker where
 
 import Common
+import Data.EnumMap.Lazy qualified as EMap
 import Diagnostic
+import Effectful.Labeled (Labeled, runLabeled)
 import Effectful.Reader.Static
-import Effectful.State.Static.Local (State, get, modify)
-import Eval (ExtendedEnv (..), UniVars, ValueEnv, app', captured, eval, force', quote, resugar)
+import Effectful.State.Static.Local (State, evalState, get, modify, runState)
+import Eval (ExtendedEnv (..), UniVarState (..), UniVars, ValueEnv, app', captured, eval, force', quote, resugar)
 import IdMap qualified as Map
 import LangPrelude
-import NameGen (freshName_)
+import NameGen (NameGen, freshName_, runNameGen)
 import Syntax
 import Syntax.Core qualified as C
 import Syntax.Declaration qualified as D
@@ -22,63 +24,77 @@ import Syntax.Value qualified as V
 import TypeChecker.TypeError (TypeError (..), typeError)
 import TypeChecker.Unification
 
+run :: TopLevel -> Eff (State UniVars : Reader TopLevel : Labeled UniVar NameGen : es) a -> Eff es a
+run types = runLabeled @UniVar runNameGen . runReader types . evalState @UniVars EMap.empty
+
+processDeclaration'
+    :: (NameGen :> es, Diagnose :> es) => TopLevel -> ValueEnv -> Declaration 'Fixity -> Eff es (EDeclaration, TopLevel, ValueEnv)
+processDeclaration' topLevel env decl = runLabeled @UniVar runNameGen do
+    ((eDecl, diff), types) <- runState topLevel $ evalState @UniVars EMap.empty $ processDeclaration (emptyContext env) decl
+    pure (eDecl, types, env{V.topLevel = diff env.topLevel})
+
 -- long story short, this is a mess. In the future, DependencyResolution should return declarations in a more structured format
 processDeclaration
-    :: (TC es, State TopLevel :> es) => Context -> Declaration 'Fixity -> Eff es (EDeclaration, IdMap Name_ Value -> IdMap Name_ Value)
+    :: (Labeled UniVar NameGen :> es, NameGen :> es, Diagnose :> es, State UniVars :> es, State TopLevel :> es)
+    => Context
+    -> Declaration 'Fixity
+    -> Eff es (EDeclaration, IdMap Name_ Value -> IdMap Name_ Value)
 processDeclaration ctx (decl :@ loc) = case decl of
     D.Signature name sig -> do
-        sigV <- removeUniVars ctx.level =<< typeFromTerm ctx sig
+        sigV <- withTopLevel $ removeUniVars ctx.level =<< typeFromTerm ctx sig
         univars <- get @UniVars
         let eSig = resugar $ quote univars ctx.level sigV
-        pure (E.SignatureD name eSig, Map.insert (unLoc name) sigV)
+        modify @TopLevel $ Map.insert (unLoc name) sigV
+        pure (E.SignatureD name eSig, id)
     D.Value binding (_ : _) -> internalError (getLoc binding) "todo: proper support for where clauses"
     D.Value (T.ValueB (L (T.VarP name)) body) [] -> do
         topLevel <- get @TopLevel
-        eBody <- case Map.lookup (unLoc name) topLevel of
+        eBody <- withTopLevel $ case Map.lookup (unLoc name) topLevel of
             Just sig -> check ctx body sig
             Nothing -> do
-                (eBody, ty) <- traverse (removeUniVars ctx.level) =<< infer ctx body
+                (eBody, ty) <- bitraverse (removeUniVarsT ctx.level) (removeUniVars ctx.level) =<< infer ctx body
                 modify @TopLevel $ Map.insert (unLoc name) ty
                 pure eBody
-        env <- extendEnv ctx.env
-        val <- eval loc env eBody
-        pure (E.ValueD (E.ValueB name eBody), Map.insert (unLoc name) val)
+        pure (E.ValueD (E.ValueB name eBody), id)
     D.Value T.ValueB{} [] -> internalError loc "pattern destructuring bindings are not supported yet"
     -- this case is way oversimplified for now, we don't even allow recursion for untyped bindings
     D.Value (T.FunctionB name args body) [] -> do
         topLevel <- get @TopLevel
         let asLambda = foldr (\var -> (:@ getLoc body) . T.Lambda var) body args
-        eLambda <- case Map.lookup (unLoc name) topLevel of
+        eLambda <- withTopLevel $ case Map.lookup (unLoc name) topLevel of
             Just sig -> check ctx asLambda sig
             Nothing -> do
-                (eLambda, ty) <- infer ctx asLambda
+                (eLambda, ty) <- bitraverse (removeUniVarsT ctx.level) (removeUniVars ctx.level) =<< infer ctx asLambda
                 modify @TopLevel $ Map.insert (unLoc name) ty
                 pure eLambda
-        env <- extendEnv ctx.env
-        val <- eval loc env eLambda
         -- ideally, we should unwrap 'eLambda' and construct a FunctionB here
-        pure (E.ValueD (E.ValueB name eLambda), Map.insert (unLoc name) val)
+        pure (E.ValueD (E.ValueB name eLambda), id)
     D.GADT name mbKind constrs -> do
         -- we can probably infer the kind of a type from its constructors, but we don't do that for now
-        kind <- maybe (pure $ V.Type (TypeName :@ getLoc name)) (typeFromTerm ctx) mbKind
+        kind <- withTopLevel $ maybe (pure $ V.Type (TypeName :@ getLoc name)) (typeFromTerm ctx) mbKind
         modify @TopLevel $ Map.insert (unLoc name) kind
-        let newCtx = ctx{env = ctx.env{V.topLevel = Map.insert (unLoc name) kind ctx.env.topLevel}}
-        for_ constrs \con -> do
+        topLevel <- get @TopLevel
+        let newCtx = ctx{env = ctx.env{V.topLevel = Map.insert (unLoc name) (V.TyCon name []) ctx.env.topLevel}}
+        runReader topLevel $ for_ constrs \con -> do
             conSig <- removeUniVars newCtx.level =<< typeFromTerm newCtx con.sig
             checkGadtConstructor ctx.level name con.name conSig
             modify @TopLevel $ Map.insert (unLoc con.name) conSig
         -- todo: add GADT constructors to the constructor table
         pure (E.TypeD name (map (\con -> (con.name, argCount con.sig)) constrs), Map.insert (unLoc name) (V.TyCon name []))
     D.Type name binders constrs -> do
-        kind <- removeUniVars ctx.level =<< mkTypeKind binders
+        kind <- withTopLevel $ removeUniVars ctx.level =<< mkTypeKind binders
         modify $ Map.insert (unLoc name) kind
-        let newCtx = ctx{env = ctx.env{V.topLevel = Map.insert (unLoc name) kind ctx.env.topLevel}}
-        for_ (mkConstrSigs name binders constrs) \(con, sig) -> do
+        let newCtx = ctx{env = ctx.env{V.topLevel = Map.insert (unLoc name) (V.TyCon name []) ctx.env.topLevel}}
+        topLevel <- get @TopLevel
+        runReader topLevel $ for_ (mkConstrSigs name binders constrs) \(con, sig) -> do
             sigV <- removeUniVars newCtx.level =<< typeFromTerm newCtx sig
             modify @TopLevel $ Map.insert (unLoc con) sigV
         -- _conMapEntry <- mkConstructorTableEntry (map (.var) binders) (map (\con -> (con.name, con.args)) constrs)
         pure (E.TypeD name (map (\con -> (con.name, length con.args)) constrs), Map.insert (unLoc name) (V.TyCon name []))
   where
+    withTopLevel action = do
+        topLevel <- get @TopLevel
+        runReader topLevel action
     -- no dependent kinds for now
     mkTypeKind = \case
         [] -> pure $ V.Type (TypeName :@ loc)
@@ -251,7 +267,7 @@ typeFromTerm ctx term = do
     eval (getLoc term) env eTerm
 
 -- | extend the value environment with current UniVar state for pure evaluation
-extendEnv :: TC es => ValueEnv -> Eff es ExtendedEnv
+extendEnv :: State UniVars :> es => ValueEnv -> Eff es ExtendedEnv
 extendEnv V.ValueEnv{..} = do
     univars <- get @UniVars
     pure ExtendedEnv{..}
@@ -283,7 +299,11 @@ lookupSig name ctx = do
     case (Map.lookup (unLoc name) ctx.types, Map.lookup (unLoc name) topLevel) of
         (Just (lvl, ty), _) -> pure (E.Var (levelToIndex ctx.level lvl), ty)
         (_, Just ty) -> pure (E.Name name, ty)
-        (Nothing, Nothing) -> internalError' $ pretty name <+> "not in scope"
+        (Nothing, Nothing) -> do
+            traceShowM $ pretty name <+> "not in scope"
+            (E.Name name,) <$> freshUniVarV ctx
+
+-- internalError' $ pretty name <+> "not in scope"
 
 {- | replace solved univars with their solutions and unsolved univars with a placeholder type
 in the future, unsolved unis should get converted to a forall with the appropriate type
@@ -327,3 +347,54 @@ removeUniVars lvl = go
             captured <- traverse go fn.captured
             V.Fn fn{captured} <$> goStuck arg
         V.Case _arg _matches -> internalError' "todo: remove univars from stuck case" -- V.Case <$> goStuck arg <*> _ matches
+
+{- | remove left-over univars from an eterm
+todo: write a traversal for ETerm
+-}
+removeUniVarsT :: TC es => Level -> ETerm -> Eff es ETerm
+removeUniVarsT lvl = go
+  where
+    go = \case
+        E.Var ix -> pure $ E.Var ix
+        E.Name name -> pure $ E.Name name
+        E.Literal lit -> pure $ E.Literal lit
+        E.App lhs rhs -> E.App <$> go lhs <*> go rhs
+        E.Lambda (E.VarP name ::: ty) body -> do
+            ty' <- go ty
+            body' <- removeUniVarsT (succ lvl) body
+            pure $ E.Lambda (E.VarP name ::: ty') body'
+        E.Lambda _ _ -> internalError' "non-trivial patterns are not supported yet"
+        E.Let (E.ValueB name defn) body -> do
+            defn' <- go defn
+            body' <- removeUniVarsT (succ lvl) body
+            pure $ E.Let (E.ValueB name defn') body'
+        E.Let{} -> internalError' "non-trivial let not supported yet"
+        E.LetRec{} -> internalError' "letrec not supported yet"
+        E.Case{} -> internalError' "case not supported yet"
+        E.Match{} -> internalError' "match not supported yet"
+        E.If cond true false -> E.If <$> go cond <*> go true <*> go false
+        E.Variant name -> pure $ E.Variant name
+        E.Record row -> E.Record <$> traverse go row
+        E.RecordAccess record field -> E.RecordAccess <$> go record <*> pure field
+        E.List items -> E.List <$> traverse go items
+        E.Sigma lhs rhs -> E.Sigma <$> go lhs <*> go rhs
+        E.Do{} -> internalError' "do not supported yet"
+        E.Function from to -> E.Function <$> go from <*> go to
+        E.Q q v e (var ::: ty) body -> do
+            ty' <- go ty
+            body' <- removeUniVarsT (succ lvl) body
+            pure $ E.Q q v e (var ::: ty') body'
+        E.VariantT row -> E.VariantT <$> traverse go row
+        E.RecordT row -> E.RecordT <$> traverse go row
+        E.UniVar uni -> do
+            univars <- get @UniVars
+            case EMap.lookup uni univars of
+                Just (Solved val) -> pure $ resugar $ quote univars lvl val
+                _ -> do
+                    traceShowM $ "unsolved univar" <+> pretty uni
+                    pure $ E.UniVar uni
+        E.InsertedUniVar uni spine -> do
+            internalError' "inserted univar, idk what to do"
+
+-- univars <- get @UniVars
+-- coreTerm <- eval _ env (E.InsertedUniVar uni spine)

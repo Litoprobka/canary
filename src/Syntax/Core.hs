@@ -1,3 +1,5 @@
+{-# LANGUAGE DerivingVia #-}
+
 module Syntax.Core where
 
 import Common (
@@ -8,6 +10,7 @@ import Common (
     Name_ (ConsName, NilName, TypeName),
     PrettyAnsi (..),
     SimpleName_,
+    UnAnnotate (..),
     UniVar,
     conColor,
     keyword,
@@ -65,9 +68,11 @@ data CoreTerm
     | RecordT (ExtRow CoreType)
     | UniVar UniVar
     | InsertedUniVar UniVar [BoundDefined]
+    deriving (Pretty) via (UnAnnotate CoreTerm)
 
 data BoundDefined = Bound | Defined
 
+-- todo: the pretty instance should build a list of local variable names and print them instead of the indices
 instance PrettyAnsi CoreTerm where
     prettyAnsi opts = go 0
       where

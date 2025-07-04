@@ -188,7 +188,7 @@ instance PrettyAnsi Name_ where
         CharName -> "Char"
         TypeName -> "Type"
 instance PrettyAnsi UniVar where
-    prettyAnsi _ (UniVar n) = "#" <> pretty n
+    prettyAnsi _ (UniVar n) = "?" <> pretty n
 instance PrettyAnsi Skolem where
     prettyAnsi opts (Skolem (L (Name name n)))
         | opts.printIds = pretty name <> "?" <> pretty n

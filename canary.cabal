@@ -46,10 +46,7 @@ library
       Syntax.Term
       Syntax.Token
       Syntax.Value
-      TypeChecker
-      TypeChecker.Backend
       TypeChecker.BiggerChecker
-      TypeChecker.Exhaustiveness
       TypeChecker.SmallChecker
       TypeChecker.TypeError
       TypeChecker.Unification

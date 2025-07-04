@@ -9,16 +9,18 @@ import Common (
     Literal (..),
     Loc (..),
     Located (..),
-    Name,
     Name_ (TypeName),
     Pass (..),
     PrettyOptions (..),
     SimpleName_ (Name'),
+    getLoc,
     prettyAnsi,
     prettyDef,
+    unLoc,
  )
 import Common qualified as C
 import Data.ByteString qualified as BS
+import Data.EnumMap.Strict qualified as EMap
 import Data.HashMap.Strict qualified as HashMap
 import Data.Text qualified as Text
 import Data.Text.Encoding (strictBuilderToText, textToStrictBuilder)
@@ -26,10 +28,6 @@ import Data.Text.Encoding qualified as Text
 import DependencyResolution (FixityMap, Op (..), SimpleOutput (..), cast, resolveDependenciesSimplified')
 import Diagnostic (Diagnose, fatal, guardNoErrors, reportExceptions, runDiagnoseWith)
 import Effectful
-import Effectful.Labeled
-import Effectful.Labeled.Reader (Reader, runReader)
-import Effectful.Reader.Static (ask)
-import Effectful.State.Static.Local (evalState, runState)
 import Error.Diagnose (Diagnostic, Position (..), Report (..), addFile)
 import Eval (ValueEnv (..), eval, modifyEnv)
 import Eval qualified as V
@@ -50,13 +48,12 @@ import Prettyprinter.Render.Terminal (putDoc)
 import Syntax
 import Syntax.AstTraversal
 import Syntax.Declaration qualified as D
-import Syntax.Elaborated (ETerm, Typed (..))
 import Syntax.Row (ExtRow (..))
 import Syntax.Term
 import Syntax.Term qualified as T
 import System.Console.Isocline
-import TypeChecker (infer, inferDeclaration, normaliseAll)
-import TypeChecker.Backend qualified as TC
+import TypeChecker.BiggerChecker qualified as TC
+import TypeChecker.Unification (Context (..), emptyContext)
 
 data ReplCommand
     = Decls [Declaration 'Parse]
@@ -73,9 +70,9 @@ data ReplEnv = ReplEnv
     , fixityMap :: FixityMap
     , operatorPriorities :: Poset Op
     , scope :: Scope
-    , types :: IdMap Name TC.Type'_
-    , constructorTable :: TC.ConstructorTable
-    , lastLoadedFile :: Maybe FilePath
+    , types :: IdMap Name_ VType
+    , -- , constructorTable :: TC.ConstructorTable
+      lastLoadedFile :: Maybe FilePath
     , loadedFiles :: forall msg. Diagnostic msg -- an empty diagnostic with files
     , input :: Text
     , inputBS :: ByteString
@@ -96,13 +93,13 @@ noLoc = C.Located builtin
 emptyEnv :: ReplEnv
 emptyEnv = ReplEnv{loadedFiles = mempty, ..}
   where
-    values = ValueEnv{values = Map.one (noLoc TypeName) (V.TyCon (noLoc TypeName) [])}
+    values = ValueEnv{topLevel = Map.one TypeName (V.TyCon (noLoc TypeName) []), locals = []}
     fixityMap = Map.one AppOp InfixL
-    types = Map.one (noLoc TypeName) (V.TyCon (noLoc TypeName) [])
+    types = Map.one TypeName (V.TyCon (noLoc TypeName) [])
     scope = Scope $ HashMap.singleton (Name' "Type") (noLoc TypeName)
     (_, operatorPriorities) = Poset.eqClass AppOp Poset.empty
     lastLoadedFile = Nothing
-    constructorTable = TC.ConstructorTable Map.empty
+    -- constructorTable = TC.ConstructorTable Map.empty
     inputBS = BS.empty
     input = Text.empty
 
@@ -116,13 +113,15 @@ mkDefaultEnv = do
     depResOutput@SimpleOutput{fixityMap, operatorPriorities} <-
         resolveDependenciesSimplified' emptyEnv.fixityMap emptyEnv.operatorPriorities $ preDecls <> afterNameRes
     fixityDecls <- Fixity.resolveFixity fixityMap operatorPriorities depResOutput.declarations
-    ((env, constructorTable), types) <- runState emptyEnv.types $ runState emptyEnv.constructorTable $ TC.run emptyEnv.values do
-        env <- ask @TC.Env
-        foldlM addDecl env fixityDecls
+    (types, values) <- (\f -> foldlM f (emptyEnv.types, emptyEnv.values) fixityDecls) \(topLevel, values) decl -> do
+        traceShowM $ "checking" <+> pretty decl
+        (eDecl, newTypes, newValues) <- TC.processDeclaration' topLevel values decl
+        newNewValues <- modifyEnv (getLoc decl) newValues [eDecl]
+        pure (newTypes, newNewValues)
     guardNoErrors
     let newEnv =
             ReplEnv
-                { values = env.values
+                { values
                 , fixityMap
                 , operatorPriorities
                 , scope = newScope
@@ -131,15 +130,10 @@ mkDefaultEnv = do
                 , loadedFiles = mempty
                 , inputBS = BS.empty
                 , input = Text.empty
-                , constructorTable
+                -- , constructorTable
                 }
-    foldlM (flip mkBuiltin) newEnv builtins
+    pure newEnv -- foldlM (flip mkBuiltin) newEnv builtins
   where
-    addDecl env decl = TC.local' (const env) do
-        (typedDecl, envDiff) <- inferDeclaration decl
-        newValues <- modifyEnv (envDiff env.values) [typedDecl]
-        pure env{TC.values = newValues}
-
     -- \| add a built-in function definition to the ReplEnv
     mkBuiltin (rawName, argCount, rawTy, resolveF) env@ReplEnv{..} = do
         ((name, ty, f), newScope) <- NameResolution.runWithEnv env.scope do
@@ -150,21 +144,15 @@ mkDefaultEnv = do
         let val = V.PrimFunction V.PrimFunc{name, remaining = argCount, captured = [], f}
         tyWithoutDepRes <- cast.term ty
         afterFixityRes <- Fixity.run env.fixityMap env.operatorPriorities $ Fixity.parse tyWithoutDepRes
-        -- this is really janky
-        elaboratedTy <-
-            runReader @"values" env.values
-                . runLabeled @"types" (evalState env.types)
-                . evalState env.types
-                . evalState env.constructorTable
-                . TC.run env.values
-                $ do
-                    expr' :@ loc ::: _ <- infer afterFixityRes
-                    pure $ expr' :@ loc
-        tyAsVal <- V.eval env.values elaboratedTy
+        elaboratedTy <- TC.run env.types do
+            let ctx = emptyContext env.values
+            (eExpr, _) <- TC.infer ctx afterFixityRes
+            pure eExpr
+        tyAsVal <- V.eval dummyLoc V.ExtendedEnv{topLevel = env.values.topLevel, locals = [], univars = EMap.empty} elaboratedTy
         pure
             ReplEnv
-                { types = Map.insert name tyAsVal env.types
-                , values = ValueEnv $ Map.insert name val env.values.values
+                { types = Map.insert (unLoc name) tyAsVal env.types
+                , values = ValueEnv{topLevel = Map.insert (unLoc name) val env.values.topLevel, locals = []}
                 , scope = newScope
                 , ..
                 }
@@ -175,17 +163,19 @@ mkDefaultEnv = do
         a <- freshName' "a"
         let builtinTypes = [C.TypeName, C.IntName, C.NatName, C.TextName, C.CharName]
             decls =
-                map
-                    noLoc
-                    [ D.Type (noLoc C.BoolName) [] [D.Constructor builtin (noLoc C.TrueName) [], D.Constructor builtin false []]
-                    , D.Type
-                        (noLoc C.ListName)
-                        [plainBinder a]
-                        [ D.Constructor builtin (noLoc C.ConsName) $ map noLoc [Name a, noLoc (Name (noLoc C.ListName)) `App` noLoc (Name a)]
-                        , D.Constructor builtin (noLoc C.NilName) []
+                map (\name -> noLoc $ D.Type (noLoc name) [] []) builtinTypes
+                    <> map
+                        noLoc
+                        [ D.Type (noLoc C.BoolName) [] [D.Constructor builtin (noLoc C.TrueName) [], D.Constructor builtin false []]
+                        , -- as a temporary hack, list defaults to Bool, because polymorphism is kinda borked at the moment
+                          D.Type
+                            (noLoc C.ListName)
+                            [] -- [plainBinder a]
+                            [ D.Constructor builtin (noLoc C.ConsName) $
+                                map noLoc [Name (noLoc C.BoolName), (Name (noLoc C.ListName {-`App` noLoc (Name a)-}))]
+                            , D.Constructor builtin (noLoc C.NilName) []
+                            ]
                         ]
-                    ]
-                    <> map (\name -> noLoc $ D.Type (noLoc name) [] []) builtinTypes
             scope =
                 Scope . HashMap.fromList . map (first C.Name') $
                     [ ("Type", noLoc C.TypeName)
@@ -203,6 +193,7 @@ mkDefaultEnv = do
         pure (decls, scope)
     freshName' :: NameGen :> es => Text -> Eff es C.Name
     freshName' = freshName . noLoc . C.Name'
+    {-
     builtins =
         [
             ( "reverse"
@@ -248,16 +239,19 @@ mkDefaultEnv = do
                 _ -> error "invalid arguments to sub"
             )
         ]
+    -}
     prelude :: [Declaration 'Parse]
-    prelude =
-        [ D.Type
-            (name' "Maybe")
-            [VarBinder{var = name' "a", kind = Nothing}]
-            [D.Constructor builtin (name' "Just") [nameTerm "a"], D.Constructor builtin (name' "Nothing") []]
-            :@ builtin
-        ]
-    name' txt = Name' txt :@ builtin
-    nameTerm txt = T.Name (name' txt) :@ builtin
+    prelude = []
+
+{-[ D.Type
+        (name' "Maybe")
+        [VarBinder{var = name' "a", kind = Nothing}]
+        [D.Constructor builtin (name' "Just") [nameTerm "a"], D.Constructor builtin (name' "Nothing") []]
+        :@ builtin
+    ]
+name' txt = Name' txt :@ builtin
+nameTerm txt = T.Name (name' txt) :@ builtin
+-}
 
 {- D.Type Blank "Unit" [] [D.Constructor Blank "MkUnit" []]
 -- , D.Value Blank (FunctionB "id" [VarP "x"] (Name "x")) []
@@ -309,12 +303,12 @@ replStep env@ReplEnv{loadedFiles} command = do
     case command of
         Decls decls -> processDecls env decls
         Expr expr -> do
-            checkedExpr ::: _ <- runReader @"values" env.values $ processExpr env.types expr
+            (checkedExpr, _) <- processExpr expr
             guardNoErrors
-            prettyVal =<< eval env.values checkedExpr
+            prettyVal =<< eval (getLoc expr) V.ExtendedEnv{locals = [], topLevel = env.values.topLevel, univars = EMap.empty} checkedExpr
             pure $ Just env
         Type_ expr -> do
-            (_ ::: ty) <- runReader @"values" env.values $ processExpr env.types expr
+            (_, ty) <- processExpr expr
             prettyVal ty
             pure $ Just env
         Load path -> do
@@ -330,7 +324,7 @@ replStep env@ReplEnv{loadedFiles} command = do
                 Nothing -> pure $ Just defaultEnv
                 Just path -> replStep defaultEnv (Load path)
         Env -> do
-            let mergedEnv = Map.merge (\ty val -> (Just ty, Just val)) ((,Nothing) . Just) ((Nothing,) . Just) env.types env.values.values
+            let mergedEnv = Map.merge (\ty val -> (Just ty, Just val)) ((,Nothing) . Just) ((Nothing,) . Just) env.types env.values.topLevel
             for_ (Map.toList mergedEnv) \(name, (mbTy, mbVal)) -> do
                 for_ mbTy \ty -> print $ prettyDef name <+> ":" <+> prettyDef ty
                 for_ mbVal \value -> print $ prettyDef name <+> "=" <+> prettyDef value
@@ -338,19 +332,16 @@ replStep env@ReplEnv{loadedFiles} command = do
         Quit -> pure Nothing
         UnknownCommand cmd -> fatal . one $ Err Nothing ("Unknown command:" <+> pretty cmd) [] []
   where
-    processExpr :: IdMap Name TC.Type'_ -> Term 'Parse -> Eff (Labeled "values" (Reader ValueEnv) ': es) (Typed ETerm)
-    processExpr types expr = evalState types do
+    processExpr :: Term 'Parse -> Eff es (ETerm, VType)
+    processExpr expr = do
         afterNameRes <- NameResolution.run env.scope $ resolveTerm expr
         skippedDepRes <- cast.term afterNameRes
         afterFixityRes <- Fixity.run env.fixityMap env.operatorPriorities $ Fixity.parse skippedDepRes
-        runLabeled @"types" (evalState env.types)
-            . evalState env.constructorTable
-            . TC.run env.values
-            $ do
-                (expr', ty) <- normaliseAll do
-                    expr' :@ loc ::: ty <- infer afterFixityRes
-                    pure (expr' :@ loc, ty :@ loc)
-                pure $ expr' ::: ty
+        TC.run env.types do
+            let ctx = emptyContext env.values
+            (eExpr, vTy) <- TC.infer ctx afterFixityRes
+            finalTy <- TC.removeUniVars ctx.level vTy
+            pure (eExpr, finalTy)
 
     prettyVal val = do
         liftIO $ putDoc $ prettyAnsi PrettyOptions{printIds = False} val <> Pretty.line
@@ -370,13 +361,14 @@ processDecls env@ReplEnv{loadedFiles} decls = do
     depResOutput@SimpleOutput{fixityMap, operatorPriorities} <-
         resolveDependenciesSimplified' env.fixityMap env.operatorPriorities afterNameRes
     fixityDecls <- Fixity.resolveFixity fixityMap operatorPriorities depResOutput.declarations
-    ((newEnv, constructorTable), types) <- runState env.types $ runState env.constructorTable $ TC.run env.values do
-        tenv <- ask @TC.Env
-        foldlM addDecl tenv fixityDecls
+    (types, values) <- (\f -> foldlM f (env.types, env.values) fixityDecls) \(topLevel, values) decl -> do
+        (eDecl, newTypes, newValues) <- TC.processDeclaration' topLevel values decl
+        newNewValues <- modifyEnv (getLoc decl) newValues [eDecl]
+        pure (newTypes, newNewValues)
     guardNoErrors
     pure . Just $
         ReplEnv
-            { values = newEnv.values
+            { values
             , fixityMap
             , operatorPriorities
             , scope = newScope
@@ -385,13 +377,8 @@ processDecls env@ReplEnv{loadedFiles} decls = do
             , loadedFiles = loadedFiles
             , input = env.input
             , inputBS = env.inputBS
-            , constructorTable
+            -- , constructorTable
             }
-  where
-    addDecl tcenv decl = TC.local' (const tcenv) do
-        (typedDecl, envDiff) <- inferDeclaration decl
-        newValues <- modifyEnv (envDiff tcenv.values) [typedDecl]
-        pure tcenv{TC.values = newValues}
 
 -- takes a line of input, or a bunch of lines in :{ }:
 takeInputChunk :: IO Text
@@ -438,7 +425,7 @@ completer env cenv input = completeWord cenv input Nothing wordCompletion
         prettyName = show $ prettyDef name
         mbSig = do
             id' <- HashMap.lookup name env.scope.table
-            ty <- Map.lookup id' env.types
+            ty <- Map.lookup (unLoc id') env.types
             pure $ show $ prettyDef ty
 
 {-

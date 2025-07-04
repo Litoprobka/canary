@@ -9,7 +9,7 @@ import Common
 import Data.Traversable (for)
 import Diagnostic
 import Error.Diagnose (Position (..))
-import Eval (ValueEnv (..))
+import Eval (Value, ValueEnv (..))
 import IdMap qualified as Map
 import NameGen (runNameGen)
 import NameResolution
@@ -66,7 +66,7 @@ runFile args fileName input = do
         for mbNewEnv \newEnv -> do
             nameOfMain <-
                 NameResolution.run newEnv.scope $ resolve $ Located (Loc Position{file = "<main>", begin = (0, 0), end = (0, 0)}) $ Name' "main"
-            pure case Map.lookup nameOfMain newEnv.values.values of
+            pure case Map.lookup (unLoc nameOfMain) env.values.topLevel of
                 Nothing -> putTextLn "there is no main function"
                 Just mainExpr -> putDoc $ (<> line) $ pretty mainExpr
     sequence_ eval'
