@@ -178,7 +178,7 @@ instance PrettyAnsi (NameAt p) => PrettyAnsi (Expr_ p) where
             compressQ q vis er (L term) = case term of
                 Q q' vis' er' binder body
                     | q == q' && vis == vis' && er == er' ->
-                        parens (prettyBinder opts binder) <+> compressQ q vis er body
+                        prettyBinder opts binder <+> compressQ q vis er body
                 other -> arrOrDot q vis <+> pretty other
 
             arrOrDot Forall Visible = "->"

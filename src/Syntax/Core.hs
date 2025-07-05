@@ -17,6 +17,7 @@ import Common (
     specSym,
     pattern L,
  )
+import Data.List ((!!))
 import LangPrelude
 import Prettyprinter
 import Prettyprinter.Render.Terminal (AnsiStyle)
@@ -71,37 +72,38 @@ data CoreTerm
 
 data BoundDefined = Bound | Defined
 
--- todo: the pretty instance should build a list of local variable names and print them instead of the indices
 instance PrettyAnsi CoreTerm where
-    prettyAnsi opts = go 0
+    prettyAnsi opts = go 0 []
       where
-        go :: Int -> CoreTerm -> Doc AnsiStyle
-        go n term = case term of
-            Var index -> "#" <> pretty index.getIndex
+        go :: Int -> [Doc AnsiStyle] -> CoreTerm -> Doc AnsiStyle
+        go n env term = case term of
+            Var index
+                | index.getIndex >= length env || index.getIndex < 0 -> "#" <> pretty index.getIndex
+                | otherwise -> env !! index.getIndex
             Name name -> prettyAnsi opts name
             TyCon name -> prettyAnsi opts name
-            Con (L ConsName) [x, Con (L NilName) []] -> brackets $ go 0 x
-            Con (L ConsName) [x, xs] | Just output <- prettyConsNil xs -> brackets $ go 0 x <> output
+            Con (L ConsName) [x, Con (L NilName) []] -> brackets $ go 0 env x
+            Con (L ConsName) [x, xs] | Just output <- prettyConsNil xs -> brackets $ go 0 env x <> output
             Con (L NilName) [] -> "[]"
             Con name [] -> prettyAnsi opts name
-            Con name args -> parensWhen 3 $ hsep (prettyAnsi opts name : map (go 3) args)
-            Lambda name body -> parensWhen 1 $ specSym "λ" <> prettyAnsi opts name <+> compressLambda body
-            App lhs rhs -> parensWhen 3 $ go 2 lhs <+> go 3 rhs
-            Record row -> prettyRecord "=" (prettyAnsi opts) (go 0) (NoExtRow row)
-            Sigma x y -> parensWhen 1 $ go 0 x <+> specSym "**" <+> go 0 y
+            Con name args -> parensWhen 3 $ hsep (prettyAnsi opts name : map (go 3 env) args)
+            lambda@Lambda{} -> parensWhen 1 $ specSym "λ" <> compressLambda env lambda
+            App lhs rhs -> parensWhen 3 $ go 2 env lhs <+> go 3 env rhs
+            Record row -> prettyRecord "=" (prettyAnsi opts) (go 0 env) (NoExtRow row)
+            Sigma x y -> parensWhen 1 $ go 0 env x <+> specSym "**" <+> go 0 env y
             Variant name -> prettyAnsi opts name
             Case arg matches ->
                 nest
                     4
                     ( vsep $
-                        (keyword "case" <+> go 0 arg <+> keyword "of" :) $
-                            matches <&> \(pat, body) -> prettyAnsi opts pat <+> specSym "->" <+> go 0 body
+                        (keyword "case" <+> go 0 env arg <+> keyword "of" :) $
+                            matches <&> \(pat, body) -> prettyAnsi opts pat <+> specSym "->" <+> go 0 env body
                     )
-            Let name body expr -> keyword "let" <+> prettyAnsi opts name <+> specSym "=" <+> go 0 body <> ";" <+> go 0 expr
+            Let name body expr -> keyword "let" <+> prettyAnsi opts name <+> specSym "=" <+> go 0 env body <> ";" <+> go 0 env expr
             Literal lit -> prettyAnsi opts lit
-            Q q vis er name ty body -> parensWhen 1 $ kw q er <+> prettyBinder name ty <+> compressQ q vis er body
-            VariantT row -> prettyVariant (prettyAnsi opts) (go 0) row
-            RecordT row -> prettyRecord ":" (prettyAnsi opts) (go 0) row
+            qq@(Q q vis er _ _ _) -> parensWhen 1 $ kw q er <+> compressQ env q vis er qq
+            VariantT row -> prettyVariant (prettyAnsi opts) (go 0 env) row
+            RecordT row -> prettyRecord ":" (prettyAnsi opts) (go 0 env) row
             UniVar uni -> prettyAnsi opts uni
             InsertedUniVar uni _ -> "<" <> prettyAnsi opts uni <> ">"
           where
@@ -114,26 +116,28 @@ instance PrettyAnsi CoreTerm where
             kw Exists Erased = keyword "∃"
             kw Exists Retained = keyword "Σ"
 
-        compressLambda term = case term of
-            Lambda name body -> prettyAnsi opts name <+> compressLambda body
-            other -> specSym "->" <+> prettyAnsi opts other
-        compressQ q vis e term = case term of
+            prettyConsNil = \case
+                Con (L ConsName) [x', xs'] -> (("," <+> go 0 env x') <>) <$> prettyConsNil xs'
+                Con (L NilName) [] -> Just ""
+                _ -> Nothing
+
+        compressLambda env term = case term of
+            Lambda name body -> prettyAnsi opts name <+> compressLambda (prettyAnsi opts name : env) body
+            other -> specSym "->" <+> go 0 env other
+
+        compressQ :: [Doc AnsiStyle] -> Quantifier -> Visibility -> Erasure -> CoreTerm -> Doc AnsiStyle
+        compressQ env q vis e term = case term of
             Q q' vis' e' name ty body
                 | q == q' && vis == vis' && e == e' ->
-                    prettyBinder name ty <+> compressQ q vis e body
-            other -> arrOrDot q vis <+> prettyAnsi opts other
+                    prettyBinder env name ty <+> compressQ (prettyAnsi opts name : env) q vis e body
+            other -> arrOrDot q vis <+> go 0 env other
 
-        prettyBinder name (TyCon (L TypeName)) = prettyAnsi opts name
-        prettyBinder name ty = parens $ prettyAnsi opts name <+> specSym ":" <+> go 0 ty
+        prettyBinder _ name (TyCon (L TypeName)) = prettyAnsi opts name
+        prettyBinder env name ty = parens $ prettyAnsi opts name <+> specSym ":" <+> go 0 env ty
 
         arrOrDot Forall Visible = specSym "->"
         arrOrDot Exists Visible = specSym "**"
         arrOrDot _ _ = specSym "."
-
-        prettyConsNil = \case
-            Con (L ConsName) [x', xs'] -> (("," <+> go 0 x') <>) <$> prettyConsNil xs'
-            Con (L NilName) [] -> Just ""
-            _ -> Nothing
 
 coreTraversal :: Applicative f => (CoreTerm -> f CoreTerm) -> CoreTerm -> f CoreTerm
 coreTraversal recur = \case

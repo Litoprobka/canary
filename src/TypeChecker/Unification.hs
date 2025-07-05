@@ -90,6 +90,7 @@ freshUniVar :: (Labeled UniVar NameGen :> es, State UniVars :> es) => Context ->
 freshUniVar ctx = do
     uni <- Common.UniVar <$> labeled @UniVar @NameGen freshId
     modify @UniVars $ EMap.insert uni Unsolved
+    traceShowM $ "fresh univar" <+> pretty uni <+> "@" <+> pretty (length ctx.bounds)
     pure $ C.InsertedUniVar uni ctx.bounds
 
 freshUniVarV :: (Labeled UniVar NameGen :> es, State UniVars :> es) => Context -> Eff es Value
@@ -105,6 +106,7 @@ data PartialRenaming = PartialRenaming
     , codomain :: Level
     , renaming :: EnumMap Level Level
     }
+    deriving (Show)
 
 -- | add a variable to a partial renaming
 lift :: PartialRenaming -> PartialRenaming
@@ -117,9 +119,12 @@ lift PartialRenaming{domain, codomain, renaming} =
 
 solve :: TC es => IdMap Name_ Value -> Level -> UniVar -> Spine -> Value -> Eff es ()
 solve topLevel ctxLevel uni spine rhs = do
+    univars <- get
+    traceShowM $ "solving" <+> pretty uni <> "@" <> pretty (length spine) <+> ":=" <+> pretty (quote univars ctxLevel rhs)
     pren <- invert ctxLevel spine
     rhs' <- rename uni pren rhs
     univars <- get @UniVars
+    traceShowM pren.renaming
     let env = ExtendedEnv{univars, topLevel, locals = []}
     let solution = evalCore env $ lambdas pren.domain rhs'
     modify @UniVars $ EMap.insert uni $ Solved solution
@@ -149,7 +154,9 @@ rename uni = go
                 | uni == uni2 -> internalError' "self-referential type"
                 | otherwise -> goSpine pren (C.UniVar uni) spine
             Stuck (VarApp lvl spine) -> case EMap.lookup lvl pren.renaming of
-                Nothing -> internalError' $ "escaping variable" <+> "#" <> pretty lvl.getLevel
+                Nothing ->
+                    internalError' $
+                        "escaping variable" <+> "#" <> pretty lvl.getLevel <+> "in scope:" <+> pretty (map (show @Text) $ EMap.keys pren.renaming)
                 Just x -> goSpine pren (C.Var $ levelToIndex pren.domain x) spine
             Lambda closure -> do
                 bodyToRename <- closure `app'` Var pren.codomain

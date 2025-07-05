@@ -113,7 +113,7 @@ mkDefaultEnv = do
     (types, values) <- (\f -> foldlM f (emptyEnv.types, emptyEnv.values) fixityDecls) \(topLevel, values) decl -> do
         traceShowM $ "checking" <+> pretty decl
         (eDecl, newTypes, newValues) <- TC.processDeclaration' topLevel values decl
-        newNewValues <- modifyEnv (getLoc decl) newValues [eDecl]
+        newNewValues <- modifyEnv newValues [eDecl]
         pure (newTypes, newNewValues)
     guardNoErrors
     let newEnv =
@@ -131,7 +131,7 @@ mkDefaultEnv = do
                 }
     pure newEnv -- foldlM (flip mkBuiltin) newEnv builtins
   where
-    -- \| add a built-in function definition to the ReplEnv
+    -- add a built-in function definition to the ReplEnv
     mkBuiltin (rawName, argCount, rawTy, resolveF) env@ReplEnv{..} = do
         ((name, ty, f), newScope) <- NameResolution.runWithEnv env.scope do
             name <- NameResolution.declare $ Name' rawName :@ builtin
@@ -145,7 +145,7 @@ mkDefaultEnv = do
             let ctx = emptyContext env.values
             (eExpr, _) <- TC.infer ctx afterFixityRes
             pure eExpr
-        tyAsVal <- V.eval dummyLoc V.ExtendedEnv{topLevel = env.values.topLevel, locals = [], univars = EMap.empty} elaboratedTy
+        let tyAsVal = V.eval V.ExtendedEnv{topLevel = env.values.topLevel, locals = [], univars = EMap.empty} elaboratedTy
         pure
             ReplEnv
                 { types = Map.insert (unLoc name) tyAsVal env.types
@@ -301,7 +301,7 @@ replStep env@ReplEnv{loadedFiles} command = do
         Expr expr -> do
             (checkedExpr, _) <- processExpr expr
             guardNoErrors
-            prettyVal =<< eval (getLoc expr) V.ExtendedEnv{locals = [], topLevel = env.values.topLevel, univars = EMap.empty} checkedExpr
+            prettyVal $ eval V.ExtendedEnv{locals = [], topLevel = env.values.topLevel, univars = EMap.empty} checkedExpr
             pure $ Just env
         Type_ expr -> do
             (_, ty) <- processExpr expr
@@ -359,7 +359,7 @@ processDecls env@ReplEnv{loadedFiles} decls = do
     fixityDecls <- Fixity.resolveFixity fixityMap operatorPriorities depResOutput.declarations
     (types, values) <- (\f -> foldlM f (env.types, env.values) fixityDecls) \(topLevel, values) decl -> do
         (eDecl, newTypes, newValues) <- TC.processDeclaration' topLevel values decl
-        newNewValues <- modifyEnv (getLoc decl) newValues [eDecl]
+        newNewValues <- modifyEnv newValues [eDecl]
         pure (newTypes, newNewValues)
     guardNoErrors
     pure . Just $
