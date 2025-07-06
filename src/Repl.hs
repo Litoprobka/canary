@@ -167,7 +167,7 @@ mkDefaultEnv = do
                             (noLoc C.ListName)
                             [plainBinder a]
                             [ D.Constructor builtin (noLoc C.ConsName) $
-                                map noLoc [Name a, noLoc (Name (noLoc C.ListName)) `App` noLoc (Name a)]
+                                map noLoc [Name a, App Visible (noLoc (Name (noLoc C.ListName))) (noLoc (Name a))]
                             , D.Constructor builtin (noLoc C.NilName) []
                             ]
                         ]
@@ -292,7 +292,6 @@ run env = do
         replStep envWithInput cmd
     traverse_ run newEnv
 
--- todo: locations of previous expressions get borked
 replStep :: forall es. (ReplCtx es, Diagnose :> es) => ReplEnv -> ReplCommand -> Eff es (Maybe ReplEnv)
 replStep env@ReplEnv{loadedFiles} command = do
     case command of

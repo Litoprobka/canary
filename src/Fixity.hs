@@ -149,14 +149,14 @@ parse (term' :@ termLoc) =
         fixity <- lookupFixity mbOp <$> ask @FixityMap
         let loc = zipLocOf lhs rhs
         pure $ Located loc case (mbOp, fixity, lhs) of
-            (AppOp, _, _) -> App lhs rhs
+            (AppOp, _, _) -> App Visible lhs rhs
             -- todo: InfixChain applications should use a special AST node, otherwise
             -- stuff like `(==) [a, b] == c` gets incorrectly parsed as `(==) [a, b, c]`
-            (Op op, InfixChain, L (App (Located nloc (Name op')) (L (List args))))
+            (Op op, InfixChain, L (App Visible (Located nloc (Name op')) (L (List args))))
                 | op == op' ->
-                    App (Located nloc $ Name op') (Located loc $ List $ args <> [rhs])
-            (Op op, InfixChain, _) -> App (Located (getLoc op) (Name op)) $ Located loc $ List [lhs, rhs]
-            (Op op, _, _) -> App (Located (zipLocOf lhs op) $ App (Located (getLoc op) (Name op)) lhs) rhs
+                    App Visible (Located nloc $ Name op') (Located loc $ List $ args <> [rhs])
+            (Op op, InfixChain, _) -> App Visible (Located (getLoc op) (Name op)) $ Located loc $ List [lhs, rhs]
+            (Op op, _, _) -> App Visible (Located (zipLocOf lhs op) $ App Visible (Located (getLoc op) (Name op)) lhs) rhs
 
 parsePattern :: Ctx es => Pattern 'DependencyRes -> Eff es (Pattern 'Fixity)
 parsePattern (term' :@ termLoc) =

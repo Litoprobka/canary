@@ -34,14 +34,13 @@ data Term_ p
 
       -- | value : Type
       Annotation (Term p) (Type p)
-    | App (Term p) (Term p)
+    | App Visibility (Term p) (Term p)
     | -- expression-only stuff
-      Lambda (Pattern p) (Expr p) -- it's still unclear to me whether I want to desugar multi-arg lambdas while parsing
+      Lambda Visibility (Pattern p) (Expr p) -- it's still unclear to me whether I want to desugar multi-arg lambdas while parsing
     | -- | (f _ x + _ y)
       WildcardLambda (NonEmpty (NameAt p)) (Expr p)
     | Let (Binding p) (Expr p)
     | LetRec (NonEmpty (Binding p)) (Expr p)
-    | TypeApp (Expr p) (Type p)
     | Case (Expr p) [(Pattern p, Expr p)]
     | -- | Haskell's \cases
       Match [(NonEmpty (Pattern p), Expr p)]
@@ -70,7 +69,7 @@ data Erasure = Retained | Erased deriving (Eq, Show)
 
 data Binding (p :: Pass)
     = ValueB {pat :: Pattern p, body :: Expr p}
-    | FunctionB {name :: NameAt p, args :: NonEmpty (Pattern p), body :: Expr p}
+    | FunctionB {name :: NameAt p, args :: NonEmpty (Visibility, Pattern p), body :: Expr p}
 
 data VarBinder p = VarBinder {var :: NameAt p, kind :: Maybe (Type p)}
 
@@ -124,19 +123,22 @@ instance Pretty (Pattern_ p) => Show (Pattern_ p) where
 instance PrettyAnsi (NameAt p) => PrettyAnsi (Binding p) where
     prettyAnsi opts = \case
         ValueB pat body -> prettyAnsi opts pat <+> "=" <+> prettyAnsi opts body
-        FunctionB name args body -> prettyAnsi opts name <+> concatWith (<+>) (prettyAnsi opts <$> args) <+> "=" <+> prettyAnsi opts body
+        FunctionB name args body ->
+            prettyAnsi opts name
+                <+> concatWith (<+>) (args <&> \(vis, pat) -> withVis vis (prettyAnsi opts pat))
+                <+> "="
+                <+> prettyAnsi opts body
 
 instance PrettyAnsi (NameAt p) => PrettyAnsi (Expr_ p) where
     prettyAnsi opts = go 0 . Located dummyLoc
       where
         go :: Int -> Expr p -> Doc AnsiStyle
-        go n (L e) = case e of
-            Lambda arg body -> parensWhen 1 $ "λ" <> prettyAnsi opts arg <+> compressLambda body
+        go n (e :@ loc) = case e of
+            lambda@Lambda{} -> parensWhen 1 $ "λ" <> compressLambda lambda
             WildcardLambda _ l@(L List{}) -> go 0 l
             WildcardLambda _ r@(L Record{}) -> go 0 r
             WildcardLambda _ body -> "(" <> go 0 body <> ")"
-            App lhs rhs -> parensWhen 3 $ go 2 lhs <+> go 3 rhs
-            TypeApp f ty -> parensWhen 3 $ go 2 f <+> "@" <> go 3 ty
+            App vis lhs rhs -> parensWhen 3 $ go 2 lhs <+> withVis vis (go 3 rhs)
             Let binding body -> "let" <+> prettyAnsi opts binding <> ";" <+> go 0 body
             LetRec bindings body -> "let rec" <+> sep ((<> ";") . prettyAnsi opts <$> NE.toList bindings) <+> go 0 body
             Case arg matches -> nest 4 (vsep $ ("case" <+> go 0 arg <+> "of" :) $ matches <&> \(pat, body) -> prettyAnsi opts pat <+> "->" <+> go 0 body)
@@ -158,7 +160,7 @@ instance PrettyAnsi (NameAt p) => PrettyAnsi (Expr_ p) where
             Literal lit -> prettyAnsi opts lit
             InfixE pairs last' -> "?(" <> sep (concatMap (\(lhs, op) -> go 3 lhs : maybe [] (pure . prettyAnsi opts) op) pairs <> [go 0 last']) <> ")"
             Function from to -> parensWhen 2 $ go 2 from <+> "->" <+> go 0 to
-            Q q vis er binder body -> parensWhen 2 $ kw q er <+> prettyBinder opts binder <+> compressQ q vis er body
+            qq@(Q q vis er _ _) -> parensWhen 2 $ kw q er <+> compressQ q vis er qq
             VariantT row -> prettyVariant (prettyAnsi opts) (go 0) row
             RecordT row -> prettyRecord ":" (prettyAnsi opts) (go 0) row
           where
@@ -171,19 +173,28 @@ instance PrettyAnsi (NameAt p) => PrettyAnsi (Expr_ p) where
             kw Exists Erased = "∃"
             kw Exists Retained = "Σ"
 
-            compressLambda (term :@ loc) = case term of
-                Lambda pat body -> prettyAnsi opts pat <+> compressLambda body
-                _ -> "->" <+> go 0 (term :@ loc)
+            compressLambda = \case
+                Lambda vis pat body -> withVis vis (prettyAnsi opts pat) <+> compressLambda (unLoc body)
+                other -> "->" <+> go 0 (other :@ loc)
 
-            compressQ q vis er (L term) = case term of
+            compressQ q vis er = \case
                 Q q' vis' er' binder body
                     | q == q' && vis == vis' && er == er' ->
-                        prettyBinder opts binder <+> compressQ q vis er body
+                        prettyBinder opts binder <+> compressQ q vis er (unLoc body)
                 other -> arrOrDot q vis <+> pretty other
 
             arrOrDot Forall Visible = "->"
             arrOrDot Exists Visible = "**"
             arrOrDot _ _ = "."
+
+-- withVis Visible  blah --> blah
+-- withVis Implicit blah -> @blah
+-- withVis Hidden   blah -> @{blah}
+withVis :: Visibility -> Doc ann -> Doc ann
+withVis = \case
+    Visible -> id
+    Implicit -> ("@" <>)
+    Hidden -> ("@" <>) . braces
 
 dummyLoc :: Loc
 dummyLoc = C.Loc Position{file = "<none>", begin = (0, 0), end = (0, 0)}
@@ -256,11 +267,10 @@ collectReferencedNames = go
         If cond true false -> go cond <> go true <> go false
         List xs -> foldMap go xs
         Sigma x y -> go x <> go y
-        Lambda pat body -> collectReferencedNamesInPat pat <> go body
+        Lambda _ pat body -> collectReferencedNamesInPat pat <> go body
         WildcardLambda _pats body -> go body
         Annotation e ty -> go e <> go ty
-        App lhs rhs -> go lhs <> go rhs
-        TypeApp e ty -> go e <> go ty
+        App _ lhs rhs -> go lhs <> go rhs
         Function fn args -> go fn <> go args
         Q _ _ _ binder body -> case binder.kind of
             Nothing -> go body

@@ -68,12 +68,11 @@ partialTravTerm trav (term' :@ loc) =
         T.Name name -> T.Name <$> trav.name name
         Literal lit -> pure $ Literal lit
         Annotation term ty -> Annotation <$> trav.term term <*> trav.term ty
-        App lhs rhs -> App <$> trav.term lhs <*> trav.term rhs
-        Lambda pat body -> Lambda <$> trav.pattern_ pat <*> trav.term body
+        App vis lhs rhs -> App vis <$> trav.term lhs <*> trav.term rhs
+        Lambda vis pat body -> Lambda vis <$> trav.pattern_ pat <*> trav.term body
         WildcardLambda names body -> WildcardLambda <$> traverse trav.name names <*> trav.term body
         Let binding body -> Let <$> trav.binding binding <*> trav.term body
         LetRec bindings body -> LetRec <$> traverse trav.binding bindings <*> trav.term body
-        TypeApp expr ty -> TypeApp <$> trav.term expr <*> trav.term ty
         Case term matches -> Case <$> trav.term term <*> traverse (bitraverse trav.pattern_ trav.term) matches
         Match matches -> Match <$> traverse (bitraverse (traverse trav.pattern_) trav.term) matches
         If cond true false -> If <$> trav.term cond <*> trav.term true <*> trav.term false
@@ -143,7 +142,7 @@ travGadtConstructor trav con = D.GadtConstructor con.loc <$> trav.name con.name 
 defTravBinding :: Applicative m => AstTraversal p q m -> Binding p -> m (Binding q)
 defTravBinding trav = \case
     ValueB{pat, body} -> ValueB <$> trav.pattern_ pat <*> trav.term body
-    FunctionB{name, args, body} -> FunctionB <$> trav.name name <*> traverse trav.pattern_ args <*> trav.term body
+    FunctionB{name, args, body} -> FunctionB <$> trav.name name <*> (traverse . traverse) trav.pattern_ args <*> trav.term body
 
 defTravBinder :: Applicative m => AstTraversal p q m -> VarBinder p -> m (VarBinder q)
 defTravBinder trav VarBinder{var, kind} = VarBinder <$> trav.name var <*> traverse trav.term kind

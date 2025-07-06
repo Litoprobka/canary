@@ -47,7 +47,6 @@ library
       Syntax.Token
       Syntax.Value
       TypeChecker.BiggerChecker
-      TypeChecker.SmallChecker
       TypeChecker.TypeError
       TypeChecker.Unification
   other-modules:

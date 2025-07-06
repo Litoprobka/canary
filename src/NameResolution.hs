@@ -266,7 +266,7 @@ resolveBinding locals =
     scoped . \case
         FunctionB name args body -> do
             name' <- resolve name
-            args' <- traverse declarePat args
+            args' <- (traverse . traverse) declarePat args
             collectNames locals
             body' <- resolveTerm body
             pure $ FunctionB name' args' body'
@@ -282,7 +282,7 @@ declareBinding = \case
     FunctionB name args body -> do
         name' <- declare name
         scoped do
-            args' <- traverse declarePat args
+            args' <- (traverse . traverse) declarePat args
             body' <- resolveTerm body
             pure $ FunctionB name' args' body'
     ValueB pat body -> do
@@ -316,10 +316,10 @@ resolveTerm :: NameResCtx es => Term 'Parse -> Eff es (Term 'NameRes)
 resolveTerm (Located loc e) =
     Located loc <$> scoped case e of
         Annotation term ty -> Annotation <$> resolveTerm term <*> inferForall (resolveTerm ty)
-        Lambda arg body -> do
+        Lambda vis arg body -> do
             arg' <- declarePat arg
             body' <- resolveTerm body
-            pure $ Lambda arg' body'
+            pure $ Lambda vis arg' body'
         Let binding expr -> do
             binding' <- declareBinding binding
             expr' <- resolveTerm expr

@@ -60,7 +60,7 @@ processDeclaration ctx (decl :@ loc) = case decl of
     -- this case is way oversimplified for now, we don't even allow recursion for untyped bindings
     D.Value (T.FunctionB name args body) [] -> do
         topLevel <- get @TopLevel
-        let asLambda = foldr (\var -> (:@ getLoc body) . T.Lambda var) body args
+        let asLambda = foldr (\(vis, var) -> (:@ getLoc body) . T.Lambda vis var) body args
         eLambda <- withTopLevel $ case Map.lookup (unLoc name) topLevel of
             Just sig -> check ctx asLambda sig
             Nothing -> do
@@ -114,7 +114,7 @@ processDeclaration ctx (decl :@ loc) = case decl of
                 binders
             )
       where
-        fullType loc' = foldl' (\lhs -> (:@ loc') . T.App lhs) (T.Name name :@ getLoc name) ((:@ loc') . T.Name . (.var) <$> binders)
+        fullType loc' = foldl' (\lhs -> (:@ loc') . T.App Visible lhs) (T.Name name :@ getLoc name) ((:@ loc') . T.Name . (.var) <$> binders)
 
     -- constructors should be reprocessed into a more convenenient form somewhere else, but I'm not sure where
     argCount = go 0
@@ -141,17 +141,17 @@ processDeclaration ctx (decl :@ loc) = case decl of
         unwrapApp = go []
           where
             go acc = \case
-                (C.App lhs rhs) -> go (rhs : acc) lhs
+                (C.App Visible lhs rhs) -> go (rhs : acc) lhs
                 other -> (other, acc)
 
 check :: TC es => Context -> Term 'Fixity -> VType -> Eff es ETerm
 check ctx (t :@ loc) ty = do
     ty' <- force' ty
     case (t, ty') of
-        (T.Lambda (L (T.VarP arg)) body, V.Pi closure) -> do
+        (T.Lambda vis (L (T.VarP arg)) body, V.Q Forall qvis _e closure) | vis == qvis -> do
             bodyTy <- closure `app'` V.Var ctx.level
             eBody <- check (bind (unLoc arg) closure.ty ctx) body bodyTy
-            pure $ E.Lambda (E.VarP (toSimpleName_ $ unLoc arg)) eBody
+            pure $ E.Lambda vis (E.VarP (toSimpleName_ $ unLoc arg)) eBody
         -- we can check against a dependent type, but I'm not sure how
         (T.If cond true false, _) -> do
             eCond <- check ctx cond $ V.Type (BoolName :@ loc)
@@ -175,28 +175,29 @@ infer ctx (t :@ loc) = case t of
             IntLiteral{} -> IntName
             TextLiteral{} -> TextName
             CharLiteral{} -> CharName
-    T.App lhs rhs -> do
+    T.App vis lhs rhs -> do
         (eLhs, lhsTy) <- infer ctx lhs
-        (argTy, closure) <-
+        closure <-
             force' lhsTy >>= \case
-                V.Pi closure -> pure (closure.ty, closure)
+                V.Q Forall vis2 _e closure | vis == vis2 -> pure closure
+                V.Q Forall vis2 _e _ -> internalError loc $ "visibility mismatch" <+> pretty (show @Text vis) <+> "!=" <+> pretty (show @Text vis2)
                 other -> do
                     argTy <- freshUniVarV ctx
                     x <- freshName_ (Name' "x")
                     closure <- V.Closure (toSimpleName_ x) argTy ctx.env <$> freshUniVar (bind x argTy ctx)
-                    unify ctx.env.topLevel ctx.level (V.Pi closure) other
-                    pure (argTy, closure)
-        eRhs <- check ctx rhs argTy
-        resultTy <- closure `app'` lhsTy
-        pure (E.App eLhs eRhs, resultTy)
-    T.TypeApp{} -> internalError loc "wip: type app"
-    T.Lambda (L (T.VarP arg)) body -> do
+                    unify ctx.env.topLevel ctx.level (V.Q Forall vis Retained closure) other
+                    pure closure
+        eRhs <- check ctx rhs closure.ty
+        env <- extendEnv ctx.env
+        resultTy <- closure `app'` eval env eRhs
+        pure (E.App vis eLhs eRhs, resultTy)
+    T.Lambda vis (L (T.VarP arg)) body -> do
         ty <- freshUniVarV ctx
         (eBody, bodyTy) <- infer (bind (unLoc arg) ty ctx) body
         univars <- get @UniVars
         let var = toSimpleName_ $ unLoc arg
             quotedBody = quote univars (succ ctx.level) bodyTy
-        pure (E.Lambda (E.VarP var) eBody, V.Pi V.Closure{ty, var, env = ctx.env, body = quotedBody})
+        pure (E.Lambda vis (E.VarP var) eBody, V.Q Forall vis Retained V.Closure{ty, var, env = ctx.env, body = quotedBody})
     T.Lambda{} -> internalError loc "wip: pattern matching lambda"
     T.WildcardLambda{} -> internalError loc "wip: wildcard lambda"
     T.Let (T.ValueB (T.VarP name :@ _) definition) body -> do
@@ -323,10 +324,10 @@ removeUniVars lvl = go
         force' >=> \case
             V.TyCon name args -> V.TyCon name <$> traverse go args
             V.Con name args -> V.Con name <$> traverse go args
-            V.Lambda closure@V.Closure{var, env} -> do
+            V.Lambda vis closure@V.Closure{var, env} -> do
                 newBody <- removeUniVars (succ lvl) =<< closure `app'` V.Var lvl
                 univars <- get @UniVars
-                pure $ V.Lambda V.Closure{var, ty = (), env, body = quote univars (succ lvl) newBody}
+                pure $ V.Lambda vis V.Closure{var, ty = (), env, body = quote univars (succ lvl) newBody}
             V.PrimFunction fn -> do
                 captured <- traverse go fn.captured
                 pure $ V.PrimFunction fn{captured}
@@ -343,7 +344,7 @@ removeUniVars lvl = go
             V.VariantT row -> V.VariantT <$> traverse go row
             V.Stuck stuck -> V.Stuck <$> goStuck stuck
     goStuck = \case
-        V.VarApp vlvl spine -> V.VarApp vlvl <$> traverse go spine
+        V.VarApp vlvl spine -> V.VarApp vlvl <$> (traverse . traverse) go spine
         -- if we reach this case, it means the univar is still unsolved
         -- in the future, we will collect all unsolved unis and convert them to
         -- a forall clause
@@ -363,11 +364,11 @@ removeUniVarsT lvl = go
         E.Var ix -> pure $ E.Var ix
         E.Name name -> pure $ E.Name name
         E.Literal lit -> pure $ E.Literal lit
-        E.App lhs rhs -> E.App <$> go lhs <*> go rhs
-        E.Lambda (E.VarP name) body -> do
+        E.App vis lhs rhs -> E.App vis <$> go lhs <*> go rhs
+        E.Lambda vis (E.VarP name) body -> do
             body' <- removeUniVarsT (succ lvl) body
-            pure $ E.Lambda (E.VarP name) body'
-        E.Lambda _ _ -> internalError' "non-trivial patterns are not supported yet"
+            pure $ E.Lambda vis (E.VarP name) body'
+        E.Lambda{} -> internalError' "non-trivial patterns are not supported yet"
         E.Let (E.ValueB name defn) body -> do
             defn' <- go defn
             body' <- removeUniVarsT (succ lvl) body

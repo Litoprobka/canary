@@ -26,7 +26,7 @@ data Value
       TyCon Name [Value]
     | -- | a fully-applied counstructor
       Con Name [Value]
-    | Lambda (Closure ())
+    | Lambda Visibility (Closure ())
     | -- | an escape hatch for interpreter primitives and similar stuff
       PrimFunction PrimFunc
     | Record (Row Value)
@@ -69,7 +69,7 @@ data PrimFunc = PrimFunc
 
 -- a reversed list of applications
 -- OnVar x [a, b, c] ~ x c b a
-type Spine = [Value] -- todo: [(Visibility, Value)]
+type Spine = [(Visibility, Value)]
 
 data Stuck
     = VarApp Level Spine

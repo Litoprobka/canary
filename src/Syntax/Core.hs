@@ -22,7 +22,7 @@ import LangPrelude
 import Prettyprinter
 import Prettyprinter.Render.Terminal (AnsiStyle)
 import Syntax.Row (ExtRow (..), OpenName, Row, prettyRecord, prettyVariant, sortedRow)
-import Syntax.Term (Erasure (..), Quantifier (..), Visibility (..))
+import Syntax.Term (Erasure (..), Quantifier (..), Visibility (..), withVis)
 
 data CorePattern
     = VarP SimpleName_
@@ -54,8 +54,8 @@ data CoreTerm
     | Name Name
     | TyCon Name
     | Con Name [CoreTerm] -- a fully-applied constructor. may only be produced by `quote`
-    | Lambda SimpleName_ CoreTerm
-    | App CoreTerm CoreTerm
+    | Lambda Visibility SimpleName_ CoreTerm
+    | App Visibility CoreTerm CoreTerm
     | Case CoreTerm [(CorePattern, CoreTerm)]
     | Let SimpleName_ CoreTerm CoreTerm
     | Literal Literal
@@ -88,7 +88,7 @@ instance PrettyAnsi CoreTerm where
             Con name [] -> prettyAnsi opts name
             Con name args -> parensWhen 3 $ hsep (prettyAnsi opts name : map (go 3 env) args)
             lambda@Lambda{} -> parensWhen 1 $ specSym "λ" <> compressLambda env lambda
-            App lhs rhs -> parensWhen 3 $ go 2 env lhs <+> go 3 env rhs
+            App vis lhs rhs -> parensWhen 3 $ go 2 env lhs <+> withVis vis (go 3 env rhs)
             Record row -> prettyRecord "=" (prettyAnsi opts) (go 0 env) (NoExtRow row)
             Sigma x y -> parensWhen 1 $ go 0 env x <+> specSym "**" <+> go 0 env y
             Variant name -> prettyAnsi opts name
@@ -122,7 +122,7 @@ instance PrettyAnsi CoreTerm where
                 _ -> Nothing
 
         compressLambda env term = case term of
-            Lambda name body -> prettyAnsi opts name <+> compressLambda (prettyAnsi opts name : env) body
+            Lambda vis name body -> withVis vis (prettyAnsi opts name) <+> compressLambda (prettyAnsi opts name : env) body
             other -> specSym "->" <+> go 0 env other
 
         compressQ :: [Doc AnsiStyle] -> Quantifier -> Visibility -> Erasure -> CoreTerm -> Doc AnsiStyle
@@ -142,8 +142,8 @@ instance PrettyAnsi CoreTerm where
 coreTraversal :: Applicative f => (CoreTerm -> f CoreTerm) -> CoreTerm -> f CoreTerm
 coreTraversal recur = \case
     Con name args -> Con name <$> traverse recur args
-    Lambda var body -> Lambda var <$> recur body
-    App lhs rhs -> App <$> recur lhs <*> recur rhs
+    Lambda vis var body -> Lambda vis var <$> recur body
+    App vis lhs rhs -> App vis <$> recur lhs <*> recur rhs
     Case arg matches -> Case <$> recur arg <*> (traverse . traverse) recur matches
     Let name defn body -> Let name <$> recur defn <*> recur body
     Record row -> Record <$> traverse recur row
@@ -173,5 +173,5 @@ lift n = go (Level 0)
         Var (Index index)
             | index >= depth.getLevel -> Var (Index $ index + n)
             | otherwise -> Var (Index index)
-        Lambda var body -> Lambda var $ go (succ depth) body
+        Lambda vis var body -> Lambda vis var $ go (succ depth) body
         other -> coreTraversalPure (go depth) other

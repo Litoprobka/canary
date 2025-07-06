@@ -9,6 +9,7 @@
 module Eval (
     evalCore,
     quote,
+    quoteClosure,
     module Reexport,
     desugar,
     force,
@@ -27,7 +28,6 @@ module Eval (
 import Common (
     Index (..),
     Level (..),
-    Literal (..),
     Loc (..),
     Located (..),
     Name,
@@ -55,6 +55,7 @@ import Syntax.Core qualified as C
 import Syntax.Elaborated (Typed (..))
 import Syntax.Elaborated qualified as D
 import Syntax.Elaborated qualified as E
+import Syntax.Term (Visibility (..))
 import Syntax.Value as Reexport
 
 data UniVarState = Solved Value | Unsolved deriving (Show)
@@ -78,42 +79,41 @@ quote :: UniVars -> Level -> Value -> CoreTerm
 quote univars = go
   where
     go lvl = \case
-        TyCon name args -> foldl' C.App (C.TyCon name) $ fmap (quote univars lvl) args
+        TyCon name args -> foldl' (C.App Visible) (C.TyCon name) $ fmap (quote univars lvl) args
         Con con args -> C.Con con $ fmap (quote univars lvl) args
-        Lambda closure -> C.Lambda closure.var $ quoteClosure univars lvl closure
+        Lambda vis closure -> C.Lambda vis closure.var $ quoteClosure univars lvl closure
         PrimFunction PrimFunc{name, captured} ->
             -- captured names are stored as a stack, i.e. backwards, so we fold right rather than left here
-            foldr (\arg acc -> C.App acc (go lvl arg)) (C.Name name) captured
+            foldr (\arg acc -> C.App Visible acc (go lvl arg)) (C.Name name) captured
         Record vals -> C.Record $ fmap (go lvl) vals
         Sigma x y -> C.Sigma (go lvl x) (go lvl y)
-        Variant name val -> C.App (C.Variant name) (go lvl val)
+        Variant name val -> C.App Visible (C.Variant name) (go lvl val)
         PrimValue lit -> C.Literal lit
         Q q v e closure -> C.Q q v e closure.var (go lvl closure.ty) $ quoteClosure univars lvl closure
         VariantT row -> C.VariantT $ fmap (go lvl) row
         RecordT row -> C.RecordT $ fmap (go lvl) row
         Stuck stuck -> quoteStuck lvl stuck
 
+    -- for now, all quote applications are explicit
     quoteStuck :: Level -> Stuck -> CoreTerm
     quoteStuck lvl = \case
         VarApp varLvl spine -> quoteSpine (C.Var $ levelToIndex lvl varLvl) spine
         UniVarApp uni spine -> quoteSpine (C.UniVar uni) spine
-        Fn fn acc -> C.App (go lvl $ PrimFunction fn) (quoteStuck lvl acc)
+        Fn fn acc -> C.App Visible (go lvl $ PrimFunction fn) (quoteStuck lvl acc)
         Case _arg _matches -> error "todo: quote stuck case"
       where
-        quoteSpine = foldr (\arg acc -> C.App acc (quote univars lvl arg))
+        quoteSpine = foldr (\(vis, arg) acc -> C.App vis acc (quote univars lvl arg))
 
 evalCore :: ExtendedEnv -> CoreTerm -> Value
 evalCore env@ExtendedEnv{..} = \case
     -- note that env.topLevel is a lazy IdMap, so we only force the outer structure here
     C.Name name -> LMap.lookupDefault (error . show $ "unbound top-level name" <+> pretty name) (unLoc name) env.topLevel
-    C.Var index
-        | index.getIndex >= length env.locals -> PrimValue (IntLiteral $ negate index.getIndex) -- error $ show $ pretty index.getIndex <+> "out of scope, max is" <+> pretty (length env.locals)
-        | otherwise -> env.locals !! index.getIndex
+    C.Var index -> env.locals !! index.getIndex
     C.TyCon name -> Type name
     C.Con name args -> Con name $ map (evalCore env) args
-    C.Lambda var body -> Lambda $ Closure{var, ty = (), env = ValueEnv{..}, body}
-    C.App (C.Variant name) arg -> Variant name $ evalCore env arg -- this is a bit of an ugly case
-    C.App lhs rhs -> evalApp univars (evalCore env lhs) (evalCore env rhs)
+    C.Lambda vis var body -> Lambda vis $ Closure{var, ty = (), env = ValueEnv{..}, body}
+    C.App _vis (C.Variant name) arg -> Variant name $ evalCore env arg -- this is a bit of an ugly case
+    C.App vis lhs rhs -> evalApp univars vis (evalCore env lhs) (evalCore env rhs)
     C.Case arg matches -> case evalCore env arg of
         Stuck stuck -> Stuck $ Case stuck (mkStuckBranches matches)
         val ->
@@ -125,7 +125,8 @@ evalCore env@ExtendedEnv{..} = \case
     C.Literal lit -> PrimValue lit
     C.Record row -> Record $ evalCore env <$> row
     C.Sigma x y -> Sigma (evalCore env x) (evalCore env y)
-    C.Variant name -> Lambda $ Closure{var = Name' "x", ty = (), env = ValueEnv{..}, body = C.Variant name `C.App` C.Var (Index 0)}
+    C.Variant name ->
+        Lambda Visible $ Closure{var = Name' "x", ty = (), env = ValueEnv{..}, body = C.App Visible (C.Variant name) (C.Var (Index 0))}
     C.Q q vis e var ty body -> Q q vis e $ Closure{var, ty = evalCore env ty, env = ValueEnv{..}, body}
     C.VariantT row -> VariantT $ evalCore env <$> row
     C.RecordT row -> RecordT $ evalCore env <$> row
@@ -139,28 +140,29 @@ evalCore env@ExtendedEnv{..} = \case
     appBDs :: [Value] -> Value -> [C.BoundDefined] -> Value
     appBDs = \cases
         [] val [] -> val
-        (t : rest) val (C.Bound : bds) -> evalApp univars (appBDs rest val bds) t
+        (t : rest) val (C.Bound : bds) -> evalApp univars Visible (appBDs rest val bds) t
         (_ : rest) val (C.Defined : bds) -> appBDs rest val bds
         _ _ _ -> error "bound-defined / env mismatch"
 
 nf :: Level -> ExtendedEnv -> CoreTerm -> CoreTerm
 nf lvl env term = quote env.univars lvl $ evalCore env term
 
-evalApp' :: State UniVars :> es => Value -> Value -> Eff es Value
-evalApp' lhs rhs = do
+evalApp' :: State UniVars :> es => Visibility -> Value -> Value -> Eff es Value
+evalApp' vis lhs rhs = do
     univars <- get @UniVars
-    pure $ evalApp univars lhs rhs
+    pure $ evalApp univars vis lhs rhs
 
-evalApp :: UniVars -> Value -> Value -> Value
-evalApp univars = \cases
-    (Lambda closure) arg -> app univars closure arg
+evalApp :: UniVars -> Visibility -> Value -> Value -> Value
+evalApp univars vis = \cases
+    (Lambda vis2 closure) arg | vis == vis2 -> app univars closure arg
+    (Lambda vis2 _) _ -> error $ "visibility mismatch " <> show vis <> " != " <> show vis2
     -- this is slightly janky, but I'm not sure whether I want to represent type constructors as lambdas yet
     (TyCon name args) arg -> TyCon name (args <> [arg])
     (PrimFunction fn) (Stuck stuck) -> Stuck $ Fn fn stuck
     (PrimFunction PrimFunc{remaining = 1, captured, f}) arg -> f (arg :| captured)
     (PrimFunction PrimFunc{name, remaining, captured, f}) arg -> PrimFunction PrimFunc{name, remaining = pred remaining, captured = arg : captured, f}
-    (Stuck (VarApp lvl spine)) arg -> Stuck $ VarApp lvl (arg : spine)
-    (Stuck (UniVarApp uni spine)) arg -> Stuck $ UniVarApp uni (arg : spine)
+    (Stuck (VarApp lvl spine)) arg -> Stuck $ VarApp lvl ((vis, arg) : spine)
+    (Stuck (UniVarApp uni spine)) arg -> Stuck $ UniVarApp uni ((vis, arg) : spine)
     nonFunc arg -> error . show $ "attempted to apply" <+> pretty nonFunc <+> "to" <+> pretty arg
 
 force' :: State UniVars :> es => Value -> Eff es Value
@@ -178,13 +180,13 @@ force !univars = \case
         Just (Solved val) -> force univars $ applySpine val spine
     Stuck (Fn fn arg) -> case force univars (Stuck arg) of
         Stuck stillStuck -> Stuck (Fn fn stillStuck)
-        noLongerStuck -> evalApp univars (PrimFunction fn) noLongerStuck
+        noLongerStuck -> evalApp univars Visible (PrimFunction fn) noLongerStuck
     Stuck (Case arg matches) -> case force univars (Stuck arg) of
         Stuck stillStuck -> Stuck (Case stillStuck matches)
         noLongerStuck -> fromMaybe (error "couldn't match") $ asum $ fmap (\closure -> tryApplyPatternClosure univars closure noLongerStuck) matches
     other -> other
   where
-    applySpine = foldr (flip $ evalApp univars)
+    applySpine = foldr (\(vis, arg) acc -> evalApp univars vis acc arg)
 
 app :: UniVars -> Closure ty -> Value -> Value
 app univars Closure{env = ValueEnv{..}, body} arg = evalCore (ExtendedEnv{locals = arg : locals, ..}) body
@@ -226,9 +228,9 @@ desugar = \case
     E.Var index -> C.Var index
     E.Name name -> C.Name name
     E.Literal lit -> C.Literal lit
-    E.App lhs rhs -> C.App (go lhs) (go rhs)
-    E.Lambda (E.VarP arg) body -> C.Lambda arg (go body)
-    E.Lambda _pat _body -> error "desugar pattern lambda: should lift"
+    E.App vis lhs rhs -> C.App vis (go lhs) (go rhs)
+    E.Lambda vis (E.VarP arg) body -> C.Lambda vis arg (go body)
+    E.Lambda _vis _pat _body -> error "desugar pattern lambda: should lift"
     -- C.Lambda "x" <$> go (E.Case (E.Var (Index 0)) [(pat, body)])
     E.Let _binding _expr -> error "todo: properly desugar Let" {- case binding of
                                                                E.ValueB ((E.VarP name) ::: _) body -> C.Let name <$> go body <*> go expr
@@ -261,7 +263,7 @@ desugar = \case
             {field} -> field
     -}
     E.Sigma x y -> C.Sigma (go x) (go y)
-    E.List xs -> foldr ((C.App . C.App cons) . go) nil xs
+    E.List xs -> foldr ((C.App Visible . C.App Visible cons) . go) nil xs
     E.Do{} -> error "todo: desugar do blocks"
     E.Q q vis er (var ::: kind) body -> C.Q q vis er var (go kind) (go body)
     E.VariantT row -> C.VariantT $ fmap go row
@@ -296,9 +298,9 @@ resugar = \case
     C.Var index -> E.Var index
     C.Name name -> E.Name name
     C.TyCon name -> E.Name name
-    C.Con name args -> foldl' E.App (E.Name name) (fmap resugar args)
-    C.Lambda var body -> E.Lambda (E.VarP var) $ resugar body
-    C.App lhs rhs -> E.App (resugar lhs) (resugar rhs)
+    C.Con name args -> foldl' (E.App Visible) (E.Name name) (fmap resugar args)
+    C.Lambda vis var body -> E.Lambda vis (E.VarP var) $ resugar body
+    C.App vis lhs rhs -> E.App vis (resugar lhs) (resugar rhs)
     C.Case arg matches -> E.Case (resugar arg) $ fmap (bimap resugarPattern resugar) matches
     C.Let _name _expr _body -> error "bindings are annoying" -- E.Let (E.VarP name) (resugar expr) (resugar body)
     C.Literal lit -> E.Literal lit
@@ -336,7 +338,7 @@ modifyEnv ValueEnv{..} decls = do
     collectBindings :: EDeclaration -> Eff es [(Name_, Either Value ETerm)]
     collectBindings decl = case decl of
         D.ValueD (E.ValueB name body) -> pure [(unLoc name, Right body)]
-        D.ValueD (E.FunctionB name args body) -> pure [(unLoc name, Right $ foldr E.Lambda body args)]
+        D.ValueD (E.FunctionB name args body) -> pure [(unLoc name, Right $ foldr (uncurry E.Lambda) body args)]
         -- todo: value constructors have to be in scope by the time we typecheck definitions that depend on them (say, GADTs)
         -- the easiest way is to just apply `typecheck` and `modifyEnv` declaration-by-declaration
         D.TypeD _ constrs -> pure $ fmap mkConstr constrs
@@ -344,11 +346,12 @@ modifyEnv ValueEnv{..} decls = do
 
     mkConstr (name, count) = (unLoc name, Left $ mkConLambda count name)
 
+-- todo: [Visibility] -> Name -> Value
 mkConLambda :: Int -> Name -> Value
 mkConLambda n con = evalCore emptyEnv lambdas
   where
     names = fmap (\i -> Name' $ "x" <> show i) [1 .. n]
-    lambdas = foldr C.Lambda body names
+    lambdas = foldr (C.Lambda Visible) body names
     body = C.Con con $ map (C.Var . Index) [n - 1, n - 2 .. 0]
     emptyEnv = ExtendedEnv{univars = EMap.empty, topLevel = LMap.empty, locals = []}
 

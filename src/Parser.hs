@@ -166,10 +166,10 @@ noExtRecord delim valueP missingValue =
 lambda' :: Parser' (Expr 'Parse)
 lambda' = withLoc do
     specialSymbol Token.Lambda
-    args <- NE.some patternParens `orError` "argument patterns"
+    args <- NE.some patternWithVisibility `orError` "argument patterns"
     specialSymbol Token.Arrow
     body <- term
-    pure \loc -> foldr (\var -> Located loc . Lambda var) body args
+    pure \loc -> foldr (\(vis, var) -> Located loc . Lambda vis var) body args
 
 quantifier :: Parser' (Type 'Parse)
 quantifier = withLoc do
@@ -217,6 +217,10 @@ pattern' = located do
             , patternParens
             ]
 
+-- | parses a visible or implicit parenthesized pattern
+patternWithVisibility :: Parser' (Visibility, Pattern 'Parse)
+patternWithVisibility = option (Visible,) ((Implicit,) <$ specialSymbol Token.At) <*> patternParens
+
 {- | parses a pattern with constructors enclosed in parens
 should be used in cases where multiple patterns in a row are accepted, i.e.
 function definitions and match expressions
@@ -249,7 +253,7 @@ binding = do
     f <-
         -- it should probably be `try (E.FunctionBinding <$> funcName) <*> NE.some patternParens
         -- for cleaner parse errors
-        try (FunctionB <$> funcName <*> NE.some patternParens)
+        try (FunctionB <$> funcName <*> NE.some patternWithVisibility)
             <|> (ValueB <$> pattern')
     specialSymbol Token.Eq
     f <$> term
@@ -291,8 +295,8 @@ term = rightAssoc Token.Colon Annotation nonAnn
             pairs <- many $ (,) <$> optional anyOperator <*> noPrec
             pure case pairs of
                 [] -> unLoc firstExpr
-                [(Nothing, secondExpr)] -> firstExpr `App` secondExpr
-                [(Just op, secondExpr)] -> (Name op :@ getLoc op `App` firstExpr) :@ zipLocOf firstExpr op `App` secondExpr -- todo: a separate AST node for an infix application?
+                [(Nothing, secondExpr)] -> App Visible firstExpr secondExpr
+                [(Just op, secondExpr)] -> App Visible (App Visible (Name op :@ getLoc op) firstExpr :@ zipLocOf firstExpr op) secondExpr -- todo: a separate AST node for an infix application?
                 (_ : _ : _) -> uncurry InfixE $ shift firstExpr pairs
         -- x [(+, y), (*, z), (+, w)] --> [(x, +), (y, *), (z, +)] w
         shift expr [] = ([], expr)
@@ -306,7 +310,7 @@ term = rightAssoc Token.Colon Annotation nonAnn
         apps <- many do
             specialSymbol Token.At
             termParens
-        pure $ foldl' (\e app -> Located (zipLocOf e app) $ TypeApp e app) expr apps
+        pure $ foldl' (\e app -> Located (zipLocOf e app) $ App Implicit e app) expr apps
 
     noPrec = keywordBased <|> typeApp
 
@@ -407,7 +411,7 @@ termParens =
         name <- upperName
         lookAhead $ token Token.TightLBrace
         arg <- located record
-        pure $ (Name name :@ getLoc name) `App` arg
+        pure $ App Visible (Name name :@ getLoc name) arg
     recordAccess nested = do
         name <- nested
         fieldAccesses <- many do

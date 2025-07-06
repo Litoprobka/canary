@@ -15,7 +15,7 @@ import LangPrelude hiding (force, lift)
 import NameGen
 import Syntax.Core (CoreTerm)
 import Syntax.Core qualified as C
-import Syntax.Term (Quantifier (..))
+import Syntax.Term (Quantifier (..), Visibility (..))
 import Syntax.Value as V
 
 -- | types of top-level bindings
@@ -41,18 +41,18 @@ unify topLevel lvl lhsTy rhsTy = do
     match lhs' rhs'
   where
     match = \cases
-        (Lambda lhsClosure) (Lambda rhsClosure) -> do
+        (Lambda _vis lhsClosure) (Lambda _vis2 rhsClosure) -> do
             lhsBody <- lhsClosure `app'` V.Var lvl
             rhsBody <- rhsClosure `app'` V.Var lvl
             unify topLevel (succ lvl) lhsBody rhsBody
         -- these two cases seem kinda redundant
-        nonLambda (Lambda rhsClosure) -> do
-            lhsBody <- nonLambda `evalApp'` V.Var lvl
+        nonLambda (Lambda vis rhsClosure) -> do
+            lhsBody <- evalApp' vis nonLambda (V.Var lvl)
             rhsBody <- rhsClosure `app'` V.Var lvl
             unify topLevel (succ lvl) lhsBody rhsBody
-        (Lambda lhsClosure) nonLambda -> do
+        (Lambda vis lhsClosure) nonLambda -> do
             lhsBody <- lhsClosure `app'` V.Var lvl
-            rhsBody <- nonLambda `evalApp'` V.Var lvl
+            rhsBody <- evalApp' vis nonLambda (V.Var lvl)
             unify topLevel (succ lvl) lhsBody rhsBody
         (TyCon lhs lhsArgs) (TyCon rhs rhsArgs) | lhs == rhs -> zipWithM_ (unify topLevel lvl) lhsArgs rhsArgs
         (Q Forall v _e closure) (Q Forall v2 _e2 closure2) | v == v2 -> do
@@ -75,7 +75,7 @@ unify topLevel lvl lhsTy rhsTy = do
 unifySpine :: TC es => IdMap Name_ Value -> Level -> Spine -> Spine -> Eff es ()
 unifySpine topLevel lvl = \cases
     [] [] -> pass
-    (ty1 : s1) (ty2 : s2) -> do
+    ((_, ty1) : s1) ((_, ty2) : s2) -> do
         unifySpine topLevel lvl s1 s2
         unify topLevel lvl ty1 ty2
     _ _ -> internalError' "spine length mismatch"
@@ -122,7 +122,7 @@ solve topLevel ctxLevel uni spine rhs = do
     rhs' <- rename uni pren rhs
     univars <- get @UniVars
     let env = ExtendedEnv{univars, topLevel, locals = []}
-    let solution = evalCore env $ lambdas pren.domain rhs'
+    let solution = evalCore env $ lambdas (reverse $ map fst spine) rhs'
     modify @UniVars $ EMap.insert uni $ Solved solution
 
 -- | convert a spine to a partial renaming
@@ -132,17 +132,17 @@ invert codomain spine = do
     pure $ PartialRenaming{domain, codomain, renaming}
   where
     go [] = pure (Level 0, EMap.empty)
-    go (ty : rest) = do
+    go ((_, ty) : rest) = do
         (domain, renaming) <- go rest
         force' ty >>= \case
             Var vlvl | EMap.notMember vlvl renaming -> pure (succ domain, EMap.insert vlvl domain renaming)
-            _ -> internalError' "non-var in spine"
+            other -> internalError' $ "non-var in spine" <+> pretty other
 
 rename :: TC es => UniVar -> PartialRenaming -> Value -> Eff es CoreTerm
 rename uni = go
   where
     goSpine _ term [] = pure term
-    goSpine pren term (ty : spine) = C.App <$> goSpine pren term spine <*> go pren ty
+    goSpine pren term ((vis, ty) : spine) = C.App vis <$> goSpine pren term spine <*> go pren ty
 
     go pren ty =
         force' ty >>= \case
@@ -154,30 +154,30 @@ rename uni = go
                     internalError' $
                         "escaping variable" <+> "#" <> pretty lvl.getLevel <+> "in scope:" <+> pretty (map (show @Text) $ EMap.keys pren.renaming)
                 Just x -> goSpine pren (C.Var $ levelToIndex pren.domain x) spine
-            Lambda closure -> do
+            Lambda vis closure -> do
                 bodyToRename <- closure `app'` Var pren.codomain
-                C.Lambda closure.var <$> go (lift pren) bodyToRename
+                C.Lambda vis closure.var <$> go (lift pren) bodyToRename
             Q q v e closure -> do
                 argTy <- go pren closure.ty
                 bodyToRename <- closure `app'` Var pren.codomain
                 C.Q q v e closure.var argTy <$> go (lift pren) bodyToRename
-            TyCon name args -> foldl' C.App (C.Name name) <$> traverse (go pren) args
-            Con name args -> foldl' C.App (C.Name name) <$> traverse (go pren) args
+            TyCon name args -> foldl' (C.App Visible) (C.Name name) <$> traverse (go pren) args
+            Con name args -> foldl' (C.App Visible) (C.Name name) <$> traverse (go pren) args
             PrimFunction fn -> do
                 captured <- traverse (go pren) fn.captured
-                pure $ foldr (flip C.App) (C.Name fn.name) captured
+                pure $ foldr (flip $ C.App Visible) (C.Name fn.name) captured
             Record row -> C.Record <$> traverse (go pren) row
             RecordT row -> C.RecordT <$> traverse (go pren) row
             VariantT row -> C.VariantT <$> traverse (go pren) row
             Sigma x y -> C.Sigma <$> go pren x <*> go pren y
             PrimValue lit -> pure $ C.Literal lit
-            Variant name arg -> C.App (C.Variant name) <$> go pren arg
-            Stuck (Fn fn stuck) -> C.App <$> go pren (PrimFunction fn) <*> go pren (Stuck stuck)
+            Variant name arg -> C.App Visible (C.Variant name) <$> go pren arg
+            Stuck (Fn fn stuck) -> C.App Visible <$> go pren (PrimFunction fn) <*> go pren (Stuck stuck)
             Stuck Case{} -> error "todo: rename stuck case"
 
 -- wrap a term in lambdas
-lambdas :: Level -> CoreTerm -> CoreTerm
-lambdas lvl = go (Level 0)
+lambdas :: [Visibility] -> CoreTerm -> CoreTerm
+lambdas = go (Level 0)
   where
-    go x term | x == lvl = term
-    go x term = C.Lambda (Name' $ "x" <> show lvl.getLevel) $ go (succ x) term
+    go _ [] term = term
+    go x (vis : vises) term = C.Lambda vis (Name' $ "x" <> show x.getLevel) $ go (succ x) vises term
