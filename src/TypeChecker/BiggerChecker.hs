@@ -8,7 +8,7 @@ import Diagnostic
 import Effectful.Labeled (Labeled, runLabeled)
 import Effectful.Reader.Static
 import Effectful.State.Static.Local (State, evalState, get, modify, runState)
-import Eval (ExtendedEnv (..), UniVarState (..), UniVars, ValueEnv, app', captured, desugar, eval, force', nf, quote, resugar)
+import Eval (ExtendedEnv (..), UniVarState (..), UniVars, ValueEnv, app', captured, eval, force', quote, resugar)
 import IdMap qualified as Map
 import LangPrelude
 import NameGen (NameGen, freshName_, runNameGen)
@@ -82,13 +82,10 @@ processDeclaration ctx (decl :@ loc) = case decl of
         pure (E.TypeD name (map (\con -> (con.name, argCount con.sig)) constrs), Map.insert (unLoc name) (V.Type name))
     D.Type name binders constrs -> do
         kind <- withTopLevel $ removeUniVars ctx.level =<< typeFromTerm ctx (mkTypeKind binders)
-        -- traceShowM $ pretty kind <+> "ok"
         modify $ Map.insert (unLoc name) kind
         let newCtx = ctx{env = ctx.env{V.topLevel = Map.insert (unLoc name) (V.Type name) ctx.env.topLevel}}
         withTopLevel $ for_ (mkConstrSigs name binders constrs) \(con, sig) -> do
-            traceShowM $ "checking con" <+> pretty con <+> ":" <+> pretty sig
             sigV <- removeUniVars newCtx.level =<< typeFromTerm newCtx sig
-            traceShowM $ "final sig" <+> pretty sigV
             modify @TopLevel $ Map.insert (unLoc con) sigV
         -- _conMapEntry <- mkConstructorTableEntry (map (.var) binders) (map (\con -> (con.name, con.args)) constrs)
         pure (E.TypeD name (map (\con -> (con.name, length con.args)) constrs), Map.insert (unLoc name) (V.Type name))
@@ -165,9 +162,6 @@ check ctx (t :@ loc) ty = do
             pure (E.If eCond eTrue eFalse)
         (other, expected) -> do
             (eTerm, inferred) <- infer ctx $ other :@ loc
-            -- traceShowM $ "unify-infer: context size is" <+> pretty (length ctx.env.locals)
-            -- env <- extendEnv ctx.env
-            -- traceShowM $ "unify-infer: inferred type is" <+> pretty (nf ctx.level env (desugar eTerm))
             unify ctx.env.topLevel ctx.level inferred expected
             pure eTerm
 
@@ -258,15 +252,12 @@ infer ctx (t :@ loc) = case t of
     T.Function from to -> do
         eFrom <- check ctx from type_
         env <- extendEnv ctx.env
-        -- traceShowM $ "arg type" <+> pretty (quote env.univars ctx.level (eval env eFrom))
         x <- freshName_ $ Name' "x"
         eTo <- check (bind x (eval env eFrom) ctx) to type_
         pure (E.Q Forall Visible Retained (toSimpleName_ x ::: eFrom) eTo, type_)
-    qq@(T.Q q v e binder body) -> do
-        -- traceShowM $ "inferring" <+> pretty qq
+    T.Q q v e binder body -> do
         eTy <- maybe (resugar <$> freshUniVar ctx) (\term -> check ctx term type_) binder.kind
         env <- extendEnv ctx.env
-        -- traceShowM $ "arg type" <+> pretty (quote env.univars ctx.level (eval env eTy))
         eBody <- check (bind (unLoc binder.var) (eval env eTy) ctx) body type_
         pure (E.Q q v e (unLoc (toSimpleName binder.var) ::: eTy) eBody, type_)
   where
@@ -283,7 +274,6 @@ infer ctx (t :@ loc) = case t of
 typeFromTerm :: TC es => Context -> Term 'Fixity -> Eff es VType
 typeFromTerm ctx term = do
     eTerm <- check ctx term (V.Type (TypeName :@ getLoc term))
-    traceShowM $ "type from term:" <+> pretty (desugar eTerm)
     env <- extendEnv ctx.env
     pure $ eval env eTerm
 
@@ -318,15 +308,7 @@ lookupSig :: TC es => Name -> Context -> Eff es (ETerm, VType)
 lookupSig name ctx = do
     topLevel <- ask @TopLevel
     case (Map.lookup (unLoc name) ctx.types, Map.lookup (unLoc name) topLevel) of
-        (Just (lvl, ty), _) -> do
-            traceShowM
-                ( "level to index:"
-                    <+> pretty ctx.level.getLevel
-                    <+> pretty lvl.getLevel
-                    <+> "->"
-                    <+> pretty (levelToIndex ctx.level lvl).getIndex
-                )
-            pure (E.Var (levelToIndex ctx.level lvl), ty)
+        (Just (lvl, ty), _) -> pure (E.Var (levelToIndex ctx.level lvl), ty)
         (_, Just ty) -> pure (E.Name name, ty)
         (Nothing, Nothing) -> do
             traceShowM $ pretty name <+> "not in scope"
@@ -344,11 +326,10 @@ removeUniVars lvl = go
         force' >=> \case
             V.TyCon name args -> V.TyCon name <$> traverse go args
             V.Con name args -> V.Con name <$> traverse go args
-            V.Lambda closure@V.Closure{var, env = V.ValueEnv{topLevel}} -> do
+            V.Lambda closure@V.Closure{var, env} -> do
                 newBody <- removeUniVars (succ lvl) =<< closure `app'` V.Var lvl
                 univars <- get @UniVars
-                let emptyEnv = V.ValueEnv{topLevel, locals = []}
-                pure $ V.Lambda V.Closure{var, ty = (), env = emptyEnv, body = quote univars (succ lvl) newBody}
+                pure $ V.Lambda V.Closure{var, ty = (), env, body = quote univars (succ lvl) newBody}
             V.PrimFunction fn -> do
                 captured <- traverse go fn.captured
                 pure $ V.PrimFunction fn{captured}
@@ -356,12 +337,11 @@ removeUniVars lvl = go
             V.Variant name arg -> V.Variant name <$> go arg
             V.Sigma lhs rhs -> V.Sigma <$> go lhs <*> go rhs
             V.PrimValue lit -> pure $ V.PrimValue lit
-            V.Q q v e closure@V.Closure{var, env = V.ValueEnv{topLevel}} -> do
+            V.Q q v e closure@V.Closure{var, env} -> do
                 ty <- go closure.ty
                 newBody <- removeUniVars (succ lvl) =<< closure `app'` V.Var lvl
                 univars <- get @UniVars
-                let emptyEnv = V.ValueEnv{topLevel, locals = []}
-                pure $ V.Q q v e V.Closure{var, ty, env = emptyEnv, body = quote univars (succ lvl) newBody}
+                pure $ V.Q q v e V.Closure{var, ty, env, body = quote univars (succ lvl) newBody}
             V.RecordT row -> V.RecordT <$> traverse go row
             V.VariantT row -> V.VariantT <$> traverse go row
             V.Stuck stuck -> V.Stuck <$> goStuck stuck

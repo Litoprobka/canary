@@ -111,7 +111,6 @@ mkDefaultEnv = do
         resolveDependenciesSimplified' emptyEnv.fixityMap emptyEnv.operatorPriorities $ preDecls <> afterNameRes
     fixityDecls <- Fixity.resolveFixity fixityMap operatorPriorities depResOutput.declarations
     (types, values) <- (\f -> foldlM f (emptyEnv.types, emptyEnv.values) fixityDecls) \(topLevel, values) decl -> do
-        traceShowM $ "checking" <+> pretty decl
         (eDecl, newTypes, newValues) <- TC.processDeclaration' topLevel values decl
         newNewValues <- modifyEnv newValues [eDecl]
         pure (newTypes, newNewValues)

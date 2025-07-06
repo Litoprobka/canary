@@ -90,7 +90,6 @@ freshUniVar :: (Labeled UniVar NameGen :> es, State UniVars :> es) => Context ->
 freshUniVar ctx = do
     uni <- Common.UniVar <$> labeled @UniVar @NameGen freshId
     modify @UniVars $ EMap.insert uni Unsolved
-    traceShowM $ "fresh univar" <+> pretty uni <+> "@" <+> pretty (length ctx.bounds)
     pure $ C.InsertedUniVar uni ctx.bounds
 
 freshUniVarV :: (Labeled UniVar NameGen :> es, State UniVars :> es) => Context -> Eff es Value
@@ -119,12 +118,9 @@ lift PartialRenaming{domain, codomain, renaming} =
 
 solve :: TC es => IdMap Name_ Value -> Level -> UniVar -> Spine -> Value -> Eff es ()
 solve topLevel ctxLevel uni spine rhs = do
-    univars <- get
-    traceShowM $ "solving" <+> pretty uni <> "@" <> pretty (length spine) <+> ":=" <+> pretty (quote univars ctxLevel rhs)
     pren <- invert ctxLevel spine
     rhs' <- rename uni pren rhs
     univars <- get @UniVars
-    traceShowM pren.renaming
     let env = ExtendedEnv{univars, topLevel, locals = []}
     let solution = evalCore env $ lambdas pren.domain rhs'
     modify @UniVars $ EMap.insert uni $ Solved solution

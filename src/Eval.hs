@@ -45,7 +45,6 @@ import Common (
 
 import Data.EnumMap.Lazy qualified as EMap
 import Data.List ((!!))
-import Diagnostic
 import Effectful.State.Static.Local (State, get)
 import Error.Diagnose (Position (..))
 import IdMap qualified as LMap
@@ -96,9 +95,7 @@ quote univars = go
 
     quoteStuck :: Level -> Stuck -> CoreTerm
     quoteStuck lvl = \case
-        VarApp varLvl spine ->
-            traceShow ("quoteSpine:" <+> pretty lvl.getLevel <+> pretty varLvl.getLevel <+> pretty (levelToIndex lvl varLvl).getIndex) $
-                quoteSpine (C.Var $ levelToIndex lvl varLvl) spine
+        VarApp varLvl spine -> quoteSpine (C.Var $ levelToIndex lvl varLvl) spine
         UniVarApp uni spine -> quoteSpine (C.UniVar uni) spine
         Fn fn acc -> C.App (go lvl $ PrimFunction fn) (quoteStuck lvl acc)
         Case _arg _matches -> error "todo: quote stuck case"
@@ -106,13 +103,13 @@ quote univars = go
         quoteSpine = foldr (\arg acc -> C.App acc (quote univars lvl arg))
 
 evalCore :: ExtendedEnv -> CoreTerm -> Value
-evalCore env@ExtendedEnv{..} term = traceShow ("[" <> pretty (length env.locals) <> "] evaluating" <+> pretty term) $ case term of
+evalCore env@ExtendedEnv{..} = \case
     -- note that env.topLevel is a lazy IdMap, so we only force the outer structure here
     C.Name name -> LMap.lookupDefault (error . show $ "unbound top-level name" <+> pretty name) (unLoc name) env.topLevel
     C.Var index
         | index.getIndex >= length env.locals -> PrimValue (IntLiteral $ negate index.getIndex) -- error $ show $ pretty index.getIndex <+> "out of scope, max is" <+> pretty (length env.locals)
         | otherwise -> env.locals !! index.getIndex
-    C.TyCon name -> TyCon name []
+    C.TyCon name -> Type name
     C.Con name args -> Con name $ map (evalCore env) args
     C.Lambda var body -> Lambda $ Closure{var, ty = (), env = ValueEnv{..}, body}
     C.App (C.Variant name) arg -> Variant name $ evalCore env arg -- this is a bit of an ugly case
