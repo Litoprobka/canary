@@ -150,10 +150,8 @@ check ctx (t :@ loc) ty = do
     case (t, ty') of
         (T.Lambda (L (T.VarP arg)) body, V.Pi closure) -> do
             bodyTy <- closure `app'` V.Var ctx.level
-            univars <- get @UniVars
-            let eTy = resugar $ quote univars ctx.level closure.ty
             eBody <- check (bind (unLoc arg) closure.ty ctx) body bodyTy
-            pure $ E.Lambda (E.VarP (toSimpleName_ $ unLoc arg) ::: eTy) eBody
+            pure $ E.Lambda (E.VarP (toSimpleName_ $ unLoc arg)) eBody
         -- we can check against a dependent type, but I'm not sure how
         (T.If cond true false, _) -> do
             eCond <- check ctx cond $ V.Type (BoolName :@ loc)
@@ -197,9 +195,8 @@ infer ctx (t :@ loc) = case t of
         (eBody, bodyTy) <- infer (bind (unLoc arg) ty ctx) body
         univars <- get @UniVars
         let var = toSimpleName_ $ unLoc arg
-            argTy = resugar $ quote univars ctx.level ty
             quotedBody = quote univars (succ ctx.level) bodyTy
-        pure (E.Lambda (E.VarP var ::: argTy) eBody, V.Pi V.Closure{ty, var, env = ctx.env, body = quotedBody})
+        pure (E.Lambda (E.VarP var) eBody, V.Pi V.Closure{ty, var, env = ctx.env, body = quotedBody})
     T.Lambda{} -> internalError loc "wip: pattern matching lambda"
     T.WildcardLambda{} -> internalError loc "wip: wildcard lambda"
     T.Let (T.ValueB (T.VarP name :@ _) definition) body -> do
@@ -367,10 +364,9 @@ removeUniVarsT lvl = go
         E.Name name -> pure $ E.Name name
         E.Literal lit -> pure $ E.Literal lit
         E.App lhs rhs -> E.App <$> go lhs <*> go rhs
-        E.Lambda (E.VarP name ::: ty) body -> do
-            ty' <- go ty
+        E.Lambda (E.VarP name) body -> do
             body' <- removeUniVarsT (succ lvl) body
-            pure $ E.Lambda (E.VarP name ::: ty') body'
+            pure $ E.Lambda (E.VarP name) body'
         E.Lambda _ _ -> internalError' "non-trivial patterns are not supported yet"
         E.Let (E.ValueB name defn) body -> do
             defn' <- go defn
@@ -400,7 +396,7 @@ removeUniVarsT lvl = go
                 _ -> do
                     traceShowM $ "unsolved univar" <+> pretty uni
                     pure $ E.UniVar uni
-        E.InsertedUniVar uni spine -> do
+        E.InsertedUniVar _uni _spine -> do
             internalError' "inserted univar, idk what to do"
 
 -- univars <- get @UniVars

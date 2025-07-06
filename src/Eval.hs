@@ -173,7 +173,7 @@ force :: UniVars -> Value -> Value
 force !univars = \case
     Stuck (UniVarApp uni spine) -> case EMap.lookup uni univars of
         -- an out of scope univar indicates a bug, but a non-fatal one
-        Nothing -> traceShow ("out of scope univar:" <+> pretty uni) (UniVar uni)
+        Nothing -> Stuck $ UniVarApp uni spine
         Just Unsolved -> Stuck $ UniVarApp uni spine
         Just (Solved val) -> force univars $ applySpine val spine
     Stuck (Fn fn arg) -> case force univars (Stuck arg) of
@@ -227,8 +227,8 @@ desugar = \case
     E.Name name -> C.Name name
     E.Literal lit -> C.Literal lit
     E.App lhs rhs -> C.App (go lhs) (go rhs)
-    E.Lambda ((E.VarP arg) ::: _) body -> C.Lambda arg (go body)
-    E.Lambda (_pat ::: _) _body -> error "desugar pattern lambda: should lift"
+    E.Lambda (E.VarP arg) body -> C.Lambda arg (go body)
+    E.Lambda _pat _body -> error "desugar pattern lambda: should lift"
     -- C.Lambda "x" <$> go (E.Case (E.Var (Index 0)) [(pat, body)])
     E.Let _binding _expr -> error "todo: properly desugar Let" {- case binding of
                                                                E.ValueB ((E.VarP name) ::: _) body -> C.Let name <$> go body <*> go expr
@@ -297,7 +297,7 @@ resugar = \case
     C.Name name -> E.Name name
     C.TyCon name -> E.Name name
     C.Con name args -> foldl' E.App (E.Name name) (fmap resugar args)
-    C.Lambda var body -> E.Lambda (E.VarP var ::: error "what") $ resugar body
+    C.Lambda var body -> E.Lambda (E.VarP var) $ resugar body
     C.App lhs rhs -> E.App (resugar lhs) (resugar rhs)
     C.Case arg matches -> E.Case (resugar arg) $ fmap (bimap resugarPattern resugar) matches
     C.Let _name _expr _body -> error "bindings are annoying" -- E.Let (E.VarP name) (resugar expr) (resugar body)

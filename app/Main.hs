@@ -6,7 +6,6 @@ module Main (main) where
 import LangPrelude
 
 import Common
-import Data.Traversable (for)
 import Diagnostic
 import Error.Diagnose (Position (..))
 import Eval (ValueEnv (..))

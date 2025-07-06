@@ -27,7 +27,7 @@ data ETerm
     | Name Name -- top-level binding
     | Literal Literal
     | App ETerm ETerm
-    | Lambda (Typed EPattern) ETerm
+    | Lambda EPattern ETerm
     | Let EBinding ETerm
     | LetRec (NonEmpty EBinding) ETerm
     | Case ETerm [(EPattern, ETerm)]
@@ -58,7 +58,7 @@ data EPattern
 -- where should the type info be?
 data EBinding
     = ValueB {name :: Name, body :: ETerm}
-    | FunctionB {name :: Name, args :: NonEmpty (Typed EPattern), body :: ETerm}
+    | FunctionB {name :: Name, args :: NonEmpty EPattern, body :: ETerm}
 
 data EStatement
     = Bind EPattern ETerm
