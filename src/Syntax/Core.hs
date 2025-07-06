@@ -70,7 +70,7 @@ data CoreTerm
     | InsertedUniVar UniVar [BoundDefined]
     deriving (Pretty) via (UnAnnotate CoreTerm)
 
-data BoundDefined = Bound | Defined
+data BoundDefined = Bound | Defined deriving (Show)
 
 instance PrettyAnsi CoreTerm where
     prettyAnsi opts = go 0 []

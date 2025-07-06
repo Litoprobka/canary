@@ -177,7 +177,7 @@ force !univars = \case
     Stuck (UniVarApp uni spine) -> case EMap.lookup uni univars of
         -- an out of scope univar indicates a bug, but a non-fatal one
         Nothing -> traceShow ("out of scope univar:" <+> pretty uni) (UniVar uni)
-        Just Unsolved -> UniVar uni
+        Just Unsolved -> Stuck $ UniVarApp uni spine
         Just (Solved val) -> force univars $ applySpine val spine
     Stuck (Fn fn arg) -> case force univars (Stuck arg) of
         Stuck stillStuck -> Stuck (Fn fn stillStuck)
