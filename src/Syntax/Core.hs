@@ -101,6 +101,7 @@ instance PrettyAnsi CoreTerm where
                     )
             Let name body expr -> keyword "let" <+> prettyAnsi opts name <+> specSym "=" <+> go 0 env body <> ";" <+> go 0 env expr
             Literal lit -> prettyAnsi opts lit
+            Q Forall Visible _e var ty body | not (occurs (Index 0) body) -> parensWhen 1 $ go 1 env ty <+> "->" <+> go 0 (prettyAnsi opts var : env) body
             qq@(Q q vis er _ _ _) -> parensWhen 1 $ kw q er <+> compressQ env q vis er qq
             VariantT row -> prettyVariant (prettyAnsi opts) (go 0 env) row
             RecordT row -> prettyRecord ":" (prettyAnsi opts) (go 0 env) row
@@ -138,6 +139,19 @@ instance PrettyAnsi CoreTerm where
         arrOrDot Forall Visible = specSym "->"
         arrOrDot Exists Visible = specSym "**"
         arrOrDot _ _ = specSym "."
+
+-- check whether a variable occurs in a term
+occurs :: Index -> CoreTerm -> Bool
+occurs var = getAny . getConst . go 0
+  where
+    go :: Int -> CoreTerm -> Const Any CoreTerm
+    go n = \case
+        Var ix -> Const $ Any $ ix.getIndex == var.getIndex + n
+        l@Lambda{} -> coreTraversal (go $ succ n) l
+        Q _ _ _ _ ty body -> go n ty *> go (succ n) body
+        Let _ defn body -> go n defn *> go (succ n) body
+        -- todo: case
+        other -> coreTraversal (go n) other
 
 coreTraversal :: Applicative f => (CoreTerm -> f CoreTerm) -> CoreTerm -> f CoreTerm
 coreTraversal recur = \case
