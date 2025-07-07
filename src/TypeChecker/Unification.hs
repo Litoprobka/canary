@@ -22,6 +22,8 @@ unify topLevel lvl lhsTy rhsTy = do
     match lhs' rhs'
   where
     match = \cases
+        -- since unify is only ever called on two values of the same type,
+        -- we known that these lambdas must have the same visibility
         (Lambda _vis lhsClosure) (Lambda _vis2 rhsClosure) -> do
             lhsBody <- lhsClosure `app'` V.Var lvl
             rhsBody <- rhsClosure `app'` V.Var lvl
@@ -114,7 +116,7 @@ rename uni = go
         force' ty >>= \case
             Stuck (UniVarApp uni2 spine)
                 | uni == uni2 -> internalError' "self-referential type"
-                | otherwise -> goSpine pren (C.UniVar uni) spine
+                | otherwise -> goSpine pren (C.UniVar uni2) spine
             Stuck (VarApp lvl spine) -> case EMap.lookup lvl pren.renaming of
                 Nothing ->
                     internalError' $

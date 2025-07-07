@@ -88,7 +88,6 @@ lookupSig name ctx = do
         (Just (lvl, ty), _) -> pure (E.Var (levelToIndex ctx.level lvl), ty)
         (_, Just ty) -> pure (E.Name name, ty)
         (Nothing, Nothing) -> do
-            traceShowM $ pretty name <+> "not in scope"
             (E.Name name,) <$> freshUniVarV ctx
 
 -- internalError' $ pretty name <+> "not in scope"

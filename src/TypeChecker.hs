@@ -1,4 +1,4 @@
-{-# LANGUAGE RecordWildCards #-}
+{-# LANGUAGE DuplicateRecordFields #-}
 
 module TypeChecker where
 
@@ -8,7 +8,7 @@ import Diagnostic
 import Effectful.Labeled (Labeled, runLabeled)
 import Effectful.Reader.Static
 import Effectful.State.Static.Local (State, evalState, get, modify, runState)
-import Eval (UniVars, app', eval, force', quote, resugar)
+import Eval (UniVars, app', eval, evalCore, force', quote, resugar)
 import IdMap qualified as Map
 import LangPrelude
 import NameGen (NameGen, freshName_, runNameGen)
@@ -141,6 +141,25 @@ processDeclaration ctx (decl :@ loc) = case decl of
                 (C.App Visible lhs rhs) -> go (rhs : acc) lhs
                 other -> (other, acc)
 
+-- todo: this should also handle implicit pattern matches on existentials
+insertApp :: TC es => Context -> (ETerm, VType) -> Eff es (ETerm, VType)
+insertApp ctx = go
+  where
+    go (term, ty) =
+        force' ty >>= \case
+            V.Q Forall vis _e closure | vis /= Visible -> do
+                arg <- freshUniVar ctx
+                env <- extendEnv ctx.env
+                let argV = evalCore env arg
+                innerTy <- closure `app'` argV
+                go (E.App vis term (resugar arg), innerTy)
+            ty' -> pure (term, ty')
+
+insertNeutralApp :: TC es => Context -> (ETerm, VType) -> Eff es (ETerm, VType)
+insertNeutralApp ctx (term, ty) = case term of
+    E.Lambda vis _ _ | vis /= Visible -> pure (term, ty)
+    _ -> insertApp ctx (term, ty)
+
 check :: TC es => Context -> Term 'Fixity -> VType -> Eff es ETerm
 check ctx (t :@ loc) ty = do
     ty' <- force' ty
@@ -155,8 +174,18 @@ check ctx (t :@ loc) ty = do
             eTrue <- check ctx true ty'
             eFalse <- check ctx false ty'
             pure (E.If eCond eTrue eFalse)
+        -- insert implicit / hidden lambda
+        (_, V.Q Forall vis _e closure) | vis /= Visible -> do
+            x <- freshName_ closure.var
+            closureBody <- closure `app'` V.Var ctx.level
+            eBody <- check (bind x closure.ty ctx) (t :@ loc) closureBody
+            pure $ E.Lambda vis (E.VarP closure.var) eBody
         (other, expected) -> do
-            (eTerm, inferred) <- infer ctx $ other :@ loc
+            -- this case happens after the implicit forall case, so we know that we're checking against a monomorphic type here
+            --
+            -- however, there's a degenerate case where we are checking against a univar and inferring solves it to a polytype
+            -- can that ever happen? I'm not sure
+            (eTerm, inferred) <- insertNeutralApp ctx =<< infer ctx (other :@ loc)
             unify ctx.env.topLevel ctx.level inferred expected
             pure eTerm
 
@@ -173,7 +202,9 @@ infer ctx (t :@ loc) = case t of
             TextLiteral{} -> TextName
             CharLiteral{} -> CharName
     T.App vis lhs rhs -> do
-        (eLhs, lhsTy) <- infer ctx lhs
+        (eLhs, lhsTy) <- case vis of
+            Visible -> insertApp ctx =<< infer ctx lhs
+            _ -> infer ctx lhs
         closure <-
             force' lhsTy >>= \case
                 V.Q Forall vis2 _e closure | vis == vis2 -> pure closure
@@ -190,7 +221,8 @@ infer ctx (t :@ loc) = case t of
         pure (E.App vis eLhs eRhs, resultTy)
     T.Lambda vis (L (T.VarP arg)) body -> do
         ty <- freshUniVarV ctx
-        (eBody, bodyTy) <- infer (bind (unLoc arg) ty ctx) body
+        let bodyCtx = bind (unLoc arg) ty ctx
+        (eBody, bodyTy) <- insertNeutralApp bodyCtx =<< infer bodyCtx body
         univars <- get @UniVars
         let var = toSimpleName_ $ unLoc arg
             quotedBody = quote univars (succ ctx.level) bodyTy
