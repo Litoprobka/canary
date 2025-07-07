@@ -49,8 +49,9 @@ import Syntax.AstTraversal
 import Syntax.Declaration qualified as D
 import Syntax.Term
 import System.Console.Isocline
-import TypeChecker.BiggerChecker qualified as TC
-import TypeChecker.Unification (Context (..), emptyContext)
+import TypeChecker qualified as TC
+import TypeChecker.Backend (Context (..), emptyContext)
+import TypeChecker.Backend qualified as TC
 
 data ReplCommand
     = Decls [Declaration 'Parse]

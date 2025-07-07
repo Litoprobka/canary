@@ -1,37 +1,18 @@
 {-# LANGUAGE DuplicateRecordFields #-}
-{-# LANGUAGE RecordWildCards #-}
 
 module TypeChecker.Unification where
 
 import Common
 import Data.EnumMap.Strict qualified as EMap
-import Diagnostic (Diagnose, internalError')
-import Effectful.Labeled
-import Effectful.Reader.Static (Reader)
-import Effectful.State.Static.Local (State, get, modify)
+import Diagnostic (internalError')
+import Effectful.State.Static.Local (get, modify)
 import Eval (ExtendedEnv (..), UniVarState (..), UniVars, app', evalApp', evalCore, force', quote)
-import IdMap qualified as Map
 import LangPrelude hiding (force, lift)
-import NameGen
 import Syntax.Core (CoreTerm)
 import Syntax.Core qualified as C
 import Syntax.Term (Quantifier (..), Visibility (..))
 import Syntax.Value as V
-
--- | types of top-level bindings
-type TopLevel = IdMap Name_ VType
-
-data Context = Context
-    { env :: ValueEnv
-    , level :: Level
-    , types :: IdMap Name_ (Level, VType)
-    , bounds :: [C.BoundDefined]
-    }
-
-emptyContext :: ValueEnv -> Context
-emptyContext env = Context{env, level = Level 0, types = Map.empty, bounds = []}
-
-type TC es = (Labeled UniVar NameGen :> es, NameGen :> es, Diagnose :> es, State UniVars :> es, Reader TopLevel :> es)
+import TypeChecker.Backend hiding (ExType (..))
 
 -- passing around topLevel like this is a bit ugly, perhaps unify should just take a Context?
 unify :: TC es => IdMap Name_ Value -> Level -> Value -> Value -> Eff es ()
@@ -84,21 +65,6 @@ unifySpine topLevel lvl = \cases
 the way we treat unification variables is based on the example implementation in elaboration-zoo
 by Andras Kovacs
 -}
-
--- | insert a new UniVar applied to all bound variables in scope
-freshUniVar :: (Labeled UniVar NameGen :> es, State UniVars :> es) => Context -> Eff es CoreTerm
-freshUniVar ctx = do
-    uni <- Common.UniVar <$> labeled @UniVar @NameGen freshId
-    modify @UniVars $ EMap.insert uni Unsolved
-    pure $ C.InsertedUniVar uni ctx.bounds
-
-freshUniVarV :: (Labeled UniVar NameGen :> es, State UniVars :> es) => Context -> Eff es Value
-freshUniVarV ctx = do
-    uniTerm <- freshUniVar ctx
-    univars <- get @UniVars
-    let ValueEnv{..} = ctx.env
-        env = ExtendedEnv{..}
-    pure $ evalCore env uniTerm
 
 data PartialRenaming = PartialRenaming
     { domain :: Level
@@ -177,7 +143,8 @@ rename uni = go
 
 -- wrap a term in lambdas
 lambdas :: [Visibility] -> CoreTerm -> CoreTerm
-lambdas = go (Level 0)
+lambdas = go 0
   where
+    go :: Int -> [Visibility] -> CoreTerm -> CoreTerm
     go _ [] term = term
-    go x (vis : vises) term = C.Lambda vis (Name' $ "x" <> show x.getLevel) $ go (succ x) vises term
+    go x (vis : vises) term = C.Lambda vis (Name' $ "x" <> show x) $ go (succ x) vises term
