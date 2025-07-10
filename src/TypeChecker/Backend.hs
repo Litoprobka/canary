@@ -1,4 +1,6 @@
+{-# LANGUAGE DuplicateRecordFields #-}
 {-# LANGUAGE RecordWildCards #-}
+{-# LANGUAGE NoFieldSelectors #-}
 
 module TypeChecker.Backend where
 
@@ -16,6 +18,7 @@ import Syntax
 import Syntax.Core qualified as C
 import Syntax.Elaborated qualified as E
 import Syntax.Row
+import Syntax.Term (Erasure (..), Quantifier (..), Visibility (..))
 import Syntax.Value qualified as V
 
 newtype ConstructorTable = ConstructorTable
@@ -30,12 +33,17 @@ type TopLevel = IdMap Name_ VType
 data Context = Context
     { env :: ValueEnv
     , level :: Level
+    , locals :: Locals
     , types :: IdMap Name_ (Level, VType)
-    , bounds :: [C.BoundDefined]
     }
 
+data Locals
+    = None
+    | Bind Name_ ~CoreType Locals
+    | Define Name_ ~CoreType ~CoreTerm Locals
+
 emptyContext :: ValueEnv -> Context
-emptyContext env = Context{env, level = Level 0, types = Map.empty, bounds = []}
+emptyContext env = Context{env, level = Level 0, types = Map.empty, locals = None}
 
 type TC es = (Labeled UniVar NameGen :> es, NameGen :> es, Diagnose :> es, State UniVars :> es, Reader TopLevel :> es)
 
@@ -43,15 +51,29 @@ run :: TopLevel -> Eff (State UniVars : Reader TopLevel : Labeled UniVar NameGen
 run types = runLabeled @UniVar runNameGen . runReader types . evalState @UniVars EMap.empty
 
 -- | insert a new UniVar applied to all bound variables in scope
-freshUniVar :: (Labeled UniVar NameGen :> es, State UniVars :> es) => Context -> Eff es CoreTerm
-freshUniVar ctx = do
+freshUniVar :: (Labeled UniVar NameGen :> es, State UniVars :> es) => Context -> VType -> Eff es CoreTerm
+freshUniVar ctx vty = do
     uni <- Common.UniVar <$> labeled @UniVar @NameGen freshId
-    modify @UniVars $ EMap.insert uni Unsolved
-    pure $ C.InsertedUniVar uni ctx.bounds
+    env <- extendEnv ctx.env
+    let ty = evalCore env $ closeType ctx.locals (quote env.univars ctx.level vty)
+    modify @UniVars $ EMap.insert uni Unsolved{ty}
+    pure $ C.InsertedUniVar uni (boundsFromLocals ctx.locals)
+  where
+    boundsFromLocals = \case
+        None -> []
+        Bind _ _ rest -> C.Bound : boundsFromLocals rest
+        Define _ _ _ rest -> C.Defined : boundsFromLocals rest
 
-freshUniVarV :: (Labeled UniVar NameGen :> es, State UniVars :> es) => Context -> Eff es Value
-freshUniVarV ctx = do
-    uniTerm <- freshUniVar ctx
+-- | convert a list of local bindings to a top-level Pi type
+closeType :: Locals -> CoreType -> CoreType
+closeType locals body = case locals of
+    None -> body
+    Bind x ty rest -> closeType rest (C.Q Forall Visible Retained (toSimpleName_ x) ty body)
+    Define x val _ty rest -> closeType rest (C.Let (toSimpleName_ x) val body)
+
+freshUniVarV :: (Labeled UniVar NameGen :> es, State UniVars :> es) => Context -> VType -> Eff es Value
+freshUniVarV ctx vty = do
+    uniTerm <- freshUniVar ctx vty
     univars <- get @UniVars
     let V.ValueEnv{..} = ctx.env
         env = ExtendedEnv{..}
@@ -63,22 +85,22 @@ extendEnv V.ValueEnv{..} = do
     univars <- get @UniVars
     pure ExtendedEnv{..}
 
-bind :: Name_ -> VType -> Context -> Context
-bind name ty Context{env = V.ValueEnv{locals, ..}, ..} =
+bind :: UniVars -> Name_ -> VType -> Context -> Context
+bind univars name ty Context{env = V.ValueEnv{locals = vlocals, ..}, ..} =
     Context
         { level = succ level
-        , env = V.ValueEnv{locals = V.Var level : locals, ..}
+        , env = V.ValueEnv{locals = V.Var level : vlocals, ..}
         , types = Map.insert name (level, ty) types
-        , bounds = C.Bound : bounds
+        , locals = Bind name (quote univars level ty) locals
         }
 
-define :: Name_ -> Value -> VType -> Context -> Context
-define name val ty Context{env = V.ValueEnv{locals, ..}, ..} =
+define :: Name_ -> CoreTerm -> Value -> CoreType -> VType -> Context -> Context
+define name val vval ty vty Context{env = V.ValueEnv{locals = vlocals, ..}, ..} =
     Context
         { level = succ level
-        , env = V.ValueEnv{locals = val : locals, ..}
-        , types = Map.insert name (level, ty) types
-        , bounds = C.Defined : bounds
+        , env = V.ValueEnv{locals = vval : vlocals, ..}
+        , types = Map.insert name (level, vty) types
+        , locals = Define name ty val locals
         }
 
 lookupSig :: TC es => Name -> Context -> Eff es (ETerm, VType)
@@ -88,7 +110,8 @@ lookupSig name ctx = do
         (Just (lvl, ty), _) -> pure (E.Var (levelToIndex ctx.level lvl), ty)
         (_, Just ty) -> pure (E.Name name, ty)
         (Nothing, Nothing) -> do
-            (E.Name name,) <$> freshUniVarV ctx
+            ty <- freshUniVarV ctx (V.Type $ TypeName :@ getLoc name)
+            (E.Name name,) <$> freshUniVarV ctx ty
 
 -- internalError' $ pretty name <+> "not in scope"
 
@@ -171,9 +194,7 @@ removeUniVarsT lvl = go
         E.UniVar uni -> do
             univars <- get @UniVars
             case EMap.lookup uni univars of
-                Just (Solved val) -> pure $ resugar $ quote univars lvl val
-                _ -> do
-                    traceShowM $ "unsolved univar" <+> pretty uni
-                    pure $ E.UniVar uni
-        E.InsertedUniVar _uni _spine -> do
+                Just (Solved{solution}) -> pure $ resugar $ quote univars lvl solution
+                _ -> pure $ E.UniVar uni
+        E.InsertedUniVar _uni _bds -> do
             internalError' "inserted univar, idk what to do"

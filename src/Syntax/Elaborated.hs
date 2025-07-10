@@ -8,7 +8,7 @@ import Syntax.Core (BoundDefined)
 import Syntax.Row
 import Syntax.Term (Erasure, Quantifier, Visibility)
 
-{-
+{-x
 The elaborated AST is halfway between core and pre-typecheck passes
 -}
 

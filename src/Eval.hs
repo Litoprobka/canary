@@ -5,6 +5,7 @@
 {-# LANGUAGE OverloadedRecordDot #-}
 {-# LANGUAGE RecordWildCards #-}
 {-# OPTIONS_GHC -Wno-orphans #-}
+{-# OPTIONS_GHC -Wno-partial-fields #-}
 
 module Eval (
     evalCore,
@@ -52,13 +53,15 @@ import LangPrelude hiding (force)
 import Prettyprinter (line, vsep)
 import Syntax
 import Syntax.Core qualified as C
-import Syntax.Elaborated (Typed (..))
 import Syntax.Elaborated qualified as D
 import Syntax.Elaborated qualified as E
 import Syntax.Term (Visibility (..))
 import Syntax.Value as Reexport
 
-data UniVarState = Solved Value | Unsolved deriving (Show)
+data UniVarState
+    = Solved {solution :: Value, ty :: ~VType}
+    | Unsolved {ty :: ~VType}
+    deriving (Show)
 type UniVars = EnumMap UniVar UniVarState
 
 data ExtendedEnv = ExtendedEnv
@@ -176,8 +179,8 @@ force !univars = \case
     Stuck (UniVarApp uni spine) -> case EMap.lookup uni univars of
         -- an out of scope univar indicates a bug, but a non-fatal one
         Nothing -> Stuck $ UniVarApp uni spine
-        Just Unsolved -> Stuck $ UniVarApp uni spine
-        Just (Solved val) -> force univars $ applySpine val spine
+        Just Unsolved{} -> Stuck $ UniVarApp uni spine
+        Just (Solved{solution}) -> force univars $ applySpine solution spine
     Stuck (Fn fn arg) -> case force univars (Stuck arg) of
         Stuck stillStuck -> Stuck (Fn fn stillStuck)
         noLongerStuck -> evalApp univars Visible (PrimFunction fn) noLongerStuck

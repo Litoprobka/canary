@@ -70,7 +70,7 @@ data CoreTerm
     | InsertedUniVar UniVar [BoundDefined]
     deriving (Pretty) via (UnAnnotate CoreTerm)
 
-data BoundDefined = Bound | Defined deriving (Show)
+data BoundDefined = Bound | Defined deriving (Show) -- this will be superseded by pruning
 
 instance PrettyAnsi CoreTerm where
     prettyAnsi opts = go 0 []
@@ -101,6 +101,7 @@ instance PrettyAnsi CoreTerm where
                     )
             Let name body expr -> keyword "let" <+> prettyAnsi opts name <+> specSym "=" <+> go 0 env body <> ";" <+> go 0 env expr
             Literal lit -> prettyAnsi opts lit
+            -- checking for variable occurances here is not ideal (potentially O(n^2) in AST size),
             Q Forall Visible _e var ty body | not (occurs (Index 0) body) -> parensWhen 1 $ go 1 env ty <+> "->" <+> go 0 (prettyAnsi opts var : env) body
             qq@(Q q vis er _ _ _) -> parensWhen 1 $ kw q er <+> compressQ env q vis er qq
             VariantT row -> prettyVariant (prettyAnsi opts) (go 0 env) row

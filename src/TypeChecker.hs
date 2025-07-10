@@ -8,7 +8,7 @@ import Diagnostic
 import Effectful.Labeled (Labeled, runLabeled)
 import Effectful.Reader.Static
 import Effectful.State.Static.Local (State, evalState, get, modify, runState)
-import Eval (UniVars, app', eval, evalCore, force', quote, resugar)
+import Eval (ExtendedEnv (univars), UniVars, app', desugar, eval, evalCore, force', quote, resugar)
 import IdMap qualified as Map
 import LangPrelude
 import NameGen (NameGen, freshName_, runNameGen)
@@ -148,7 +148,7 @@ insertApp ctx = go
     go (term, ty) =
         force' ty >>= \case
             V.Q Forall vis _e closure | vis /= Visible -> do
-                arg <- freshUniVar ctx
+                arg <- freshUniVar ctx closure.ty
                 env <- extendEnv ctx.env
                 let argV = evalCore env arg
                 innerTy <- closure `app'` argV
@@ -163,10 +163,11 @@ insertNeutralApp ctx (term, ty) = case term of
 check :: TC es => Context -> Term 'Fixity -> VType -> Eff es ETerm
 check ctx (t :@ loc) ty = do
     ty' <- force' ty
+    univars <- get
     case (t, ty') of
         (T.Lambda vis (L (T.VarP arg)) body, V.Q Forall qvis _e closure) | vis == qvis -> do
             bodyTy <- closure `app'` V.Var ctx.level
-            eBody <- check (bind (unLoc arg) closure.ty ctx) body bodyTy
+            eBody <- check (bind univars (unLoc arg) closure.ty ctx) body bodyTy
             pure $ E.Lambda vis (E.VarP (toSimpleName_ $ unLoc arg)) eBody
         -- we can check against a dependent type, but I'm not sure how
         (T.If cond true false, _) -> do
@@ -178,7 +179,7 @@ check ctx (t :@ loc) ty = do
         (_, V.Q Forall vis _e closure) | vis /= Visible -> do
             x <- freshName_ closure.var
             closureBody <- closure `app'` V.Var ctx.level
-            eBody <- check (bind x closure.ty ctx) (t :@ loc) closureBody
+            eBody <- check (bind univars x closure.ty ctx) (t :@ loc) closureBody
             pure $ E.Lambda vis (E.VarP closure.var) eBody
         (other, expected) -> do
             -- this case happens after the implicit forall case, so we know that we're checking against a monomorphic type here
@@ -210,9 +211,10 @@ infer ctx (t :@ loc) = case t of
                 V.Q Forall vis2 _e closure | vis == vis2 -> pure closure
                 V.Q Forall vis2 _e _ -> internalError loc $ "visibility mismatch" <+> pretty (show @Text vis) <+> "!=" <+> pretty (show @Text vis2)
                 other -> do
-                    argTy <- freshUniVarV ctx
+                    argTy <- freshUniVarV ctx type_
+                    univars <- get
                     x <- freshName_ (Name' "x")
-                    closure <- V.Closure (toSimpleName_ x) argTy ctx.env <$> freshUniVar (bind x argTy ctx)
+                    closure <- V.Closure (toSimpleName_ x) argTy ctx.env <$> freshUniVar (bind univars x argTy ctx) argTy
                     unify ctx.env.topLevel ctx.level (V.Q Forall vis Retained closure) other
                     pure closure
         eRhs <- check ctx rhs closure.ty
@@ -220,10 +222,10 @@ infer ctx (t :@ loc) = case t of
         resultTy <- closure `app'` eval env eRhs
         pure (E.App vis eLhs eRhs, resultTy)
     T.Lambda vis (L (T.VarP arg)) body -> do
-        ty <- freshUniVarV ctx
-        let bodyCtx = bind (unLoc arg) ty ctx
+        ty <- freshUniVarV ctx type_
+        univars <- get
+        let bodyCtx = bind univars (unLoc arg) ty ctx
         (eBody, bodyTy) <- insertNeutralApp bodyCtx =<< infer bodyCtx body
-        univars <- get @UniVars
         let var = toSimpleName_ $ unLoc arg
             quotedBody = quote univars (succ ctx.level) bodyTy
         pure (E.Lambda vis (E.VarP var) eBody, V.Q Forall vis Retained V.Closure{ty, var, env = ctx.env, body = quotedBody})
@@ -232,7 +234,7 @@ infer ctx (t :@ loc) = case t of
     T.Let (T.ValueB (T.VarP name :@ _) definition) body -> do
         (eDef, ty) <- infer ctx definition
         env <- extendEnv ctx.env
-        (eBody, bodyTy) <- infer (define (unLoc name) (eval env eDef) ty ctx) body
+        (eBody, bodyTy) <- infer (define (unLoc name) (desugar eDef) (eval env eDef) (quote env.univars ctx.level ty) ty ctx) body
         pure (E.Let (E.ValueB name eDef) eBody, bodyTy)
     T.Let{} -> internalError loc "destructuring bindings and function bindings are not supported yet"
     T.LetRec{} -> internalError loc "let rec not supported yet"
@@ -247,10 +249,10 @@ infer ctx (t :@ loc) = case t of
         unify ctx.env.topLevel ctx.level trueTy falseTy
         pure (E.If eCond eTrue eFalse, trueTy)
     T.Variant con -> do
-        payloadTy <- freshUniVarV ctx
+        payloadTy <- freshUniVarV ctx type_
         payload <- freshName_ $ Name' "payload"
-        rowExt <- freshUniVar (bind payload payloadTy ctx)
-        univars <- get @UniVars
+        univars <- get
+        rowExt <- freshUniVar (bind univars payload payloadTy ctx) type_
         let body = C.VariantT $ ExtRow (fromList [(con, quote univars ctx.level payloadTy)]) rowExt
         -- '(x : ?a) -> [| Con ?a | ?r x ]'
         pure (E.Variant con, V.Pi V.Closure{env = ctx.env, ty = payloadTy, var = toSimpleName_ payload, body})
@@ -260,13 +262,13 @@ infer ctx (t :@ loc) = case t of
         (eLhs, lhsTy) <- infer ctx lhs
         env <- extendEnv ctx.env
         x <- freshName_ $ Name' "x"
-        (eRhs, rhsTy) <- infer (define x (eval env eLhs) lhsTy ctx) rhs
+        (eRhs, rhsTy) <- infer (define x (desugar eLhs) (eval env eLhs) (quote env.univars ctx.level lhsTy) lhsTy ctx) rhs
         univars <- get @UniVars
         -- I *think* we have to quote with increased level here, but I'm not sure
         let body = quote univars (succ ctx.level) rhsTy
         pure (E.Sigma eLhs eRhs, V.Q Exists Visible Retained $ V.Closure{ty = lhsTy, var = Name' "x", env = ctx.env, body})
     T.List items -> do
-        itemTy <- freshUniVarV ctx
+        itemTy <- freshUniVarV ctx type_
         eItems <- traverse (\item -> check ctx item itemTy) items
         pure (E.List eItems, itemTy)
     T.RecordT row -> do
@@ -280,12 +282,14 @@ infer ctx (t :@ loc) = case t of
         eFrom <- check ctx from type_
         env <- extendEnv ctx.env
         x <- freshName_ $ Name' "x"
-        eTo <- check (bind x (eval env eFrom) ctx) to type_
+        univars <- get
+        eTo <- check (bind univars x (eval env eFrom) ctx) to type_
         pure (E.Q Forall Visible Retained (toSimpleName_ x ::: eFrom) eTo, type_)
     T.Q q v e binder body -> do
-        eTy <- maybe (resugar <$> freshUniVar ctx) (\term -> check ctx term type_) binder.kind
+        eTy <- maybe (resugar <$> freshUniVar ctx type_) (\term -> check ctx term type_) binder.kind
         env <- extendEnv ctx.env
-        eBody <- check (bind (unLoc binder.var) (eval env eTy) ctx) body type_
+        univars <- get
+        eBody <- check (bind univars (unLoc binder.var) (eval env eTy) ctx) body type_
         pure (E.Q q v e (unLoc (toSimpleName binder.var) ::: eTy) eBody, type_)
   where
     {-

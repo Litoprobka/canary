@@ -27,7 +27,7 @@ import Syntax.Elaborated qualified as E
 import Syntax.Row (ExtRow (..), OpenName, Row, prettyRecord)
 import Syntax.Row qualified as Row
 import Syntax.Value qualified as V
-import TypeChecker.Backend
+import TypeChecker.Backend hiding (Locals (..))
 import Prelude qualified (show)
 
 type Ctx es = (Diagnose :> es, State UniVars :> es, State ConstructorTable :> es)
@@ -138,7 +138,7 @@ simplifyPatternTypeWith = \case
     V.UniVar uni -> do
         univars <- get
         case EMap.lookup uni univars of
-            Just (Solved ty) -> simplifyPatternTypeWith ty
+            Just (Solved{solution}) -> simplifyPatternTypeWith solution
             _ -> pure $ const OpaqueTy
     _ -> pure $ const OpaqueTy
 

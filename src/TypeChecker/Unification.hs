@@ -86,12 +86,16 @@ lift PartialRenaming{domain, codomain, renaming} =
 
 solve :: TC es => IdMap Name_ Value -> Level -> UniVar -> Spine -> Value -> Eff es ()
 solve topLevel ctxLevel uni spine rhs = do
+    univars <- get @UniVars
+    ty <- case EMap.lookup uni univars of
+        Just Unsolved{ty} -> pure ty
+        Just Solved{} -> internalError' "attempted to solve an already solved univar"
+        Nothing -> internalError' "out of scope univar"
     pren <- invert ctxLevel spine
     rhs' <- rename uni pren rhs
-    univars <- get @UniVars
     let env = ExtendedEnv{univars, topLevel, locals = []}
     let solution = evalCore env $ lambdas (reverse $ map fst spine) rhs'
-    modify @UniVars $ EMap.insert uni $ Solved solution
+    modify @UniVars $ EMap.insert uni $ Solved{solution, ty}
 
 -- | convert a spine to a partial renaming
 invert :: TC es => Level -> Spine -> Eff es PartialRenaming

@@ -29,6 +29,9 @@ default-extensions:
   - OverloadedRecordDot
   - ExplicitNamespaces
   - PatternSynonyms
+  - NoFieldSelectors
+  - DisambiguateRecordFields
+  - DerivingVia
 
 dependencies:
 - base >= 4.7 && < 5
