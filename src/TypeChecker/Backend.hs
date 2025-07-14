@@ -6,11 +6,12 @@ module TypeChecker.Backend where
 
 import Common
 import Data.EnumMap.Strict qualified as EMap
+import Desugar (resugar)
 import Diagnostic (Diagnose, internalError')
 import Effectful.Labeled (Labeled, labeled, runLabeled)
 import Effectful.Reader.Static
 import Effectful.State.Static.Local
-import Eval (ExtendedEnv (..), UniVarState (..), UniVars, app', captured, evalCore, force', quote, resugar)
+import Eval (ExtendedEnv (..), UniVarState (..), UniVars, app', captured, evalCore, force', quote)
 import IdMap qualified as Map
 import LangPrelude
 import NameGen (NameGen, freshId, runNameGen)
@@ -18,7 +19,6 @@ import Syntax
 import Syntax.Core qualified as C
 import Syntax.Elaborated qualified as E
 import Syntax.Row
-import Syntax.Term (Erasure (..), Quantifier (..), Visibility (..))
 import Syntax.Value qualified as V
 
 newtype ConstructorTable = ConstructorTable
@@ -93,6 +93,12 @@ bind univars name ty Context{env = V.ValueEnv{locals = vlocals, ..}, ..} =
         , types = Map.insert name (level, ty) types
         , locals = Bind name (quote univars level ty) locals
         }
+
+{- | bind a list of new vars, where the first var in the list is the most recently bound
+e. g. `Cons x xs` --> `[xs, x]`
+-}
+bindMany :: UniVars -> [(Name_, VType)] -> Context -> Context
+bindMany univars newLocals ctx = foldr (uncurry $ bind univars) ctx newLocals
 
 define :: Name_ -> CoreTerm -> Value -> CoreType -> VType -> Context -> Context
 define name val vval ty vty Context{env = V.ValueEnv{locals = vlocals, ..}, ..} =

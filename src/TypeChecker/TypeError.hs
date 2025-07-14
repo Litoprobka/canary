@@ -7,7 +7,6 @@ import Diagnostic
 import Error.Diagnose (Marker (..), Report (..))
 import LangPrelude
 import Syntax
-import Syntax.Core (CoreType)
 import Syntax.Row (OpenName)
 
 type CType = Located CoreType

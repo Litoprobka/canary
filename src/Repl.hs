@@ -12,7 +12,6 @@ import Common (
     Pass (..),
     PrettyOptions (..),
     SimpleName_ (Name'),
-    getLoc,
     prettyAnsi,
     prettyDef,
     unLoc,

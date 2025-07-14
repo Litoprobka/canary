@@ -74,3 +74,17 @@ data EDeclaration
 
 instance HasLoc a => HasLoc (Typed a) where
     getLoc (x ::: _) = getLoc x
+
+-- | How many new variables does a pattern bind?
+patternArity :: EPattern -> Int
+patternArity = go
+  where
+    go = \case
+        VarP{} -> 1
+        WildcardP{} -> 1 -- should it also be 0?
+        ConstructorP _ args -> sum (map go args)
+        VariantP _ arg -> go arg
+        RecordP row -> sum (fmap go row)
+        SigmaP lhs rhs -> go lhs + go rhs
+        ListP args -> sum (map go args)
+        LiteralP{} -> 0

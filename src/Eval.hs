@@ -12,7 +12,6 @@ module Eval (
     quote,
     quoteClosure,
     module Reexport,
-    desugar,
     force,
     eval,
     modifyEnv,
@@ -22,17 +21,14 @@ module Eval (
     evalApp',
     force',
     ExtendedEnv (..),
-    resugar,
     nf,
 ) where
 
 import Common (
     Index (..),
     Level (..),
-    Loc (..),
-    Located (..),
     Name,
-    Name_ (ConsName, NilName, TrueName),
+    Name_,
     PrettyAnsi (..),
     SimpleName_ (..),
     UnAnnotate (..),
@@ -46,8 +42,8 @@ import Common (
 
 import Data.EnumMap.Lazy qualified as EMap
 import Data.List ((!!))
+import Desugar (desugar)
 import Effectful.State.Static.Local (State, get)
-import Error.Diagnose (Position (..))
 import IdMap qualified as LMap
 import LangPrelude hiding (force)
 import Prettyprinter (line, vsep)
@@ -55,7 +51,6 @@ import Syntax
 import Syntax.Core qualified as C
 import Syntax.Elaborated qualified as D
 import Syntax.Elaborated qualified as E
-import Syntax.Term (Visibility (..))
 import Syntax.Value as Reexport
 
 data UniVarState
@@ -70,8 +65,7 @@ data ExtendedEnv = ExtendedEnv
     , univars :: UniVars
     }
 
--- an orphan instance, since otherwise we'd have a cyclic dependency between elaborated terms, which are typed, and values
--- perhaps elaborated terms should be parametrised by the type instead?..
+-- an orphan instance, since I don't want to merge 'Value.hs' and 'Eval.hs'
 instance PrettyAnsi Value where
     prettyAnsi opts = prettyAnsi opts . quote EMap.empty (Level 0)
 
@@ -103,9 +97,15 @@ quote univars = go
         VarApp varLvl spine -> quoteSpine (C.Var $ levelToIndex lvl varLvl) spine
         UniVarApp uni spine -> quoteSpine (C.UniVar uni) spine
         Fn fn acc -> C.App Visible (go lvl $ PrimFunction fn) (quoteStuck lvl acc)
-        Case _arg _matches -> error "todo: quote stuck case"
+        Case arg matches -> C.Case (quoteStuck lvl arg) (fmap quotePatternClosure matches)
       where
         quoteSpine = foldr (\(vis, arg) acc -> C.App vis acc (quote univars lvl arg))
+        quotePatternClosure PatternClosure{pat, env, body} =
+            let ValueEnv{..} = env
+                freeVars = Var <$> [pred newLevel .. lvl]
+                newLevel = Level $ lvl.getLevel + C.patternArity pat
+                bodyV = evalCore ExtendedEnv{locals = freeVars <> locals, ..} body
+             in (pat, quote univars newLevel bodyV)
 
 evalCore :: ExtendedEnv -> CoreTerm -> Value
 evalCore env@ExtendedEnv{..} = \case
@@ -225,106 +225,6 @@ tryApplyPatternClosure univars PatternClosure{pat, env = ValueEnv{..}, body} arg
     newEnv <- matchCore ExtendedEnv{..} pat arg
     pure $ evalCore newEnv body
 
--- TODO: properly handle recursive bindings (that is, don't infinitely loop on them)
-desugar :: ETerm -> CoreTerm
-desugar = \case
-    E.Var index -> C.Var index
-    E.Name name -> C.Name name
-    E.Literal lit -> C.Literal lit
-    E.App vis lhs rhs -> C.App vis (go lhs) (go rhs)
-    E.Lambda vis (E.VarP arg) body -> C.Lambda vis arg (go body)
-    E.Lambda _vis _pat _body -> error "desugar pattern lambda: should lift"
-    -- C.Lambda "x" <$> go (E.Case (E.Var (Index 0)) [(pat, body)])
-    E.Let _binding _expr -> error "todo: properly desugar Let" {- case binding of
-                                                               E.ValueB ((E.VarP name) ::: _) body -> C.Let name <$> go body <*> go expr
-                                                               E.ValueB (pat ::: _) body -> go $ E.Case body [(pat, expr)]
-                                                               E.FunctionB name args body -> C.Let (unLoc . toSimpleName $ name) <$> go (foldr E.Lambda body args) <*> go expr
-                                                               -}
-    E.LetRec _bindings _body -> error "todo: letrec desugar"
-    E.Case arg matches -> C.Case (go arg) $ fmap (bimap flattenPattern go) matches
-    E.Match _matches@((_ :| [], _) : _) -> error "todo: lift in match"
-    {-do
-       name <- freshName $ Name' "matchArg" :@ loc
-       matches' <- for matches \case
-           ((pat ::: _) :| [], body) -> bitraverse flattenPattern go (pat, body)
-           _ -> internalError loc "inconsistent pattern count in a match expression"
-       pure $ C.Lambda name $ C.Case (C.Name name) matches'-}
-    E.Match _ -> error "todo: multi-arg match desugar"
-    E.If cond true false ->
-        C.Case
-            (go cond)
-            [ (C.ConstructorP (TrueName :@ loc) [], go true)
-            , (C.WildcardP "", go false)
-            ]
-    E.Variant name -> C.Variant name
-    E.Record fields -> C.Record $ fmap go fields
-    E.RecordAccess record field ->
-        let arg = go record
-         in C.Case arg [(C.RecordP (one (field, unLoc field)), C.Var (Index 0))]
-    {- `record.field` gets desugared to
-        case record of
-            {field} -> field
-    -}
-    E.Sigma x y -> C.Sigma (go x) (go y)
-    E.List xs -> foldr ((C.App Visible . C.App Visible cons) . go) nil xs
-    E.Do{} -> error "todo: desugar do blocks"
-    E.Q q vis er (var ::: kind) body -> C.Q q vis er var (go kind) (go body)
-    E.VariantT row -> C.VariantT $ fmap go row
-    E.RecordT row -> C.RecordT $ fmap go row
-    E.UniVar uni -> C.UniVar uni
-    E.InsertedUniVar uni bds -> C.InsertedUniVar uni bds
-  where
-    go = desugar
-    cons = C.Name $ ConsName :@ loc
-    nil = C.Name $ NilName :@ loc
-    loc = Loc Position{begin = (0, 0), end = (0, 0), file = "<eval>"}
-
-    -- we only support non-nested patterns for now
-    flattenPattern :: EPattern -> CorePattern
-    flattenPattern p = case p of
-        E.VarP name -> C.VarP name
-        E.WildcardP name -> C.WildcardP name
-        E.ConstructorP name pats -> C.ConstructorP name (fmap asVar pats)
-        E.VariantP name pat -> C.VariantP name (asVar pat)
-        E.RecordP row -> C.RecordP $ fmap asVar row
-        E.SigmaP lhs rhs -> C.SigmaP (asVar lhs) (asVar rhs)
-        E.ListP _ -> error "todo: list pattern desugaring"
-        E.LiteralP lit -> C.LiteralP lit
-
-    asVar (E.VarP name) = name
-    asVar (E.WildcardP txt) = Wildcard' txt
-    asVar _ = error "todo: nested patterns"
-
--- idk, perhaps typecheck should produce CoreTerm right away
-resugar :: CoreTerm -> ETerm
-resugar = \case
-    C.Var index -> E.Var index
-    C.Name name -> E.Name name
-    C.TyCon name -> E.Name name
-    C.Con name args -> foldl' (E.App Visible) (E.Name name) (fmap resugar args)
-    C.Lambda vis var body -> E.Lambda vis (E.VarP var) $ resugar body
-    C.App vis lhs rhs -> E.App vis (resugar lhs) (resugar rhs)
-    C.Case arg matches -> E.Case (resugar arg) $ fmap (bimap resugarPattern resugar) matches
-    C.Let _name _expr _body -> error "bindings are annoying" -- E.Let (E.VarP name) (resugar expr) (resugar body)
-    C.Literal lit -> E.Literal lit
-    C.Record row -> E.Record (fmap resugar row)
-    C.Sigma lhs rhs -> E.Sigma (resugar lhs) (resugar rhs)
-    C.Variant name -> E.Variant name
-    C.Q q v e var ty body -> E.Q q v e (var ::: resugar ty) (resugar body)
-    C.VariantT row -> E.VariantT $ fmap resugar row
-    C.RecordT row -> E.RecordT $ fmap resugar row
-    C.UniVar uni -> E.UniVar uni
-    C.InsertedUniVar uni bds -> E.InsertedUniVar uni bds
-  where
-    resugarPattern = \case
-        C.VarP name -> E.VarP name
-        C.WildcardP txt -> E.WildcardP txt
-        C.ConstructorP name args -> E.ConstructorP name $ fmap E.VarP args
-        C.VariantP name arg -> E.VariantP name $ E.VarP arg
-        C.RecordP nameRow -> E.RecordP $ fmap E.VarP nameRow
-        C.SigmaP lhs rhs -> E.SigmaP (E.VarP lhs) (E.VarP rhs)
-        C.LiteralP lit -> E.LiteralP lit
-
 eval :: ExtendedEnv -> ETerm -> Value
 eval env term = evalCore env $ desugar term
 
@@ -357,31 +257,3 @@ mkConLambda n con = evalCore emptyEnv lambdas
     lambdas = foldr (C.Lambda Visible) body names
     body = C.Con con $ map (C.Var . Index) [n - 1, n - 2 .. 0]
     emptyEnv = ExtendedEnv{univars = EMap.empty, topLevel = LMap.empty, locals = []}
-
-{-
-names <- for [1 .. n] \i -> freshName (Name' ("x" <> show i) :@ getLoc con)
--- fused foldl/foldr go brrr
-pure $
-    foldr
-        ( \var bodyFromEnv env' ->
-            let newEnv = env'{locals = LMap.insert var (Var var) env'.values}
-             in -- current implementation with quoteForPrinting is a crutch
-                Lambda $ Closure{var, ty = (), env = newEnv, body = quoteForPrinting $ bodyFromEnv newEnv}
-        )
-        (const $ Con con (map Var names))
-        names
-        env
--}
-
-{-
--- is template haskell worth it?
-
-mkLambda1 :: Name -> (Value -> Value) -> Value
-mkLambda1 name f = PrimFunction name 1 [] \(x :| _) -> f x
-
-mkLambda2 :: Name -> (Value -> Value -> Value) -> Value
-mkLambda2 name f = PrimFunction name 2 [] \(y :| x : _) -> f x y
-
-mkLambda3 :: Name -> (Value -> Value -> Value -> Value) -> Value
-mkLambda3 name f = PrimFunction name 3 [] \(z :| y : x : _) -> f x y z
--}

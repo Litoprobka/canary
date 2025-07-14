@@ -128,6 +128,8 @@ instance PrettyAnsi CoreTerm where
             other -> specSym "->" <+> go 0 env other
 
         compressQ :: [Doc AnsiStyle] -> Quantifier -> Visibility -> Erasure -> CoreTerm -> Doc AnsiStyle
+        compressQ env Forall Visible e (Q Forall Visible e' name ty body)
+            | e == e' && not (occurs (Index 0) body) = "->" <+> go 1 env ty <+> "->" <+> go 0 (prettyAnsi opts name : env) body
         compressQ env q vis e term = case term of
             Q q' vis' e' name ty body
                 | q == q' && vis == vis' && e == e' ->
@@ -190,3 +192,16 @@ lift n = go (Level 0)
             | otherwise -> Var (Index index)
         Lambda vis var body -> Lambda vis var $ go (succ depth) body
         other -> coreTraversalPure (go depth) other
+
+-- | How many new variables does a pattern bind?
+patternArity :: CorePattern -> Int
+patternArity = go
+  where
+    go = \case
+        VarP{} -> 1
+        WildcardP{} -> 1 -- should it also be 0?
+        ConstructorP _ args -> length args
+        VariantP{} -> 1
+        RecordP row -> length row
+        SigmaP{} -> 2
+        LiteralP{} -> 0

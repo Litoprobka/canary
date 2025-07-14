@@ -4,20 +4,20 @@ module TypeChecker where
 
 import Common
 import Data.EnumMap.Lazy qualified as EMap
+import Desugar (desugar, resugar)
 import Diagnostic
 import Effectful.Labeled (Labeled, runLabeled)
 import Effectful.Reader.Static
 import Effectful.State.Static.Local (State, evalState, get, modify, runState)
-import Eval (ExtendedEnv (univars), UniVars, app', desugar, eval, evalCore, force', quote, resugar)
+import Eval (ExtendedEnv (univars), UniVars, app', eval, evalCore, force', quote)
 import IdMap qualified as Map
 import LangPrelude
-import NameGen (NameGen, freshName_, runNameGen)
+import NameGen (NameGen, freshName, freshName_, runNameGen)
 import Syntax
 import Syntax.Core qualified as C
 import Syntax.Declaration qualified as D
 import Syntax.Elaborated qualified as E
 import Syntax.Row (ExtRow (..))
-import Syntax.Term (Erasure (..), Quantifier (..), Visibility (..))
 import Syntax.Term qualified as T
 import Syntax.Value qualified as V
 import TypeChecker.Backend
@@ -221,6 +221,9 @@ infer ctx (t :@ loc) = case t of
         env <- extendEnv ctx.env
         resultTy <- closure `app'` eval env eRhs
         pure (E.App vis eLhs eRhs, resultTy)
+    T.Lambda vis (T.WildcardP txt :@ patLoc) body -> do
+        name <- freshName $ Name' txt :@ patLoc
+        infer ctx $ T.Lambda vis (T.VarP name :@ patLoc) body :@ loc
     T.Lambda vis (L (T.VarP arg)) body -> do
         ty <- freshUniVarV ctx type_
         univars <- get
@@ -239,7 +242,14 @@ infer ctx (t :@ loc) = case t of
     T.Let{} -> internalError loc "destructuring bindings and function bindings are not supported yet"
     T.LetRec{} -> internalError loc "let rec not supported yet"
     T.Do{} -> internalError loc "do notation not supported yet"
-    T.Case{} -> internalError loc "wip: case"
+    T.Case arg branches -> do
+        (eArg, argTy) <- infer ctx arg
+        result <- freshUniVarV ctx type_
+        eBranches <- for branches \(pat, body) -> do
+            (ePat, newLocals) <- checkPattern ctx pat argTy
+            univars <- get
+            (ePat,) <$> check (bindMany univars newLocals ctx) body result
+        pure (E.Case eArg eBranches, result)
     T.Match{} -> internalError loc "wip: match"
     -- we don't infer dependent if, because that would mask type errors a lot of time
     T.If cond true false -> do
@@ -292,13 +302,6 @@ infer ctx (t :@ loc) = case t of
         eBody <- check (bind univars (unLoc binder.var) (eval env eTy) ctx) body type_
         pure (E.Q q v e (unLoc (toSimpleName binder.var) ::: eTy) eBody, type_)
   where
-    {-
-        P.Pi x i a b -> do
-        a <- check cxt a VU
-        b <- check (bind cxt x (eval (env cxt) a)) b VU
-        pure (Pi x i a b, VU)
-    -}
-
     type_ = V.Type $ TypeName :@ loc
 
 -- check a term against Type and evaluate it
@@ -307,3 +310,85 @@ typeFromTerm ctx term = do
     eTerm <- check ctx term (V.Type (TypeName :@ getLoc term))
     env <- extendEnv ctx.env
     pure $ eval env eTerm
+
+checkPattern :: TC es => Context -> Pattern 'Fixity -> VType -> Eff es (EPattern, [(Name_, VType)])
+checkPattern ctx (pat :@ pLoc) ty = case pat of
+    T.VarP (L name) -> pure (E.VarP (toSimpleName_ name), [(name, ty)])
+    T.VariantP{} -> internalError pLoc "todo: check variant pattern"
+    T.RecordP{} -> internalError pLoc "todo: check record pattern"
+    T.SigmaP{} -> internalError pLoc "todo: check sigma pattern"
+    _ -> fallthroughToInfer
+      where
+        fallthroughToInfer = do
+            (ePat, inferred, newLocals) <- inferPattern ctx $ pat :@ pLoc
+            topLevel <- ask
+            unify topLevel ctx.level inferred ty
+            pure (ePat, newLocals)
+
+inferPattern :: TC es => Context -> Pattern 'Fixity -> Eff es (EPattern, VType, [(Name_, VType)])
+inferPattern ctx (p :@ loc) = case p of
+    T.VarP (L name) -> do
+        ty <- freshUniVarV ctx type_
+        pure (E.VarP (toSimpleName_ name), ty, [(name, ty)])
+    T.WildcardP txt -> do
+        name <- freshName_ $ Name' txt
+        ty <- freshUniVarV ctx type_
+        pure (E.WildcardP txt, ty, [(name, ty)])
+    (T.AnnotationP pat ty) -> do
+        tyV <- typeFromTerm ctx ty
+        (ePat, newLocals) <- checkPattern ctx pat tyV
+        pure (ePat, tyV, newLocals)
+    T.ConstructorP{} -> internalError loc "todo: inferPattern: constructor"
+    T.ListP pats -> do
+        result <- freshUniVarV ctx type_
+        patsAndLocals <- traverse (\pat -> checkPattern ctx pat result) pats
+        let ePats = map fst patsAndLocals
+            -- [2, 1] [5, 4, 3] --> [5, 4, 3, 2, 1]
+            -- our lists are actually snoc lists
+            newLocals = fold . reverse $ map snd patsAndLocals
+            listType = V.TyCon (ListName :@ loc) [result]
+        pure (E.ListP ePats, listType, newLocals)
+    _ -> internalError loc "todo: non-trivial inferPattern"
+  where
+    type_ = V.Type $ TypeName :@ loc
+
+{-
+T.ConstructorP name args -> do
+    (resultType, argTypes) <- conArgTypes name
+    fixedResultType <- postprocess resultType
+    unless (length argTypes == length args) do
+        typeError $ ArgCountMismatchPattern (Located loc p) (length argTypes) (length args)
+    (typeMap, typedArgs) <- traverseFold pure =<< zipWithM checkP args (map (:@ loc) argTypes)
+    pure (typeMap, El.ConstructorP name typedArgs :@ loc ::: fixedResultType)
+T.VariantP name arg -> do
+    (typeMap, elabArg ::: argTy) <- inferP arg
+    ty <- V.VariantT . ExtRow (fromList [(name, argTy)]) <$> freshUniVar
+    pure (typeMap, El.VariantP name elabArg :@ loc ::: ty)
+T.RecordP row -> do
+    (typeMap, typedRow) <- traverseFold inferP row
+    ext <- freshUniVar
+    let (elabRow, typeRow) = unzip $ fmap (\(pat ::: ty) -> (pat, ty)) typedRow
+        openRecordTy = V.RecordT (ExtRow typeRow ext)
+    pure (typeMap, El.RecordP elabRow :@ loc ::: openRecordTy)
+T.SigmaP (T.VarP name :@ varLoc) rhs -> do
+    varTy <- freshUniVar
+    var <- freshSkolem' $ toSimpleName name
+    (typeMap, typedRhs ::: rhsTy) <- local' (define name (V.Var var) . declare name (varTy :@ varLoc)) do
+        inferP rhs
+    env <- asks (.values)
+    body <- V.quote rhsTy
+    let closure = V.Closure{var, ty = varTy, env, body}
+    pure
+        ( Map.insert name (varTy :@ varLoc) typeMap
+        , El.SigmaP (El.VarP name :@ varLoc) typedRhs :@ loc ::: V.Q Exists Visible Retained closure
+        )
+T.SigmaP{} -> internalError loc "can't infer the type of a sigma with non-var lhs pattern (yet?)"
+T.LiteralP lit -> do
+    let litTypeName = case lit of
+            IntLiteral num
+                | num >= 0 -> NatName
+                | otherwise -> IntName
+            TextLiteral _ -> TextName
+            CharLiteral _ -> CharName
+    pure (Map.empty, El.LiteralP lit :@ loc ::: V.TyCon (litTypeName :@ loc) [])
+-}

@@ -89,7 +89,6 @@ data PatternClosure ty = PatternClosure
     }
 
 -- I have a feeling that it's safer to stick to CoreTerm in the cases where I have to introduce new binders
---
 
 -- | lift a value through N new binders, altering all encountered levels
 lift :: Int -> Value -> Value

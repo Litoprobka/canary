@@ -26,6 +26,7 @@ library
   exposed-modules:
       Common
       DependencyResolution
+      Desugar
       Diagnostic
       Eval
       Fixity
@@ -144,7 +145,6 @@ test-suite canary-test
       LexerSpec
       ParserSpec
       Playground
-      TypeCheckerSpec
       Paths_canary
   hs-source-dirs:
       test
