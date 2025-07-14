@@ -1,4 +1,5 @@
 {-# LANGUAGE DuplicateRecordFields #-}
+{-# LANGUAGE RecordWildCards #-}
 {-# OPTIONS_GHC -Wno-partial-fields #-}
 
 module Syntax.Value where
@@ -7,6 +8,7 @@ import Common (UniVar)
 import Common hiding (Skolem, UniVar)
 import LangPrelude
 import Syntax.Core (CorePattern, CoreTerm)
+import Syntax.Core qualified as C
 import Syntax.Row
 import Syntax.Term (Erasure (..), Quantifier (..), Visibility (Visible))
 
@@ -17,10 +19,6 @@ data ValueEnv = ValueEnv
 
 type VType = Value
 
--- unlike the AST types, the location information on Values are shallow, since
--- the way we use it is different from the AST nodes
--- in AST, the location corresponds to the source span where the AST node is written
--- in Values, the location is the source space that the location is *arising from*
 data Value
     = -- | a type constructor. Unlike value constructors, they don't keep track of arity and may be applied to values
       TyCon Name [Value]
@@ -89,3 +87,35 @@ data PatternClosure ty = PatternClosure
     , env :: ValueEnv
     , body :: CoreTerm
     }
+
+-- I have a feeling that it's safer to stick to CoreTerm in the cases where I have to introduce new binders
+--
+
+-- | lift a value through N new binders, altering all encountered levels
+lift :: Int -> Value -> Value
+lift n = go
+  where
+    go = \case
+        TyCon name args -> TyCon name (fmap go args)
+        Con name args -> Con name (fmap go args)
+        Lambda vis Closure{..} -> Lambda vis $ Closure{body = C.lift n body, env = liftEnv env, ..}
+        PrimFunction fn -> PrimFunction (liftFunc fn)
+        Record row -> Record (fmap go row)
+        RecordT row -> RecordT (fmap go row)
+        VariantT row -> VariantT (fmap go row)
+        Sigma lhs rhs -> Sigma (go lhs) (go rhs)
+        Variant name arg -> Variant name (go arg)
+        PrimValue prim -> PrimValue prim
+        Q q v e Closure{..} -> Q q v e $ Closure{body = C.lift n body, ty = go ty, env = liftEnv env, ..}
+        Stuck stuck -> Stuck (liftStuck stuck)
+
+    liftStuck = \case
+        VarApp (Level lvl) spine -> VarApp (Level $ lvl + n) ((fmap . fmap) go spine)
+        UniVarApp uni spine -> UniVarApp uni ((fmap . fmap) go spine)
+        Fn fn stuck -> Fn (liftFunc fn) (liftStuck stuck)
+        Case stuck branches -> Case (liftStuck stuck) (fmap liftPatternClosure branches)
+
+    liftEnv ValueEnv{locals, ..} = ValueEnv{locals = fmap go locals, ..}
+    liftFunc PrimFunc{captured, ..} = PrimFunc{captured = fmap go captured, ..}
+
+    liftPatternClosure PatternClosure{body, env, ..} = PatternClosure{body = C.lift n body, env = liftEnv env, ..}

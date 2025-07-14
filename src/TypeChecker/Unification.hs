@@ -11,7 +11,7 @@ import LangPrelude hiding (force, lift)
 import Syntax.Core (CoreTerm)
 import Syntax.Core qualified as C
 import Syntax.Term (Quantifier (..), Visibility (..))
-import Syntax.Value as V
+import Syntax.Value as V hiding (lift)
 import TypeChecker.Backend hiding (ExType (..))
 
 -- passing around topLevel like this is a bit ugly, perhaps unify should just take a Context?
