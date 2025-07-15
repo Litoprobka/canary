@@ -54,7 +54,7 @@ desugar = \case
     E.VariantT row -> C.VariantT $ fmap go row
     E.RecordT row -> C.RecordT $ fmap go row
     E.UniVar uni -> C.UniVar uni
-    E.InsertedUniVar uni bds -> C.InsertedUniVar uni bds
+    E.AppPruning lhs pruning -> C.AppPruning (desugar lhs) pruning
   where
     go = desugar
     cons = C.Name $ ConsName :@ loc
@@ -96,7 +96,7 @@ resugar = \case
     C.VariantT row -> E.VariantT $ fmap resugar row
     C.RecordT row -> E.RecordT $ fmap resugar row
     C.UniVar uni -> E.UniVar uni
-    C.InsertedUniVar uni bds -> E.InsertedUniVar uni bds
+    C.AppPruning lhs pruning -> E.AppPruning (resugar lhs) pruning
   where
     resugarPattern = \case
         C.VarP name -> E.VarP name

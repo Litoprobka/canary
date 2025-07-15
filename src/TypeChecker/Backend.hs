@@ -34,6 +34,7 @@ data Context = Context
     { env :: ValueEnv
     , level :: Level
     , locals :: Locals
+    , pruning :: Pruning -- a mask that's used for fresh univars
     , types :: IdMap Name_ (Level, VType)
     }
 
@@ -43,7 +44,14 @@ data Locals
     | Define Name_ ~CoreType ~CoreTerm Locals
 
 emptyContext :: ValueEnv -> Context
-emptyContext env = Context{env, level = Level 0, types = Map.empty, locals = None}
+emptyContext env =
+    Context
+        { env
+        , level = Level 0
+        , types = Map.empty
+        , locals = None
+        , pruning = Pruning []
+        }
 
 type TC es = (Labeled UniVar NameGen :> es, NameGen :> es, Diagnose :> es, State UniVars :> es, Reader TopLevel :> es)
 
@@ -53,16 +61,23 @@ run types = runLabeled @UniVar runNameGen . runReader types . evalState @UniVars
 -- | insert a new UniVar applied to all bound variables in scope
 freshUniVar :: (Labeled UniVar NameGen :> es, State UniVars :> es) => Context -> VType -> Eff es CoreTerm
 freshUniVar ctx vty = do
-    uni <- Common.UniVar <$> labeled @UniVar @NameGen freshId
     env <- extendEnv ctx.env
-    let ty = evalCore env $ closeType ctx.locals (quote env.univars ctx.level vty)
+    let fullType = evalCore env $ closeType ctx.locals (quote env.univars ctx.level vty)
+    uni <- newUniVar fullType
+    pure $ C.AppPruning (C.UniVar uni) ctx.pruning
+
+newUniVar :: (Labeled UniVar NameGen :> es, State UniVars :> es) => VType -> Eff es UniVar
+newUniVar ty = do
+    uni <- Common.UniVar <$> labeled @UniVar @NameGen freshId
     modify @UniVars $ EMap.insert uni Unsolved{ty}
-    pure $ C.InsertedUniVar uni (boundsFromLocals ctx.locals)
-  where
-    boundsFromLocals = \case
-        None -> []
-        Bind _ _ rest -> C.Bound : boundsFromLocals rest
-        Define _ _ _ rest -> C.Defined : boundsFromLocals rest
+    pure uni
+
+typeOfUnsolvedUniVar :: (Diagnose :> es, State UniVars :> es) => UniVar -> Eff es VType
+typeOfUnsolvedUniVar uni =
+    gets (EMap.lookup uni) >>= \case
+        Just Unsolved{ty} -> pure ty
+        Just Solved{} -> internalError' "expected the univar to be unsolved"
+        Nothing -> internalError' "out of scope univar"
 
 -- | convert a list of local bindings to a top-level Pi type
 closeType :: Locals -> CoreType -> CoreType
@@ -92,6 +107,7 @@ bind univars name ty Context{env = V.ValueEnv{locals = vlocals, ..}, ..} =
         , env = V.ValueEnv{locals = V.Var level : vlocals, ..}
         , types = Map.insert name (level, ty) types
         , locals = Bind name (quote univars level ty) locals
+        , pruning = Pruning (Just Visible : pruning.getPruning) -- 'bind' should probably take a visibility argument
         }
 
 {- | bind a list of new vars, where the first var in the list is the most recently bound
@@ -107,6 +123,7 @@ define name val vval ty vty Context{env = V.ValueEnv{locals = vlocals, ..}, ..} 
         , env = V.ValueEnv{locals = vval : vlocals, ..}
         , types = Map.insert name (level, vty) types
         , locals = Define name ty val locals
+        , pruning = Pruning (Nothing : pruning.getPruning)
         }
 
 lookupSig :: TC es => Name -> Context -> Eff es (ETerm, VType)
@@ -202,5 +219,5 @@ removeUniVarsT lvl = go
             case EMap.lookup uni univars of
                 Just (Solved{solution}) -> pure $ resugar $ quote univars lvl solution
                 _ -> pure $ E.UniVar uni
-        E.InsertedUniVar _uni _bds -> do
-            internalError' "inserted univar, idk what to do"
+        E.AppPruning _uni _bds -> do
+            internalError' "pruning, idk what to do"

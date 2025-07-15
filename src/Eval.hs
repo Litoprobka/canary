@@ -18,6 +18,7 @@ module Eval (
     UniVars,
     UniVarState (..),
     app',
+    app,
     evalApp',
     force',
     ExtendedEnv (..),
@@ -134,18 +135,16 @@ evalCore env@ExtendedEnv{..} = \case
     C.VariantT row -> VariantT $ evalCore env <$> row
     C.RecordT row -> RecordT $ evalCore env <$> row
     C.UniVar uni -> force univars (UniVar uni)
-    C.InsertedUniVar uni bds -> appBDs env.locals (force univars $ UniVar uni) bds
+    C.AppPruning lhs pruning -> evalAppPruning env.locals (evalCore env lhs) pruning.getPruning
   where
     mkStuckBranches :: [(CorePattern, CoreTerm)] -> [PatternClosure ()]
     mkStuckBranches = map \(pat, body) -> PatternClosure{pat, ty = (), env = ValueEnv{..}, body}
 
-    -- apply a univar to all variables in scope, skipping those whose value is known
-    appBDs :: [Value] -> Value -> [C.BoundDefined] -> Value
-    appBDs = \cases
-        [] val [] -> val
-        (t : rest) val (C.Bound : bds) -> evalApp univars Visible (appBDs rest val bds) t
-        (_ : rest) val (C.Defined : bds) -> appBDs rest val bds
-        _ _ _ -> error "bound-defined / env mismatch"
+    evalAppPruning ls val pruning = case (ls, pruning) of
+        ([], []) -> val
+        (t : ls', Just vis : rest) -> evalApp env.univars vis (evalAppPruning ls' val rest) t
+        (_ : ls', Nothing : rest) -> evalAppPruning ls' val rest
+        _ -> error "pruning-env length mismatch"
 
 nf :: Level -> ExtendedEnv -> CoreTerm -> CoreTerm
 nf lvl env term = quote env.univars lvl $ evalCore env term

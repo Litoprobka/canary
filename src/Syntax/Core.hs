@@ -67,10 +67,11 @@ data CoreTerm
     | VariantT (ExtRow CoreType)
     | RecordT (ExtRow CoreType)
     | UniVar UniVar
-    | InsertedUniVar UniVar [BoundDefined]
+    | AppPruning CoreTerm Pruning
     deriving (Pretty) via (UnAnnotate CoreTerm)
 
-data BoundDefined = Bound | Defined deriving (Show) -- this will be superseded by pruning
+newtype Pruning = Pruning {getPruning :: [Maybe Visibility]}
+newtype ReversedPruning = ReversedPruning [Maybe Visibility]
 
 instance PrettyAnsi CoreTerm where
     prettyAnsi opts = go 0 []
@@ -107,7 +108,7 @@ instance PrettyAnsi CoreTerm where
             VariantT row -> prettyVariant (prettyAnsi opts) (go 0 env) row
             RecordT row -> prettyRecord ":" (prettyAnsi opts) (go 0 env) row
             UniVar uni -> prettyAnsi opts uni
-            InsertedUniVar uni _ -> "<" <> prettyAnsi opts uni <> ">"
+            AppPruning{} -> "<pruning, idk>"
           where
             parensWhen minPrec
                 | n >= minPrec = parens
@@ -174,7 +175,7 @@ coreTraversal recur = \case
     Literal lit -> pure $ Literal lit
     Variant name -> pure $ Variant name
     UniVar uni -> pure $ UniVar uni
-    InsertedUniVar uni bds -> pure $ InsertedUniVar uni bds
+    AppPruning lhs pruning -> pure $ AppPruning lhs pruning
 
 coreTraversalPure :: (CoreTerm -> CoreTerm) -> CoreTerm -> CoreTerm
 coreTraversalPure recur = runIdentity . coreTraversal (pure . recur)

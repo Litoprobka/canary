@@ -4,7 +4,7 @@ module Syntax.Elaborated where
 
 import Common
 import LangPrelude
-import Syntax.Core (BoundDefined)
+import Syntax.Core (Pruning)
 import Syntax.Row
 import Syntax.Term (Erasure, Quantifier, Visibility)
 
@@ -43,7 +43,7 @@ data ETerm
     | VariantT (ExtRow ETerm)
     | RecordT (ExtRow ETerm)
     | UniVar UniVar
-    | InsertedUniVar UniVar [BoundDefined]
+    | AppPruning ETerm Pruning
 
 data EPattern
     = VarP SimpleName_
