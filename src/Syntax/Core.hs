@@ -18,6 +18,7 @@ import Common (
     pattern L,
  )
 import Data.List ((!!))
+import Data.Vector qualified as Vec
 import LangPrelude
 import Prettyprinter
 import Prettyprinter.Render.Terminal (AnsiStyle)
@@ -52,8 +53,8 @@ type CoreType = CoreTerm
 data CoreTerm
     = Var Index
     | Name Name
-    | TyCon Name
-    | Con Name [CoreTerm] -- a fully-applied constructor. may only be produced by `quote`
+    | TyCon Name (Vector CoreTerm) -- a fully-applied type constructor
+    | Con Name (Vector CoreTerm) -- a fully-applied constructor. may only be produced by `quote`
     | Lambda Visibility SimpleName_ CoreTerm
     | App Visibility CoreTerm CoreTerm
     | Case CoreTerm [(CorePattern, CoreTerm)]
@@ -82,12 +83,13 @@ instance PrettyAnsi CoreTerm where
                 | index.getIndex >= length env || index.getIndex < 0 -> "#" <> pretty index.getIndex
                 | otherwise -> env !! index.getIndex
             Name name -> prettyAnsi opts name
-            TyCon name -> prettyAnsi opts name
-            Con (L ConsName) [x, Con (L NilName) []] -> brackets $ go 0 env x
-            Con (L ConsName) [x, xs] | Just output <- prettyConsNil xs -> brackets $ go 0 env x <> output
-            Con (L NilName) [] -> "[]"
-            Con name [] -> prettyAnsi opts name
-            Con name args -> parensWhen 3 $ hsep (prettyAnsi opts name : map (go 3 env) args)
+            TyCon name Nil -> prettyAnsi opts name
+            TyCon name args -> parensWhen 3 $ hsep (prettyAnsi opts name : map (go 3 env) (Vec.toList args))
+            Con (L ConsName) (x :< Con (L NilName) Nil :< Nil) -> brackets $ go 0 env x
+            Con (L ConsName) (x :< xs :< Nil) | Just output <- prettyConsNil xs -> brackets $ go 0 env x <> output
+            Con (L NilName) Nil -> "[]"
+            Con name Nil -> prettyAnsi opts name
+            Con name args -> parensWhen 3 $ hsep (prettyAnsi opts name : map (go 3 env) (Vec.toList args))
             lambda@Lambda{} -> parensWhen 1 $ specSym "λ" <> compressLambda env lambda
             App vis lhs rhs -> parensWhen 3 $ go 2 env lhs <+> withVis vis (go 3 env rhs)
             Record row -> prettyRecord "=" (prettyAnsi opts) (go 0 env) (NoExtRow row)
@@ -120,8 +122,8 @@ instance PrettyAnsi CoreTerm where
             kw Exists Retained = keyword "Σ"
 
             prettyConsNil = \case
-                Con (L ConsName) [x', xs'] -> (("," <+> go 0 env x') <>) <$> prettyConsNil xs'
-                Con (L NilName) [] -> Just ""
+                Con (L ConsName) (x' :< xs' :< Nil) -> (("," <+> go 0 env x') <>) <$> prettyConsNil xs'
+                Con (L NilName) Nil -> Just ""
                 _ -> Nothing
 
         compressLambda env term = case term of
@@ -137,7 +139,7 @@ instance PrettyAnsi CoreTerm where
                     prettyBinder env name ty <+> compressQ (prettyAnsi opts name : env) q vis e body
             other -> arrOrDot q vis <+> go 0 env other
 
-        prettyBinder _ name (TyCon (L TypeName)) = prettyAnsi opts name
+        prettyBinder _ name (TyCon (L TypeName) v) | Vec.null v = prettyAnsi opts name
         prettyBinder env name ty = parens $ prettyAnsi opts name <+> specSym ":" <+> go 0 env ty
 
         arrOrDot Forall Visible = specSym "->"
@@ -171,7 +173,7 @@ coreTraversal recur = \case
     Q q v e name ty body -> Q q v e name <$> recur ty <*> recur body
     Var index -> pure $ Var index
     Name name -> pure $ Name name
-    TyCon name -> pure $ TyCon name
+    TyCon name args -> TyCon name <$> traverse recur args
     Literal lit -> pure $ Literal lit
     Variant name -> pure $ Variant name
     UniVar uni -> pure $ UniVar uni
@@ -206,3 +208,12 @@ patternArity = go
         RecordP row -> length row
         SigmaP{} -> 2
         LiteralP{} -> 0
+
+-- invariant: the term must not contain unsolved univars in tail position
+functionTypeArity :: CoreTerm -> Int
+functionTypeArity = go 0
+  where
+    go !acc = \case
+        Q Forall _ _ _ _ body -> go (succ acc) body
+        UniVar{} -> error "functionTypeArity called on a term with unsolved univars"
+        _ -> acc

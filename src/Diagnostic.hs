@@ -82,7 +82,7 @@ runDiagnoseWith' baseDiagnostic =
         (Left fatalErrors, diagnostic) -> (Nothing, foldl' @[] addReport diagnostic fatalErrors)
         (Right val, diagnostic) -> (Just val, diagnostic)
 
--- apparently `withSync` catches internal exceptions that are used by the Error effect. meh.
+-- apparently `handleSync` catches internal exceptions that are used by the Error effect. meh.
 reportExceptions :: forall exc es a. (Diagnose :> es, Exception exc) => Eff es a -> Eff es a
 reportExceptions = handle @exc \exc -> fatal . one $ Err Nothing ("An exception has occured:" <+> pretty (displayException exc)) [] []
 

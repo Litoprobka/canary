@@ -1,17 +1,20 @@
 {-# LANGUAGE DuplicateRecordFields #-}
 {-# LANGUAGE RecordWildCards #-}
+{-# LANGUAGE ViewPatterns #-}
 {-# OPTIONS_GHC -Wno-partial-fields #-}
 
 module Syntax.Value where
 
 import Common (UniVar)
 import Common hiding (Skolem, UniVar)
+import Data.Vector qualified as Vec
 import LangPrelude
 import Syntax.Core (CorePattern, CoreTerm)
 import Syntax.Core qualified as C
 import Syntax.Row
 import Syntax.Term (Erasure (..), Quantifier (..), Visibility (Visible))
 
+-- Values probably shouldn't close over top level bindings
 data ValueEnv = ValueEnv
     { topLevel :: IdMap Name_ Value
     , locals :: [Value] -- accessed via de bruijn indexes
@@ -20,10 +23,10 @@ data ValueEnv = ValueEnv
 type VType = Value
 
 data Value
-    = -- | a type constructor. Unlike value constructors, they don't keep track of arity and may be applied to values
-      TyCon Name [Value]
+    = -- | a fully-applied type constructor
+      TyCon Name (Vector Value)
     | -- | a fully-applied counstructor
-      Con Name [Value]
+      Con Name (Vector Value)
     | Lambda Visibility (Closure ())
     | -- | an escape hatch for interpreter primitives and similar stuff
       PrimFunction PrimFunc
@@ -49,9 +52,9 @@ pattern UniVar uni <- Stuck (UniVarApp uni [])
         UniVar uni = Stuck (UniVarApp uni [])
 
 pattern Type :: Name -> Value
-pattern Type name <- TyCon name []
+pattern Type name <- TyCon name (Vec.null -> True)
     where
-        Type name = TyCon name []
+        Type name = TyCon name Vec.empty
 
 pattern Pi :: Closure VType -> Value
 pattern Pi closure <- Q Forall Visible Retained closure

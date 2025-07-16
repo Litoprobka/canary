@@ -82,7 +82,7 @@ resugar :: CoreTerm -> ETerm
 resugar = \case
     C.Var index -> E.Var index
     C.Name name -> E.Name name
-    C.TyCon name -> E.Name name
+    C.TyCon name args -> foldl' (E.App Visible) (E.Name name) (fmap resugar args)
     C.Con name args -> foldl' (E.App Visible) (E.Name name) (fmap resugar args)
     C.Lambda vis var body -> E.Lambda vis (E.VarP var) $ resugar body
     C.App vis lhs rhs -> E.App vis (resugar lhs) (resugar rhs)

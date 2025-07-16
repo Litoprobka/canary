@@ -4,12 +4,13 @@ module TypeChecker where
 
 import Common
 import Data.EnumMap.Lazy qualified as EMap
+import Data.Vector qualified as Vec
 import Desugar (desugar, resugar)
 import Diagnostic
 import Effectful.Labeled (Labeled, runLabeled)
 import Effectful.Reader.Static
 import Effectful.State.Static.Local (State, evalState, get, modify, runState)
-import Eval (ExtendedEnv (univars), UniVars, appM, eval, evalCore, forceM, quote)
+import Eval (ExtendedEnv (univars), UniVars, appM, eval, evalCore, forceM, mkTyCon, quote)
 import IdMap qualified as Map
 import LangPrelude
 import NameGen (NameGen, freshName, freshName_, runNameGen)
@@ -69,23 +70,30 @@ processDeclaration ctx (decl :@ loc) = case decl of
     D.GADT name mbKind constrs -> do
         -- we can probably infer the kind of a type from its constructors, but we don't do that for now
         kind <- withTopLevel $ maybe (pure $ V.Type (TypeName :@ getLoc name)) (typeFromTerm ctx) mbKind
+        univars <- get
+        let kindC = quote univars ctx.level kind
+            tyCon = mkTyCon kindC name
         modify @TopLevel $ Map.insert (unLoc name) kind
-        let newCtx = ctx{env = ctx.env{V.topLevel = Map.insert (unLoc name) (V.Type name) ctx.env.topLevel}}
+        let newCtx = ctx{env = ctx.env{V.topLevel = Map.insert (unLoc name) tyCon ctx.env.topLevel}}
         withTopLevel $ for_ constrs \con -> do
             conSig <- removeUniVars newCtx.level =<< typeFromTerm newCtx con.sig
             checkGadtConstructor ctx.level name con.name conSig
             modify @TopLevel $ Map.insert (unLoc con.name) conSig
         -- todo: add GADT constructors to the constructor table
-        pure (E.TypeD name (map (\con -> (con.name, argCount con.sig)) constrs), Map.insert (unLoc name) (V.Type name))
+        pure (E.TypeD name (map (\con -> (con.name, argCount con.sig)) constrs), Map.insert (unLoc name) tyCon)
     D.Type name binders constrs -> do
         kind <- withTopLevel $ removeUniVars ctx.level =<< typeFromTerm ctx (mkTypeKind binders)
+        univars <- get
+        let kindC = quote univars ctx.level kind
+            tyCon = mkTyCon kindC name
         modify $ Map.insert (unLoc name) kind
-        let newCtx = ctx{env = ctx.env{V.topLevel = Map.insert (unLoc name) (V.Type name) ctx.env.topLevel}}
+        let newCtx = ctx{env = ctx.env{V.topLevel = Map.insert (unLoc name) tyCon ctx.env.topLevel}}
         withTopLevel $ for_ (mkConstrSigs name binders constrs) \(con, sig) -> do
             sigV <- removeUniVars newCtx.level =<< typeFromTerm newCtx sig
             modify @TopLevel $ Map.insert (unLoc con) sigV
         -- _conMapEntry <- mkConstructorTableEntry (map (.var) binders) (map (\con -> (con.name, con.args)) constrs)
-        pure (E.TypeD name (map (\con -> (con.name, length con.args)) constrs), Map.insert (unLoc name) (V.Type name))
+        pure
+            (E.TypeD name (map (\con -> (con.name, length con.args + C.functionTypeArity kindC)) constrs), Map.insert (unLoc name) tyCon)
   where
     withTopLevel action = do
         topLevel <- get @TopLevel
@@ -118,7 +126,7 @@ processDeclaration ctx (decl :@ loc) = case decl of
       where
         go acc (L e) = case e of
             T.Function _ rhs -> go (succ acc) rhs
-            T.Q Forall Visible _ _ body -> go (succ acc) body
+            T.Q Forall _ _ _ body -> go (succ acc) body
             T.Q _ _ _ _ body -> go acc body
             _ -> acc
 
@@ -126,8 +134,8 @@ processDeclaration ctx (decl :@ loc) = case decl of
     checkGadtConstructor :: TC es => Level -> Name -> Name -> VType -> Eff es ()
     checkGadtConstructor lvl tyName con conTy = do
         univars <- get @UniVars
-        case unwrapApp (fnResult $ quote univars lvl conTy) of
-            (C.Name name, _)
+        case fnResult (quote univars lvl conTy) of
+            C.TyCon name _
                 | name /= tyName -> typeError $ ConstructorReturnType{con, expected = tyName, returned = name}
                 | otherwise -> pass
             _ -> internalError (getLoc con) "something weird in a GADT constructor type"
@@ -135,11 +143,6 @@ processDeclaration ctx (decl :@ loc) = case decl of
         fnResult = \case
             C.Q _ _ _ _ _ rhs -> fnResult rhs
             other -> other
-        unwrapApp = go []
-          where
-            go acc = \case
-                (C.App Visible lhs rhs) -> go (rhs : acc) lhs
-                other -> (other, acc)
 
 -- todo: this should also handle implicit pattern matches on existentials
 insertApp :: TC es => Context -> (ETerm, VType) -> Eff es (ETerm, VType)
@@ -345,7 +348,7 @@ inferPattern ctx (p :@ loc) = case p of
             -- [2, 1] [5, 4, 3] --> [5, 4, 3, 2, 1]
             -- our lists are actually snoc lists
             newLocals = fold . reverse $ map snd patsAndLocals
-            listType = V.TyCon (ListName :@ loc) [result]
+            listType = V.TyCon (ListName :@ loc) (Vec.singleton result)
         pure (E.ListP ePats, listType, newLocals)
     _ -> internalError loc "todo: non-trivial inferPattern"
   where

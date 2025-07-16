@@ -127,7 +127,7 @@ simplifyPatternTypeWith = \case
     V.Var{} -> pure $ const OpaqueTy
     V.TyCon name args -> do
         argFns <- traverse simplifyPatternTypeWith args
-        pure $ \env -> TyCon (unLoc name) $ map ($ env) argFns
+        pure $ \env -> TyCon (unLoc name) $ map ($ env) (toList argFns)
     -- todo: compress the rows wrt. solved univars
     V.VariantT row -> do
         fnRow <- traverse simplifyPatternTypeWith row

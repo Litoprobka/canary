@@ -27,6 +27,7 @@ import Common (
 
 import Data.EnumMap.Lazy qualified as EMap
 import Data.List ((!!))
+import Data.Vector qualified as Vec
 import Desugar (desugar)
 import Effectful.State.Static.Local (State, get)
 import IdMap qualified as LMap
@@ -61,7 +62,7 @@ quote :: UniVars -> Level -> Value -> CoreTerm
 quote univars = go
   where
     go lvl = \case
-        TyCon name args -> foldl' (C.App Visible) (C.TyCon name) $ fmap (quote univars lvl) args
+        TyCon name args -> C.TyCon name $ fmap (quote univars lvl) args
         Con con args -> C.Con con $ fmap (quote univars lvl) args
         Lambda vis closure -> C.Lambda vis closure.var $ quoteClosure univars lvl closure
         PrimFunction PrimFunc{name, captured} ->
@@ -97,8 +98,8 @@ evalCore env@ExtendedEnv{..} = \case
     -- note that env.topLevel is a lazy IdMap, so we only force the outer structure here
     C.Name name -> LMap.lookupDefault (error . show $ "unbound top-level name" <+> pretty name) (unLoc name) env.topLevel
     C.Var index -> env.locals !! index.getIndex
-    C.TyCon name -> Type name
-    C.Con name args -> Con name $ map (evalCore env) args
+    C.TyCon name args -> TyCon name $ fmap (evalCore env) args
+    C.Con name args -> Con name $ fmap (evalCore env) args
     C.Lambda vis var body -> Lambda vis $ Closure{var, ty = (), env = ValueEnv{..}, body}
     C.App _vis (C.Variant name) arg -> Variant name $ evalCore env arg -- this is a bit of an ugly case
     C.App vis lhs rhs -> evalApp univars vis (evalCore env lhs) (evalCore env rhs)
@@ -142,8 +143,6 @@ evalApp :: UniVars -> Visibility -> Value -> Value -> Value
 evalApp univars vis = \cases
     (Lambda vis2 closure) arg | vis == vis2 -> app univars closure arg
     (Lambda vis2 _) _ -> error $ "visibility mismatch " <> show vis <> " != " <> show vis2
-    -- this is slightly janky, but I'm not sure whether I want to represent type constructors as lambdas yet
-    (TyCon name args) arg -> TyCon name (args <> [arg])
     (PrimFunction fn) (Stuck stuck) -> Stuck $ Fn fn stuck
     (PrimFunction PrimFunc{remaining = 1, captured, f}) arg -> f (arg :| captured)
     (PrimFunction PrimFunc{name, remaining, captured, f}) arg -> PrimFunction PrimFunc{name, remaining = pred remaining, captured = arg : captured, f}
@@ -193,7 +192,7 @@ matchCore ExtendedEnv{..} = \cases
     (C.ConstructorP pname _) (Con name args)
         | pname == name ->
             -- since locals is a SnocList, we have to reverse args before appending
-            Just ExtendedEnv{locals = reverse args <> locals, ..}
+            Just ExtendedEnv{locals = reverse (toList args) <> locals, ..}
     (C.VariantP pname _) (Variant name val)
         | pname == name -> Just ExtendedEnv{locals = val : locals, ..}
     (C.RecordP _varRow) (Record _row) -> error "todo: row matching (must preserve original field order)"
@@ -230,13 +229,16 @@ modifyEnv ValueEnv{..} decls = do
         D.TypeD _ constrs -> pure $ fmap mkConstr constrs
         D.SignatureD{} -> pure mempty
 
-    mkConstr (name, count) = (unLoc name, Left $ mkConLambda count name)
+    mkConstr (name, count) = (unLoc name, Left $ mkConLambda count (C.Con name))
 
 -- todo: [Visibility] -> Name -> Value
-mkConLambda :: Int -> Name -> Value
+mkConLambda :: Int -> (Vector CoreTerm -> CoreTerm) -> Value
 mkConLambda n con = evalCore emptyEnv lambdas
   where
     names = fmap (\i -> Name' $ "x" <> show i) [1 .. n]
     lambdas = foldr (C.Lambda Visible) body names
-    body = C.Con con $ map (C.Var . Index) [n - 1, n - 2 .. 0]
+    body = con $ Vec.fromListN n $ map (C.Var . Index) [n - 1, n - 2 .. 0]
     emptyEnv = ExtendedEnv{univars = EMap.empty, topLevel = LMap.empty, locals = []}
+
+mkTyCon :: CoreType -> Name -> Value
+mkTyCon ty name = mkConLambda (C.functionTypeArity ty) (C.TyCon name)

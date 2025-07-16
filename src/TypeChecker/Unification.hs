@@ -6,6 +6,7 @@ module TypeChecker.Unification (unify) where
 import Common
 import Data.EnumMap.Strict qualified as EMap
 import Data.EnumSet qualified as ESet
+import Data.Vector qualified as Vec
 import Diagnostic (internalError')
 import Effectful.Error.Static (Error, runErrorNoCallStack, throwError)
 import Effectful.Reader.Static (Reader, asks, runReader)
@@ -60,7 +61,8 @@ unify' lvl lhsTy rhsTy = do
             lhsBody <- lhsClosure `appM` Var lvl
             rhsBody <- evalAppM vis nonLambda (Var lvl)
             unify' (succ lvl) lhsBody rhsBody
-        (TyCon lhs lhsArgs) (TyCon rhs rhsArgs) | lhs == rhs -> zipWithM_ (unify' lvl) lhsArgs rhsArgs
+        (TyCon lhs lhsArgs) (TyCon rhs rhsArgs) | lhs == rhs -> Vec.zipWithM_ (unify' lvl) lhsArgs rhsArgs
+        (Con lhs lhsArgs) (Con rhs rhsArgs) | lhs == rhs -> Vec.zipWithM_ (unify' lvl) lhsArgs rhsArgs
         (Q Forall v _e closure) (Q Forall v2 _e2 closure2) | v == v2 -> do
             unify' lvl closure.ty closure2.ty
             body <- closure `appM` Var lvl

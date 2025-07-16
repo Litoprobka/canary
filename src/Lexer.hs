@@ -13,7 +13,6 @@ import Control.Monad.Combinators qualified as P
 import Data.Char (isLetter, isSpace, isUpperCase)
 import Data.List.NonEmpty qualified as NE
 import Data.Text qualified as Text
-import Data.Vector (Vector)
 import Data.Vector qualified as V
 import Diagnostic
 import Error.Diagnose (Position (..))
