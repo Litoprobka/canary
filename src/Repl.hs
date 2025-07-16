@@ -27,7 +27,7 @@ import DependencyResolution (FixityMap, Op (..), SimpleOutput (..), cast, resolv
 import Diagnostic (Diagnose, fatal, guardNoErrors, reportExceptions, runDiagnoseWith)
 import Effectful
 import Error.Diagnose (Diagnostic, Position (..), Report (..), addFile)
-import Eval (ValueEnv (..), eval, modifyEnv)
+import Eval (eval, modifyEnv)
 import Eval qualified as V
 import Fixity qualified (parse, resolveFixity, run)
 import FlatParse.Stateful qualified as FP
@@ -47,6 +47,8 @@ import Syntax
 import Syntax.AstTraversal
 import Syntax.Declaration qualified as D
 import Syntax.Term
+import Syntax.Value (ValueEnv (..))
+import Syntax.Value qualified as V
 import System.Console.Isocline
 import TypeChecker qualified as TC
 import TypeChecker.Backend (Context (..), emptyContext)

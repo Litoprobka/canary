@@ -7,23 +7,7 @@
 {-# OPTIONS_GHC -Wno-orphans #-}
 {-# OPTIONS_GHC -Wno-partial-fields #-}
 
-module Eval (
-    evalCore,
-    quote,
-    quoteClosure,
-    module Reexport,
-    force,
-    eval,
-    modifyEnv,
-    UniVars,
-    UniVarState (..),
-    app',
-    app,
-    evalApp',
-    force',
-    ExtendedEnv (..),
-    nf,
-) where
+module Eval where
 
 import Common (
     Index (..),
@@ -149,8 +133,8 @@ evalCore env@ExtendedEnv{..} = \case
 nf :: Level -> ExtendedEnv -> CoreTerm -> CoreTerm
 nf lvl env term = quote env.univars lvl $ evalCore env term
 
-evalApp' :: State UniVars :> es => Visibility -> Value -> Value -> Eff es Value
-evalApp' vis lhs rhs = do
+evalAppM :: State UniVars :> es => Visibility -> Value -> Value -> Eff es Value
+evalAppM vis lhs rhs = do
     univars <- get @UniVars
     pure $ evalApp univars vis lhs rhs
 
@@ -167,8 +151,8 @@ evalApp univars vis = \cases
     (Stuck (UniVarApp uni spine)) arg -> Stuck $ UniVarApp uni ((vis, arg) : spine)
     nonFunc arg -> error . show $ "attempted to apply" <+> pretty nonFunc <+> "to" <+> pretty arg
 
-force' :: State UniVars :> es => Value -> Eff es Value
-force' val = do
+forceM :: State UniVars :> es => Value -> Eff es Value
+forceM val = do
     univars <- get @UniVars
     pure $ force univars val
 
@@ -193,8 +177,8 @@ force !univars = \case
 app :: UniVars -> Closure ty -> Value -> Value
 app univars Closure{env = ValueEnv{..}, body} arg = evalCore (ExtendedEnv{locals = arg : locals, ..}) body
 
-app' :: State UniVars :> es => Closure ty -> Value -> Eff es Value
-app' closure arg = do
+appM :: State UniVars :> es => Closure ty -> Value -> Eff es Value
+appM closure arg = do
     univars <- get @UniVars
     pure $ app univars closure arg
 

@@ -8,7 +8,6 @@ import LangPrelude
 import Common
 import Diagnostic
 import Error.Diagnose (Position (..))
-import Eval (ValueEnv (..))
 import IdMap qualified as Map
 import NameGen (runNameGen)
 import NameResolution
@@ -18,6 +17,7 @@ import Prettyprinter
 import Prettyprinter.Render.Terminal (putDoc)
 import Repl (ReplEnv (..))
 import Repl qualified
+import Syntax.Value (ValueEnv (..))
 import System.Console.Isocline (setHistory)
 import System.Directory
 

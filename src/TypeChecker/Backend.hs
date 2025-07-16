@@ -11,7 +11,7 @@ import Diagnostic (Diagnose, internalError')
 import Effectful.Labeled (Labeled, labeled, runLabeled)
 import Effectful.Reader.Static
 import Effectful.State.Static.Local
-import Eval (ExtendedEnv (..), UniVarState (..), UniVars, app', captured, evalCore, force', quote)
+import Eval (ExtendedEnv (..), UniVarState (..), UniVars, appM, evalCore, forceM, quote)
 import IdMap qualified as Map
 import LangPrelude
 import NameGen (NameGen, freshId, runNameGen)
@@ -145,23 +145,23 @@ removeUniVars :: TC es => Level -> Value -> Eff es Value
 removeUniVars lvl = go
   where
     go =
-        force' >=> \case
+        forceM >=> \case
             V.TyCon name args -> V.TyCon name <$> traverse go args
             V.Con name args -> V.Con name <$> traverse go args
             V.Lambda vis closure@V.Closure{var, env} -> do
-                newBody <- removeUniVars (succ lvl) =<< closure `app'` V.Var lvl
+                newBody <- removeUniVars (succ lvl) =<< closure `appM` V.Var lvl
                 univars <- get @UniVars
                 pure $ V.Lambda vis V.Closure{var, ty = (), env, body = quote univars (succ lvl) newBody}
             V.PrimFunction fn -> do
                 captured <- traverse go fn.captured
-                pure $ V.PrimFunction fn{captured}
+                pure $ V.PrimFunction fn{V.captured}
             V.Record row -> V.Record <$> traverse go row
             V.Variant name arg -> V.Variant name <$> go arg
             V.Sigma lhs rhs -> V.Sigma <$> go lhs <*> go rhs
             V.PrimValue lit -> pure $ V.PrimValue lit
             V.Q q v e closure@V.Closure{var, env} -> do
                 ty <- go closure.ty
-                newBody <- removeUniVars (succ lvl) =<< closure `app'` V.Var lvl
+                newBody <- removeUniVars (succ lvl) =<< closure `appM` V.Var lvl
                 univars <- get @UniVars
                 pure $ V.Q q v e V.Closure{var, ty, env, body = quote univars (succ lvl) newBody}
             V.RecordT row -> V.RecordT <$> traverse go row
@@ -175,7 +175,7 @@ removeUniVars lvl = go
         uniApp@V.UniVarApp{} -> pure uniApp
         V.Fn fn arg -> do
             captured <- traverse go fn.captured
-            V.Fn fn{captured} <$> goStuck arg
+            V.Fn fn{V.captured} <$> goStuck arg
         V.Case _arg _matches -> internalError' "todo: remove univars from stuck case" -- V.Case <$> goStuck arg <*> _ matches
 
 {- | remove left-over univars from an eterm

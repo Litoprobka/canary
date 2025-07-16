@@ -18,13 +18,13 @@ import Diagnostic
 import Effectful.State.Static.Local (State, get)
 import Error.Diagnose (Note (..), Report (..))
 import Error.Diagnose qualified as M
-import Eval (UniVarState (..), UniVars, VType)
+import Eval (UniVarState (..), UniVars)
 import IdMap qualified as Map
 import LangPrelude
 import Prettyprinter (hsep, parens, vsep)
-import Syntax.Elaborated (EPattern)
+import Syntax hiding (Pattern)
 import Syntax.Elaborated qualified as E
-import Syntax.Row (ExtRow (..), OpenName, Row, prettyRecord)
+import Syntax.Row (ExtRow (..), OpenName, prettyRecord)
 import Syntax.Row qualified as Row
 import Syntax.Value qualified as V
 import TypeChecker.Backend hiding (Locals (..))

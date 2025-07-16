@@ -9,7 +9,7 @@ import Diagnostic
 import Effectful.Labeled (Labeled, runLabeled)
 import Effectful.Reader.Static
 import Effectful.State.Static.Local (State, evalState, get, modify, runState)
-import Eval (ExtendedEnv (univars), UniVars, app', eval, evalCore, force', quote)
+import Eval (ExtendedEnv (univars), UniVars, appM, eval, evalCore, forceM, quote)
 import IdMap qualified as Map
 import LangPrelude
 import NameGen (NameGen, freshName, freshName_, runNameGen)
@@ -146,12 +146,12 @@ insertApp :: TC es => Context -> (ETerm, VType) -> Eff es (ETerm, VType)
 insertApp ctx = go
   where
     go (term, ty) =
-        force' ty >>= \case
+        forceM ty >>= \case
             V.Q Forall vis _e closure | vis /= Visible -> do
                 arg <- freshUniVar ctx closure.ty
                 env <- extendEnv ctx.env
                 let argV = evalCore env arg
-                innerTy <- closure `app'` argV
+                innerTy <- closure `appM` argV
                 go (E.App vis term (resugar arg), innerTy)
             ty' -> pure (term, ty')
 
@@ -162,11 +162,11 @@ insertNeutralApp ctx (term, ty) = case term of
 
 check :: TC es => Context -> Term 'Fixity -> VType -> Eff es ETerm
 check ctx (t :@ loc) ty = do
-    ty' <- force' ty
+    ty' <- forceM ty
     univars <- get
     case (t, ty') of
         (T.Lambda vis (L (T.VarP arg)) body, V.Q Forall qvis _e closure) | vis == qvis -> do
-            bodyTy <- closure `app'` V.Var ctx.level
+            bodyTy <- closure `appM` V.Var ctx.level
             eBody <- check (bind univars (unLoc arg) closure.ty ctx) body bodyTy
             pure $ E.Lambda vis (E.VarP (toSimpleName_ $ unLoc arg)) eBody
         -- we can check against a dependent type, but I'm not sure how
@@ -178,7 +178,7 @@ check ctx (t :@ loc) ty = do
         -- insert implicit / hidden lambda
         (_, V.Q Forall vis _e closure) | vis /= Visible -> do
             x <- freshName_ closure.var
-            closureBody <- closure `app'` V.Var ctx.level
+            closureBody <- closure `appM` V.Var ctx.level
             eBody <- check (bind univars x closure.ty ctx) (t :@ loc) closureBody
             pure $ E.Lambda vis (E.VarP closure.var) eBody
         (other, expected) -> do
@@ -187,7 +187,7 @@ check ctx (t :@ loc) ty = do
             -- however, there's a degenerate case where we are checking against a univar and inferring solves it to a polytype
             -- can that ever happen? I'm not sure
             (eTerm, inferred) <- insertNeutralApp ctx =<< infer ctx (other :@ loc)
-            unify ctx.env.topLevel ctx.level inferred expected
+            unify ctx inferred expected
             pure eTerm
 
 infer :: TC es => Context -> Term 'Fixity -> Eff es (ETerm, VType)
@@ -207,7 +207,7 @@ infer ctx (t :@ loc) = case t of
             Visible -> insertApp ctx =<< infer ctx lhs
             _ -> infer ctx lhs
         closure <-
-            force' lhsTy >>= \case
+            forceM lhsTy >>= \case
                 V.Q Forall vis2 _e closure | vis == vis2 -> pure closure
                 V.Q Forall vis2 _e _ -> internalError loc $ "visibility mismatch" <+> pretty (show @Text vis) <+> "!=" <+> pretty (show @Text vis2)
                 other -> do
@@ -215,11 +215,11 @@ infer ctx (t :@ loc) = case t of
                     univars <- get
                     x <- freshName_ (Name' "x")
                     closure <- V.Closure (toSimpleName_ x) argTy ctx.env <$> freshUniVar (bind univars x argTy ctx) argTy
-                    unify ctx.env.topLevel ctx.level (V.Q Forall vis Retained closure) other
+                    unify ctx (V.Q Forall vis Retained closure) other
                     pure closure
         eRhs <- check ctx rhs closure.ty
         env <- extendEnv ctx.env
-        resultTy <- closure `app'` eval env eRhs
+        resultTy <- closure `appM` eval env eRhs
         pure (E.App vis eLhs eRhs, resultTy)
     T.Lambda vis (T.WildcardP txt :@ patLoc) body -> do
         name <- freshName $ Name' txt :@ patLoc
@@ -256,7 +256,7 @@ infer ctx (t :@ loc) = case t of
         eCond <- check ctx cond $ V.Type (BoolName :@ loc)
         (eTrue, trueTy) <- infer ctx true
         (eFalse, falseTy) <- infer ctx false
-        unify ctx.env.topLevel ctx.level trueTy falseTy
+        unify ctx trueTy falseTy
         pure (E.If eCond eTrue eFalse, trueTy)
     T.Variant con -> do
         payloadTy <- freshUniVarV ctx type_
@@ -321,8 +321,7 @@ checkPattern ctx (pat :@ pLoc) ty = case pat of
       where
         fallthroughToInfer = do
             (ePat, inferred, newLocals) <- inferPattern ctx $ pat :@ pLoc
-            topLevel <- ask
-            unify topLevel ctx.level inferred ty
+            unify ctx inferred ty
             pure (ePat, newLocals)
 
 inferPattern :: TC es => Context -> Pattern 'Fixity -> Eff es (EPattern, VType, [(Name_, VType)])
