@@ -53,8 +53,13 @@ type CoreType = CoreTerm
 data CoreTerm
     = Var Index
     | Name Name
-    | TyCon Name (Vector CoreTerm) -- a fully-applied type constructor
-    | Con Name (Vector CoreTerm) -- a fully-applied constructor. may only be produced by `quote`
+    | -- TyCon and Con are treated more or less the same way everywhere
+      -- it could have made sense to merge them, except an optimised representation of Con
+      -- would probably store a constructor tag (e.g. 0 for False, 1 for True) instead of a global name
+      -- I guess, for now it's easier to keep the redundant TyCon
+      TyCon Name (Vector CoreTerm)
+    | Con Name (Vector CoreTerm)
+    | Variant OpenName CoreTerm
     | Lambda Visibility SimpleName_ CoreTerm
     | App Visibility CoreTerm CoreTerm
     | Case CoreTerm [(CorePattern, CoreTerm)]
@@ -62,7 +67,6 @@ data CoreTerm
     | Literal Literal
     | Record (Row CoreTerm)
     | Sigma CoreTerm CoreTerm
-    | Variant OpenName
     | -- types
       Q Quantifier Visibility Erasure SimpleName_ CoreType CoreTerm
     | VariantT (ExtRow CoreType)
@@ -94,7 +98,7 @@ instance PrettyAnsi CoreTerm where
             App vis lhs rhs -> parensWhen 3 $ go 2 env lhs <+> withVis vis (go 3 env rhs)
             Record row -> prettyRecord "=" (prettyAnsi opts) (go 0 env) (NoExtRow row)
             Sigma x y -> parensWhen 1 $ go 0 env x <+> specSym "**" <+> go 0 env y
-            Variant name -> prettyAnsi opts name
+            Variant name arg -> parensWhen 3 $ prettyAnsi opts name <+> go 3 env arg
             Case arg matches ->
                 nest
                     4
@@ -162,6 +166,8 @@ occurs var = getAny . getConst . go 0
 coreTraversal :: Applicative f => (CoreTerm -> f CoreTerm) -> CoreTerm -> f CoreTerm
 coreTraversal recur = \case
     Con name args -> Con name <$> traverse recur args
+    TyCon name args -> TyCon name <$> traverse recur args
+    Variant name arg -> Variant name <$> recur arg
     Lambda vis var body -> Lambda vis var <$> recur body
     App vis lhs rhs -> App vis <$> recur lhs <*> recur rhs
     Case arg matches -> Case <$> recur arg <*> (traverse . traverse) recur matches
@@ -173,9 +179,7 @@ coreTraversal recur = \case
     Q q v e name ty body -> Q q v e name <$> recur ty <*> recur body
     Var index -> pure $ Var index
     Name name -> pure $ Name name
-    TyCon name args -> TyCon name <$> traverse recur args
     Literal lit -> pure $ Literal lit
-    Variant name -> pure $ Variant name
     UniVar uni -> pure $ UniVar uni
     AppPruning lhs pruning -> pure $ AppPruning lhs pruning
 

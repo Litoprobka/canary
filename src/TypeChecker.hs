@@ -205,6 +205,13 @@ infer ctx (t :@ loc) = case t of
             IntLiteral{} -> IntName
             TextLiteral{} -> TextName
             CharLiteral{} -> CharName
+    -- this is case is redundant (inferring a function type and then checking an immediate application works just fine),
+    -- but since variants are guaranteed to have exactly one argument, checking it right away feels cleaner
+    T.App Visible (L (T.Variant con)) payload -> do
+        (ePayload, payloadTy) <- infer ctx payload
+        rowExt <- freshUniVarV ctx type_
+        let ty = V.VariantT $ ExtRow (fromList [(con, payloadTy)]) rowExt
+        pure (E.App Visible (E.Variant con) ePayload, ty)
     T.App vis lhs rhs -> do
         (eLhs, lhsTy) <- case vis of
             Visible -> insertApp ctx =<< infer ctx lhs

@@ -38,7 +38,7 @@ desugar = \case
             [ (C.ConstructorP (TrueName :@ loc) [], go true)
             , (C.WildcardP "", go false)
             ]
-    E.Variant name -> C.Variant name
+    E.Variant name -> C.Lambda Visible (Name' "x") $ C.Variant name (C.Var $ Index 0)
     E.Record fields -> C.Record $ fmap go fields
     E.RecordAccess record field ->
         let arg = go record
@@ -84,6 +84,7 @@ resugar = \case
     C.Name name -> E.Name name
     C.TyCon name args -> foldl' (E.App Visible) (E.Name name) (fmap resugar args)
     C.Con name args -> foldl' (E.App Visible) (E.Name name) (fmap resugar args)
+    C.Variant name arg -> E.App Visible (E.Variant name) (resugar arg)
     C.Lambda vis var body -> E.Lambda vis (E.VarP var) $ resugar body
     C.App vis lhs rhs -> E.App vis (resugar lhs) (resugar rhs)
     C.Case arg matches -> E.Case (resugar arg) $ fmap (bimap resugarPattern resugar) matches
@@ -91,7 +92,6 @@ resugar = \case
     C.Literal lit -> E.Literal lit
     C.Record row -> E.Record (fmap resugar row)
     C.Sigma lhs rhs -> E.Sigma (resugar lhs) (resugar rhs)
-    C.Variant name -> E.Variant name
     C.Q q v e var ty body -> E.Q q v e (var ::: resugar ty) (resugar body)
     C.VariantT row -> E.VariantT $ fmap resugar row
     C.RecordT row -> E.RecordT $ fmap resugar row

@@ -70,7 +70,7 @@ quote univars = go
             foldr (\arg acc -> C.App Visible acc (go lvl arg)) (C.Name name) captured
         Record vals -> C.Record $ fmap (go lvl) vals
         Sigma x y -> C.Sigma (go lvl x) (go lvl y)
-        Variant name val -> C.App Visible (C.Variant name) (go lvl val)
+        Variant name val -> C.Variant name (go lvl val)
         PrimValue lit -> C.Literal lit
         Q q v e closure -> C.Q q v e closure.var (go lvl closure.ty) $ quoteClosure univars lvl closure
         VariantT row -> C.VariantT $ fmap (go lvl) row
@@ -100,8 +100,8 @@ evalCore env@ExtendedEnv{..} = \case
     C.Var index -> env.locals !! index.getIndex
     C.TyCon name args -> TyCon name $ fmap (evalCore env) args
     C.Con name args -> Con name $ fmap (evalCore env) args
+    C.Variant name arg -> Variant name (evalCore env arg)
     C.Lambda vis var body -> Lambda vis $ Closure{var, ty = (), env = ValueEnv{..}, body}
-    C.App _vis (C.Variant name) arg -> Variant name $ evalCore env arg -- this is a bit of an ugly case
     C.App vis lhs rhs -> evalApp univars vis (evalCore env lhs) (evalCore env rhs)
     C.Case arg matches -> case evalCore env arg of
         Stuck stuck -> Stuck $ Case stuck (mkStuckBranches matches)
@@ -114,8 +114,6 @@ evalCore env@ExtendedEnv{..} = \case
     C.Literal lit -> PrimValue lit
     C.Record row -> Record $ evalCore env <$> row
     C.Sigma x y -> Sigma (evalCore env x) (evalCore env y)
-    C.Variant name ->
-        Lambda Visible $ Closure{var = Name' "x", ty = (), env = ValueEnv{..}, body = C.App Visible (C.Variant name) (C.Var (Index 0))}
     C.Q q vis e var ty body -> Q q vis e $ Closure{var, ty = evalCore env ty, env = ValueEnv{..}, body}
     C.VariantT row -> VariantT $ evalCore env <$> row
     C.RecordT row -> RecordT $ evalCore env <$> row

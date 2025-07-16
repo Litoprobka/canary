@@ -216,6 +216,7 @@ rename = go
                 C.Q q v e closure.var argTy <$> go (lift pren) bodyToRename
             TyCon name args -> foldl' (C.App Visible) (C.Name name) <$> traverse (go pren) args
             Con name args -> foldl' (C.App Visible) (C.Name name) <$> traverse (go pren) args
+            Variant name arg -> C.Variant name <$> go pren arg
             PrimFunction fn -> do
                 captured <- traverse (go pren) fn.captured
                 pure $ foldr (flip $ C.App Visible) (C.Name fn.name) captured
@@ -224,7 +225,6 @@ rename = go
             VariantT row -> C.VariantT <$> traverse (go pren) row
             Sigma x y -> C.Sigma <$> go pren x <*> go pren y
             PrimValue lit -> pure $ C.Literal lit
-            Variant name arg -> C.App Visible (C.Variant name) <$> go pren arg
             Stuck (Fn fn stuck) -> C.App Visible <$> go pren (PrimFunction fn) <*> go pren (Stuck stuck)
             Stuck Case{} -> error "todo: rename stuck case"
 
