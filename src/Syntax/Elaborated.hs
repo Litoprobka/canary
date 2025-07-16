@@ -4,7 +4,7 @@ module Syntax.Elaborated where
 
 import Common
 import LangPrelude
-import Syntax.Core (Pruning)
+import Syntax.Core (CoreTerm)
 import Syntax.Row
 import Syntax.Term (Erasure, Quantifier, Visibility)
 
@@ -42,8 +42,10 @@ data ETerm
     | Q Quantifier Visibility Erasure (Typed SimpleName_) ETerm
     | VariantT (ExtRow ETerm)
     | RecordT (ExtRow ETerm)
-    | UniVar UniVar
-    | AppPruning ETerm Pruning
+    | -- when inserting implicit applications, the inferred arg is usually already a CoreTerm
+      -- the old solution was a 'resugar' function that transformed core term back into elaborated terms,
+      -- but it makes more sense to just keep inserted core as is
+      Core CoreTerm
 
 data EPattern
     = VarP SimpleName_

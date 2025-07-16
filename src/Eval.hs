@@ -21,6 +21,7 @@ import Common (
     levelToIndex,
     prettyDef,
     unLoc,
+    pattern L,
  )
 
 -- IdMap is currently lazy anyway, but it's up to change
@@ -187,7 +188,7 @@ matchCore :: ExtendedEnv -> CorePattern -> Value -> Maybe ExtendedEnv
 matchCore ExtendedEnv{..} = \cases
     C.VarP{} val -> Just $ ExtendedEnv{locals = val : locals, ..}
     C.WildcardP{} val -> Just ExtendedEnv{locals = val : locals, ..}
-    (C.ConstructorP pname _) (Con name args)
+    (C.ConstructorP pname _) (Con (L name) args)
         | pname == name ->
             -- since locals is a SnocList, we have to reverse args before appending
             Just ExtendedEnv{locals = reverse (toList args) <> locals, ..}

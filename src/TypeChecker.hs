@@ -5,7 +5,7 @@ module TypeChecker where
 import Common
 import Data.EnumMap.Lazy qualified as EMap
 import Data.Vector qualified as Vec
-import Desugar (desugar, resugar)
+import Desugar (desugar)
 import Diagnostic
 import Effectful.Labeled (Labeled, runLabeled)
 import Effectful.Reader.Static
@@ -41,7 +41,7 @@ processDeclaration ctx (decl :@ loc) = case decl of
     D.Signature name sig -> do
         sigV <- withTopLevel $ removeUniVars ctx.level =<< typeFromTerm ctx sig
         univars <- get @UniVars
-        let eSig = resugar $ quote univars ctx.level sigV
+        let eSig = E.Core $ quote univars ctx.level sigV
         modify @TopLevel $ Map.insert (unLoc name) sigV
         pure (E.SignatureD name eSig, id)
     D.Value binding (_ : _) -> internalError (getLoc binding) "todo: proper support for where clauses"
@@ -155,7 +155,7 @@ insertApp ctx = go
                 env <- extendEnv ctx.env
                 let argV = evalCore env arg
                 innerTy <- closure `appM` argV
-                go (E.App vis term (resugar arg), innerTy)
+                go (E.App vis term (E.Core arg), innerTy)
             ty' -> pure (term, ty')
 
 insertNeutralApp :: TC es => Context -> (ETerm, VType) -> Eff es (ETerm, VType)
@@ -306,7 +306,7 @@ infer ctx (t :@ loc) = case t of
         eTo <- check (bind univars x (eval env eFrom) ctx) to type_
         pure (E.Q Forall Visible Retained (toSimpleName_ x ::: eFrom) eTo, type_)
     T.Q q v e binder body -> do
-        eTy <- maybe (resugar <$> freshUniVar ctx type_) (\term -> check ctx term type_) binder.kind
+        eTy <- maybe (E.Core <$> freshUniVar ctx type_) (\term -> check ctx term type_) binder.kind
         env <- extendEnv ctx.env
         univars <- get
         eBody <- check (bind univars (unLoc binder.var) (eval env eTy) ctx) body type_

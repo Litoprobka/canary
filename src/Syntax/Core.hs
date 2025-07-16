@@ -28,7 +28,7 @@ import Syntax.Term (Erasure (..), Quantifier (..), Visibility (..), withVis)
 data CorePattern
     = VarP SimpleName_
     | WildcardP Text
-    | ConstructorP Name [SimpleName_]
+    | ConstructorP Name_ [SimpleName_]
     | VariantP OpenName SimpleName_
     | RecordP (Row SimpleName_)
     | SigmaP SimpleName_ SimpleName_

@@ -6,7 +6,6 @@ module TypeChecker.Backend where
 
 import Common
 import Data.EnumMap.Strict qualified as EMap
-import Desugar (resugar)
 import Diagnostic (Diagnose, internalError')
 import Effectful.Labeled (Labeled, labeled, runLabeled)
 import Effectful.Reader.Static
@@ -214,10 +213,4 @@ removeUniVarsT lvl = go
             pure $ E.Q q v e (var ::: ty') body'
         E.VariantT row -> E.VariantT <$> traverse go row
         E.RecordT row -> E.RecordT <$> traverse go row
-        E.UniVar uni -> do
-            univars <- get @UniVars
-            case EMap.lookup uni univars of
-                Just (Solved{solution}) -> pure $ resugar $ quote univars lvl solution
-                _ -> pure $ E.UniVar uni
-        E.AppPruning _uni _bds -> do
-            internalError' "pruning, idk what to do"
+        E.Core _coreTerm -> internalError' "removeUniVarsT: todo: inserted core term - should probably call removeUniVars"
