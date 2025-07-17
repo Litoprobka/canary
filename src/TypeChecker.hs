@@ -3,14 +3,15 @@
 module TypeChecker where
 
 import Common
+import Data.DList (DList)
+import Data.DList qualified as DList
 import Data.EnumMap.Lazy qualified as EMap
-import Data.Vector qualified as Vec
 import Desugar (desugar)
 import Diagnostic
 import Effectful.Labeled (Labeled, runLabeled)
 import Effectful.Reader.Static
 import Effectful.State.Static.Local (State, evalState, get, modify, runState)
-import Eval (ExtendedEnv (univars), UniVars, appM, eval, evalCore, forceM, mkTyCon, quote)
+import Eval (ExtendedEnv (univars), UniVars, app, appM, eval, evalCore, forceM, mkTyCon, quote)
 import IdMap qualified as Map
 import LangPrelude
 import NameGen (NameGen, freshName, freshName_, runNameGen)
@@ -184,6 +185,12 @@ check ctx (t :@ loc) ty = localLoc loc do
             closureBody <- closure `appM` V.Var ctx.level
             eBody <- check (bind univars x closure.ty ctx) (t :@ loc) closureBody
             pure $ E.Lambda vis (E.VarP closure.var) eBody
+        (T.Case arg branches, result) -> do
+            (eArg, argTy) <- infer ctx arg
+            eBranches <- for branches \(pat, body) -> do
+                ((ePat, _), ctx) <- checkPattern ctx pat argTy
+                (ePat,) <$> check ctx body result
+            pure (E.Case eArg eBranches)
         (other, expected) -> do
             -- this case happens after the implicit forall case, so we know that we're checking against a monomorphic type here
             --
@@ -252,16 +259,11 @@ infer ctx (t :@ loc) = localLoc loc case t of
     T.Let{} -> internalError' "destructuring bindings and function bindings are not supported yet"
     T.LetRec{} -> internalError' "let rec not supported yet"
     T.Do{} -> internalError' "do notation not supported yet"
-    T.Case arg branches -> do
-        (eArg, argTy) <- infer ctx arg
+    case'@T.Case{} -> do
         result <- freshUniVarV ctx type_
-        eBranches <- for branches \(pat, body) -> do
-            (ePat, newLocals) <- checkPattern ctx pat argTy
-            univars <- get
-            (ePat,) <$> check (bindMany univars newLocals ctx) body result
-        pure (E.Case eArg eBranches, result)
+        (,result) <$> check ctx (case' :@ loc) result
     T.Match{} -> internalError' "wip: match"
-    -- we don't infer dependent if, because that would mask type errors a lot of time
+    -- we don't infer dependent if, because that would mask type errors a lot of the time
     T.If cond true false -> do
         eCond <- check ctx cond $ V.Type (BoolName :@ loc)
         (eTrue, trueTy) <- infer ctx true
@@ -321,45 +323,84 @@ typeFromTerm ctx term = do
     env <- extendEnv ctx.env
     pure $ eval env eTerm
 
-checkPattern :: TC es => Context -> Pattern 'Fixity -> VType -> Eff es (EPattern, [(Name_, VType)])
-checkPattern ctx (pat :@ pLoc) ty = localLoc pLoc case pat of
-    T.VarP (L name) -> pure (E.VarP (toSimpleName_ name), [(name, ty)])
-    T.VariantP{} -> internalError' "todo: check variant pattern"
-    T.RecordP{} -> internalError' "todo: check record pattern"
-    T.SigmaP{} -> internalError' "todo: check sigma pattern"
-    _ -> fallthroughToInfer
-      where
-        fallthroughToInfer = do
-            (ePat, inferred, newLocals) <- inferPattern ctx $ pat :@ pLoc
-            unify ctx inferred ty
-            pure (ePat, newLocals)
+checkPattern :: TC es => Context -> Pattern 'Fixity -> VType -> Eff es ((EPattern, Value), Context)
+checkPattern ctx (pat :@ pLoc) ty = do
+    univars <- get
+    localLoc pLoc case pat of
+        T.VarP (L name) -> do
+            def <- freshUniVar ctx ty
+            env <- extendEnv ctx.env
+            let value = evalCore env def
+                tyC = quote univars ctx.level ty
+            pure ((E.VarP (toSimpleName_ name), value), define name def value tyC ty ctx)
+        T.WildcardP txt -> do
+            name <- freshName_ $ Name' txt
+            value <- freshUniVarV ctx ty
+            pure ((E.WildcardP txt, value), bind univars name ty ctx)
+        T.VariantP{} -> internalError' "todo: check variant pattern"
+        T.RecordP{} -> internalError' "todo: check record pattern"
+        T.SigmaP{} -> internalError' "todo: check sigma pattern"
+        _ -> fallthroughToInfer
+          where
+            fallthroughToInfer = do
+                (ePat, inferred, ctx) <- inferPattern ctx $ pat :@ pLoc
+                unify ctx inferred ty
+                pure (ePat, ctx)
 
-inferPattern :: TC es => Context -> Pattern 'Fixity -> Eff es (EPattern, VType, [(Name_, VType)])
-inferPattern ctx (p :@ loc) = localLoc loc case p of
-    T.VarP (L name) -> do
-        ty <- freshUniVarV ctx type_
-        pure (E.VarP (toSimpleName_ name), ty, [(name, ty)])
-    T.WildcardP txt -> do
-        name <- freshName_ $ Name' txt
-        ty <- freshUniVarV ctx type_
-        pure (E.WildcardP txt, ty, [(name, ty)])
-    (T.AnnotationP pat ty) -> do
-        tyV <- typeFromTerm ctx ty
-        (ePat, newLocals) <- checkPattern ctx pat tyV
-        pure (ePat, tyV, newLocals)
-    T.ConstructorP{} -> internalError' "todo: inferPattern: constructor"
-    T.ListP pats -> do
-        result <- freshUniVarV ctx type_
-        patsAndLocals <- traverse (\pat -> checkPattern ctx pat result) pats
-        let ePats = map fst patsAndLocals
-            -- [2, 1] [5, 4, 3] --> [5, 4, 3, 2, 1]
-            -- our lists are actually snoc lists
-            newLocals = fold . reverse $ map snd patsAndLocals
-            listType = V.TyCon (ListName :@ loc) (Vec.singleton result)
-        pure (E.ListP ePats, listType, newLocals)
-    _ -> internalError' "todo: non-trivial inferPattern"
+inferPattern :: TC es => Context -> Pattern 'Fixity -> Eff es ((EPattern, Value), VType, Context)
+inferPattern ctx (p :@ loc) = do
+    univars <- get
+    localLoc loc case p of
+        T.VarP (L name) -> do
+            ty <- freshUniVarV ctx type_
+            def <- freshUniVar ctx ty
+            env <- extendEnv ctx.env
+            let value = evalCore env def
+                tyC = quote univars ctx.level ty
+            pure ((E.VarP (toSimpleName_ name), value), ty, define name def value tyC ty ctx)
+        T.WildcardP txt -> do
+            name <- freshName_ $ Name' txt
+            ty <- freshUniVarV ctx type_
+            value <- freshUniVarV ctx ty
+            pure ((E.WildcardP txt, value), ty, bind univars name ty ctx)
+        (T.AnnotationP pat ty) -> do
+            tyV <- typeFromTerm ctx ty
+            (ePat, newLocals) <- checkPattern ctx pat tyV
+            pure (ePat, tyV, newLocals)
+        T.ConstructorP name args -> do
+            (_, conType) <- lookupSig name ctx
+            (argsWithVals, ty, ctx) <- inferConArgs ctx conType args
+            let (eArgs, argVals) = unzip $ toList argsWithVals
+            pure ((E.ConstructorP name eArgs, V.Con name (fromList argVals)), ty, ctx)
+        {-
+        T.ListP pats -> do
+            result <- freshUniVarV ctx type_
+            patsAndLocals <- traverse (\pat -> checkPattern ctx pat result) pats
+            let ePats = map fst patsAndLocals
+                -- [2, 1] [5, 4, 3] --> [5, 4, 3, 2, 1]
+                -- our lists are actually snoc lists
+                newLocals = fold . reverse $ map snd patsAndLocals
+                listType = V.TyCon (ListName :@ loc) (Vec.singleton result)
+            pure ((E.ListP ePats, _), listType, newLocals)
+        -}
+        _ -> internalError' "todo: non-trivial inferPattern"
   where
     type_ = V.Type $ TypeName :@ loc
+
+    inferConArgs :: TC es => Context -> VType -> [Pattern 'Fixity] -> Eff es (DList (EPattern, Value), VType, Context)
+    inferConArgs ctx conType args = do
+        conType <- forceM conType
+        case (conType, args) of
+            (V.Q Forall _v _e closure, arg : rest) -> do
+                (eArg@(_, argV), ctx) <- checkPattern ctx arg closure.ty
+                univars <- get
+                (pats, vty, ctx) <- inferConArgs ctx (app univars closure argV) rest
+                pure (DList.snoc pats eArg, vty, ctx)
+            (V.Q Exists _ _ _, _) -> internalError' "existentials in constructor types are not supported yet"
+            (ty@V.TyCon{}, []) -> do
+                pure (mempty, ty, ctx)
+            (V.TyCon{}, _) -> internalError' "too many arguments in a pattern"
+            _ -> internalError' "not enough arguments in a pattern"
 
 {-
 T.ConstructorP name args -> do

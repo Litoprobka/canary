@@ -198,7 +198,7 @@ removeUniVarsT lvl = go
             pure $ E.Let (E.ValueB name defn') body'
         E.Let{} -> internalError' "non-trivial let not supported yet"
         E.LetRec{} -> internalError' "letrec not supported yet"
-        E.Case{} -> internalError' "case not supported yet"
+        E.Case arg branches -> E.Case <$> go arg <*> traverse goBranch branches
         E.Match{} -> internalError' "match not supported yet"
         E.If cond true false -> E.If <$> go cond <*> go true <*> go false
         E.Variant name -> pure $ E.Variant name
@@ -214,3 +214,5 @@ removeUniVarsT lvl = go
         E.VariantT row -> E.VariantT <$> traverse go row
         E.RecordT row -> E.RecordT <$> traverse go row
         E.Core _coreTerm -> internalError' "removeUniVarsT: todo: inserted core term - should probably call removeUniVars"
+    goBranch (pat, body) = do
+        (pat,) <$> removeUniVarsT (Level $ lvl.getLevel + E.patternArity pat) body
