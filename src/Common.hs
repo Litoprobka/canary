@@ -145,7 +145,7 @@ instance HasId a => HasId (Located a) where
 
 instance PrettyAnsi SimpleName_ where
     prettyAnsi _ (Name' name) = pretty name
-    prettyAnsi _ (Wildcard' n) = "_" <> pretty n
+    prettyAnsi _ (Wildcard' txt) = pretty txt
 
 -- | does the name belong to an infix constructor?
 isInfixConstructor :: Name -> Bool
@@ -176,7 +176,7 @@ instance PrettyAnsi Name_ where
         (Name name id')
             | opts.printIds -> pretty name <> "#" <> pretty id'
             | otherwise -> pretty name
-        (Wildcard n id') -> "_" <> pretty n <> "#" <> pretty id'
+        (Wildcard txt id') -> pretty txt <> "#" <> pretty id'
         BoolName -> "Bool"
         TrueName -> "True"
         ListName -> "List"

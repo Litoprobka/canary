@@ -63,8 +63,8 @@ quote :: UniVars -> Level -> Value -> CoreTerm
 quote univars = go
   where
     go lvl = \case
-        TyCon name args -> C.TyCon name $ fmap (quote univars lvl) args
-        Con con args -> C.Con con $ fmap (quote univars lvl) args
+        TyCon name args -> C.TyCon name $ (fmap . fmap) (quote univars lvl) args
+        Con con args -> C.Con con $ (fmap . fmap) (quote univars lvl) args
         Lambda vis closure -> C.Lambda vis closure.var $ quoteClosure univars lvl closure
         PrimFunction PrimFunc{name, captured} ->
             -- captured names are stored as a stack, i.e. backwards, so we fold right rather than left here
@@ -89,8 +89,8 @@ quote univars = go
         quoteSpine = foldr (\(vis, arg) acc -> C.App vis acc (quote univars lvl arg))
         quotePatternClosure PatternClosure{pat, env, body} =
             let ValueEnv{..} = env
-                freeVars = Var <$> [pred newLevel .. lvl]
                 newLevel = Level $ lvl.getLevel + C.patternArity pat
+                freeVars = Var <$> [pred newLevel .. lvl]
                 bodyV = evalCore ExtendedEnv{locals = freeVars <> locals, ..} body
              in (pat, quote univars newLevel bodyV)
 
@@ -99,8 +99,8 @@ evalCore env@ExtendedEnv{..} = \case
     -- note that env.topLevel is a lazy IdMap, so we only force the outer structure here
     C.Name name -> LMap.lookupDefault (error . show $ "unbound top-level name" <+> pretty name) (unLoc name) env.topLevel
     C.Var index -> env.locals !! index.getIndex
-    C.TyCon name args -> TyCon name $ fmap (evalCore env) args
-    C.Con name args -> Con name $ fmap (evalCore env) args
+    C.TyCon name args -> TyCon name $ (fmap . fmap) (evalCore env) args
+    C.Con name args -> Con name $ (fmap . fmap) (evalCore env) args
     C.Variant name arg -> Variant name (evalCore env arg)
     C.Lambda vis var body -> Lambda vis $ Closure{var, ty = (), env = ValueEnv{..}, body}
     C.App vis lhs rhs -> evalApp univars vis (evalCore env lhs) (evalCore env rhs)
@@ -191,13 +191,13 @@ matchCore ExtendedEnv{..} = \cases
     (C.ConstructorP pname _) (Con (L name) args)
         | pname == name ->
             -- since locals is a SnocList, we have to reverse args before appending
-            Just ExtendedEnv{locals = reverse (toList args) <> locals, ..}
+            Just ExtendedEnv{locals = reverse (map snd $ toList args) <> locals, ..}
     (C.VariantP pname _) (Variant name val)
         | pname == name -> Just ExtendedEnv{locals = val : locals, ..}
     (C.RecordP _varRow) (Record _row) -> error "todo: row matching (must preserve original field order)"
     -- let (pairs, _, _) = Row.zipRows varRow row
     -- in Just $ env{locals = foldl' (flip $ uncurry LMap.insert) env.values pairs}
-    (C.SigmaP _ _) (Sigma lhs rhs) -> Just ExtendedEnv{locals = rhs : lhs : locals, ..}
+    C.SigmaP{} (Sigma lhs rhs) -> Just ExtendedEnv{locals = rhs : lhs : locals, ..}
     (C.LiteralP lit) (PrimValue val) -> ExtendedEnv{..} <$ guard (lit == val)
     _ _ -> Nothing
 
@@ -228,15 +228,16 @@ modifyEnv ValueEnv{..} decls = do
         D.TypeD _ constrs -> pure $ fmap mkConstr constrs
         D.SignatureD{} -> pure mempty
 
-    mkConstr (name, count) = (unLoc name, Left $ mkConLambda count (C.Con name))
+    mkConstr (name, vises) = (unLoc name, Left $ mkConLambda vises (C.Con name))
 
 -- todo: [Visibility] -> Name -> Value
-mkConLambda :: Int -> (Vector CoreTerm -> CoreTerm) -> Value
-mkConLambda n con = evalCore emptyEnv lambdas
+mkConLambda :: Vector Visibility -> (Vector (Visibility, CoreTerm) -> CoreTerm) -> Value
+mkConLambda vises con = evalCore emptyEnv lambdas
   where
-    names = fmap (\i -> Name' $ "x" <> show i) [1 .. n]
-    lambdas = foldr (C.Lambda Visible) body names
-    body = con $ Vec.fromListN n $ map (C.Var . Index) [n - 1, n - 2 .. 0]
+    n = Vec.length vises
+    names = zipWith (\vis i -> (vis, Name' $ "x" <> show i)) (toList vises) [1 .. n]
+    lambdas = foldr (uncurry C.Lambda) body names
+    body = con $ Vec.zipWith (\vis ix -> (vis, C.Var (Index ix))) vises (Vec.fromListN n [n - 1, n - 2 .. 0])
     emptyEnv = ExtendedEnv{univars = EMap.empty, topLevel = LMap.empty, locals = []}
 
 mkTyCon :: CoreType -> Name -> Value

@@ -145,8 +145,8 @@ removeUniVars lvl = go
   where
     go =
         forceM >=> \case
-            V.TyCon name args -> V.TyCon name <$> traverse go args
-            V.Con name args -> V.Con name <$> traverse go args
+            V.TyCon name args -> V.TyCon name <$> (traverse . traverse) go args
+            V.Con name args -> V.Con name <$> (traverse . traverse) go args
             V.Lambda vis closure@V.Closure{var, env} -> do
                 newBody <- removeUniVars (succ lvl) =<< closure `appM` V.Var lvl
                 univars <- get @UniVars
@@ -204,7 +204,7 @@ removeUniVarsT lvl = go
         E.Variant name -> pure $ E.Variant name
         E.Record row -> E.Record <$> traverse go row
         E.RecordAccess record field -> E.RecordAccess <$> go record <*> pure field
-        E.List items -> E.List <$> traverse go items
+        E.List ty items -> E.List <$> go ty <*> traverse go items
         E.Sigma lhs rhs -> E.Sigma <$> go lhs <*> go rhs
         E.Do{} -> internalError' "do not supported yet"
         E.Q q v e (var ::: ty) body -> do

@@ -3,8 +3,6 @@
 module TypeChecker where
 
 import Common
-import Data.DList (DList)
-import Data.DList qualified as DList
 import Data.EnumMap.Lazy qualified as EMap
 import Desugar (desugar)
 import Diagnostic
@@ -93,8 +91,9 @@ processDeclaration ctx (decl :@ loc) = localLoc loc case decl of
             sigV <- removeUniVars newCtx.level =<< typeFromTerm newCtx sig
             modify @TopLevel $ Map.insert (unLoc con) sigV
         -- _conMapEntry <- mkConstructorTableEntry (map (.var) binders) (map (\con -> (con.name, con.args)) constrs)
+        let argVisibilities con = (Implicit <$ C.functionTypeArity kindC) <> fromList (Visible <$ con.args)
         pure
-            (E.TypeD name (map (\con -> (con.name, length con.args + C.functionTypeArity kindC)) constrs), Map.insert (unLoc name) tyCon)
+            (E.TypeD name (map (\con -> (con.name, argVisibilities con)) constrs), Map.insert (unLoc name) tyCon)
   where
     withTopLevel action = do
         topLevel <- get @TopLevel
@@ -114,8 +113,7 @@ processDeclaration ctx (decl :@ loc) = localLoc loc case decl of
         constrs <&> \(D.Constructor loc' con params) ->
             ( con
             , foldr
-                -- Implicit Erased
-                (\var acc -> T.Q Forall Visible Retained var acc :@ loc')
+                (\var acc -> T.Q Forall Implicit Erased var acc :@ loc')
                 (foldr (\lhs acc -> T.Function lhs acc :@ loc') (fullType loc') params)
                 binders
             )
@@ -123,13 +121,13 @@ processDeclaration ctx (decl :@ loc) = localLoc loc case decl of
         fullType loc' = foldl' (\lhs -> (:@ loc') . T.App Visible lhs) (T.Name name :@ getLoc name) ((:@ loc') . T.Name . (.var) <$> binders)
 
     -- constructors should be reprocessed into a more convenenient form somewhere else, but I'm not sure where
-    argCount = go 0
+    argCount = fromList . go
       where
-        go acc (L e) = case e of
-            T.Function _ rhs -> go (succ acc) rhs
-            T.Q Forall _ _ _ body -> go (succ acc) body
-            T.Q _ _ _ _ body -> go acc body
-            _ -> acc
+        go (L e) = case e of
+            T.Function _ rhs -> Visible : go rhs
+            T.Q Forall vis _ _ body -> vis : go body
+            T.Q Exists _ _ _ body -> go body
+            _ -> []
 
     -- check that a GADT constructor actually returns the declared type
     checkGadtConstructor :: TC es => Level -> Name -> Name -> VType -> Eff es ()
@@ -290,9 +288,11 @@ infer ctx (t :@ loc) = localLoc loc case t of
         let body = quote univars (succ ctx.level) rhsTy
         pure (E.Sigma eLhs eRhs, V.Q Exists Visible Retained $ V.Closure{ty = lhsTy, var = Name' "x", env = ctx.env, body})
     T.List items -> do
-        itemTy <- freshUniVarV ctx type_
-        eItems <- traverse (\item -> check ctx item itemTy) items
-        pure (E.List eItems, itemTy)
+        itemTy <- freshUniVar ctx type_
+        env <- extendEnv ctx.env
+        let itemTyV = evalCore env itemTy
+        eItems <- traverse (\item -> check ctx item itemTyV) items
+        pure (E.List (E.Core itemTy) eItems, V.TyCon (ListName :@ loc) $ fromList [(Visible, itemTyV)])
     T.RecordT row -> do
         eRow <- traverse (\field -> check ctx field type_) row
         pure (E.RecordT eRow, type_)
@@ -339,13 +339,21 @@ checkPattern ctx (pat :@ pLoc) ty = do
             pure ((E.WildcardP txt, value), bind univars name ty ctx)
         T.VariantP{} -> internalError' "todo: check variant pattern"
         T.RecordP{} -> internalError' "todo: check record pattern"
-        T.SigmaP{} -> internalError' "todo: check sigma pattern"
+        T.SigmaP vis lhs rhs -> do
+            forceM ty >>= \case
+                V.Q Exists vis2 _e closure
+                    | vis /= vis2 -> internalError' "sigma type: visibility mismatch (implicit argument insertion is not implemented yet)"
+                    | otherwise -> do
+                        ((eLhs, lhsV), ctx) <- checkPattern ctx lhs closure.ty
+                        ((eRhs, rhsV), ctx) <- checkPattern ctx rhs =<< closure `appM` lhsV
+                        pure ((E.SigmaP vis eLhs eRhs, V.Sigma lhsV rhsV), ctx)
+                _ -> fallthroughToInfer
         _ -> fallthroughToInfer
-          where
-            fallthroughToInfer = do
-                (ePat, inferred, ctx) <- inferPattern ctx $ pat :@ pLoc
-                unify ctx inferred ty
-                pure (ePat, ctx)
+  where
+    fallthroughToInfer = do
+        (ePat, inferred, ctx) <- inferPattern ctx $ pat :@ pLoc
+        unify ctx inferred ty
+        pure (ePat, ctx)
 
 inferPattern :: TC es => Context -> Pattern 'Fixity -> Eff es ((EPattern, Value), VType, Context)
 inferPattern ctx (p :@ loc) = do
@@ -370,8 +378,10 @@ inferPattern ctx (p :@ loc) = do
         T.ConstructorP name args -> do
             (_, conType) <- lookupSig name ctx
             (argsWithVals, ty, ctx) <- inferConArgs ctx conType args
-            let (eArgs, argVals) = unzip $ toList argsWithVals
-            pure ((E.ConstructorP name eArgs, V.Con name (fromList argVals)), ty, ctx)
+            let (eArgs, argVals) = unzip argsWithVals
+                valsWithVis = zip (map fst eArgs) argVals
+            pure ((E.ConstructorP name eArgs, V.Con name (fromList valsWithVis)), ty, ctx)
+        T.SigmaP{} -> internalError' "todo: not sure how to infer sigma"
         {-
         T.ListP pats -> do
             result <- freshUniVarV ctx type_
@@ -387,15 +397,23 @@ inferPattern ctx (p :@ loc) = do
   where
     type_ = V.Type $ TypeName :@ loc
 
-    inferConArgs :: TC es => Context -> VType -> [Pattern 'Fixity] -> Eff es (DList (EPattern, Value), VType, Context)
+    inferConArgs
+        :: TC es => Context -> VType -> [(Visibility, Pattern 'Fixity)] -> Eff es ([((Visibility, EPattern), Value)], VType, Context)
     inferConArgs ctx conType args = do
         conType <- forceM conType
         case (conType, args) of
-            (V.Q Forall _v _e closure, arg : rest) -> do
-                (eArg@(_, argV), ctx) <- checkPattern ctx arg closure.ty
+            (V.Q Forall vis _e closure, (vis2, arg) : rest) | vis == vis2 -> do
+                ((eArg, argV), ctx) <- checkPattern ctx arg closure.ty
                 univars <- get
                 (pats, vty, ctx) <- inferConArgs ctx (app univars closure argV) rest
-                pure (DList.snoc pats eArg, vty, ctx)
+                pure (((Visible, eArg), argV) : pats, vty, ctx)
+            (V.Q Forall vis _ _, (vis2, _) : _) ->
+                internalError' $
+                    "visibility mismatch:"
+                        <+> pretty (show @Text vis)
+                        <+> "!="
+                        <+> pretty (show @Text vis2)
+                        <+> "(implict argument insertion is not implemented yet)"
             (V.Q Exists _ _ _, _) -> internalError' "existentials in constructor types are not supported yet"
             (ty@V.TyCon{}, []) -> do
                 pure (mempty, ty, ctx)

@@ -24,9 +24,9 @@ type VType = Value
 
 data Value
     = -- | a fully-applied type constructor
-      TyCon Name (Vector Value)
+      TyCon Name (Vector (Visibility, Value))
     | -- | a fully-applied counstructor
-      Con Name (Vector Value)
+      Con Name (Vector (Visibility, Value))
     | Lambda Visibility (Closure ())
     | -- | an escape hatch for interpreter primitives and similar stuff
       PrimFunction PrimFunc
@@ -98,8 +98,8 @@ lift :: Int -> Value -> Value
 lift n = go
   where
     go = \case
-        TyCon name args -> TyCon name (fmap go args)
-        Con name args -> Con name (fmap go args)
+        TyCon name args -> TyCon name ((fmap . fmap) go args)
+        Con name args -> Con name ((fmap . fmap) go args)
         Lambda vis Closure{..} -> Lambda vis $ Closure{body = C.lift n body, env = liftEnv env, ..}
         PrimFunction fn -> PrimFunction (liftFunc fn)
         Record row -> Record (fmap go row)

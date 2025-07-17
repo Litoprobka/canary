@@ -103,10 +103,10 @@ partialTravPattern trav (pat' :@ loc) =
         VarP name -> VarP <$> trav.name name
         WildcardP text -> pure $ WildcardP text
         AnnotationP pat ty -> AnnotationP <$> trav.pattern_ pat <*> trav.term ty
-        ConstructorP name pats -> ConstructorP <$> trav.name name <*> traverse trav.pattern_ pats
+        ConstructorP name pats -> ConstructorP <$> trav.name name <*> (traverse . traverse) trav.pattern_ pats
         VariantP oname pat -> VariantP oname <$> trav.pattern_ pat
         RecordP row -> RecordP <$> traverse trav.pattern_ row
-        SigmaP lhs rhs -> SigmaP <$> trav.pattern_ lhs <*> trav.pattern_ rhs
+        SigmaP vis lhs rhs -> SigmaP vis <$> trav.pattern_ lhs <*> trav.pattern_ rhs
         ListP pats -> ListP <$> traverse trav.pattern_ pats
         LiteralP lit -> pure $ LiteralP lit
         InfixP{} -> error "partialTravPattern: encountered InfixP"

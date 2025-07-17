@@ -28,21 +28,21 @@ import Syntax.Term (Erasure (..), Quantifier (..), Visibility (..), withVis)
 data CorePattern
     = VarP SimpleName_
     | WildcardP Text
-    | ConstructorP Name_ [SimpleName_]
+    | ConstructorP Name_ [(Visibility, SimpleName_)]
     | VariantP OpenName SimpleName_
     | RecordP (Row SimpleName_)
-    | SigmaP SimpleName_ SimpleName_
+    | SigmaP Visibility SimpleName_ SimpleName_
     | LiteralP Literal
 
 instance PrettyAnsi CorePattern where
     prettyAnsi opts = \case
         VarP name -> prettyAnsi opts name
-        WildcardP txt -> "_" <> pretty txt
+        WildcardP txt -> pretty txt
         ConstructorP name [] -> prettyCon name
-        ConstructorP name args -> parens $ hsep (prettyCon name : map (prettyAnsi opts) args)
+        ConstructorP name args -> parens $ hsep (prettyCon name : map (\(vis, arg) -> withVis vis (prettyAnsi opts arg)) args)
         VariantP name arg -> parens $ prettyCon name <+> prettyAnsi opts arg
         RecordP row -> braces . sep . punctuate comma . map recordField $ sortedRow row
-        SigmaP lhs rhs -> parens $ pretty lhs <+> "**" <+> pretty rhs
+        SigmaP vis lhs rhs -> parens $ withVis vis (pretty lhs) <+> "**" <+> pretty rhs
         LiteralP lit -> prettyAnsi opts lit
       where
         prettyCon name = conColor $ prettyAnsi opts name
@@ -57,8 +57,8 @@ data CoreTerm
       -- it could have made sense to merge them, except an optimised representation of Con
       -- would probably store a constructor tag (e.g. 0 for False, 1 for True) instead of a global name
       -- I guess, for now it's easier to keep the redundant TyCon
-      TyCon Name (Vector CoreTerm)
-    | Con Name (Vector CoreTerm)
+      TyCon Name (Vector (Visibility, CoreTerm))
+    | Con Name (Vector (Visibility, CoreTerm))
     | Variant OpenName CoreTerm
     | Lambda Visibility SimpleName_ CoreTerm
     | App Visibility CoreTerm CoreTerm
@@ -88,12 +88,14 @@ instance PrettyAnsi CoreTerm where
                 | otherwise -> env !! index.getIndex
             Name name -> prettyAnsi opts name
             TyCon name Nil -> prettyAnsi opts name
-            TyCon name args -> parensWhen 3 $ hsep (prettyAnsi opts name : map (go 3 env) (Vec.toList args))
-            Con (L ConsName) (x :< Con (L NilName) Nil :< Nil) -> brackets $ go 0 env x
-            Con (L ConsName) (x :< xs :< Nil) | Just output <- prettyConsNil xs -> brackets $ go 0 env x <> output
-            Con (L NilName) Nil -> "[]"
+            TyCon name args -> parensWhen 3 $ hsep (prettyAnsi opts name : map (\(vis, t) -> withVis vis (go 3 env t)) (Vec.toList args))
+            -- list sugar doesn't really make sense with explicit type applications, perhaps I should remove it
+            -- another option is `[a, b, c] @ty`
+            Con (L ConsName) (_ty :< (_, x) :< (_, Con (L NilName) Nil) :< Nil) -> brackets $ go 0 env x
+            Con (L ConsName) (_ty :< (_, x) :< (_, xs) :< Nil) | Just output <- prettyConsNil xs -> brackets $ go 0 env x <> output
+            Con (L NilName) (_ty :< Nil) -> "[]"
             Con name Nil -> prettyAnsi opts name
-            Con name args -> parensWhen 3 $ hsep (prettyAnsi opts name : map (go 3 env) (Vec.toList args))
+            Con name args -> parensWhen 3 $ hsep (prettyAnsi opts name : map (\(vis, t) -> withVis vis (go 3 env t)) (Vec.toList args))
             lambda@Lambda{} -> parensWhen 1 $ specSym "λ" <> compressLambda env lambda
             App vis lhs rhs -> parensWhen 3 $ go 2 env lhs <+> withVis vis (go 3 env rhs)
             Record row -> prettyRecord "=" (prettyAnsi opts) (go 0 env) (NoExtRow row)
@@ -126,8 +128,8 @@ instance PrettyAnsi CoreTerm where
             kw Exists Retained = keyword "Σ"
 
             prettyConsNil = \case
-                Con (L ConsName) (x' :< xs' :< Nil) -> (("," <+> go 0 env x') <>) <$> prettyConsNil xs'
-                Con (L NilName) Nil -> Just ""
+                Con (L ConsName) (_ty :< (_, x') :< (_, xs') :< Nil) -> (("," <+> go 0 env x') <>) <$> prettyConsNil xs'
+                Con (L NilName) (_ty :< Nil) -> Just ""
                 _ -> Nothing
 
         compressLambda env term = case term of
@@ -165,8 +167,8 @@ occurs var = getAny . getConst . go 0
 
 coreTraversal :: Applicative f => (CoreTerm -> f CoreTerm) -> CoreTerm -> f CoreTerm
 coreTraversal recur = \case
-    Con name args -> Con name <$> traverse recur args
-    TyCon name args -> TyCon name <$> traverse recur args
+    Con name args -> Con name <$> (traverse . traverse) recur args
+    TyCon name args -> TyCon name <$> (traverse . traverse) recur args
     Variant name arg -> Variant name <$> recur arg
     Lambda vis var body -> Lambda vis var <$> recur body
     App vis lhs rhs -> App vis <$> recur lhs <*> recur rhs
@@ -200,13 +202,13 @@ lift n = go (Level 0)
         Lambda vis var body -> Lambda vis var $ go (succ depth) body
         other -> coreTraversalPure (go depth) other
 
--- | How many new variables does a pattern bind?
+-- | How many new variables (including wildcards) does a pattern bind?
 patternArity :: CorePattern -> Int
 patternArity = go
   where
     go = \case
         VarP{} -> 1
-        WildcardP{} -> 1 -- should it also be 0?
+        WildcardP{} -> 1
         ConstructorP _ args -> length args
         VariantP{} -> 1
         RecordP row -> length row
@@ -214,10 +216,10 @@ patternArity = go
         LiteralP{} -> 0
 
 -- invariant: the term must not contain unsolved univars in tail position
-functionTypeArity :: CoreTerm -> Int
-functionTypeArity = go 0
+functionTypeArity :: CoreTerm -> Vector Visibility
+functionTypeArity = fromList . go
   where
-    go !acc = \case
-        Q Forall _ _ _ _ body -> go (succ acc) body
+    go = \case
+        Q Forall vis _ _ _ body -> vis : go body
         UniVar{} -> error "functionTypeArity called on a term with unsolved univars"
-        _ -> acc
+        _ -> []

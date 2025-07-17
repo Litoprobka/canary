@@ -19,9 +19,6 @@ type EType = ETerm
 unTyped :: Typed a -> a
 unTyped (x ::: _) = x
 
--- another thing I might want to add are big lambdas (or rather, implicit lambdas)
--- > id : forall a. a -> a
--- > id = Λa. λ(x : a). x
 data ETerm
     = Var Index
     | Name Name -- top-level binding
@@ -36,7 +33,7 @@ data ETerm
     | Variant OpenName
     | Record (Row ETerm)
     | RecordAccess ETerm OpenName
-    | List [ETerm]
+    | List EType [ETerm]
     | Sigma ETerm ETerm
     | Do [EStatement] ETerm
     | Q Quantifier Visibility Erasure (Typed SimpleName_) ETerm
@@ -50,10 +47,10 @@ data ETerm
 data EPattern
     = VarP SimpleName_
     | WildcardP Text
-    | ConstructorP Name [EPattern]
+    | ConstructorP Name [(Visibility, EPattern)]
     | VariantP OpenName EPattern
     | RecordP (Row EPattern)
-    | SigmaP EPattern EPattern
+    | SigmaP Visibility EPattern EPattern
     | ListP [EPattern]
     | LiteralP Literal
 
@@ -71,7 +68,7 @@ data EStatement
 data EDeclaration
     = ValueD EBinding -- no local bindings for now
     -- I'm not sure which representation for typechecked constructors makes more sense, this is the bare minimum
-    | TypeD Name [(Name, Int)]
+    | TypeD Name [(Name, Vector Visibility)]
     | SignatureD Name EType
 
 instance HasLoc a => HasLoc (Typed a) where
@@ -84,9 +81,9 @@ patternArity = go
     go = \case
         VarP{} -> 1
         WildcardP{} -> 1 -- should it also be 0?
-        ConstructorP _ args -> sum (map go args)
+        ConstructorP _ args -> sum (map (go . snd) args)
         VariantP _ arg -> go arg
         RecordP row -> sum (fmap go row)
-        SigmaP lhs rhs -> go lhs + go rhs
+        SigmaP _ lhs rhs -> go lhs + go rhs
         ListP args -> sum (map go args)
         LiteralP{} -> 0

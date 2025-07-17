@@ -168,7 +168,7 @@ parsePattern (term' :@ termLoc) =
         other -> unLoc <$> partialTravPattern traversal (other :@ termLoc)
   where
     conP :: Applicative m => Name -> Pattern 'Fixity -> Pattern 'Fixity -> m (Pattern 'Fixity)
-    conP conOp lhs rhs = pure $ ConstructorP conOp [lhs, rhs] :@ zipLocOf lhs rhs
+    conP conOp lhs rhs = pure $ ConstructorP conOp [(Visible, lhs), (Visible, rhs)] :@ zipLocOf lhs rhs
 
 shuntingYard
     :: forall es a unloc op. (a ~ Located unloc, Ctx es) => (op -> Op) -> (op -> a -> a -> Eff es a) -> [(a, op)] -> a -> Eff es unloc

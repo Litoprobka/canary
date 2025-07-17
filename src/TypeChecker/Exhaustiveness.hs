@@ -109,7 +109,8 @@ simplifyPattern :: EPattern -> Pattern
 simplifyPattern = \case
     E.VarP{} -> Wildcard
     E.WildcardP{} -> Wildcard
-    E.ConstructorP name pats -> Con (unLoc name) $ fmap simplifyPattern pats
+    -- ideally, we should retain visibility information for cleaner errors
+    E.ConstructorP name pats -> Con (unLoc name) $ fmap (simplifyPattern . snd) pats
     E.ListP pats -> foldr (\x xs -> Con ConsName [simplifyPattern x, xs]) (Con NilName []) pats
     E.VariantP name arg -> VariantP (unLoc name) $ simplifyPattern arg
     E.RecordP row -> RecordP $ fmap simplifyPattern row
@@ -126,7 +127,7 @@ simplifyPatternTypeWith :: forall es. (Diagnose :> es, State UniVars :> es) => V
 simplifyPatternTypeWith = \case
     V.Var{} -> pure $ const OpaqueTy
     V.TyCon name args -> do
-        argFns <- traverse simplifyPatternTypeWith args
+        argFns <- traverse (simplifyPatternTypeWith . snd) args
         pure $ \env -> TyCon (unLoc name) $ map ($ env) (toList argFns)
     -- todo: compress the rows wrt. solved univars
     V.VariantT row -> do

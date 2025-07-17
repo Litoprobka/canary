@@ -48,7 +48,12 @@ desugar = \case
             {field} -> field
     -}
     E.Sigma x y -> C.Sigma (go x) (go y)
-    E.List xs -> foldr ((C.App Visible . C.App Visible cons) . go) nil xs
+    E.List ty xs ->
+        let cty = go ty
+         in foldr
+                (\x xs -> C.Con cons $ fromList [(Implicit, cty), (Visible, go x), (Visible, xs)])
+                (C.Con nil $ fromList [(Implicit, cty)])
+                xs
     E.Do{} -> error "todo: desugar do blocks"
     E.Q q vis er (var ::: kind) body -> C.Q q vis er var (go kind) (go body)
     E.VariantT row -> C.VariantT $ fmap go row
@@ -56,8 +61,8 @@ desugar = \case
     E.Core coreTerm -> coreTerm
   where
     go = desugar
-    cons = C.Name $ ConsName :@ loc
-    nil = C.Name $ NilName :@ loc
+    cons = ConsName :@ loc
+    nil = NilName :@ loc
     loc = Loc Position{begin = (0, 0), end = (0, 0), file = "<eval>"}
 
     -- we only support non-nested patterns for now
@@ -65,12 +70,12 @@ desugar = \case
     flattenPattern p = case p of
         E.VarP name -> C.VarP name
         E.WildcardP name -> C.WildcardP name
-        E.ConstructorP name pats -> C.ConstructorP (unLoc name) (fmap asVar pats)
+        E.ConstructorP name pats -> C.ConstructorP (unLoc name) ((fmap . fmap) asVar pats)
         E.VariantP name pat -> C.VariantP name (asVar pat)
         E.RecordP row -> C.RecordP $ fmap asVar row
-        E.SigmaP lhs rhs -> C.SigmaP (asVar lhs) (asVar rhs)
-        E.ListP [x] -> C.ConstructorP ConsName [asVar x]
-        E.ListP [] -> C.ConstructorP NilName []
+        E.SigmaP vis lhs rhs -> C.SigmaP vis (asVar lhs) (asVar rhs)
+        E.ListP [_x] -> error "todo: list patterns need a type" -- C.ConstructorP ConsName [(Implicit, ty), (Visible, asVar x)]
+        E.ListP [] -> error "todo: list patterns need a type" -- C.ConstructorP NilName [(Implicit, ty)]
         E.ListP _ -> error "todo: list pattern desugaring"
         E.LiteralP lit -> C.LiteralP lit
 

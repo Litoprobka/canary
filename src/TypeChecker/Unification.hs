@@ -61,8 +61,8 @@ unify' lvl lhsTy rhsTy = do
             lhsBody <- lhsClosure `appM` Var lvl
             rhsBody <- evalAppM vis nonLambda (Var lvl)
             unify' (succ lvl) lhsBody rhsBody
-        (TyCon lhs lhsArgs) (TyCon rhs rhsArgs) | lhs == rhs -> Vec.zipWithM_ (unify' lvl) lhsArgs rhsArgs
-        (Con lhs lhsArgs) (Con rhs rhsArgs) | lhs == rhs -> Vec.zipWithM_ (unify' lvl) lhsArgs rhsArgs
+        (TyCon lhs lhsArgs) (TyCon rhs rhsArgs) | lhs == rhs -> Vec.zipWithM_ (unify' lvl `on` snd) lhsArgs rhsArgs
+        (Con lhs lhsArgs) (Con rhs rhsArgs) | lhs == rhs -> Vec.zipWithM_ (unify' lvl `on` snd) lhsArgs rhsArgs
         (Q Forall v _e closure) (Q Forall v2 _e2 closure2) | v == v2 -> do
             unify' lvl closure.ty closure2.ty
             body <- closure `appM` Var lvl
@@ -214,8 +214,8 @@ rename = go
                 argTy <- go pren closure.ty
                 bodyToRename <- closure `appM` Var pren.codomain
                 C.Q q v e closure.var argTy <$> go (lift pren) bodyToRename
-            TyCon name args -> foldl' (C.App Visible) (C.Name name) <$> traverse (go pren) args
-            Con name args -> foldl' (C.App Visible) (C.Name name) <$> traverse (go pren) args
+            TyCon name args -> C.TyCon name <$> (traverse . traverse) (go pren) args
+            Con name args -> C.TyCon name <$> (traverse . traverse) (go pren) args
             Variant name arg -> C.Variant name <$> go pren arg
             PrimFunction fn -> do
                 captured <- traverse (go pren) fn.captured

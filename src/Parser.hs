@@ -197,14 +197,19 @@ pattern' = located do
         AnnotationP pat <$> term
   where
     -- for now, dependent pairs have a precedence lower than any of the operators
-    sigma = rightAssoc Token.DepPair SigmaP infixPattern
+    sigma = located do
+        (vis, lhs) <- (Visible,) <$> infixPattern <|> (Implicit,) <$> (specialSymbol Token.At *> patternParens)
+        option (unLoc lhs) do
+            specialSymbol Token.DepPair
+            rhs <- sigma
+            pure $ SigmaP vis lhs rhs
 
     infixPattern = located do
         firstPat <- nonOpPattern
         pairs <- many $ (,) <$> colonOperator <*> nonOpPattern
         pure case pairs of
             [] -> unLoc firstPat
-            [(op, secondPat)] -> ConstructorP op [firstPat, secondPat]
+            [(op, secondPat)] -> ConstructorP op [(Visible, firstPat), (Visible, secondPat)]
             (_ : _ : _) -> uncurry InfixP $ shift firstPat pairs
     -- x [(+, y), (*, z), (+, w)] --> [(x, +), (y, *), (z, +)] w
     shift expr [] = ([], expr)
@@ -212,7 +217,7 @@ pattern' = located do
 
     nonOpPattern =
         choice
-            [ located $ ConstructorP <$> upperName <*> many patternParens
+            [ located $ ConstructorP <$> upperName <*> many patternWithVisibility
             , located $ VariantP <$> variantConstructor <*> patternParens
             , patternParens
             ]
@@ -233,7 +238,7 @@ patternParens =
         , record
         , ListP <$> brackets (commaSep pattern')
         , LiteralP <$> literal
-        , ConstructorP <$> upperName <*> option [] ((: []) <$> tightRecord)
+        , ConstructorP <$> upperName <*> option [] ((: []) . (Visible,) <$> tightRecord)
         , variant
         , unLoc <$> parens pattern'
         ]

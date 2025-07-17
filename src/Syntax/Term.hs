@@ -104,10 +104,10 @@ data Pattern_ (p :: Pass)
     = VarP (NameAt p)
     | WildcardP Text
     | AnnotationP (Pattern p) (Type p)
-    | ConstructorP (NameAt p) [Pattern p]
+    | ConstructorP (NameAt p) [(Visibility, Pattern p)]
     | VariantP OpenName (Pattern p)
     | RecordP (Row (Pattern p))
-    | SigmaP (Pattern p) (Pattern p)
+    | SigmaP Visibility (Pattern p) (Pattern p)
     | ListP [Pattern p]
     | LiteralP Literal
     | -- infix constructors cannot have a higher-than-pattern precedence
@@ -233,10 +233,10 @@ instance PrettyAnsi (NameAt pass) => PrettyAnsi (Pattern_ pass) where
             VarP name -> prettyAnsi opts name
             WildcardP txt -> pretty txt
             AnnotationP pat ty -> parens $ go 0 pat <+> ":" <+> prettyAnsi opts ty
-            ConstructorP name args -> parensWhen 1 $ sep (prettyAnsi opts name : map (go 1) args)
+            ConstructorP name args -> parensWhen 1 $ sep (prettyAnsi opts name : map (\(vis, pat) -> withVis vis $ go 1 pat) args)
             VariantP name body -> parensWhen 1 $ prettyAnsi opts name <+> go 1 body -- todo: special case for unit?
             RecordP row -> braces . sep . punctuate comma . map recordField $ sortedRow row
-            SigmaP lhs rhs -> parensWhen 1 $ go 0 lhs <+> "**" <+> go 0 rhs
+            SigmaP vis lhs rhs -> parensWhen 1 $ withVis vis (go 0 lhs) <+> "**" <+> go 0 rhs
             ListP items -> brackets . sep $ map (go 0) items
             LiteralP lit -> prettyAnsi opts lit
             InfixP pairs last' -> "?(" <> sep (concatMap (\(lhs, op) -> go 3 lhs : (pure . prettyAnsi opts) op) pairs <> [go 0 last']) <> ")"
@@ -246,87 +246,3 @@ instance PrettyAnsi (NameAt pass) => PrettyAnsi (Pattern_ pass) where
                 | otherwise = id
 
             recordField (name, pat) = prettyAnsi opts name <+> "=" <+> go 0 pat
-
--- one place where recursion schemes would come in handy
---
--- this should probably be moved to the NameRes pass, since we
--- have to keep track of local variables here
-collectReferencedNames :: Type p -> [NameAt p]
-collectReferencedNames = go
-  where
-    go (L inner) = case inner of
-        Name name -> [name]
-        ImplicitVar var -> [var]
-        Parens expr -> go expr
-        Literal _ -> []
-        Variant{} -> []
-        Let{} -> error "collectReferencedNames: local bindings are not supported yet"
-        LetRec{} -> error "collectReferencedNames: local bindings are not supported yet"
-        Case{} -> error "collectReferencedNames: local bindings are not supported yet"
-        Match{} -> error "collectReferencedNames: local bindings are not supported yet"
-        If cond true false -> go cond <> go true <> go false
-        List xs -> foldMap go xs
-        Sigma x y -> go x <> go y
-        Lambda _ pat body -> collectReferencedNamesInPat pat <> go body
-        WildcardLambda _pats body -> go body
-        Annotation e ty -> go e <> go ty
-        App _ lhs rhs -> go lhs <> go rhs
-        Function fn args -> go fn <> go args
-        Q _ _ _ binder body -> case binder.kind of
-            Nothing -> go body
-            Just ty -> go ty <> go body
-        VariantT row -> foldMap go $ toList row
-        RecordT row -> foldMap go $ toList row
-        Record row -> foldMap go $ toList row
-        RecordAccess record _ -> go record
-        InfixE pairs lastE -> foldMap (\(e, mbName) -> go e <> maybeToList mbName) pairs <> go lastE
-        Do _stmts _action -> error "collectReferencedNames: local bindings are not supported yet"
-
--- | collects all to-be-declared names in a pattern
-collectNamesInPat :: Pattern p -> [NameAt p]
-collectNamesInPat (L p) = case p of
-    VarP name -> [name]
-    WildcardP{} -> []
-    AnnotationP pat _ -> collectNamesInPat pat
-    VariantP _ pat -> collectNamesInPat pat
-    ConstructorP _ pats -> foldMap collectNamesInPat pats
-    ListP pats -> foldMap collectNamesInPat pats
-    RecordP row -> foldMap collectNamesInPat $ toList row
-    SigmaP lhs rhs -> collectNamesInPat lhs <> collectNamesInPat rhs
-    LiteralP _ -> []
-    InfixP pairs l -> foldMap (collectNamesInPat . fst) pairs <> collectNamesInPat l
-
-collectReferencedNamesInPat :: Pattern p -> [NameAt p]
-collectReferencedNamesInPat = go
-  where
-    go (L p) = case p of
-        VarP _ -> []
-        WildcardP{} -> []
-        AnnotationP pat ty -> go pat <> collectReferencedNames ty
-        VariantP _ pat -> go pat
-        ConstructorP con pats -> con : foldMap go pats
-        ListP pats -> foldMap go pats
-        RecordP row -> foldMap go $ toList row
-        SigmaP lhs rhs -> collectReferencedNamesInPat lhs <> collectReferencedNamesInPat rhs
-        LiteralP _ -> []
-        InfixP pairs l -> foldMap (\(pat, conOp) -> go pat <> [conOp]) pairs <> go l
-
-collectNamesInBinding :: Binding p -> [NameAt p]
-collectNamesInBinding = \case
-    FunctionB name _ _ -> [name]
-    ValueB pat _ -> collectNamesInPat pat
-
-{-
--- >>> pretty $ Function (Var "a") (Record (fromList [("x", Name "Int"), ("x", Name "a")]) Nothing)
--- >>> pretty $ Forall "a" $ Forall "b" $ Forall "c" $ Name "a" `Function` (Name "b" `Function` Name "c")
--- >>> pretty $ Forall "a" $ (Forall "b" $ Name "b" `Function` Name "a") `Function` Name "a"
--- >>> pretty $ App (Forall "f" $ Name "f") (Name "b") `Function` (App (App (Name "c") (Name "a")) $ App (Name "d") (Name "e"))
--- >>> pretty $ Record (fromList [("x", Name "Bool")]) (Just "r")
--- >>> pretty $ Variant (fromList [("E", Name "Unit")]) (Just "v")
--- a -> {x : Int, x : a}
--- ∀a. ∀b. ∀c. a -> b -> c
--- ∀a. (∀b. b -> a) -> a
--- (∀f. f) b -> c a (d e)
--- {x : Bool | r}
--- [E Unit | v]
--}
