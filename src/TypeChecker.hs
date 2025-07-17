@@ -37,7 +37,7 @@ processDeclaration
     => Context
     -> Declaration 'Fixity
     -> Eff es (EDeclaration, IdMap Name_ Value -> IdMap Name_ Value)
-processDeclaration ctx (decl :@ loc) = case decl of
+processDeclaration ctx (decl :@ loc) = localLoc loc case decl of
     D.Signature name sig -> do
         sigV <- withTopLevel $ removeUniVars ctx.level =<< typeFromTerm ctx sig
         univars <- get @UniVars
@@ -54,7 +54,7 @@ processDeclaration ctx (decl :@ loc) = case decl of
                 modify @TopLevel $ Map.insert (unLoc name) ty
                 pure eBody
         pure (E.ValueD (E.ValueB name eBody), id)
-    D.Value T.ValueB{} [] -> internalError loc "pattern destructuring bindings are not supported yet"
+    D.Value (T.ValueB pat _) [] -> internalError (getLoc pat) "pattern destructuring bindings are not supported yet"
     -- this case is way oversimplified for now, we don't even allow recursion for untyped bindings
     D.Value (T.FunctionB name args body) [] -> do
         topLevel <- get @TopLevel
@@ -164,7 +164,7 @@ insertNeutralApp ctx (term, ty) = case term of
     _ -> insertApp ctx (term, ty)
 
 check :: TC es => Context -> Term 'Fixity -> VType -> Eff es ETerm
-check ctx (t :@ loc) ty = do
+check ctx (t :@ loc) ty = localLoc loc do
     ty' <- forceM ty
     univars <- get
     case (t, ty') of
@@ -194,7 +194,7 @@ check ctx (t :@ loc) ty = do
             pure eTerm
 
 infer :: TC es => Context -> Term 'Fixity -> Eff es (ETerm, VType)
-infer ctx (t :@ loc) = case t of
+infer ctx (t :@ loc) = localLoc loc case t of
     T.Name name -> lookupSig name ctx
     T.Annotation term ty -> do
         vty <- typeFromTerm ctx ty
@@ -219,7 +219,7 @@ infer ctx (t :@ loc) = case t of
         closure <-
             forceM lhsTy >>= \case
                 V.Q Forall vis2 _e closure | vis == vis2 -> pure closure
-                V.Q Forall vis2 _e _ -> internalError loc $ "visibility mismatch" <+> pretty (show @Text vis) <+> "!=" <+> pretty (show @Text vis2)
+                V.Q Forall vis2 _e _ -> internalError' $ "visibility mismatch" <+> pretty (show @Text vis) <+> "!=" <+> pretty (show @Text vis2)
                 other -> do
                     argTy <- freshUniVarV ctx type_
                     univars <- get
@@ -242,16 +242,16 @@ infer ctx (t :@ loc) = case t of
         let var = toSimpleName_ $ unLoc arg
             quotedBody = quote univars (succ ctx.level) bodyTy
         pure (E.Lambda vis (E.VarP var) eBody, V.Q Forall vis Retained V.Closure{ty, var, env = ctx.env, body = quotedBody})
-    T.Lambda{} -> internalError loc "wip: pattern matching lambda"
-    T.WildcardLambda{} -> internalError loc "wip: wildcard lambda"
+    T.Lambda{} -> internalError' "wip: pattern matching lambda"
+    T.WildcardLambda{} -> internalError' "wip: wildcard lambda"
     T.Let (T.ValueB (T.VarP name :@ _) definition) body -> do
         (eDef, ty) <- infer ctx definition
         env <- extendEnv ctx.env
         (eBody, bodyTy) <- infer (define (unLoc name) (desugar eDef) (eval env eDef) (quote env.univars ctx.level ty) ty ctx) body
         pure (E.Let (E.ValueB name eDef) eBody, bodyTy)
-    T.Let{} -> internalError loc "destructuring bindings and function bindings are not supported yet"
-    T.LetRec{} -> internalError loc "let rec not supported yet"
-    T.Do{} -> internalError loc "do notation not supported yet"
+    T.Let{} -> internalError' "destructuring bindings and function bindings are not supported yet"
+    T.LetRec{} -> internalError' "let rec not supported yet"
+    T.Do{} -> internalError' "do notation not supported yet"
     T.Case arg branches -> do
         (eArg, argTy) <- infer ctx arg
         result <- freshUniVarV ctx type_
@@ -260,7 +260,7 @@ infer ctx (t :@ loc) = case t of
             univars <- get
             (ePat,) <$> check (bindMany univars newLocals ctx) body result
         pure (E.Case eArg eBranches, result)
-    T.Match{} -> internalError loc "wip: match"
+    T.Match{} -> internalError' "wip: match"
     -- we don't infer dependent if, because that would mask type errors a lot of time
     T.If cond true false -> do
         eCond <- check ctx cond $ V.Type (BoolName :@ loc)
@@ -276,8 +276,8 @@ infer ctx (t :@ loc) = case t of
         let body = C.VariantT $ ExtRow (fromList [(con, quote univars ctx.level payloadTy)]) rowExt
         -- '(x : ?a) -> [| Con ?a | ?r x ]'
         pure (E.Variant con, V.Pi V.Closure{env = ctx.env, ty = payloadTy, var = toSimpleName_ payload, body})
-    T.RecordAccess{} -> internalError loc "wip: record access"
-    T.Record{} -> internalError loc "wip: record"
+    T.RecordAccess{} -> internalError' "wip: record access"
+    T.Record{} -> internalError' "wip: record"
     T.Sigma lhs rhs -> do
         (eLhs, lhsTy) <- infer ctx lhs
         env <- extendEnv ctx.env
@@ -322,11 +322,11 @@ typeFromTerm ctx term = do
     pure $ eval env eTerm
 
 checkPattern :: TC es => Context -> Pattern 'Fixity -> VType -> Eff es (EPattern, [(Name_, VType)])
-checkPattern ctx (pat :@ pLoc) ty = case pat of
+checkPattern ctx (pat :@ pLoc) ty = localLoc pLoc case pat of
     T.VarP (L name) -> pure (E.VarP (toSimpleName_ name), [(name, ty)])
-    T.VariantP{} -> internalError pLoc "todo: check variant pattern"
-    T.RecordP{} -> internalError pLoc "todo: check record pattern"
-    T.SigmaP{} -> internalError pLoc "todo: check sigma pattern"
+    T.VariantP{} -> internalError' "todo: check variant pattern"
+    T.RecordP{} -> internalError' "todo: check record pattern"
+    T.SigmaP{} -> internalError' "todo: check sigma pattern"
     _ -> fallthroughToInfer
       where
         fallthroughToInfer = do
@@ -335,7 +335,7 @@ checkPattern ctx (pat :@ pLoc) ty = case pat of
             pure (ePat, newLocals)
 
 inferPattern :: TC es => Context -> Pattern 'Fixity -> Eff es (EPattern, VType, [(Name_, VType)])
-inferPattern ctx (p :@ loc) = case p of
+inferPattern ctx (p :@ loc) = localLoc loc case p of
     T.VarP (L name) -> do
         ty <- freshUniVarV ctx type_
         pure (E.VarP (toSimpleName_ name), ty, [(name, ty)])
@@ -347,7 +347,7 @@ inferPattern ctx (p :@ loc) = case p of
         tyV <- typeFromTerm ctx ty
         (ePat, newLocals) <- checkPattern ctx pat tyV
         pure (ePat, tyV, newLocals)
-    T.ConstructorP{} -> internalError loc "todo: inferPattern: constructor"
+    T.ConstructorP{} -> internalError' "todo: inferPattern: constructor"
     T.ListP pats -> do
         result <- freshUniVarV ctx type_
         patsAndLocals <- traverse (\pat -> checkPattern ctx pat result) pats
@@ -357,7 +357,7 @@ inferPattern ctx (p :@ loc) = case p of
             newLocals = fold . reverse $ map snd patsAndLocals
             listType = V.TyCon (ListName :@ loc) (Vec.singleton result)
         pure (E.ListP ePats, listType, newLocals)
-    _ -> internalError loc "todo: non-trivial inferPattern"
+    _ -> internalError' "todo: non-trivial inferPattern"
   where
     type_ = V.Type $ TypeName :@ loc
 
