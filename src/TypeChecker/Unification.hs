@@ -7,8 +7,8 @@ import Common
 import Data.EnumMap.Strict qualified as EMap
 import Data.EnumSet qualified as ESet
 import Data.Vector qualified as Vec
-import Diagnostic (internalError')
-import Effectful.Error.Static (Error, runErrorNoCallStack, throwError)
+import Diagnostic (currentLoc, internalError')
+import Effectful.Error.Static (Error, runErrorNoCallStack, throwError_, tryError)
 import Effectful.Reader.Static (Reader, asks, runReader)
 import Effectful.State.Static.Local (get, modify)
 import Eval (
@@ -26,21 +26,37 @@ import Eval (
  )
 import LangPrelude hiding (force, lift)
 import Prettyprinter (vsep)
-import Prettyprinter.Render.Terminal (AnsiStyle)
 import Syntax
 import Syntax.Core qualified as C
 import Syntax.Value as V hiding (lift)
 import TypeChecker.Backend hiding (ExType (..))
+import TypeChecker.TypeError (TypeError (..), UnificationError (..), typeError)
 
 newtype ValueTopLevel = ValueTopLevel {getValues :: IdMap Name_ Value}
 
 askValues :: Reader ValueTopLevel :> es => Eff es (IdMap Name_ Value)
 askValues = asks @ValueTopLevel (.getValues)
 
-type TC' es = (TC es, Reader ValueTopLevel :> es)
+type TC' es = (TC es, Reader ValueTopLevel :> es, Error UnificationError :> es)
 
 unify :: TC es => Context -> Value -> Value -> Eff es ()
-unify ctx lhs rhs = runReader (ValueTopLevel ctx.env.topLevel) $ unify' ctx.level lhs rhs
+unify ctx lhs rhs = do
+    result <-
+        runErrorNoCallStack @UnificationError $
+            runReader (ValueTopLevel ctx.env.topLevel) $
+                unify' ctx.level lhs rhs
+    case result of
+        Right () -> pass
+        Left context -> do
+            univars <- get
+            let lhsC = quote univars ctx.level lhs
+                rhsC = quote univars ctx.level rhs
+            -- fixme: location info should be handled outside of here
+            loc <-
+                currentLoc >>= \case
+                    Just loc -> pure loc
+                    Nothing -> internalError' "no loc available in unify"
+            typeError CannotUnify{loc, lhs = lhsC, rhs = rhsC, context}
 
 unify' :: TC' es => Level -> Value -> Value -> Eff es ()
 unify' lvl lhsTy rhsTy = do
@@ -92,7 +108,9 @@ unify' lvl lhsTy rhsTy = do
                 unify' lvl (Stuck arg) (Stuck arg2)
         lhs rhs -> do
             univars <- get @UniVars
-            internalError' $ "cannot unify" <+> pretty (quote univars lvl lhs) <+> "with" <+> pretty (quote univars lvl rhs)
+            let lhsC = quote univars lvl lhs
+                rhsC = quote univars lvl rhs
+            throwError_ (NotEq lhsC rhsC)
 
 unifySpine :: TC' es => Level -> Spine -> Spine -> Eff es ()
 unifySpine lvl = \cases
@@ -135,7 +153,7 @@ skip PartialRenaming{codomain, ..} = PartialRenaming{codomain = succ codomain, .
 
 solve :: TC' es => Level -> UniVar -> Spine -> Value -> Eff es ()
 solve ctxLevel uni spine rhs = do
-    pren <- either internalError' pure =<< invert ctxLevel spine
+    pren <- invert ctxLevel spine
     solveWithRenaming uni pren rhs
 
 solveWithRenaming :: TC' es => UniVar -> (PartialRenaming, Maybe Pruning) -> Value -> Eff es ()
@@ -152,8 +170,8 @@ solveWithRenaming uni (pren, pruneNonlinear) rhs = do
 {- | convert a spine to a partial renaming
 also returns a pruning of non-linear vars, if one is needed
 -}
-invert :: TC es => Level -> Spine -> Eff es (Either (Doc AnsiStyle) (PartialRenaming, Maybe Pruning))
-invert codomain spine = runErrorNoCallStack do
+invert :: TC' es => Level -> Spine -> Eff es (PartialRenaming, Maybe Pruning)
+invert codomain spine = do
     (domain, renaming, nonLinears, varSpine) <- go spine
 
     let mask :: [(Visibility, Level)] -> Pruning
@@ -167,7 +185,7 @@ invert codomain spine = runErrorNoCallStack do
 
     pure (PartialRenaming{uni = Nothing, domain, codomain, renaming}, mbPruning)
   where
-    go :: TC es => Spine -> Eff (Error (Doc AnsiStyle) : es) (Level, EnumMap Level Level, EnumSet Level, [(Visibility, Level)])
+    go :: TC' es => Spine -> Eff es (Level, EnumMap Level Level, EnumSet Level, [(Visibility, Level)])
     go [] = pure (Level 0, EMap.empty, ESet.empty, [])
     go ((vis, ty) : spine') = do
         (domain, renaming, nonLinears, rest) <- go spine'
@@ -177,7 +195,8 @@ invert codomain spine = runErrorNoCallStack do
                     pure (succ domain, EMap.delete vlvl renaming, ESet.insert vlvl nonLinears, (vis, vlvl) : rest)
                 | otherwise ->
                     pure (succ domain, EMap.insert vlvl domain renaming, nonLinears, (vis, vlvl) : rest)
-            other -> throwError @(Doc AnsiStyle) $ "non-var in spine:" <+> pretty other
+            -- TODO: Level 0 is obviously incorrect here, but I'm not sure whether we should use the domain or the codomain
+            other -> throwError_ (NonVarInSpine $ quote EMap.empty (Level 0) other)
 
 data PruneStatus
     = Renaming
@@ -200,10 +219,10 @@ pruneUniVarApp pren uni spine = do
         forceM ty >>= \case
             Var vlvl -> case (EMap.lookup vlvl pren.renaming, status) of
                 (Just targetLvl, _) -> pure ((vis, Just $ C.Var $ levelToIndex pren.domain targetLvl) : spine', status)
-                (Nothing, NonRenaming) -> internalError' "can't prune a spine that's not a renaming"
+                (Nothing, NonRenaming) -> throwError_ PruneNonRenaming
                 (Nothing, _) -> pure ((vis, Nothing) : spine', NeedsPruning)
             other -> case status of
-                NeedsPruning -> internalError' "can't prune a non-pattern spine"
+                NeedsPruning -> throwError_ PruneNonPattern
                 _ -> do
                     term <- rename pren other
                     pure ((vis, Just term) : spine', NonRenaming)
@@ -212,12 +231,10 @@ rename :: TC' es => PartialRenaming -> Value -> Eff es CoreTerm
 rename pren ty =
     forceM ty >>= \case
         Stuck (UniVarApp uni2 spine)
-            | pren.uni == Just uni2 -> internalError' "self-referential type"
+            | pren.uni == Just uni2 -> throwError_ (OccursCheck uni2)
             | otherwise -> pruneUniVarApp pren uni2 spine
         Stuck (VarApp lvl spine) -> case EMap.lookup lvl pren.renaming of
-            Nothing ->
-                internalError' $
-                    "escaping variable" <+> "#" <> pretty lvl.getLevel <+> "in scope:" <+> pretty (map (show @Text) $ EMap.keys pren.renaming)
+            Nothing -> throwError_ (EscapingVariable lvl)
             Just x -> renameSpine pren (C.Var $ levelToIndex pren.domain x) spine
         Lambda vis closure -> do
             bodyToRename <- closure `appM` Var pren.codomain
@@ -308,7 +325,7 @@ uniUni ctxLvl uni spine uni2 spine2
     | otherwise = go uni spine uni2 spine2
   where
     go u sp u2 sp2 =
-        invert ctxLvl sp >>= \case
+        tryError @UnificationError (invert ctxLvl sp) >>= \case
             Left{} -> solve ctxLvl u2 sp2 (Stuck $ UniVarApp u sp)
             Right pren -> solveWithRenaming u pren (Stuck $ UniVarApp u2 sp2)
 

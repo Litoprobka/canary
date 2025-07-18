@@ -17,6 +17,7 @@ module Diagnostic (
     nonFatal,
     fatal,
     noErrors,
+    currentLoc,
     localLoc,
     internalError,
     internalError',

@@ -1,18 +1,20 @@
 {-# OPTIONS_GHC -Wno-partial-fields #-}
 
-module TypeChecker.TypeError (TypeError (..), typeError) where
+module TypeChecker.TypeError (TypeError (..), typeError, UnificationError (..)) where
 
 import Common
 import Diagnostic
-import Error.Diagnose (Marker (..), Report (..))
+import Error.Diagnose (Marker (..), Note (Note), Report (..))
 import LangPrelude
+import Prettyprinter (vsep)
+import Prettyprinter.Render.Terminal (AnsiStyle)
 import Syntax
 import Syntax.Row (OpenName)
 
 type CType = Located CoreType
 
 data TypeError
-    = CannotUnify CType CType
+    = CannotUnify {loc :: Loc, lhs :: CoreType, rhs :: CoreType, context :: UnificationError}
     | NotASubtype CType CType (Maybe OpenName)
     | MissingField (Either CType (Term 'Fixity)) OpenName
     | MissingVariant CType OpenName
@@ -25,15 +27,25 @@ data TypeError
     | NoVisibleTypeArgument Loc (Type 'Fixity) CType
     | ConstructorReturnType {con :: Name, expected :: Name, returned :: Name}
 
+data UnificationError
+    = NotEq CoreTerm CoreTerm
+    | PruneNonRenaming
+    | PruneNonPattern
+    | NonVarInSpine CoreTerm
+    | OccursCheck UniVar
+    | EscapingVariable Level
+
 typeError :: Diagnose :> es => TypeError -> Eff es a
 typeError =
     fatal . one . \case
-        CannotUnify lhs rhs ->
+        CannotUnify{loc, lhs, rhs, context} ->
             Err
                 Nothing
-                ("cannot unify" <+> prettyDef lhs <+> "with" <+> prettyDef rhs)
-                (mkNotes [(getLoc lhs, This $ prettyDef lhs <+> "originates from"), (getLoc rhs, This $ prettyDef rhs <+> "originates from")])
-                []
+                "Type error"
+                (mkNotes [(loc, This "when typechecking this")])
+                [ Note $ vsep ["when trying to unify", prettyDef lhs, prettyDef rhs]
+                , noteFromUnificationError context
+                ]
         NotASubtype lhs rhs mbField ->
             Err
                 Nothing
@@ -114,3 +126,13 @@ typeError =
                     ]
                 )
                 []
+
+-- todo: proper error messages
+noteFromUnificationError :: UnificationError -> Note (Doc AnsiStyle)
+noteFromUnificationError = \case
+    NotEq lhs rhs -> Note $ vsep ["specifically, these types are incompatible", prettyDef lhs, prettyDef rhs]
+    PruneNonRenaming -> Note "can't prune a spine that's not a renaming"
+    PruneNonPattern -> Note "can't prune a non-pattern spine"
+    NonVarInSpine term -> Note $ "non-var in spine:" <+> pretty term
+    OccursCheck uni -> Note $ "solving the unification variable" <+> pretty uni <+> "resulted in a type that refers to itself"
+    EscapingVariable lvl -> Note $ "variable" <+> "#" <> pretty lvl.getLevel <+> "is not in scope of a unification variable"
