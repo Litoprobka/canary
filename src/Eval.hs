@@ -54,7 +54,7 @@ data ExtendedEnv = ExtendedEnv
 
 -- an orphan instance, since I don't want to merge 'Value.hs' and 'Eval.hs'
 instance PrettyAnsi Value where
-    prettyAnsi opts = prettyAnsi opts . quote EMap.empty (Level 0)
+    prettyAnsi opts = prettyAnsi opts . quoteWhnf EMap.empty (Level 0)
 
 deriving via (UnAnnotate Value) instance Pretty Value
 deriving via (UnAnnotate Value) instance Show Value
@@ -63,8 +63,8 @@ quote :: UniVars -> Level -> Value -> CoreTerm
 quote univars = go
   where
     go lvl = \case
-        TyCon name args -> C.TyCon name $ (fmap . fmap) (quote univars lvl) args
-        Con con args -> C.Con con $ (fmap . fmap) (quote univars lvl) args
+        TyCon name args -> C.TyCon name $ (fmap . fmap) (go lvl) args
+        Con con args -> C.Con con $ (fmap . fmap) (go lvl) args
         Lambda vis closure -> C.Lambda vis closure.var $ quoteClosure lvl closure
         PrimFunction PrimFunc{name, captured} ->
             -- captured names are stored as a stack, i.e. backwards, so we fold right rather than left here
@@ -85,13 +85,84 @@ quote univars = go
         Fn fn acc -> C.App Visible (go lvl $ PrimFunction fn) (quoteStuck lvl acc)
         Case arg matches -> C.Case (quoteStuck lvl arg) (fmap quotePatternClosure matches)
       where
-        quoteSpine = foldr (\(vis, arg) acc -> C.App vis acc (quote univars lvl arg))
+        quoteSpine = foldr (\(vis, arg) acc -> C.App vis acc (go lvl arg))
         quotePatternClosure closure =
             let (bodyV, newLevel) = skolemizePatternClosure univars lvl closure
-             in (closure.pat, quote univars newLevel bodyV)
+             in (closure.pat, go newLevel bodyV)
 
     quoteClosure :: Level -> Closure a -> CoreTerm
-    quoteClosure lvl closure = quote univars (succ lvl) $ app univars closure (Var lvl)
+    quoteClosure lvl closure = go (succ lvl) $ app univars closure (Var lvl)
+
+{- | quote a value without reducing anything under lambdas
+todo: 'quoteWhnf' is 90% the same as 'quote', I think they can be merged into one function
+-}
+quoteWhnf :: UniVars -> Level -> Value -> CoreTerm
+quoteWhnf univars = go
+  where
+    go lvl = \case
+        TyCon name args -> C.TyCon name $ (fmap . fmap) (go lvl) args
+        Con con args -> C.Con con $ (fmap . fmap) (go lvl) args
+        Lambda vis closure -> C.Lambda vis closure.var $ quoteClosure lvl closure
+        PrimFunction PrimFunc{name, captured} ->
+            foldr (\arg acc -> C.App Visible acc (go lvl arg)) (C.Name name) captured
+        Record vals -> C.Record $ fmap (go lvl) vals
+        Sigma x y -> C.Sigma (go lvl x) (go lvl y)
+        Variant name val -> C.Variant name (go lvl val)
+        PrimValue lit -> C.Literal lit
+        Q q v e closure -> C.Q q v e closure.var (go lvl closure.ty) $ quoteClosure lvl closure
+        VariantT row -> C.VariantT $ fmap (go lvl) row
+        RecordT row -> C.RecordT $ fmap (go lvl) row
+        Stuck stuck -> goStuck lvl stuck
+
+    goStuck lvl = \case
+        VarApp varLvl spine -> goSpine (C.Var $ levelToIndex lvl varLvl) spine
+        UniVarApp uni spine -> goSpine (C.UniVar uni) spine
+        Fn fn acc -> C.App Visible (go lvl $ PrimFunction fn) (goStuck lvl acc)
+        Case arg matches -> C.Case (goStuck lvl arg) (fmap goPatternClosure matches)
+      where
+        goSpine = foldr (\(vis, arg) acc -> C.App vis acc (go lvl arg))
+        -- we can't reuse `skolemizePatternClosure`, because it calls `evalCore` inside. Meh.
+        goPatternClosure closure = (closure.pat, subst newLevel env closure.body)
+          where
+            env = freeVars <> closure.env.locals
+            freeVars = Var <$> [pred newLevel, pred (pred newLevel) .. lvl]
+            newLevel = Level $ lvl.getLevel + C.patternArity closure.pat
+
+    quoteClosure lvl Closure{env, body} = subst (succ lvl) (Var lvl : env.locals) body
+
+    -- substitute known variables without reducing anything
+    subst :: Level -> [Value] -> CoreTerm -> CoreTerm
+    subst lvl env = \case
+        C.Name name -> C.Name name
+        C.Literal lit -> C.Literal lit
+        C.Var index -> go lvl $ env !! index.getIndex
+        -- \| otherwise -> traceShow ("not in scope!" <+> pretty index.getIndex <> "@" <> pretty index.getIndex <> "," <+> pretty (length env)) $ C.Var index -- does this case ever happen?
+        C.TyCon name args -> C.TyCon name $ (fmap . fmap) (subst lvl env) args
+        C.Con name args -> C.Con name $ (fmap . fmap) (subst lvl env) args
+        C.Variant name arg -> C.Variant name $ subst lvl env arg
+        C.Lambda vis var body -> C.Lambda vis var $ subst (succ lvl) (Var lvl : env) body
+        C.App vis lhs rhs -> C.App vis (subst lvl env lhs) (subst lvl env rhs)
+        C.Case arg branches -> C.Case (subst lvl env arg) $ fmap (substBranch lvl env) branches
+        C.Let name expr body -> C.Let name (subst lvl env expr) (subst (succ lvl) (Var lvl : env) body)
+        C.Record row -> C.Record (fmap (subst lvl env) row)
+        C.RecordT row -> C.RecordT (fmap (subst lvl env) row)
+        C.VariantT row -> C.VariantT (fmap (subst lvl env) row)
+        C.Sigma lhs rhs -> C.Sigma (subst lvl env lhs) (subst lvl env rhs)
+        C.Q q vis e var ty body -> C.Q q vis e var (subst lvl env ty) (subst (succ lvl) (Var lvl : env) body)
+        C.UniVar uni -> case EMap.lookup uni univars of
+            Just Solved{solution} -> go lvl solution
+            _ -> C.UniVar uni
+        C.AppPruning lhs pruning -> C.AppPruning (subst lvl env lhs) pruning
+
+    -- in terms of the printed output, it might be cleaner to evaluate nested pattern matches,
+    -- because pattern matching only reduces the size of the output
+    -- however, to properly apply a pattern we'd have to evaluate the scrutinee, which is exactly what we were trying to avoid
+    substBranch :: Level -> [Value] -> (CorePattern, CoreTerm) -> (CorePattern, CoreTerm)
+    substBranch lvl env (pat, body) =
+        let diff = C.patternArity pat
+            newLevel = Level $ lvl.getLevel + diff
+            freeVars = Var <$> [pred newLevel, pred (pred newLevel) .. lvl]
+         in (pat, subst newLevel (freeVars <> env) body)
 
 evalCore :: ExtendedEnv -> CoreTerm -> Value
 evalCore env@ExtendedEnv{..} = \case
@@ -133,6 +204,9 @@ evalCore env@ExtendedEnv{..} = \case
 
 nf :: Level -> ExtendedEnv -> CoreTerm -> CoreTerm
 nf lvl env term = quote env.univars lvl $ evalCore env term
+
+whnf :: Level -> ExtendedEnv -> CoreTerm -> CoreTerm
+whnf lvl env term = quoteWhnf env.univars lvl $ evalCore env term
 
 evalAppM :: State UniVars :> es => Visibility -> Value -> Value -> Eff es Value
 evalAppM vis lhs rhs = do

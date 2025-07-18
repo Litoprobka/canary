@@ -116,7 +116,7 @@ instance PrettyAnsi CoreTerm where
             VariantT row -> prettyVariant (prettyAnsi opts) (go 0 env) row
             RecordT row -> prettyRecord ":" (prettyAnsi opts) (go 0 env) row
             UniVar uni -> prettyAnsi opts uni
-            AppPruning{} -> "<pruning, idk>"
+            AppPruning lhs pruning -> parensWhen 3 $ go 2 env lhs <> prettyPruning env pruning.getPruning
           where
             parensWhen minPrec
                 | n >= minPrec = parens
@@ -151,6 +151,12 @@ instance PrettyAnsi CoreTerm where
         arrOrDot Forall Visible = specSym "->"
         arrOrDot Exists Visible = specSym "**"
         arrOrDot _ _ = specSym "."
+
+        -- this mirrors the logic in 'evalAppPruning'
+        prettyPruning = \cases
+            (var : rest) (Just vis : pruning) -> prettyPruning rest pruning <+> withVis vis var
+            (_ : rest) (Nothing : pruning) -> prettyPruning rest pruning
+            _ _ -> ""
 
         patternVars = \case
             var@VarP{} -> [prettyAnsi opts var]

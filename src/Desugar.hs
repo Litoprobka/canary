@@ -7,7 +7,6 @@ import Syntax
 import Syntax.Core qualified as C
 import Syntax.Elaborated qualified as E
 
--- TODO: properly handle recursive bindings (that is, don't infinitely loop on them)
 desugar :: ETerm -> CoreTerm
 desugar = \case
     E.Var index -> C.Var index
@@ -36,7 +35,7 @@ desugar = \case
         C.Case
             (go cond)
             [ (C.ConstructorP TrueName [], go true)
-            , (C.WildcardP "", go false)
+            , (C.WildcardP "_", go false)
             ]
     E.Variant name -> C.Lambda Visible (Name' "x") $ C.Variant name (C.Var $ Index 0)
     E.Record fields -> C.Record $ fmap go fields
