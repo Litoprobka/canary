@@ -6,7 +6,7 @@
 module Syntax.Value where
 
 import Common (UniVar)
-import Common hiding (Skolem, UniVar)
+import Common hiding (UniVar)
 import Data.Vector qualified as Vec
 import LangPrelude
 import Syntax.Core (CorePattern, CoreTerm)

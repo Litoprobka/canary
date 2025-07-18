@@ -59,8 +59,13 @@ instance PrettyAnsi Value where
 deriving via (UnAnnotate Value) instance Pretty Value
 deriving via (UnAnnotate Value) instance Show Value
 
-quote :: UniVars -> Level -> Value -> CoreTerm
-quote univars = go
+quoteWith
+    :: (forall ty. Level -> Closure ty -> CoreTerm)
+    -> (Level -> PatternClosure () -> (CorePattern, CoreTerm))
+    -> Level
+    -> Value
+    -> CoreTerm
+quoteWith quoteClosure quotePatternClosure = go
   where
     go lvl = \case
         TyCon name args -> C.TyCon name $ (fmap . fmap) (go lvl) args
@@ -83,15 +88,22 @@ quote univars = go
         VarApp varLvl spine -> quoteSpine (C.Var $ levelToIndex lvl varLvl) spine
         UniVarApp uni spine -> quoteSpine (C.UniVar uni) spine
         Fn fn acc -> C.App Visible (go lvl $ PrimFunction fn) (quoteStuck lvl acc)
-        Case arg matches -> C.Case (quoteStuck lvl arg) (fmap quotePatternClosure matches)
+        Case arg matches -> C.Case (quoteStuck lvl arg) (fmap (quotePatternClosure lvl) matches)
       where
         quoteSpine = foldr (\(vis, arg) acc -> C.App vis acc (go lvl arg))
-        quotePatternClosure closure =
-            let (bodyV, newLevel) = skolemizePatternClosure univars lvl closure
-             in (closure.pat, go newLevel bodyV)
+
+quote :: UniVars -> Level -> Value -> CoreTerm
+quote univars = go
+  where
+    go = quoteWith quoteClosure quotePatternClosure
 
     quoteClosure :: Level -> Closure a -> CoreTerm
     quoteClosure lvl closure = go (succ lvl) $ app univars closure (Var lvl)
+
+    quotePatternClosure :: Level -> PatternClosure a -> (CorePattern, CoreTerm)
+    quotePatternClosure lvl closure =
+        let (bodyV, newLevel) = skolemizePatternClosure univars lvl closure
+         in (closure.pat, go newLevel bodyV)
 
 {- | quote a value without reducing anything under lambdas
 todo: 'quoteWhnf' is 90% the same as 'quote', I think they can be merged into one function
@@ -99,34 +111,14 @@ todo: 'quoteWhnf' is 90% the same as 'quote', I think they can be merged into on
 quoteWhnf :: UniVars -> Level -> Value -> CoreTerm
 quoteWhnf univars = go
   where
-    go lvl = \case
-        TyCon name args -> C.TyCon name $ (fmap . fmap) (go lvl) args
-        Con con args -> C.Con con $ (fmap . fmap) (go lvl) args
-        Lambda vis closure -> C.Lambda vis closure.var $ quoteClosure lvl closure
-        PrimFunction PrimFunc{name, captured} ->
-            foldr (\arg acc -> C.App Visible acc (go lvl arg)) (C.Name name) captured
-        Record vals -> C.Record $ fmap (go lvl) vals
-        Sigma x y -> C.Sigma (go lvl x) (go lvl y)
-        Variant name val -> C.Variant name (go lvl val)
-        PrimValue lit -> C.Literal lit
-        Q q v e closure -> C.Q q v e closure.var (go lvl closure.ty) $ quoteClosure lvl closure
-        VariantT row -> C.VariantT $ fmap (go lvl) row
-        RecordT row -> C.RecordT $ fmap (go lvl) row
-        Stuck stuck -> goStuck lvl stuck
+    go = quoteWith quoteClosure quotePatternClosure
 
-    goStuck lvl = \case
-        VarApp varLvl spine -> goSpine (C.Var $ levelToIndex lvl varLvl) spine
-        UniVarApp uni spine -> goSpine (C.UniVar uni) spine
-        Fn fn acc -> C.App Visible (go lvl $ PrimFunction fn) (goStuck lvl acc)
-        Case arg matches -> C.Case (goStuck lvl arg) (fmap goPatternClosure matches)
+    -- we can't reuse `skolemizePatternClosure`, because it calls `evalCore` inside. Meh.
+    quotePatternClosure lvl closure = (closure.pat, subst newLevel env closure.body)
       where
-        goSpine = foldr (\(vis, arg) acc -> C.App vis acc (go lvl arg))
-        -- we can't reuse `skolemizePatternClosure`, because it calls `evalCore` inside. Meh.
-        goPatternClosure closure = (closure.pat, subst newLevel env closure.body)
-          where
-            env = freeVars <> closure.env.locals
-            freeVars = Var <$> [pred newLevel, pred (pred newLevel) .. lvl]
-            newLevel = Level $ lvl.getLevel + C.patternArity closure.pat
+        env = freeVars <> closure.env.locals
+        freeVars = Var <$> [pred newLevel, pred (pred newLevel) .. lvl]
+        newLevel = Level $ lvl.getLevel + C.patternArity closure.pat
 
     quoteClosure lvl Closure{env, body} = subst (succ lvl) (Var lvl : env.locals) body
 

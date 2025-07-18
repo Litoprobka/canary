@@ -23,19 +23,15 @@ desugar = \case
             asLambda = foldr (uncurry E.Lambda) body args
     E.LetRec _bindings _body -> error "todo: letrec desugar"
     E.Case arg matches -> C.Case (go arg) $ fmap (bimap flattenPattern go) matches
-    E.Match _matches@((_ :| [], _) : _) -> error "todo: lift in match"
-    {-do
-       name <- freshName $ Name' "matchArg" :@ loc
-       matches' <- for matches \case
-           ((pat ::: _) :| [], body) -> bitraverse flattenPattern go (pat, body)
-           _ -> internalError loc "inconsistent pattern count in a match expression"
-       pure $ C.Lambda name $ C.Case (C.Name name) matches'-}
+    E.Match matches@((_ :| [], _) : _) -> C.Lambda Visible (Name' "x") $ C.lift 1 $ C.Case (C.Var (Index 0)) (fmap desugarMatchBranch matches)
+      where
+        desugarMatchBranch ((pat ::: _) :| _, body) = (flattenPattern pat, go body)
     E.Match _ -> error "todo: multi-arg match desugar"
     E.If cond true false ->
         C.Case
             (go cond)
             [ (C.ConstructorP TrueName [], go true)
-            , (C.WildcardP "_", go false)
+            , (C.WildcardP "_", C.lift 1 $ go false)
             ]
     E.Variant name -> C.Lambda Visible (Name' "x") $ C.Variant name (C.Var $ Index 0)
     E.Record fields -> C.Record $ fmap go fields

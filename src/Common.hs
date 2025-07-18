@@ -161,14 +161,6 @@ newtype Id = Id {id :: Int}
     deriving (Show, Eq)
     deriving newtype (Hashable, Pretty, Enum)
 
-newtype Skolem = Skolem Name
-    deriving (Show, Eq)
-    deriving newtype (Hashable, HasId)
-    deriving (Pretty) via (UnAnnotate Skolem)
-
-instance HasLoc Skolem where
-    getLoc (Skolem name) = getLoc name
-
 newtype Scope = Scope Int deriving (Show, Eq, Ord)
 
 instance PrettyAnsi Name_ where
@@ -189,11 +181,6 @@ instance PrettyAnsi Name_ where
         TypeName -> "Type"
 instance PrettyAnsi UniVar where
     prettyAnsi _ (UniVar n) = "?" <> pretty n
-instance PrettyAnsi Skolem where
-    prettyAnsi opts (Skolem (L (Name name n)))
-        | opts.printIds = pretty name <> "?" <> pretty n
-        | otherwise = pretty name <> "?"
-    prettyAnsi opts (Skolem builtin) = prettyAnsi opts builtin <> "?"
 
 newtype Loc = Loc Position
     deriving (Show)
