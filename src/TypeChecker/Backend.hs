@@ -213,6 +213,10 @@ removeUniVarsT lvl = go
             pure $ E.Q q v e (var ::: ty') body'
         E.VariantT row -> E.VariantT <$> traverse go row
         E.RecordT row -> E.RecordT <$> traverse go row
-        E.Core _coreTerm -> internalError' "removeUniVarsT: todo: inserted core term - should probably call removeUniVars"
+        E.Core coreTerm -> do
+            univars <- get
+            let val = evalCore ExtendedEnv{univars, locals = [], topLevel = Map.empty} coreTerm
+            val <- removeUniVars lvl val
+            pure (E.Core $ quote univars lvl val)
     goBranch (pat, body) = do
         (pat,) <$> removeUniVarsT (Level $ lvl.getLevel + E.patternArity pat) body

@@ -337,6 +337,7 @@ replStep env@ReplEnv{loadedFiles} command = do
             let ctx = emptyContext env.values
             (eExpr, vTy) <- TC.infer ctx afterFixityRes
             finalTy <- TC.removeUniVars ctx.level vTy
+            eExpr <- TC.removeUniVarsT ctx.level eExpr
             pure (eExpr, finalTy)
 
     prettyVal val = do

@@ -65,7 +65,7 @@ quote univars = go
     go lvl = \case
         TyCon name args -> C.TyCon name $ (fmap . fmap) (quote univars lvl) args
         Con con args -> C.Con con $ (fmap . fmap) (quote univars lvl) args
-        Lambda vis closure -> C.Lambda vis closure.var $ quoteClosure univars lvl closure
+        Lambda vis closure -> C.Lambda vis closure.var $ quoteClosure lvl closure
         PrimFunction PrimFunc{name, captured} ->
             -- captured names are stored as a stack, i.e. backwards, so we fold right rather than left here
             foldr (\arg acc -> C.App Visible acc (go lvl arg)) (C.Name name) captured
@@ -73,12 +73,11 @@ quote univars = go
         Sigma x y -> C.Sigma (go lvl x) (go lvl y)
         Variant name val -> C.Variant name (go lvl val)
         PrimValue lit -> C.Literal lit
-        Q q v e closure -> C.Q q v e closure.var (go lvl closure.ty) $ quoteClosure univars lvl closure
+        Q q v e closure -> C.Q q v e closure.var (go lvl closure.ty) $ quoteClosure lvl closure
         VariantT row -> C.VariantT $ fmap (go lvl) row
         RecordT row -> C.RecordT $ fmap (go lvl) row
         Stuck stuck -> quoteStuck lvl stuck
 
-    -- for now, all quote applications are explicit
     quoteStuck :: Level -> Stuck -> CoreTerm
     quoteStuck lvl = \case
         VarApp varLvl spine -> quoteSpine (C.Var $ levelToIndex lvl varLvl) spine
@@ -87,18 +86,20 @@ quote univars = go
         Case arg matches -> C.Case (quoteStuck lvl arg) (fmap quotePatternClosure matches)
       where
         quoteSpine = foldr (\(vis, arg) acc -> C.App vis acc (quote univars lvl arg))
-        quotePatternClosure PatternClosure{pat, env, body} =
-            let ValueEnv{..} = env
-                newLevel = Level $ lvl.getLevel + C.patternArity pat
-                freeVars = Var <$> [pred newLevel .. lvl]
-                bodyV = evalCore ExtendedEnv{locals = freeVars <> locals, ..} body
-             in (pat, quote univars newLevel bodyV)
+        quotePatternClosure closure =
+            let (bodyV, newLevel) = skolemizePatternClosure univars lvl closure
+             in (closure.pat, quote univars newLevel bodyV)
+
+    quoteClosure :: Level -> Closure a -> CoreTerm
+    quoteClosure lvl closure = quote univars (succ lvl) $ app univars closure (Var lvl)
 
 evalCore :: ExtendedEnv -> CoreTerm -> Value
 evalCore env@ExtendedEnv{..} = \case
     -- note that env.topLevel is a lazy IdMap, so we only force the outer structure here
     C.Name name -> LMap.lookupDefault (error . show $ "unbound top-level name" <+> pretty name) (unLoc name) env.topLevel
-    C.Var index -> env.locals !! index.getIndex
+    C.Var index
+        | index.getIndex < length env.locals -> env.locals !! index.getIndex
+        | otherwise -> error . show $ "index" <+> pretty index.getIndex <+> "out of scope of env@" <> pretty (length env.locals)
     C.TyCon name args -> TyCon name $ (fmap . fmap) (evalCore env) args
     C.Con name args -> Con name $ (fmap . fmap) (evalCore env) args
     C.Variant name arg -> Variant name (evalCore env arg)
@@ -141,7 +142,7 @@ evalAppM vis lhs rhs = do
 evalApp :: UniVars -> Visibility -> Value -> Value -> Value
 evalApp univars vis = \cases
     (Lambda vis2 closure) arg | vis == vis2 -> app univars closure arg
-    (Lambda vis2 _) _ -> error $ "visibility mismatch " <> show vis <> " != " <> show vis2
+    (Lambda vis2 _) _ -> error $ "[eval] visibility mismatch " <> show vis <> " != " <> show vis2
     (PrimFunction fn) (Stuck stuck) -> Stuck $ Fn fn stuck
     (PrimFunction PrimFunc{remaining = 1, captured, f}) arg -> f (arg :| captured)
     (PrimFunction PrimFunc{name, remaining, captured, f}) arg -> PrimFunction PrimFunc{name, remaining = pred remaining, captured = arg : captured, f}
@@ -180,8 +181,14 @@ appM closure arg = do
     univars <- get @UniVars
     pure $ app univars closure arg
 
-quoteClosure :: UniVars -> Level -> Closure a -> CoreTerm
-quoteClosure univars lvl closure = quote univars (succ lvl) $ app univars closure (Var lvl)
+-- | convert a pattern closure to a value with free variables
+skolemizePatternClosure :: UniVars -> Level -> PatternClosure a -> (Value, Level)
+skolemizePatternClosure univars level closure = (evalCore env closure.body, newLevel)
+  where
+    ValueEnv{..} = closure.env
+    env = ExtendedEnv{locals = freeVars <> locals, ..}
+    freeVars = Var <$> [pred newLevel, pred (pred newLevel) .. level]
+    newLevel = Level $ level.getLevel + C.patternArity closure.pat
 
 -- | try to apply a pattern to a value, updating the given value env
 matchCore :: ExtendedEnv -> CorePattern -> Value -> Maybe ExtendedEnv

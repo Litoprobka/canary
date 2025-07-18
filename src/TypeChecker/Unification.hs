@@ -11,7 +11,19 @@ import Diagnostic (internalError')
 import Effectful.Error.Static (Error, runErrorNoCallStack, throwError)
 import Effectful.Reader.Static (Reader, asks, runReader)
 import Effectful.State.Static.Local (get, modify)
-import Eval (ExtendedEnv (..), UniVarState (..), UniVars, app, appM, evalAppM, evalCore, force, forceM, quote)
+import Eval (
+    ExtendedEnv (..),
+    UniVarState (..),
+    UniVars,
+    app,
+    appM,
+    evalAppM,
+    evalCore,
+    force,
+    forceM,
+    quote,
+    skolemizePatternClosure,
+ )
 import LangPrelude hiding (force, lift)
 import Prettyprinter (vsep)
 import Prettyprinter.Render.Terminal (AnsiStyle)
@@ -113,6 +125,11 @@ lift PartialRenaming{uni, domain, codomain, renaming} =
         , renaming = EMap.insert codomain domain renaming
         }
 
+-- | add multiple variables to a partial renaming
+liftN :: Int -> PartialRenaming -> PartialRenaming
+liftN 0 = id
+liftN n = lift . liftN (pred n)
+
 skip :: PartialRenaming -> PartialRenaming
 skip PartialRenaming{codomain, ..} = PartialRenaming{codomain = succ codomain, ..}
 
@@ -160,7 +177,7 @@ invert codomain spine = runErrorNoCallStack do
                     pure (succ domain, EMap.delete vlvl renaming, ESet.insert vlvl nonLinears, (vis, vlvl) : rest)
                 | otherwise ->
                     pure (succ domain, EMap.insert vlvl domain renaming, nonLinears, (vis, vlvl) : rest)
-            other -> throwError @(Doc AnsiStyle) $ "non-var in spine" <+> pretty other
+            other -> throwError @(Doc AnsiStyle) $ "non-var in spine:" <+> pretty other
 
 data PruneStatus
     = Renaming
@@ -192,41 +209,48 @@ pruneUniVarApp pren uni spine = do
                     pure ((vis, Just term) : spine', NonRenaming)
 
 rename :: TC' es => PartialRenaming -> Value -> Eff es CoreTerm
-rename = go
-  where
-    goSpine _ term [] = pure term
-    goSpine pren term ((vis, ty) : spine) = C.App vis <$> goSpine pren term spine <*> go pren ty
+rename pren ty =
+    forceM ty >>= \case
+        Stuck (UniVarApp uni2 spine)
+            | pren.uni == Just uni2 -> internalError' "self-referential type"
+            | otherwise -> pruneUniVarApp pren uni2 spine
+        Stuck (VarApp lvl spine) -> case EMap.lookup lvl pren.renaming of
+            Nothing ->
+                internalError' $
+                    "escaping variable" <+> "#" <> pretty lvl.getLevel <+> "in scope:" <+> pretty (map (show @Text) $ EMap.keys pren.renaming)
+            Just x -> renameSpine pren (C.Var $ levelToIndex pren.domain x) spine
+        Lambda vis closure -> do
+            bodyToRename <- closure `appM` Var pren.codomain
+            C.Lambda vis closure.var <$> rename (lift pren) bodyToRename
+        Q q v e closure -> do
+            argTy <- rename pren closure.ty
+            bodyToRename <- closure `appM` Var pren.codomain
+            C.Q q v e closure.var argTy <$> rename (lift pren) bodyToRename
+        TyCon name args -> C.TyCon name <$> (traverse . traverse) (rename pren) args
+        Con name args -> C.TyCon name <$> (traverse . traverse) (rename pren) args
+        Variant name arg -> C.Variant name <$> rename pren arg
+        PrimFunction fn -> do
+            captured <- traverse (rename pren) fn.captured
+            pure $ foldr (flip $ C.App Visible) (C.Name fn.name) captured
+        Record row -> C.Record <$> traverse (rename pren) row
+        RecordT row -> C.RecordT <$> traverse (rename pren) row
+        VariantT row -> C.VariantT <$> traverse (rename pren) row
+        Sigma x y -> C.Sigma <$> rename pren x <*> rename pren y
+        PrimValue lit -> pure $ C.Literal lit
+        Stuck (Fn fn stuck) -> C.App Visible <$> rename pren (PrimFunction fn) <*> rename pren (Stuck stuck)
+        Stuck (Case arg branches) -> C.Case <$> rename pren (Stuck arg) <*> traverse (renameBranch pren) branches
 
-    go pren ty =
-        forceM ty >>= \case
-            Stuck (UniVarApp uni2 spine)
-                | pren.uni == Just uni2 -> internalError' "self-referential type"
-                | otherwise -> pruneUniVarApp pren uni2 spine
-            Stuck (VarApp lvl spine) -> case EMap.lookup lvl pren.renaming of
-                Nothing ->
-                    internalError' $
-                        "escaping variable" <+> "#" <> pretty lvl.getLevel <+> "in scope:" <+> pretty (map (show @Text) $ EMap.keys pren.renaming)
-                Just x -> goSpine pren (C.Var $ levelToIndex pren.domain x) spine
-            Lambda vis closure -> do
-                bodyToRename <- closure `appM` Var pren.codomain
-                C.Lambda vis closure.var <$> go (lift pren) bodyToRename
-            Q q v e closure -> do
-                argTy <- go pren closure.ty
-                bodyToRename <- closure `appM` Var pren.codomain
-                C.Q q v e closure.var argTy <$> go (lift pren) bodyToRename
-            TyCon name args -> C.TyCon name <$> (traverse . traverse) (go pren) args
-            Con name args -> C.TyCon name <$> (traverse . traverse) (go pren) args
-            Variant name arg -> C.Variant name <$> go pren arg
-            PrimFunction fn -> do
-                captured <- traverse (go pren) fn.captured
-                pure $ foldr (flip $ C.App Visible) (C.Name fn.name) captured
-            Record row -> C.Record <$> traverse (go pren) row
-            RecordT row -> C.RecordT <$> traverse (go pren) row
-            VariantT row -> C.VariantT <$> traverse (go pren) row
-            Sigma x y -> C.Sigma <$> go pren x <*> go pren y
-            PrimValue lit -> pure $ C.Literal lit
-            Stuck (Fn fn stuck) -> C.App Visible <$> go pren (PrimFunction fn) <*> go pren (Stuck stuck)
-            Stuck Case{} -> error "todo: rename stuck case"
+renameSpine :: TC' es => PartialRenaming -> CoreTerm -> Spine -> Eff es CoreTerm
+renameSpine _ term [] = pure term
+renameSpine pren term ((vis, ty) : spine) = C.App vis <$> renameSpine pren term spine <*> rename pren ty
+
+renameBranch :: TC' es => PartialRenaming -> PatternClosure a -> Eff es (CorePattern, CoreTerm)
+renameBranch pren closure = do
+    univars <- get
+    let (bodyV, newLevel) = skolemizePatternClosure univars pren.codomain closure
+        diff = pren.codomain.getLevel - newLevel.getLevel
+    renamedBody <- rename (liftN diff pren) bodyV
+    pure (closure.pat, renamedBody)
 
 -- wrap a term in lambdas
 lambdas :: UniVars -> Level -> VType -> CoreTerm -> CoreTerm
@@ -288,6 +312,10 @@ uniUni ctxLvl uni spine uni2 spine2
             Left{} -> solve ctxLvl u2 sp2 (Stuck $ UniVarApp u sp)
             Right pren -> solveWithRenaming u pren (Stuck $ UniVarApp u2 sp2)
 
+{- | solve @uni spine ~ uni spine'@ by removing all variables that are not present in either of the spines
+
+e.g. @?a x y z w ~ ?a x u z v ===> ?a x _ z _ ~ ?b x z@
+-}
 intersect :: TC' es => Level -> UniVar -> Spine -> Spine -> Eff es ()
 intersect lvl uni spine spine2 = do
     univars <- get

@@ -106,7 +106,7 @@ instance PrettyAnsi CoreTerm where
                     4
                     ( vsep $
                         (keyword "case" <+> go 0 env arg <+> keyword "of" :) $
-                            matches <&> \(pat, body) -> prettyAnsi opts pat <+> specSym "->" <+> go 0 env body
+                            matches <&> \(pat, body) -> prettyAnsi opts pat <+> specSym "->" <+> go 0 (patternVars pat <> env) body
                     )
             Let name body expr -> keyword "let" <+> prettyAnsi opts name <+> specSym "=" <+> go 0 env body <> ";" <+> go 0 env expr
             Literal lit -> prettyAnsi opts lit
@@ -151,6 +151,15 @@ instance PrettyAnsi CoreTerm where
         arrOrDot Forall Visible = specSym "->"
         arrOrDot Exists Visible = specSym "**"
         arrOrDot _ _ = specSym "."
+
+        patternVars = \case
+            var@VarP{} -> [prettyAnsi opts var]
+            w@WildcardP{} -> [prettyAnsi opts w]
+            ConstructorP _ args -> map (prettyAnsi opts . snd) $ reverse args
+            VariantP _ arg -> [prettyAnsi opts arg]
+            RecordP row -> map (prettyAnsi opts) . reverse $ toList row
+            SigmaP _vis lhs rhs -> [prettyAnsi opts rhs, prettyAnsi opts lhs]
+            LiteralP{} -> []
 
 -- check whether a variable occurs in a term
 occurs :: Index -> CoreTerm -> Bool
@@ -204,16 +213,14 @@ lift n = go (Level 0)
 
 -- | How many new variables (including wildcards) does a pattern bind?
 patternArity :: CorePattern -> Int
-patternArity = go
-  where
-    go = \case
-        VarP{} -> 1
-        WildcardP{} -> 1
-        ConstructorP _ args -> length args
-        VariantP{} -> 1
-        RecordP row -> length row
-        SigmaP{} -> 2
-        LiteralP{} -> 0
+patternArity = \case
+    VarP{} -> 1
+    WildcardP{} -> 1
+    ConstructorP _ args -> length args
+    VariantP{} -> 1
+    RecordP row -> length row
+    SigmaP{} -> 2
+    LiteralP{} -> 0
 
 -- invariant: the term must not contain unsolved univars in tail position
 functionTypeArity :: CoreTerm -> Vector Visibility

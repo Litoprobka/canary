@@ -406,7 +406,7 @@ inferPattern ctx (p :@ loc) = do
                 ((eArg, argV), ctx) <- checkPattern ctx arg closure.ty
                 univars <- get
                 (pats, vty, ctx) <- inferConArgs ctx (app univars closure argV) rest
-                pure (((Visible, eArg), argV) : pats, vty, ctx)
+                pure (((vis, eArg), argV) : pats, vty, ctx)
             (V.Q Forall vis _ _, (vis2, _) : _) ->
                 internalError' $
                     "visibility mismatch:"
