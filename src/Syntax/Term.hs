@@ -5,7 +5,7 @@
 
 module Syntax.Term where
 
-import Common hiding (Name, Skolem, UniVar)
+import Common hiding (Name, UniVar)
 import Common qualified as C
 import Data.List.NonEmpty qualified as NE
 import Data.Type.Ord (type (<))

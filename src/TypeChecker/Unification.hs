@@ -41,10 +41,7 @@ type TC' es = (TC es, Reader ValueTopLevel :> es, Error UnificationError :> es)
 
 unify :: TC es => Context -> Value -> Value -> Eff es ()
 unify ctx lhs rhs = do
-    result <-
-        runErrorNoCallStack @UnificationError $
-            runReader (ValueTopLevel ctx.env.topLevel) $
-                unify' ctx.level lhs rhs
+    result <- runErrorNoCallStack @UnificationError $ runReader (ValueTopLevel ctx.env.topLevel) $ unify' ctx.level lhs rhs
     case result of
         Right () -> pass
         Left context -> do

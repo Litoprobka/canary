@@ -328,11 +328,8 @@ checkPattern ctx (pat :@ pLoc) ty = do
     univars <- get
     localLoc pLoc case pat of
         T.VarP (L name) -> do
-            def <- freshUniVar ctx ty
-            env <- extendEnv ctx.env
-            let value = evalCore env def
-                tyC = quote univars ctx.level ty
-            pure ((E.VarP (toSimpleName_ name), value), define name def value tyC ty ctx)
+            value <- freshUniVarV ctx ty
+            pure ((E.VarP (toSimpleName_ name), value), bind univars name ty ctx)
         T.WildcardP txt -> do
             name <- freshName_ $ Name' txt
             value <- freshUniVarV ctx ty
@@ -342,7 +339,7 @@ checkPattern ctx (pat :@ pLoc) ty = do
         T.SigmaP vis lhs rhs -> do
             forceM ty >>= \case
                 V.Q Exists vis2 _e closure
-                    | vis /= vis2 -> internalError' "sigma type: visibility mismatch (implicit argument insertion is not implemented yet)"
+                    | vis /= vis2 -> internalError' "sigma type: visibility mismatch"
                     | otherwise -> do
                         ((eLhs, lhsV), ctx) <- checkPattern ctx lhs closure.ty
                         ((eRhs, rhsV), ctx) <- checkPattern ctx rhs =<< closure `appM` lhsV
@@ -361,11 +358,8 @@ inferPattern ctx (p :@ loc) = do
     localLoc loc case p of
         T.VarP (L name) -> do
             ty <- freshUniVarV ctx type_
-            def <- freshUniVar ctx ty
-            env <- extendEnv ctx.env
-            let value = evalCore env def
-                tyC = quote univars ctx.level ty
-            pure ((E.VarP (toSimpleName_ name), value), ty, define name def value tyC ty ctx)
+            value <- freshUniVarV ctx ty
+            pure ((E.VarP (toSimpleName_ name), value), ty, bind univars name ty ctx)
         T.WildcardP txt -> do
             name <- freshName_ $ Name' txt
             ty <- freshUniVarV ctx type_
@@ -382,18 +376,23 @@ inferPattern ctx (p :@ loc) = do
                 valsWithVis = zip (map fst eArgs) argVals
             pure ((E.ConstructorP name eArgs, V.Con name (fromList valsWithVis)), ty, ctx)
         T.SigmaP{} -> internalError' "todo: not sure how to infer sigma"
-        {-
+        -- this is a lazy desugaring, I can do better
         T.ListP pats -> do
-            result <- freshUniVarV ctx type_
-            patsAndLocals <- traverse (\pat -> checkPattern ctx pat result) pats
-            let ePats = map fst patsAndLocals
-                -- [2, 1] [5, 4, 3] --> [5, 4, 3, 2, 1]
-                -- our lists are actually snoc lists
-                newLocals = fold . reverse $ map snd patsAndLocals
-                listType = V.TyCon (ListName :@ loc) (Vec.singleton result)
-            pure ((E.ListP ePats, _), listType, newLocals)
-        -}
-        _ -> internalError' "todo: non-trivial inferPattern"
+            itemType <- freshUniVarV ctx type_
+            let listType = V.TyCon (ListName :@ loc) $ fromList [(Visible, itemType)]
+                patToCheck = case pats of
+                    [] -> T.ConstructorP (NilName :@ loc) [] :@ loc
+                    (pat : pats) -> T.ConstructorP (ConsName :@ loc) [(Visible, pat), (Visible, T.ListP pats :@ loc)] :@ loc
+            (ePat, ctx) <- checkPattern ctx patToCheck listType
+            pure (ePat, listType, ctx)
+        T.LiteralP lit -> do
+            let litTypeName = case lit of
+                    IntLiteral{} -> IntName
+                    TextLiteral{} -> TextName
+                    CharLiteral{} -> CharName
+            pure ((E.LiteralP lit, V.PrimValue lit), V.Type (litTypeName :@ loc), ctx)
+        T.VariantP{} -> internalError' "todo: infer variant pattern"
+        T.RecordP{} -> internalError' "todo: infer record pattern"
   where
     type_ = V.Type $ TypeName :@ loc
 
@@ -407,56 +406,18 @@ inferPattern ctx (p :@ loc) = do
                 univars <- get
                 (pats, vty, ctx) <- inferConArgs ctx (app univars closure argV) rest
                 pure (((vis, eArg), argV) : pats, vty, ctx)
-            (V.Q Forall vis _ _, (vis2, _) : _) ->
+            -- insert an implicit argument: 'Cons x xs' --> 'Cons @a x xs'
+            (V.Q Forall vis _e closure, args) | vis /= Visible -> do
+                name <- freshName_ $ Name' "a"
+                ((insertedPat, insertedVal), ctx) <- checkPattern ctx (T.VarP (name :@ loc) :@ loc) closure.ty
+                univars <- get
+                (pats, vty, ctx) <- inferConArgs ctx (app univars closure insertedVal) args
+                pure (((vis, insertedPat), closure.ty) : pats, vty, ctx)
+            (V.Q Forall Visible _ _, (vis2, _) : _) ->
                 internalError' $
-                    "visibility mismatch:"
-                        <+> pretty (show @Text vis)
-                        <+> "!="
-                        <+> pretty (show @Text vis2)
-                        <+> "(implict argument insertion is not implemented yet)"
+                    "visibility mismatch: expected a visible argument, got an" <+> pretty (show @Text vis2) <+> "one."
             (V.Q Exists _ _ _, _) -> internalError' "existentials in constructor types are not supported yet"
             (ty@V.TyCon{}, []) -> do
                 pure (mempty, ty, ctx)
             (V.TyCon{}, _) -> internalError' "too many arguments in a pattern"
             _ -> internalError' "not enough arguments in a pattern"
-
-{-
-T.ConstructorP name args -> do
-    (resultType, argTypes) <- conArgTypes name
-    fixedResultType <- postprocess resultType
-    unless (length argTypes == length args) do
-        typeError $ ArgCountMismatchPattern (Located loc p) (length argTypes) (length args)
-    (typeMap, typedArgs) <- traverseFold pure =<< zipWithM checkP args (map (:@ loc) argTypes)
-    pure (typeMap, El.ConstructorP name typedArgs :@ loc ::: fixedResultType)
-T.VariantP name arg -> do
-    (typeMap, elabArg ::: argTy) <- inferP arg
-    ty <- V.VariantT . ExtRow (fromList [(name, argTy)]) <$> freshUniVar
-    pure (typeMap, El.VariantP name elabArg :@ loc ::: ty)
-T.RecordP row -> do
-    (typeMap, typedRow) <- traverseFold inferP row
-    ext <- freshUniVar
-    let (elabRow, typeRow) = unzip $ fmap (\(pat ::: ty) -> (pat, ty)) typedRow
-        openRecordTy = V.RecordT (ExtRow typeRow ext)
-    pure (typeMap, El.RecordP elabRow :@ loc ::: openRecordTy)
-T.SigmaP (T.VarP name :@ varLoc) rhs -> do
-    varTy <- freshUniVar
-    var <- freshSkolem' $ toSimpleName name
-    (typeMap, typedRhs ::: rhsTy) <- local' (define name (V.Var var) . declare name (varTy :@ varLoc)) do
-        inferP rhs
-    env <- asks (.values)
-    body <- V.quote rhsTy
-    let closure = V.Closure{var, ty = varTy, env, body}
-    pure
-        ( Map.insert name (varTy :@ varLoc) typeMap
-        , El.SigmaP (El.VarP name :@ varLoc) typedRhs :@ loc ::: V.Q Exists Visible Retained closure
-        )
-T.SigmaP{} -> internalError loc "can't infer the type of a sigma with non-var lhs pattern (yet?)"
-T.LiteralP lit -> do
-    let litTypeName = case lit of
-            IntLiteral num
-                | num >= 0 -> NatName
-                | otherwise -> IntName
-            TextLiteral _ -> TextName
-            CharLiteral _ -> CharName
-    pure (Map.empty, El.LiteralP lit :@ loc ::: V.TyCon (litTypeName :@ loc) [])
--}
