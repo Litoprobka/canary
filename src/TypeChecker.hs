@@ -412,7 +412,7 @@ inferPattern ctx (p :@ loc) = do
                 ((insertedPat, insertedVal), ctx) <- checkPattern ctx (T.VarP (name :@ loc) :@ loc) closure.ty
                 univars <- get
                 (pats, vty, ctx) <- inferConArgs ctx (app univars closure insertedVal) args
-                pure (((vis, insertedPat), closure.ty) : pats, vty, ctx)
+                pure (((vis, insertedPat), insertedVal) : pats, vty, ctx)
             (V.Q Forall Visible _ _, (vis2, _) : _) ->
                 internalError' $
                     "visibility mismatch: expected a visible argument, got an" <+> pretty (show @Text vis2) <+> "one."
