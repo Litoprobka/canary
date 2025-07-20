@@ -180,25 +180,32 @@ occurs var = getAny . getConst . go 0
         -- todo: case
         other -> coreTraversal (go n) other
 
-coreTraversal :: Applicative f => (CoreTerm -> f CoreTerm) -> CoreTerm -> f CoreTerm
-coreTraversal recur = \case
-    Con name args -> Con name <$> (traverse . traverse) recur args
-    TyCon name args -> TyCon name <$> (traverse . traverse) recur args
-    Variant name arg -> Variant name <$> recur arg
-    Lambda vis var body -> Lambda vis var <$> recur body
-    App vis lhs rhs -> App vis <$> recur lhs <*> recur rhs
-    Case arg matches -> Case <$> recur arg <*> (traverse . traverse) recur matches
-    Let name defn body -> Let name <$> recur defn <*> recur body
-    Record row -> Record <$> traverse recur row
-    RecordT row -> RecordT <$> traverse recur row
-    VariantT row -> VariantT <$> traverse recur row
-    Sigma x y -> Sigma <$> recur x <*> recur y
-    Q q v e name ty body -> Q q v e name <$> recur ty <*> recur body
+coreTraversalWithLevel :: Applicative f => (Level -> CoreTerm -> f CoreTerm) -> Level -> CoreTerm -> f CoreTerm
+coreTraversalWithLevel recur lvl = \case
+    Con name args -> Con name <$> (traverse . traverse) (recur lvl) args
+    TyCon name args -> TyCon name <$> (traverse . traverse) (recur lvl) args
+    Variant name arg -> Variant name <$> recur lvl arg
+    Lambda vis var body -> Lambda vis var <$> recur (succ lvl) body
+    App vis lhs rhs -> App vis <$> recur lvl lhs <*> recur lvl rhs
+    Case arg matches ->
+        Case <$> recur lvl arg <*> traverse (\(pat, body) -> (pat,) <$> recur (Level $ lvl.getLevel + patternArity pat) body) matches
+    Let name defn body -> Let name <$> recur lvl defn <*> recur (succ lvl) body
+    Record row -> Record <$> traverse (recur lvl) row
+    RecordT row -> RecordT <$> traverse (recur lvl) row
+    VariantT row -> VariantT <$> traverse (recur lvl) row
+    Sigma x y -> Sigma <$> recur lvl x <*> recur lvl y
+    Q q v e name ty body -> Q q v e name <$> recur lvl ty <*> recur (succ lvl) body
     Var index -> pure $ Var index
     Name name -> pure $ Name name
     Literal lit -> pure $ Literal lit
     UniVar uni -> pure $ UniVar uni
     AppPruning lhs pruning -> pure $ AppPruning lhs pruning
+
+coreTraversal :: Applicative f => (CoreTerm -> f CoreTerm) -> CoreTerm -> f CoreTerm
+coreTraversal recur = coreTraversalWithLevel (const recur) (Level 0)
+
+coreTraversalPureWithLevel :: (Level -> CoreTerm -> CoreTerm) -> Level -> CoreTerm -> CoreTerm
+coreTraversalPureWithLevel recur lvl = runIdentity . coreTraversalWithLevel (\lvl -> pure . recur lvl) lvl
 
 coreTraversalPure :: (CoreTerm -> CoreTerm) -> CoreTerm -> CoreTerm
 coreTraversalPure recur = runIdentity . coreTraversal (pure . recur)
@@ -214,8 +221,7 @@ lift n = go (Level 0)
         Var (Index index)
             | index >= depth.getLevel -> Var (Index $ index + n)
             | otherwise -> Var (Index index)
-        Lambda vis var body -> Lambda vis var $ go (succ depth) body
-        other -> coreTraversalPure (go depth) other
+        other -> coreTraversalPureWithLevel go depth other
 
 -- | How many new variables (including wildcards) does a pattern bind?
 patternArity :: CorePattern -> Int

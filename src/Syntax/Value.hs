@@ -41,6 +41,12 @@ data Value
     | RecordT (ExtRow VType)
     | Stuck Stuck
 
+data Stuck
+    = VarApp Level Spine
+    | UniVarApp UniVar Spine
+    | Fn PrimFunc Stuck
+    | Case Stuck [PatternClosure ()]
+
 pattern Var :: Level -> Value
 pattern Var lvl <- Stuck (VarApp lvl [])
     where
@@ -71,12 +77,6 @@ data PrimFunc = PrimFunc
 -- a reversed list of applications
 -- OnVar x [a, b, c] ~ x c b a
 type Spine = [(Visibility, Value)]
-
-data Stuck
-    = VarApp Level Spine
-    | UniVarApp UniVar Spine
-    | Fn PrimFunc Stuck
-    | Case Stuck [PatternClosure ()]
 
 data Closure ty = Closure
     { var :: SimpleName_
