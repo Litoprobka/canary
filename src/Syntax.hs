@@ -4,10 +4,10 @@ module Syntax (module Export) where
 
 import Prelude ()
 
+import Data.Row as Export (Row)
 import Syntax.Core as Export (CorePattern, CoreTerm, CoreType, Pruning (..), ReversedPruning (..))
 import Syntax.Declaration as Export (Constructor, Declaration, Declaration_, GadtConstructor)
 import Syntax.Elaborated as Export (EDeclaration, EPattern, ETerm, EType, Typed (..))
-import Syntax.Row as Export (Row)
 import Syntax.Term as Export (
     Binding,
     DoStatement,

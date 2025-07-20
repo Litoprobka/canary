@@ -20,6 +20,9 @@ import Common qualified as C
 import Data.ByteString qualified as BS
 import Data.EnumMap.Strict qualified as EMap
 import Data.HashMap.Strict qualified as HashMap
+import Data.IdMap qualified as Map
+import Data.Poset (Poset)
+import Data.Poset qualified as Poset
 import Data.Text qualified as Text
 import Data.Text.Encoding (strictBuilderToText, textToStrictBuilder)
 import Data.Text.Encoding qualified as Text
@@ -31,7 +34,6 @@ import Eval (eval, modifyEnv)
 import Eval qualified as V
 import Fixity qualified (parse, resolveFixity, run)
 import FlatParse.Stateful qualified as FP
-import IdMap qualified as Map
 import LangPrelude
 import Lexer (space1)
 import NameGen (NameGen, freshName)
@@ -39,8 +41,6 @@ import NameResolution (Scope (..), resolveNames, resolveTerm)
 import NameResolution qualified
 import Parser (Parser')
 import Parser qualified
-import Poset (Poset)
-import Poset qualified
 import Prettyprinter qualified as Pretty
 import Prettyprinter.Render.Terminal (putDoc)
 import Syntax

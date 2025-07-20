@@ -27,11 +27,11 @@ import Common (
 -- IdMap is currently lazy anyway, but it's up to change
 
 import Data.EnumMap.Lazy qualified as EMap
+import Data.IdMap qualified as LMap
 import Data.List ((!!))
 import Data.Vector qualified as Vec
 import Desugar (desugar)
 import Effectful.State.Static.Local (State, get)
-import IdMap qualified as LMap
 import LangPrelude hiding (force)
 import Prettyprinter (line, vsep)
 import Syntax

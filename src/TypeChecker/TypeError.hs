@@ -3,13 +3,13 @@
 module TypeChecker.TypeError (TypeError (..), typeError, UnificationError (..)) where
 
 import Common
+import Data.Row (OpenName)
 import Diagnostic
 import Error.Diagnose (Marker (..), Note (Note), Report (..))
 import LangPrelude
 import Prettyprinter (vsep)
 import Prettyprinter.Render.Terminal (AnsiStyle)
 import Syntax
-import Syntax.Row (OpenName)
 
 type CType = Located CoreType
 

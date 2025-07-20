@@ -19,16 +19,16 @@ import Common (
     pattern Located,
  )
 import Control.Monad (foldM)
+import Data.IdMap qualified as Map
 import Data.List.NonEmpty qualified as NE
+import Data.Poset (Poset)
+import Data.Poset qualified as Poset
 import DependencyResolution (FixityMap, Op (..))
 import Diagnostic (Diagnose, fatal)
 import Effectful.Error.Static (runErrorNoCallStackWith)
 import Effectful.Reader.Static (Reader, ask, runReader)
 import Error.Diagnose (Marker (This), Position (..), Report (..))
-import IdMap qualified as Map
 import LangPrelude hiding (cycle)
-import Poset (Poset)
-import Poset qualified
 import Syntax
 import Syntax.AstTraversal
 import Syntax.Declaration qualified as D

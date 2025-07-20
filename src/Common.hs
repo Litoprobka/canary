@@ -12,13 +12,13 @@
 
 module Common where
 
+import Data.IdMap (HasId (..))
 import Data.Text qualified as Text
 import Data.Type.Bool (type (||))
 import Data.Type.Ord (Compare, type (>?))
 import Error.Diagnose (Position (..))
 import Error.Diagnose qualified as M
 import GHC.TypeError (Assert, ErrorMessage (..), TypeError)
-import IdMap (HasId (..))
 import LangPrelude
 import Prettyprinter
 import Prettyprinter.Render.Terminal (AnsiStyle, Color (..), bold, color, colorDull)

@@ -26,6 +26,8 @@ import Common (
 import Control.Monad.Combinators
 import Control.Monad.Combinators.NonEmpty qualified as NE
 import Data.List.NonEmpty qualified as NE
+import Data.Row
+import Data.Row qualified as Row
 import Diagnostic (Diagnose, fatal)
 import Error.Diagnose (Marker (This, Where), Report (..))
 import Lexer
@@ -33,8 +35,6 @@ import Prettyprinter.Render.Terminal (AnsiStyle)
 import Proto hiding (token)
 import Syntax
 import Syntax.Declaration qualified as D
-import Syntax.Row
-import Syntax.Row qualified as Row
 import Syntax.Term
 import Syntax.Token (SpecialSymbol, tok)
 import Syntax.Token qualified as Token

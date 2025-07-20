@@ -1,4 +1,0 @@
--- h1 : Unit -> Bool -> c
-h1 _ x = h2 x Unit
--- h2 : Bool -> Unit -> c
-h2 _ x = h1 x False

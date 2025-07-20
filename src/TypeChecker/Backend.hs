@@ -6,18 +6,18 @@ module TypeChecker.Backend where
 
 import Common
 import Data.EnumMap.Strict qualified as EMap
+import Data.IdMap qualified as Map
+import Data.Row
 import Diagnostic (Diagnose, internalError')
 import Effectful.Labeled (Labeled, labeled, runLabeled)
 import Effectful.Reader.Static
 import Effectful.State.Static.Local
 import Eval (ExtendedEnv (..), UniVarState (..), UniVars, appM, evalCore, forceM, quote)
-import IdMap qualified as Map
 import LangPrelude
 import NameGen (NameGen, freshId, runNameGen)
 import Syntax
 import Syntax.Core qualified as C
 import Syntax.Elaborated qualified as E
-import Syntax.Row
 import Syntax.Value qualified as V
 
 newtype ConstructorTable = ConstructorTable

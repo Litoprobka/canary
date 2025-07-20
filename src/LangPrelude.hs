@@ -7,12 +7,12 @@ module LangPrelude (module Reexport, (.>), traverseFold, pattern (:<), pattern (
 
 import Data.EnumMap as Reexport (EnumMap)
 import Data.EnumSet as Reexport (EnumSet)
+import Data.IdMap as Reexport (IdMap)
 import Data.Traversable as Reexport (for)
 import Data.Vector as Reexport (Vector)
 import Data.Vector qualified as Vec
 import Effectful as Reexport
 import Effectful.TH as Reexport
-import IdMap as Reexport (IdMap)
 import Prettyprinter as Reexport (Doc, Pretty (..), (<+>))
 import Relude as Reexport hiding (
     Op,

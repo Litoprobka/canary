@@ -1,15 +1,15 @@
 {-# HLINT ignore "Functor law" #-}
 {-# OPTIONS_GHC -Wno-unrecognised-pragmas #-}
 
-module Poset where
+module Data.Poset where
 
 import Data.EnumMap.Strict qualified as EMap
 import Data.EnumSet qualified as Set
+import Data.IdMap qualified as Map
 import Data.Sequence qualified as Seq
 import Diagnostic (Diagnose, internalError')
 import Effectful.Error.Static (Error, runErrorNoCallStack, throwError_)
 import Effectful.Writer.Static.Local (Writer, tell)
-import IdMap qualified as Map
 import LangPrelude hiding (cycle)
 import Relude.Extra (traverseToSnd)
 
@@ -234,4 +234,4 @@ ordered p@Poset{relations} = map (`items` p) $ sortBy cmp (EMap.keys relations)
 reportError :: Diagnose :> es => Eff (Error PosetError : es) a -> Eff es a
 reportError = runErrorNoCallStack @PosetError >=> either asDiagnoseError pure
   where
-    asDiagnoseError (Poset.LookupError key) = internalError' $ "invalid poset key" <+> pretty key
+    asDiagnoseError (LookupError key) = internalError' $ "invalid poset key" <+> pretty key

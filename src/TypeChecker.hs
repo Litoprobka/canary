@@ -4,20 +4,20 @@ module TypeChecker where
 
 import Common
 import Data.EnumMap.Lazy qualified as EMap
+import Data.IdMap qualified as Map
+import Data.Row (ExtRow (..))
 import Desugar (desugar)
 import Diagnostic
 import Effectful.Labeled (Labeled, runLabeled)
 import Effectful.Reader.Static
 import Effectful.State.Static.Local (State, evalState, get, modify, runState)
 import Eval (ExtendedEnv (univars), UniVars, app, appM, eval, evalCore, forceM, mkTyCon, quote)
-import IdMap qualified as Map
 import LangPrelude
 import NameGen (NameGen, freshName, freshName_, runNameGen)
 import Syntax
 import Syntax.Core qualified as C
 import Syntax.Declaration qualified as D
 import Syntax.Elaborated qualified as E
-import Syntax.Row (ExtRow (..))
 import Syntax.Term qualified as T
 import Syntax.Value qualified as V
 import TypeChecker.Backend

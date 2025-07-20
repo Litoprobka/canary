@@ -25,25 +25,25 @@ source-repository head
 library
   exposed-modules:
       Common
+      Data.IdMap
+      Data.Poset
+      Data.Row
       DependencyResolution
       Desugar
       Diagnostic
       Eval
       Fixity
-      IdMap
       LangPrelude
       Lexer
       NameGen
       NameResolution
       Parser
-      Poset
       Repl
       Syntax
       Syntax.AstTraversal
       Syntax.Core
       Syntax.Declaration
       Syntax.Elaborated
-      Syntax.Row
       Syntax.Term
       Syntax.Token
       Syntax.Value

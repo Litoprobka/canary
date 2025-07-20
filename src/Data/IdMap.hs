@@ -1,4 +1,4 @@
-module IdMap where
+module Data.IdMap where
 
 import Relude hiding (null, toList)
 

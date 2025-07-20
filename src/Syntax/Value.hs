@@ -7,11 +7,11 @@ module Syntax.Value where
 
 import Common (UniVar)
 import Common hiding (UniVar)
+import Data.Row
 import Data.Vector qualified as Vec
 import LangPrelude
 import Syntax.Core (CorePattern, CoreTerm)
 import Syntax.Core qualified as C
-import Syntax.Row
 import Syntax.Term (Erasure (..), Quantifier (..), Visibility (Visible))
 
 -- Values probably shouldn't close over top level bindings

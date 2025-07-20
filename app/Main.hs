@@ -6,9 +6,9 @@ module Main (main) where
 import LangPrelude
 
 import Common
+import Data.IdMap qualified as Map
 import Diagnostic
 import Error.Diagnose (Position (..))
-import IdMap qualified as Map
 import NameGen (runNameGen)
 import NameResolution
 import Options.Applicative

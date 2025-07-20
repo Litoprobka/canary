@@ -5,14 +5,14 @@
 module DependencyResolution where
 
 import Common
+import Data.IdMap qualified as Map
+import Data.Poset (Poset)
+import Data.Poset qualified as Poset
 import Diagnostic (Diagnose, fatal, internalError', nonFatal)
 import Effectful.State.Static.Local
 import Effectful.Writer.Static.Local (Writer, runWriter)
 import Error.Diagnose (Marker (..), Report (..))
-import IdMap qualified as Map
 import LangPrelude
-import Poset (Poset)
-import Poset qualified
 import Prettyprinter (comma, hsep, punctuate)
 import Syntax
 import Syntax.AstTraversal

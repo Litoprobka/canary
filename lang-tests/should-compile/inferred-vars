@@ -1,8 +1,0 @@
-id : 'a -> 'a
-id x = x
-
-const : 'a -> 'b -> 'a
-const x _ = x
-
-compose : ('a -> 'b) -> ('b -> 'c) -> 'a -> 'c
-compose f g x = g (f x)

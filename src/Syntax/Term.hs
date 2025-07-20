@@ -8,12 +8,12 @@ module Syntax.Term where
 import Common hiding (Name, UniVar)
 import Common qualified as C
 import Data.List.NonEmpty qualified as NE
+import Data.Row
 import Data.Type.Ord (type (<))
 import Error.Diagnose (Position (..))
 import LangPrelude hiding (show)
 import Prettyprinter
 import Prettyprinter.Render.Terminal (AnsiStyle)
-import Syntax.Row
 import Prelude (show)
 
 type Term p = Located (Term_ p)

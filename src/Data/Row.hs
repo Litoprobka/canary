@@ -2,7 +2,7 @@
 {-# LANGUAGE TypeFamilies #-}
 {-# LANGUAGE NoFieldSelectors #-}
 
-module Syntax.Row (
+module Data.Row (
     OpenName,
     Row,
     ExtRow (..),

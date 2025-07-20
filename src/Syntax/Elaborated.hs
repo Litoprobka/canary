@@ -3,9 +3,9 @@
 module Syntax.Elaborated where
 
 import Common
+import Data.Row
 import LangPrelude
 import Syntax.Core (CoreTerm)
-import Syntax.Row
 import Syntax.Term (Erasure, Quantifier, Visibility)
 
 {-x

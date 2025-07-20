@@ -13,19 +13,19 @@ import Common hiding (Wildcard)
 import Data.EnumMap.Strict qualified as EMap
 import Data.Foldable1 (foldMap1)
 import Data.HashMap.Strict qualified as HashMap
+import Data.IdMap qualified as Map
 import Data.IntMap qualified as IntMap
+import Data.Row (ExtRow (..), OpenName, prettyRecord)
+import Data.Row qualified as Row
 import Diagnostic
 import Effectful.State.Static.Local (State, get)
 import Error.Diagnose (Note (..), Report (..))
 import Error.Diagnose qualified as M
 import Eval (UniVarState (..), UniVars)
-import IdMap qualified as Map
 import LangPrelude
 import Prettyprinter (hsep, parens, vsep)
 import Syntax hiding (Pattern)
 import Syntax.Elaborated qualified as E
-import Syntax.Row (ExtRow (..), OpenName, prettyRecord)
-import Syntax.Row qualified as Row
 import Syntax.Value qualified as V
 import TypeChecker.Backend hiding (Locals (..))
 import Prelude qualified (show)

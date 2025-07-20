@@ -18,11 +18,11 @@ import Common (
     pattern L,
  )
 import Data.List ((!!))
+import Data.Row (ExtRow (..), OpenName, Row, prettyRecord, prettyVariant, sortedRow)
 import Data.Vector qualified as Vec
 import LangPrelude
 import Prettyprinter
 import Prettyprinter.Render.Terminal (AnsiStyle)
-import Syntax.Row (ExtRow (..), OpenName, Row, prettyRecord, prettyVariant, sortedRow)
 import Syntax.Term (Erasure (..), Quantifier (..), Visibility (..), withVis)
 
 data CorePattern
