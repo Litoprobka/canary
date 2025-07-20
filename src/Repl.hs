@@ -335,10 +335,8 @@ replStep env@ReplEnv{loadedFiles} command = do
         afterFixityRes <- Fixity.run env.fixityMap env.operatorPriorities $ Fixity.parse skippedDepRes
         TC.run env.types do
             let ctx = emptyContext env.values
-            (eExpr, vTy) <- TC.infer ctx afterFixityRes
-            finalTy <- TC.removeUniVars ctx.level vTy
-            eExpr <- TC.removeUniVarsT ctx.level eExpr
-            pure (eExpr, finalTy)
+            (eExpr, vTy) <- TC.removeUniVarsT ctx =<< TC.infer ctx afterFixityRes
+            pure (eExpr, vTy)
 
     prettyVal val = do
         liftIO $ putDoc $ prettyAnsi PrettyOptions{printIds = False} val <> Pretty.line

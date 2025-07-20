@@ -38,7 +38,7 @@ processDeclaration
     -> Eff es (EDeclaration, IdMap Name_ Value -> IdMap Name_ Value)
 processDeclaration ctx (decl :@ loc) = localLoc loc case decl of
     D.Signature name sig -> do
-        sigV <- withTopLevel $ removeUniVars ctx.level =<< typeFromTerm ctx sig
+        sigV <- withTopLevel $ removeUniVars ctx =<< typeFromTerm ctx sig
         univars <- get @UniVars
         let eSig = E.Core $ quote univars ctx.level sigV
         modify @TopLevel $ Map.insert (unLoc name) sigV
@@ -49,7 +49,7 @@ processDeclaration ctx (decl :@ loc) = localLoc loc case decl of
         eBody <- withTopLevel $ case Map.lookup (unLoc name) topLevel of
             Just sig -> check ctx body sig
             Nothing -> do
-                (eBody, ty) <- bitraverse (removeUniVarsT ctx.level) (removeUniVars ctx.level) =<< infer ctx body
+                (eBody, ty) <- removeUniVarsT ctx =<< infer ctx body
                 modify @TopLevel $ Map.insert (unLoc name) ty
                 pure eBody
         pure (E.ValueD (E.ValueB name eBody), id)
@@ -61,7 +61,7 @@ processDeclaration ctx (decl :@ loc) = localLoc loc case decl of
         eLambda <- withTopLevel $ case Map.lookup (unLoc name) topLevel of
             Just sig -> check ctx asLambda sig
             Nothing -> do
-                (eLambda, ty) <- bitraverse (removeUniVarsT ctx.level) (removeUniVars ctx.level) =<< infer ctx asLambda
+                (eLambda, ty) <- removeUniVarsT ctx =<< infer ctx asLambda
                 modify @TopLevel $ Map.insert (unLoc name) ty
                 pure eLambda
         -- ideally, we should unwrap 'eLambda' and construct a FunctionB here
@@ -75,20 +75,20 @@ processDeclaration ctx (decl :@ loc) = localLoc loc case decl of
         modify @TopLevel $ Map.insert (unLoc name) kind
         let newCtx = ctx{env = ctx.env{V.topLevel = Map.insert (unLoc name) tyCon ctx.env.topLevel}}
         withTopLevel $ for_ constrs \con -> do
-            conSig <- removeUniVars newCtx.level =<< typeFromTerm newCtx con.sig
+            conSig <- removeUniVars newCtx =<< typeFromTerm newCtx con.sig
             checkGadtConstructor ctx.level name con.name conSig
             modify @TopLevel $ Map.insert (unLoc con.name) conSig
         -- todo: add GADT constructors to the constructor table
         pure (E.TypeD name (map (\con -> (con.name, argCount con.sig)) constrs), Map.insert (unLoc name) tyCon)
     D.Type name binders constrs -> do
-        kind <- withTopLevel $ removeUniVars ctx.level =<< typeFromTerm ctx (mkTypeKind binders)
+        kind <- withTopLevel $ removeUniVars ctx =<< typeFromTerm ctx (mkTypeKind binders)
         univars <- get
         let kindC = quote univars ctx.level kind
             tyCon = mkTyCon kindC name
         modify $ Map.insert (unLoc name) kind
         let newCtx = ctx{env = ctx.env{V.topLevel = Map.insert (unLoc name) tyCon ctx.env.topLevel}}
         withTopLevel $ for_ (mkConstrSigs name binders constrs) \(con, sig) -> do
-            sigV <- removeUniVars newCtx.level =<< typeFromTerm newCtx sig
+            sigV <- removeUniVars newCtx =<< typeFromTerm newCtx sig
             modify @TopLevel $ Map.insert (unLoc con) sigV
         -- _conMapEntry <- mkConstructorTableEntry (map (.var) binders) (map (\con -> (con.name, con.args)) constrs)
         let argVisibilities con = (Implicit <$ C.functionTypeArity kindC) <> fromList (Visible <$ con.args)

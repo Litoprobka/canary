@@ -12,7 +12,7 @@ import Diagnostic (Diagnose, internalError')
 import Effectful.Labeled (Labeled, labeled, runLabeled)
 import Effectful.Reader.Static
 import Effectful.State.Static.Local
-import Eval (ExtendedEnv (..), UniVarState (..), UniVars, appM, evalCore, forceM, quote)
+import Eval (ExtendedEnv (..), UniVarState (..), UniVars, evalCore, quote, quoteM, whnf)
 import LangPrelude
 import NameGen (NameGen, freshId, runNameGen)
 import Syntax
@@ -135,88 +135,58 @@ lookupSig name ctx = do
             ty <- freshUniVarV ctx (V.Type $ TypeName :@ getLoc name)
             (E.Name name,) <$> freshUniVarV ctx ty
 
--- internalError' $ pretty name <+> "not in scope"
+removeUniVars :: TC es => Context -> VType -> Eff es VType
+removeUniVars ctx ty = snd <$> removeUniVars' ctx (Nothing, ty)
 
-{- | replace solved univars with their solutions and unsolved univars with a placeholder type
-in the future, unsolved unis should get converted to a forall with the appropriate type
--}
-removeUniVars :: TC es => Level -> Value -> Eff es Value
-removeUniVars lvl = go
-  where
-    go =
-        forceM >=> \case
-            V.TyCon name args -> V.TyCon name <$> (traverse . traverse) go args
-            V.Con name args -> V.Con name <$> (traverse . traverse) go args
-            V.Lambda vis closure@V.Closure{var, env} -> do
-                newBody <- removeUniVars (succ lvl) =<< closure `appM` V.Var lvl
-                univars <- get @UniVars
-                pure $ V.Lambda vis V.Closure{var, ty = (), env, body = quote univars (succ lvl) newBody}
-            V.PrimFunction fn -> do
-                captured <- traverse go fn.captured
-                pure $ V.PrimFunction fn{V.captured}
-            V.Record row -> V.Record <$> traverse go row
-            V.Variant name arg -> V.Variant name <$> go arg
-            V.Sigma lhs rhs -> V.Sigma <$> go lhs <*> go rhs
-            V.PrimValue lit -> pure $ V.PrimValue lit
-            V.Q q v e closure@V.Closure{var, env} -> do
-                ty <- go closure.ty
-                newBody <- removeUniVars (succ lvl) =<< closure `appM` V.Var lvl
-                univars <- get @UniVars
-                pure $ V.Q q v e V.Closure{var, ty, env, body = quote univars (succ lvl) newBody}
-            V.RecordT row -> V.RecordT <$> traverse go row
-            V.VariantT row -> V.VariantT <$> traverse go row
-            V.Stuck stuck -> V.Stuck <$> goStuck stuck
-    goStuck = \case
-        V.VarApp vlvl spine -> V.VarApp vlvl <$> (traverse . traverse) go spine
-        -- if we reach this case, it means the univar is still unsolved
-        -- in the future, we will collect all unsolved unis and convert them to
-        -- a forall clause
-        uniApp@V.UniVarApp{} -> pure uniApp
-        V.Fn fn arg -> do
-            captured <- traverse go fn.captured
-            V.Fn fn{V.captured} <$> goStuck arg
-        V.Case _arg _matches -> internalError' "todo: remove univars from stuck case" -- V.Case <$> goStuck arg <*> _ matches
+removeUniVarsT :: TC es => Context -> (ETerm, VType) -> Eff es (ETerm, VType)
+removeUniVarsT ctx (term, ty) = first runIdentity <$> removeUniVars' ctx (Identity term, ty)
 
-{- | remove left-over univars from an eterm
-todo: write a traversal for ETerm
--}
-removeUniVarsT :: TC es => Level -> ETerm -> Eff es ETerm
-removeUniVarsT lvl = go
+-- zonk unification variables from a term and its type,
+-- generalise unsolved variables to new forall binders
+removeUniVars' :: (TC es, Traversable t) => Context -> (t ETerm, VType) -> Eff es (t ETerm, VType)
+removeUniVars' ctx (mbTerm, ty) = do
+    env <- extendEnv ctx.env
+    -- quote forces a term to normal form and applies all solved univars
+    -- quoteWhnf would also work here, I'm not sure which one is better in this case
+    ty <- evalCore env <$> quoteM ctx.level ty
+    mbTerm <- traverse (zonkTerm (ctx.level, ctx.env)) mbTerm
+    pure (mbTerm, ty)
   where
-    go = \case
-        E.Var ix -> pure $ E.Var ix
-        E.Name name -> pure $ E.Name name
-        E.Literal lit -> pure $ E.Literal lit
-        E.App vis lhs rhs -> E.App vis <$> go lhs <*> go rhs
-        E.Lambda vis (E.VarP name) body -> do
-            body' <- removeUniVarsT (succ lvl) body
-            pure $ E.Lambda vis (E.VarP name) body'
-        E.Lambda{} -> internalError' "non-trivial patterns are not supported yet"
-        E.Let (E.ValueB name defn) body -> do
-            defn' <- go defn
-            body' <- removeUniVarsT (succ lvl) body
-            pure $ E.Let (E.ValueB name defn') body'
-        E.Let{} -> internalError' "non-trivial let not supported yet"
-        E.LetRec{} -> internalError' "letrec not supported yet"
-        E.Case arg branches -> E.Case <$> go arg <*> traverse goBranch branches
-        E.Match{} -> internalError' "match not supported yet"
-        E.If cond true false -> E.If <$> go cond <*> go true <*> go false
-        E.Variant name -> pure $ E.Variant name
-        E.Record row -> E.Record <$> traverse go row
-        E.RecordAccess record field -> E.RecordAccess <$> go record <*> pure field
-        E.List ty items -> E.List <$> go ty <*> traverse go items
-        E.Sigma lhs rhs -> E.Sigma <$> go lhs <*> go rhs
-        E.Do{} -> internalError' "do not supported yet"
-        E.Q q v e (var ::: ty) body -> do
-            ty' <- go ty
-            body' <- removeUniVarsT (succ lvl) body
-            pure $ E.Q q v e (var ::: ty') body'
-        E.VariantT row -> E.VariantT <$> traverse go row
-        E.RecordT row -> E.RecordT <$> traverse go row
+    -- the only important case is E.Core, which may actually contain univars
+    -- the rest are just plain traversal logic
+    zonkTerm :: TC es => (Level, ValueEnv) -> ETerm -> Eff es ETerm
+    zonkTerm c@(lvl, env@V.ValueEnv{..}) = \case
         E.Core coreTerm -> do
-            univars <- get
-            let val = evalCore ExtendedEnv{univars, locals = [], topLevel = Map.empty} coreTerm
-            val <- removeUniVars lvl val
-            pure (E.Core $ quote univars lvl val)
-    goBranch (pat, body) = do
-        (pat,) <$> removeUniVarsT (Level $ lvl.getLevel + E.patternArity pat) body
+            env <- extendEnv env
+            pure $ E.Core $ whnf lvl env coreTerm
+        E.App vis lhs rhs -> E.App vis <$> zonkTerm c lhs <*> zonkTerm c rhs
+        E.Lambda vis pat body -> do
+            let env = V.ValueEnv{locals = freeVars <> locals, ..}
+                freeVars = V.Var <$> [pred newLevel, pred (pred newLevel) .. lvl]
+                newLevel = Level $ lvl.getLevel + E.patternArity pat
+            E.Lambda vis pat <$> zonkTerm (newLevel, env) body
+        E.Let{} -> internalError' "zonkTerm: let bindings are not supported yet"
+        E.LetRec{} -> internalError' "zonkTerm: let rec bindings are not supported yet"
+        E.Case arg branches -> E.Case <$> zonkTerm c arg <*> traverse zonkBranch branches
+          where
+            zonkBranch (pat, body) = do
+                let env = V.ValueEnv{locals = freeVars <> locals, ..}
+                    freeVars = V.Var <$> [pred newLevel, pred (pred newLevel) .. lvl]
+                    newLevel = Level $ lvl.getLevel + E.patternArity pat
+                (pat,) <$> zonkTerm (newLevel, env) body
+        E.Match{} -> internalError' "zonkTerm: match not supported yet"
+        E.If cond true false -> E.If <$> zonkTerm c cond <*> zonkTerm c true <*> zonkTerm c false
+        E.Record row -> E.Record <$> traverse (zonkTerm c) row
+        E.RecordT row -> E.RecordT <$> traverse (zonkTerm c) row
+        E.VariantT row -> E.VariantT <$> traverse (zonkTerm c) row
+        E.RecordAccess term field -> E.RecordAccess <$> zonkTerm c term <*> pure field
+        E.List ty items -> E.List <$> zonkTerm c ty <*> traverse (zonkTerm c) items
+        E.Sigma lhs rhs -> E.Sigma <$> zonkTerm c lhs <*> zonkTerm c rhs
+        E.Do{} -> internalError' "zonkTerm: do notation not supported yet"
+        E.Q q v e (var ::: ty) body -> do
+            ty <- zonkTerm c ty
+            E.Q q v e (var ::: ty) <$> zonkTerm (succ lvl, V.ValueEnv{locals = V.Var lvl : locals, ..}) body
+        v@E.Var{} -> pure v
+        n@E.Name{} -> pure n
+        v@E.Variant{} -> pure v
+        l@E.Literal{} -> pure l

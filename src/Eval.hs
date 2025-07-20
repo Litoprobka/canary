@@ -59,13 +59,16 @@ instance PrettyAnsi Value where
 deriving via (UnAnnotate Value) instance Pretty Value
 deriving via (UnAnnotate Value) instance Show Value
 
+data UnrollUniVars = NoUnroll | DeepUnroll UniVars
+
 quoteWith
     :: (forall ty. Level -> Closure ty -> CoreTerm)
     -> (Level -> PatternClosure () -> (CorePattern, CoreTerm))
+    -> UnrollUniVars
     -> Level
     -> Value
     -> CoreTerm
-quoteWith quoteClosure quotePatternClosure = go
+quoteWith quoteClosure quotePatternClosure unroll = go
   where
     go lvl = \case
         TyCon name args -> C.TyCon name $ (fmap . fmap) (go lvl) args
@@ -86,16 +89,26 @@ quoteWith quoteClosure quotePatternClosure = go
     quoteStuck :: Level -> Stuck -> CoreTerm
     quoteStuck lvl = \case
         VarApp varLvl spine -> quoteSpine (C.Var $ levelToIndex lvl varLvl) spine
-        UniVarApp uni spine -> quoteSpine (C.UniVar uni) spine
+        UniVarApp uni spine -> case unroll of
+            NoUnroll -> quoteSpine (C.UniVar uni) spine
+            DeepUnroll univars -> case force univars $ Stuck $ UniVarApp uni spine of
+                -- if we get a stuck univar even after forcing, then the univar is unsolved
+                Stuck (UniVarApp uni spine) -> quoteSpine (C.UniVar uni) spine
+                nonStuck -> go lvl nonStuck
         Fn fn acc -> C.App Visible (go lvl $ PrimFunction fn) (quoteStuck lvl acc)
         Case arg matches -> C.Case (quoteStuck lvl arg) (fmap (quotePatternClosure lvl) matches)
       where
         quoteSpine = foldr (\(vis, arg) acc -> C.App vis acc (go lvl arg))
 
+quoteM :: State UniVars :> es => Level -> Value -> Eff es CoreTerm
+quoteM lvl value = do
+    univars <- get
+    pure $ quote univars lvl value
+
 quote :: UniVars -> Level -> Value -> CoreTerm
 quote univars = go
   where
-    go = quoteWith quoteClosure quotePatternClosure
+    go = quoteWith quoteClosure quotePatternClosure (DeepUnroll univars)
 
     quoteClosure :: Level -> Closure a -> CoreTerm
     quoteClosure lvl closure = go (succ lvl) $ app univars closure (Var lvl)
@@ -111,7 +124,7 @@ todo: 'quoteWhnf' is 90% the same as 'quote', I think they can be merged into on
 quoteWhnf :: UniVars -> Level -> Value -> CoreTerm
 quoteWhnf univars = go
   where
-    go = quoteWith quoteClosure quotePatternClosure
+    go = quoteWith quoteClosure quotePatternClosure (DeepUnroll univars)
 
     -- we can't reuse `skolemizePatternClosure`, because it calls `evalCore` inside. Meh.
     quotePatternClosure lvl closure = (closure.pat, subst newLevel env closure.body)
@@ -209,6 +222,8 @@ evalApp :: UniVars -> Visibility -> Value -> Value -> Value
 evalApp univars vis = \cases
     (Lambda vis2 closure) arg | vis == vis2 -> app univars closure arg
     (Lambda vis2 _) _ -> error $ "[eval] visibility mismatch " <> show vis <> " != " <> show vis2
+    -- this is potentially problematic. primitive functions shouldn't accept anything
+    -- that contains even a nested stuck term, e.g. 'Cons x []' where 'x' is stuck
     (PrimFunction fn) (Stuck stuck) -> Stuck $ Fn fn stuck
     (PrimFunction PrimFunc{remaining = 1, captured, f}) arg -> f (arg :| captured)
     (PrimFunction PrimFunc{name, remaining, captured, f}) arg -> PrimFunction PrimFunc{name, remaining = pred remaining, captured = arg : captured, f}
@@ -231,7 +246,7 @@ force !univars = \case
         Just (Solved{solution}) -> force univars $ applySpine solution spine
     Stuck (Fn fn arg) -> case force univars (Stuck arg) of
         Stuck stillStuck -> Stuck (Fn fn stillStuck)
-        noLongerStuck -> evalApp univars Visible (PrimFunction fn) noLongerStuck
+        noLongerStuck -> force univars $ evalApp univars Visible (PrimFunction fn) noLongerStuck
     Stuck (Case arg matches) -> case force univars (Stuck arg) of
         Stuck stillStuck -> Stuck (Case stillStuck matches)
         noLongerStuck -> fromMaybe (error "couldn't match") $ asum $ fmap (\closure -> tryApplyPatternClosure univars closure noLongerStuck) matches
