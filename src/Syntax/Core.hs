@@ -15,6 +15,7 @@ import Common (
     conColor,
     keyword,
     specSym,
+    typeColor,
     pattern L,
  )
 import Data.List ((!!))
@@ -27,7 +28,6 @@ import Syntax.Term (Erasure (..), Quantifier (..), Visibility (..), withVis)
 
 data CorePattern
     = VarP SimpleName_
-    | WildcardP Text
     | ConstructorP Name_ [(Visibility, SimpleName_)]
     | VariantP OpenName SimpleName_
     | RecordP (Row SimpleName_)
@@ -37,7 +37,6 @@ data CorePattern
 instance PrettyAnsi CorePattern where
     prettyAnsi opts = \case
         VarP name -> prettyAnsi opts name
-        WildcardP txt -> pretty txt
         ConstructorP name [] -> prettyCon name
         ConstructorP name args -> parens $ hsep (prettyCon name : map (\(vis, arg) -> withVis vis (prettyAnsi opts arg)) args)
         VariantP name arg -> parens $ prettyCon name <+> prettyAnsi opts arg
@@ -87,20 +86,20 @@ instance PrettyAnsi CoreTerm where
                 | index.getIndex >= length env || index.getIndex < 0 -> "#" <> pretty index.getIndex
                 | otherwise -> env !! index.getIndex
             Name name -> prettyAnsi opts name
-            TyCon name Nil -> prettyAnsi opts name
-            TyCon name args -> parensWhen 3 $ hsep (prettyAnsi opts name : map (\(vis, t) -> withVis vis (go 3 env t)) (Vec.toList args))
+            TyCon name Nil -> typeColor $ prettyAnsi opts name
+            TyCon name args -> parensWhen 3 $ hsep (typeColor (prettyAnsi opts name) : map (\(vis, t) -> withVis vis (go 3 env t)) (Vec.toList args))
             -- list sugar doesn't really make sense with explicit type applications, perhaps I should remove it
             -- another option is `[a, b, c] @ty`
             Con (L ConsName) (_ty :< (_, x) :< (_, Con (L NilName) Nil) :< Nil) -> brackets $ go 0 env x
             Con (L ConsName) (_ty :< (_, x) :< (_, xs) :< Nil) | Just output <- prettyConsNil xs -> brackets $ go 0 env x <> output
             Con (L NilName) (_ty :< Nil) -> "[]"
-            Con name Nil -> prettyAnsi opts name
-            Con name args -> parensWhen 3 $ hsep (prettyAnsi opts name : map (\(vis, t) -> withVis vis (go 3 env t)) (Vec.toList args))
+            Con name Nil -> conColor $ prettyAnsi opts name
+            Con name args -> parensWhen 3 $ hsep (conColor (prettyAnsi opts name) : map (\(vis, t) -> withVis vis (go 3 env t)) (Vec.toList args))
             lambda@Lambda{} -> parensWhen 1 $ specSym "λ" <> compressLambda env lambda
             App vis lhs rhs -> parensWhen 3 $ go 2 env lhs <+> withVis vis (go 3 env rhs)
             Record row -> prettyRecord "=" (prettyAnsi opts) (go 0 env) (NoExtRow row)
             Sigma x y -> parensWhen 1 $ go 0 env x <+> specSym "**" <+> go 0 env y
-            Variant name arg -> parensWhen 3 $ prettyAnsi opts name <+> go 3 env arg
+            Variant name arg -> parensWhen 3 $ conColor (prettyAnsi opts name) <+> go 3 env arg
             Case arg matches ->
                 nest
                     4
@@ -160,7 +159,6 @@ instance PrettyAnsi CoreTerm where
 
         patternVars = \case
             var@VarP{} -> [prettyAnsi opts var]
-            w@WildcardP{} -> [prettyAnsi opts w]
             ConstructorP _ args -> map (prettyAnsi opts . snd) $ reverse args
             VariantP _ arg -> [prettyAnsi opts arg]
             RecordP row -> map (prettyAnsi opts) . reverse $ toList row
@@ -227,7 +225,6 @@ lift n = go (Level 0)
 patternArity :: CorePattern -> Int
 patternArity = \case
     VarP{} -> 1
-    WildcardP{} -> 1
     ConstructorP _ args -> length args
     VariantP{} -> 1
     RecordP row -> length row

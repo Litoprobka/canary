@@ -275,7 +275,6 @@ skolemizePatternClosure univars level closure = (evalCore env closure.body, newL
 matchCore :: ExtendedEnv -> CorePattern -> Value -> Maybe ExtendedEnv
 matchCore ExtendedEnv{..} = \cases
     C.VarP{} val -> Just $ ExtendedEnv{locals = val : locals, ..}
-    C.WildcardP{} val -> Just ExtendedEnv{locals = val : locals, ..}
     (C.ConstructorP pname _) (Con (L name) args)
         | pname == name ->
             -- since locals is a SnocList, we have to reverse args before appending

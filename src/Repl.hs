@@ -95,7 +95,7 @@ emptyEnv = ReplEnv{loadedFiles = mempty, ..}
     values = ValueEnv{topLevel = Map.one TypeName (V.Type (noLoc TypeName)), locals = []}
     fixityMap = Map.one AppOp InfixL
     types = Map.one TypeName (V.Type (noLoc TypeName))
-    scope = Scope $ HashMap.singleton (Name' "Type") (noLoc TypeName)
+    scope = Scope $ HashMap.singleton "Type" (noLoc TypeName)
     (_, operatorPriorities) = Poset.eqClass AppOp Poset.empty
     lastLoadedFile = Nothing
     -- constructorTable = TC.ConstructorTable Map.empty

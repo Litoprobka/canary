@@ -64,7 +64,7 @@ runFile args fileName input = do
         mbNewEnv <- Repl.replStep env $ Repl.Decls decls
         for mbNewEnv \newEnv -> do
             nameOfMain <-
-                NameResolution.run newEnv.scope $ resolve $ Located (Loc Position{file = "<main>", begin = (0, 0), end = (0, 0)}) $ Name' "main"
+                NameResolution.run newEnv.scope $ resolve $ Located (Loc Position{file = "<main>", begin = (0, 0), end = (0, 0)}) "main"
             pure case Map.lookup (unLoc nameOfMain) env.values.topLevel of
                 Nothing -> putTextLn "there is no main function"
                 Just mainExpr -> putDoc $ (<> line) $ pretty mainExpr

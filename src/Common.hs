@@ -113,6 +113,9 @@ data SimpleName_
     deriving (Show, Eq, Ord, Generic, Hashable)
     deriving (Pretty) via (UnAnnotate SimpleName_)
 
+instance IsString SimpleName_ where
+    fromString = Name' . fromString
+
 data Located a = a :@ Loc
     deriving (Show, Generic, Functor, Foldable, Traversable)
     deriving (Pretty) via (UnAnnotate (Located a))
@@ -233,16 +236,16 @@ toSimpleName_ :: Name_ -> SimpleName_
 toSimpleName_ = \case
     Name txt _ -> Name' txt
     Wildcard n _ -> Wildcard' n
-    BoolName -> Name' "Bool"
-    TrueName -> Name' "True"
-    ListName -> Name' "List"
-    ConsName -> Name' "Cons"
-    NilName -> Name' "Nil"
-    IntName -> Name' "Int"
-    NatName -> Name' "Nat"
-    TextName -> Name' "Text"
-    CharName -> Name' "Char"
-    TypeName -> Name' "Type"
+    BoolName -> "Bool"
+    TrueName -> "True"
+    ListName -> "List"
+    ConsName -> "Cons"
+    NilName -> "Nil"
+    IntName -> "Int"
+    NatName -> "Nat"
+    TextName -> "Text"
+    CharName -> "Char"
+    TypeName -> "Type"
 
 mkNotes :: [(Loc, M.Marker a)] -> [(Position, M.Marker a)]
 mkNotes = fmap \(Loc pos, marker) -> (pos, marker)
@@ -278,3 +281,6 @@ specSym = annotate $ bold <> color Red
 
 conColor :: Doc AnsiStyle -> Doc AnsiStyle
 conColor = annotate $ bold <> colorDull Yellow
+
+typeColor :: Doc AnsiStyle -> Doc AnsiStyle
+typeColor = annotate $ bold <> color Blue

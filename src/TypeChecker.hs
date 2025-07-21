@@ -6,7 +6,7 @@ import Common
 import Data.EnumMap.Lazy qualified as EMap
 import Data.IdMap qualified as Map
 import Data.Row (ExtRow (..))
-import Desugar (desugar)
+import Desugar (desugar, flattenPattern)
 import Diagnostic
 import Effectful.Labeled (Labeled, runLabeled)
 import Effectful.Reader.Static
@@ -171,6 +171,14 @@ check ctx (t :@ loc) ty = localLoc loc do
             bodyTy <- closure `appM` V.Var ctx.level
             eBody <- check (bind univars (unLoc arg) closure.ty ctx) body bodyTy
             pure $ E.Lambda vis (E.VarP (toSimpleName_ $ unLoc arg)) eBody
+        -- VVVVVV this case doesn't work, but I don't see a reason why
+        -- (T.Lambda vis pat body, V.Q Forall qvis _e closure) | vis == qvis -> do
+        --     arg <- freshName_ "x"
+        --     let ctx' = bind univars arg closure.ty ctx
+        --     ((ePat, val), ctx) <- checkPattern ctx' pat closure.ty
+        --     bodyTy <- closure `appM` val
+        --     eBody <- check ctx body bodyTy
+        --     pure (E.Lambda vis ePat eBody)
         -- we can check against a dependent type, but I'm not sure how
         (T.If cond true false, _) -> do
             eCond <- check ctx cond $ V.Type (BoolName :@ loc)
@@ -228,7 +236,7 @@ infer ctx (t :@ loc) = localLoc loc case t of
                 other -> do
                     argTy <- freshUniVarV ctx type_
                     univars <- get
-                    x <- freshName_ (Name' "x")
+                    x <- freshName_ "x"
                     closure <- V.Closure (toSimpleName_ x) argTy ctx.env <$> freshUniVar (bind univars x argTy ctx) argTy
                     unify ctx (V.Q Forall vis Retained closure) other
                     pure closure
@@ -239,15 +247,40 @@ infer ctx (t :@ loc) = localLoc loc case t of
     T.Lambda vis (T.WildcardP txt :@ patLoc) body -> do
         name <- freshName $ Name' txt :@ patLoc
         infer ctx $ T.Lambda vis (T.VarP name :@ patLoc) body :@ loc
-    T.Lambda vis (L (T.VarP arg)) body -> do
+    T.Lambda vis (L (T.VarP (L arg))) body -> do
         ty <- freshUniVarV ctx type_
         univars <- get
-        let bodyCtx = bind univars (unLoc arg) ty ctx
+        let bodyCtx = bind univars arg ty ctx
         (eBody, bodyTy) <- insertNeutralApp bodyCtx =<< infer bodyCtx body
-        let var = toSimpleName_ $ unLoc arg
+        let var = toSimpleName_ arg
             quotedBody = quote univars (succ ctx.level) bodyTy
         pure (E.Lambda vis (E.VarP var) eBody, V.Q Forall vis Retained V.Closure{ty, var, env = ctx.env, body = quotedBody})
-    T.Lambda{} -> internalError' "wip: pattern matching lambda"
+    -- a special case for an annotation, since it doesn't require a case at type level, unlike other patterns
+    T.Lambda vis (L (T.AnnotationP (L (T.VarP (L arg))) ty)) body -> do
+        ty <- typeFromTerm ctx ty
+        univars <- get
+        let bodyCtx = bind univars arg ty ctx
+        (eBody, bodyTy) <- insertNeutralApp bodyCtx =<< infer bodyCtx body
+        let var = toSimpleName_ arg
+            quotedBody = quote univars (succ ctx.level) bodyTy
+        pure (E.Lambda vis (E.VarP var) eBody, V.Q Forall vis Retained V.Closure{ty, var, env = ctx.env, body = quotedBody})
+    -- the type of a pattern lambda has the shape '(x : argTy) -> (case x of pat -> bodyTy)'
+    T.Lambda vis pat body -> do
+        argTy <- freshUniVarV ctx type_
+        arg <- freshName_ "x"
+        univars <- get
+        let ctx' = bind univars arg argTy ctx
+        ((ePat, _), ty, ctx) <- inferPattern ctx' pat
+        unify ctx argTy ty
+        (eBody, bodyTy) <- insertNeutralApp ctx =<< infer ctx body
+        univars <- get
+        -- todo: if the `bodyTy` doesn't contain our new variables at all, we don't have to construct the case
+        -- also, since the pattern is guaranteed to be infallible, we can define each new variable as 'case x of Pat _ var _ -> var'
+        -- that way, unused variables would naturally disappear
+        let bodyTyC = quote univars (Level $ ctx.level.getLevel + E.patternArity ePat + 1) bodyTy
+            body = C.Case (C.Var (Index 0)) [(flattenPattern ePat, bodyTyC)]
+            lambdaTy = V.Q Forall vis Retained V.Closure{ty, var = "x", env = ctx.env, body}
+        pure (E.Lambda vis (E.VarP "x") eBody, lambdaTy)
     T.WildcardLambda{} -> internalError' "wip: wildcard lambda"
     T.Let (T.ValueB (T.VarP name :@ _) definition) body -> do
         (eDef, ty) <- infer ctx definition
@@ -270,7 +303,7 @@ infer ctx (t :@ loc) = localLoc loc case t of
         pure (E.If eCond eTrue eFalse, trueTy)
     T.Variant con -> do
         payloadTy <- freshUniVarV ctx type_
-        payload <- freshName_ $ Name' "payload"
+        payload <- freshName_ "payload"
         univars <- get
         rowExt <- freshUniVar (bind univars payload payloadTy ctx) type_
         let body = C.VariantT $ ExtRow (fromList [(con, quote univars ctx.level payloadTy)]) rowExt
@@ -281,12 +314,12 @@ infer ctx (t :@ loc) = localLoc loc case t of
     T.Sigma lhs rhs -> do
         (eLhs, lhsTy) <- infer ctx lhs
         env <- extendEnv ctx.env
-        x <- freshName_ $ Name' "x"
+        x <- freshName_ "x"
         (eRhs, rhsTy) <- infer (define x (desugar eLhs) (eval env eLhs) (quote env.univars ctx.level lhsTy) lhsTy ctx) rhs
         univars <- get @UniVars
         -- I *think* we have to quote with increased level here, but I'm not sure
         let body = quote univars (succ ctx.level) rhsTy
-        pure (E.Sigma eLhs eRhs, V.Q Exists Visible Retained $ V.Closure{ty = lhsTy, var = Name' "x", env = ctx.env, body})
+        pure (E.Sigma eLhs eRhs, V.Q Exists Visible Retained $ V.Closure{ty = lhsTy, var = "x", env = ctx.env, body})
     T.List items -> do
         itemTy <- freshUniVar ctx type_
         env <- extendEnv ctx.env
@@ -303,7 +336,7 @@ infer ctx (t :@ loc) = localLoc loc case t of
     T.Function from to -> do
         eFrom <- check ctx from type_
         env <- extendEnv ctx.env
-        x <- freshName_ $ Name' "x"
+        x <- freshName_ "x"
         univars <- get
         eTo <- check (bind univars x (eval env eFrom) ctx) to type_
         pure (E.Q Forall Visible Retained (toSimpleName_ x ::: eFrom) eTo, type_)
@@ -408,7 +441,7 @@ inferPattern ctx (p :@ loc) = do
                 pure (((vis, eArg), argV) : pats, vty, ctx)
             -- insert an implicit argument: 'Cons x xs' --> 'Cons @a x xs'
             (V.Q Forall vis _e closure, args) | vis /= Visible -> do
-                name <- freshName_ $ Name' "a"
+                name <- freshName_ "a"
                 ((insertedPat, insertedVal), ctx) <- checkPattern ctx (T.VarP (name :@ loc) :@ loc) closure.ty
                 univars <- get
                 (pats, vty, ctx) <- inferConArgs ctx (app univars closure insertedVal) args
