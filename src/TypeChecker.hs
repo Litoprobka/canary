@@ -75,12 +75,13 @@ processDeclaration ctx (decl :@ loc) = localLoc loc case decl of
             tyCon = mkTyCon kindC name
         modify @TopLevel $ Map.insert (unLoc name) kind
         let newCtx = ctx{env = ctx.env{V.topLevel = Map.insert (unLoc name) tyCon ctx.env.topLevel}}
-        withTopLevel $ for_ constrs \con -> do
+        constrs <- withTopLevel $ for constrs \con -> do
             conSig <- removeUniVars newCtx =<< typeFromTerm newCtx con.sig
             checkGadtConstructor ctx.level name con.name conSig
             modify @TopLevel $ Map.insert (unLoc con.name) conSig
+            pure (con, quote EMap.empty (Level 0) conSig)
         -- todo: add GADT constructors to the constructor table
-        pure (E.TypeD name (map (\con -> (con.name, argCount con.sig)) constrs), Map.insert (unLoc name) tyCon)
+        pure (E.TypeD name (map (\(con, conSig) -> (con.name, C.functionTypeArity conSig)) constrs), Map.insert (unLoc name) tyCon)
     D.Type name binders constrs -> do
         kind <- withTopLevel $ removeUniVars ctx =<< typeFromTerm ctx (mkTypeKind binders)
         univars <- get
@@ -100,15 +101,16 @@ processDeclaration ctx (decl :@ loc) = localLoc loc case decl of
         topLevel <- get @TopLevel
         runReader topLevel action
 
-    -- convert a list of binders to a type term
+    -- convert a list of binders to a type expression
     -- e.g. a b (c : Int) d
     -- ===> foreach (a : Type) (b : Type) (c : Int) (d : Type) -> Type
     mkTypeKind = \case
         [] -> T.Name (TypeName :@ loc) :@ loc
         (binder : rest) ->
-            let newKind = T.binderKind binder
-             in T.Q Forall Visible Retained binder{T.kind = Just newKind} (mkTypeKind rest) :@ loc
+            T.Q Forall Visible Retained binder{T.kind = Just (T.binderKind binder)} (mkTypeKind rest) :@ loc
 
+    -- constructing constructor signatures as pre-typecheck terms is not nice,
+    -- but we still need to typecheck them either way
     mkConstrSigs :: Name -> [VarBinder 'Fixity] -> [Constructor 'Fixity] -> [(Name, Type 'Fixity)]
     mkConstrSigs name binders constrs =
         constrs <&> \(D.Constructor loc' con params) ->
@@ -120,15 +122,6 @@ processDeclaration ctx (decl :@ loc) = localLoc loc case decl of
             )
       where
         fullType loc' = foldl' (\lhs -> (:@ loc') . T.App Visible lhs) (T.Name name :@ getLoc name) ((:@ loc') . T.Name . (.var) <$> binders)
-
-    -- constructors should be reprocessed into a more convenenient form somewhere else, but I'm not sure where
-    argCount = fromList . go
-      where
-        go (L e) = case e of
-            T.Function _ rhs -> Visible : go rhs
-            T.Q Forall vis _ _ body -> vis : go body
-            T.Q Exists _ _ _ body -> go body
-            _ -> []
 
     -- check that a GADT constructor actually returns the declared type
     checkGadtConstructor :: TC es => Level -> Name -> Name -> VType -> Eff es ()
@@ -172,14 +165,16 @@ check ctx (t :@ loc) ty = localLoc loc do
             bodyTy <- closure `appM` V.Var ctx.level
             eBody <- check (bind univars (unLoc arg) closure.ty ctx) body bodyTy
             pure $ E.Lambda vis (E.VarP (toSimpleName_ $ unLoc arg)) eBody
-        -- VVVVVV this case doesn't work, but I don't see a reason why
-        -- (T.Lambda vis pat body, V.Q Forall qvis _e closure) | vis == qvis -> do
-        --     arg <- freshName_ "x"
-        --     let ctx' = bind univars arg closure.ty ctx
-        --     ((ePat, val), ctx) <- checkPattern ctx' pat closure.ty
-        --     bodyTy <- closure `appM` val
-        --     eBody <- check ctx body bodyTy
-        --     pure (E.Lambda vis ePat eBody)
+        -- this case doesn't work, but I don't why
+        {-
+         (T.Lambda vis pat body, V.Q Forall qvis _e closure) | vis == qvis -> do
+             arg <- freshName_ "x"
+             let ctx' = bind univars arg closure.ty ctx
+             ((ePat, val), ctx) <- checkPattern ctx' pat closure.ty
+             bodyTy <- closure `appM` val
+             eBody <- check ctx body bodyTy
+             pure (E.Lambda vis ePat eBody)
+        -}
         -- we can check against a dependent type, but I'm not sure how
         (T.If cond true false, _) -> do
             eCond <- check ctx cond $ V.Type (BoolName :@ loc)
@@ -225,18 +220,19 @@ check ctx (t :@ loc) ty = localLoc loc do
             pure eTerm
   where
     type_ = V.Type (TypeName :@ loc)
-    ensurePi ctx = \case
-        V.Pi closure -> pure closure
-        uni@(V.Stuck V.UniVarApp{}) -> do
-            ty <- freshUniVarV ctx type_
-            name <- freshName_ "x"
-            univars <- get
-            body <- freshUniVar (bind univars name ty ctx) type_
-            let closure = V.Closure{var = "x", env = ctx.env, ty, body}
-            unify ctx uni (V.Pi closure)
-            pure closure
-        -- I think this should throw NotAFunction or something like that
-        other -> internalError' $ "ensurePi: not a pi type:" <+> pretty other
+    ensurePi ctx =
+        forceM >=> \case
+            V.Pi closure -> pure closure
+            uni@(V.Stuck V.UniVarApp{}) -> do
+                ty <- freshUniVarV ctx type_
+                name <- freshName_ "x"
+                univars <- get
+                body <- freshUniVar (bind univars name ty ctx) type_
+                let closure = V.Closure{var = "x", env = ctx.env, ty, body}
+                unify ctx uni (V.Pi closure)
+                pure closure
+            -- I think this should throw NotAFunction or something like that
+            other -> internalError' $ "ensurePi: not a pi type:" <+> pretty other
 
 infer :: TC es => Context -> Term 'Fixity -> Eff es (ETerm, VType)
 infer ctx (t :@ loc) = localLoc loc case t of
