@@ -5,6 +5,7 @@ module TypeChecker where
 import Common
 import Data.EnumMap.Lazy qualified as EMap
 import Data.IdMap qualified as Map
+import Data.List.NonEmpty qualified as NE
 import Data.Row (ExtRow (..))
 import Desugar (desugar, flattenPattern)
 import Diagnostic
@@ -197,6 +198,23 @@ check ctx (t :@ loc) ty = localLoc loc do
                 ((ePat, _), ctx) <- checkPattern ctx pat argTy
                 (ePat,) <$> check ctx body result
             pure (E.Case eArg eBranches)
+        (T.Match branches, ty) ->
+            E.Match <$> for branches \(pats, body) -> do
+                (ePats, ctx, bodyTy) <- checkPatterns ctx pats ty
+                (ePats,) <$> check ctx body bodyTy
+          where
+            checkPatterns ctx (pat :| pats) fnTy = do
+                closure <- ensurePi ctx fnTy
+                -- I'm not sure whether we should quote with
+                -- the old context or with the updated context
+                let patTy = E.Core $ quote univars ctx.level closure.ty
+                ((ePat, patVal), ctx) <- checkPattern ctx pat closure.ty
+                innerTy <- closure `appM` patVal
+                case nonEmpty pats of
+                    Nothing -> pure ((ePat ::: patTy) :| [], ctx, innerTy)
+                    Just pats -> do
+                        (ePats, ctx, resultTy) <- checkPatterns ctx pats innerTy
+                        pure (NE.cons (ePat ::: patTy) ePats, ctx, resultTy)
         (other, expected) -> do
             -- this case happens after the implicit forall case, so we know that we're checking against a monomorphic type here
             --
@@ -205,6 +223,20 @@ check ctx (t :@ loc) ty = localLoc loc do
             (eTerm, inferred) <- insertNeutralApp ctx =<< infer ctx (other :@ loc)
             unify ctx inferred expected
             pure eTerm
+  where
+    type_ = V.Type (TypeName :@ loc)
+    ensurePi ctx = \case
+        V.Pi closure -> pure closure
+        uni@(V.Stuck V.UniVarApp{}) -> do
+            ty <- freshUniVarV ctx type_
+            name <- freshName_ "x"
+            univars <- get
+            body <- freshUniVar (bind univars name ty ctx) type_
+            let closure = V.Closure{var = "x", env = ctx.env, ty, body}
+            unify ctx uni (V.Pi closure)
+            pure closure
+        -- I think this should throw NotAFunction or something like that
+        other -> internalError' $ "ensurePi: not a pi type:" <+> pretty other
 
 infer :: TC es => Context -> Term 'Fixity -> Eff es (ETerm, VType)
 infer ctx (t :@ loc) = localLoc loc case t of
@@ -275,7 +307,7 @@ infer ctx (t :@ loc) = localLoc loc case t of
         (eBody, bodyTy) <- insertNeutralApp ctx =<< infer ctx body
         univars <- get
         -- todo: if the `bodyTy` doesn't contain our new variables at all, we don't have to construct the case
-        -- also, since the pattern is guaranteed to be infallible, we can define each new variable as 'case x of Pat _ var _ -> var'
+        -- also, since the pattern is guaranteed to be infallible, we can define each new variable as 'case x of (Pat ... var ...) -> var'
         -- that way, unused variables would naturally disappear
         let bodyTyC = quote univars (Level $ ctx.level.getLevel + E.patternArity ePat + 1) bodyTy
             body = C.Case (C.Var (Index 0)) [(flattenPattern ePat, bodyTyC)]
@@ -293,7 +325,10 @@ infer ctx (t :@ loc) = localLoc loc case t of
     case'@T.Case{} -> do
         result <- freshUniVarV ctx type_
         (,result) <$> check ctx (case' :@ loc) result
-    T.Match{} -> internalError' "wip: match"
+    T.Match [] -> typeError $ EmptyMatch loc
+    T.Match (branch : _) -> do
+        fullType <- mkMultiArgPi ctx (length branch)
+        (,fullType) <$> check ctx (t :@ loc) fullType
     -- we don't infer dependent if, because that would mask type errors a lot of the time
     T.If cond true false -> do
         eCond <- check ctx cond $ V.Type (BoolName :@ loc)
@@ -348,6 +383,18 @@ infer ctx (t :@ loc) = localLoc loc case t of
         pure (E.Q q v e (unLoc (toSimpleName binder.var) ::: eTy) eBody, type_)
   where
     type_ = V.Type $ TypeName :@ loc
+
+    mkMultiArgPi ctx n = do
+        env <- extendEnv ctx.env
+        evalCore env <$> mkMultiArgPi' ctx n
+
+    mkMultiArgPi' ctx 0 = freshUniVar ctx type_
+    mkMultiArgPi' ctx n = do
+        ty <- freshUniVar ctx type_
+        argName <- freshName_ "x"
+        env <- extendEnv ctx.env
+        resultTy <- mkMultiArgPi' (bind env.univars argName (evalCore env ty) ctx) (pred n)
+        pure $ C.Q Forall Visible Retained "x" ty resultTy
 
 -- check a term against Type and evaluate it
 typeFromTerm :: TC es => Context -> Term 'Fixity -> Eff es VType
