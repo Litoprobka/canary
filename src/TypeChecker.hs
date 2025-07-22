@@ -12,7 +12,7 @@ import Diagnostic
 import Effectful.Labeled (Labeled, runLabeled)
 import Effectful.Reader.Static
 import Effectful.State.Static.Local (State, evalState, get, modify, runState)
-import Eval (ExtendedEnv (univars), UniVars, app, appM, eval, evalCore, forceM, mkTyCon, quote)
+import Eval (ExtendedEnv (univars), UniVars, app, appM, eval, evalCore, forceM, mkTyCon, quote, quoteM)
 import LangPrelude
 import NameGen (NameGen, freshName, freshName_, runNameGen)
 import Syntax
@@ -23,7 +23,7 @@ import Syntax.Term qualified as T
 import Syntax.Value qualified as V
 import TypeChecker.Backend
 import TypeChecker.TypeError (TypeError (..), typeError)
-import TypeChecker.Unification
+import TypeChecker.Unification (unify)
 
 processDeclaration'
     :: (NameGen :> es, Diagnose :> es) => TopLevel -> ValueEnv -> Declaration 'Fixity -> Eff es (EDeclaration, TopLevel, ValueEnv)
@@ -31,83 +31,122 @@ processDeclaration' topLevel env decl = runLabeled @UniVar runNameGen do
     ((eDecl, diff), types) <- runState topLevel $ evalState @UniVars EMap.empty $ processDeclaration (emptyContext env) decl
     pure (eDecl, types, env{V.topLevel = diff env.topLevel})
 
--- long story short, this is a mess. In the future, DependencyResolution should return declarations in a more structured format
 processDeclaration
     :: (Labeled UniVar NameGen :> es, NameGen :> es, Diagnose :> es, State UniVars :> es, State TopLevel :> es)
     => Context
     -> Declaration 'Fixity
     -> Eff es (EDeclaration, IdMap Name_ Value -> IdMap Name_ Value)
 processDeclaration ctx (decl :@ loc) = localLoc loc case decl of
-    D.Signature name sig -> do
-        sigV <- withTopLevel $ removeUniVars ctx =<< typeFromTerm ctx sig
-        univars <- get @UniVars
-        let eSig = E.Core $ quote univars ctx.level sigV
-        modify @TopLevel $ Map.insert (unLoc name) sigV
-        pure (E.SignatureD name eSig, id)
-    D.Value binding (_ : _) -> internalError (getLoc binding) "todo: proper support for where clauses"
-    D.Value (T.ValueB (L (T.VarP name)) body) [] -> do
-        topLevel <- get @TopLevel
-        eBody <- withTopLevel $ case Map.lookup (unLoc name) topLevel of
-            Just sig -> check ctx body sig
-            Nothing -> do
-                (eBody, ty) <- removeUniVarsT ctx =<< infer ctx body
-                modify @TopLevel $ Map.insert (unLoc name) ty
-                pure eBody
-        pure (E.ValueD (E.ValueB name eBody), id)
-    D.Value (T.ValueB pat _) [] -> internalError (getLoc pat) "pattern destructuring bindings are not supported yet"
-    -- this case is way oversimplified for now, we don't even allow recursion for untyped bindings
-    D.Value (T.FunctionB name args body) [] -> do
-        topLevel <- get @TopLevel
-        let asLambda = foldr (\(vis, var) -> (:@ getLoc body) . T.Lambda vis var) body args
-        eLambda <- withTopLevel $ case Map.lookup (unLoc name) topLevel of
-            Just sig -> check ctx asLambda sig
-            Nothing -> do
-                (eLambda, ty) <- removeUniVarsT ctx =<< infer ctx asLambda
-                modify @TopLevel $ Map.insert (unLoc name) ty
-                pure eLambda
-        -- ideally, we should unwrap 'eLambda' and construct a FunctionB here
-        pure (E.ValueD (E.ValueB name eLambda), id)
-    D.GADT name mbKind constrs -> do
-        -- we can probably infer the kind of a type from its constructors, but we don't do that for now
-        kind <- withTopLevel $ maybe (pure $ V.Type (TypeName :@ getLoc name)) (typeFromTerm ctx) mbKind
-        univars <- get
-        let kindC = quote univars ctx.level kind
-            tyCon = mkTyCon kindC name
-        modify @TopLevel $ Map.insert (unLoc name) kind
-        let newCtx = ctx{env = ctx.env{V.topLevel = Map.insert (unLoc name) tyCon ctx.env.topLevel}}
-        constrs <- withTopLevel $ for constrs \con -> do
-            conSig <- removeUniVars newCtx =<< typeFromTerm newCtx con.sig
-            checkGadtConstructor ctx.level name con.name conSig
-            modify @TopLevel $ Map.insert (unLoc con.name) conSig
-            pure (con, quote EMap.empty (Level 0) conSig)
-        -- todo: add GADT constructors to the constructor table
-        pure (E.TypeD name (map (\(con, conSig) -> (con.name, C.functionTypeArity conSig)) constrs), Map.insert (unLoc name) tyCon)
-    D.Type name binders constrs -> do
-        kind <- withTopLevel $ removeUniVars ctx =<< typeFromTerm ctx (mkTypeKind binders)
-        univars <- get
-        let kindC = quote univars ctx.level kind
-            tyCon = mkTyCon kindC name
-        modify $ Map.insert (unLoc name) kind
-        let newCtx = ctx{env = ctx.env{V.topLevel = Map.insert (unLoc name) tyCon ctx.env.topLevel}}
-        withTopLevel $ for_ (mkConstrSigs name binders constrs) \(con, sig) -> do
-            sigV <- removeUniVars newCtx =<< typeFromTerm newCtx sig
-            modify @TopLevel $ Map.insert (unLoc con) sigV
-        -- _conMapEntry <- mkConstructorTableEntry (map (.var) binders) (map (\con -> (con.name, con.args)) constrs)
-        let argVisibilities con = (Implicit <$ C.functionTypeArity kindC) <> fromList (Visible <$ con.args)
-        pure
-            (E.TypeD name (map (\con -> (con.name, argVisibilities con)) constrs), Map.insert (unLoc name) tyCon)
-  where
-    withTopLevel action = do
-        topLevel <- get @TopLevel
-        runReader topLevel action
+    D.Signature name sig -> (,id) <$> processSignature ctx name sig
+    D.Value binding locals -> (,id) <$> checkBinding ctx binding locals
+    D.GADT name mbKind constructors -> second (Map.insert (unLoc name)) <$> processGadt ctx name mbKind constructors
+    D.Type name binders constructors -> second (Map.insert (unLoc name)) <$> processType ctx name binders constructors
 
+processSignature
+    :: (Labeled UniVar NameGen :> es, NameGen :> es, Diagnose :> es, State UniVars :> es, State TopLevel :> es)
+    => Context
+    -> Name
+    -> Term 'Fixity
+    -> Eff es EDeclaration
+processSignature ctx name sig = do
+    topLevel <- get
+    sigV <- runReader @TopLevel topLevel $ removeUniVars ctx =<< typeFromTerm ctx sig
+    univars <- get @UniVars
+    let eSig = E.Core $ quote univars ctx.level sigV
+    modify @TopLevel $ Map.insert (unLoc name) sigV
+    pure (E.SignatureD name eSig)
+
+checkBinding
+    :: (Labeled UniVar NameGen :> es, NameGen :> es, Diagnose :> es, State UniVars :> es, State TopLevel :> es)
+    => Context
+    -> Binding 'Fixity
+    -> [Declaration 'Fixity]
+    -> Eff es EDeclaration
+checkBinding _ binding (_ : _) = internalError (getLoc binding) "todo: proper support for where clauses"
+checkBinding ctx binding [] = do
+    topLevel <- get @TopLevel
+    (name, body) <- case binding of
+        (T.ValueB (L (T.VarP name)) body) -> pure (name, body)
+        (T.FunctionB name args body) ->
+            pure (name, foldr (\(vis, var) -> (:@ getLoc body) . T.Lambda vis var) body args)
+        T.ValueB pat _ -> internalError (getLoc pat) "pattern destructuring bindings are not supported yet"
+    eBody <- runReader topLevel case Map.lookup (unLoc name) topLevel of
+        Just sig -> check ctx body sig
+        Nothing -> do
+            (eBody, ty) <- removeUniVarsT ctx =<< infer ctx body
+            modify @TopLevel $ Map.insert (unLoc name) ty
+            pure eBody
+    -- ideally, we should unwrap the body and construct a FunctionB if the original binding was a function
+    pure (E.ValueD (E.ValueB name eBody))
+
+processGadt
+    :: (Labeled UniVar NameGen :> es, NameGen :> es, Diagnose :> es, State UniVars :> es, State TopLevel :> es)
+    => Context
+    -> Name
+    -> Maybe (Type 'Fixity)
+    -> [GadtConstructor 'Fixity]
+    -> Eff es (EDeclaration, VType)
+processGadt ctx name mbKind constructors = do
+    -- we can probably infer the kind of a type from its constructors, but we don't do that for now
+    topLevel <- get @TopLevel
+    kind <- runReader topLevel $ maybe (pure $ V.Type (TypeName :@ getLoc name)) (typeFromTerm ctx) mbKind
+    kindC <- quoteM ctx.level kind
+    let tyCon = mkTyCon kindC name
+    modify @TopLevel $ Map.insert (unLoc name) kind
+    let newCtx = ctx{env = ctx.env{V.topLevel = Map.insert (unLoc name) tyCon ctx.env.topLevel}}
+    topLevel <- get @TopLevel
+    constructors <- runReader topLevel $ for constructors \con -> do
+        conSig <- removeUniVars newCtx =<< typeFromTerm newCtx con.sig
+        checkGadtConstructor ctx.level name con.name conSig
+        modify @TopLevel $ Map.insert (unLoc con.name) conSig
+        pure (con, quote EMap.empty (Level 0) conSig)
+    pure (E.TypeD name (map (\(con, conSig) -> (con.name, C.functionTypeArity conSig)) constructors), tyCon)
+  where
+    -- check that a GADT constructor actually returns the declared type
+    checkGadtConstructor :: TC es => Level -> Name -> Name -> VType -> Eff es ()
+    checkGadtConstructor lvl tyName con conTy = do
+        univars <- get @UniVars
+        case fnResult (quote univars lvl conTy) of
+            C.TyCon name _
+                | name /= tyName -> typeError $ ConstructorReturnType{con, expected = tyName, returned = name}
+                | otherwise -> pass
+            _ -> internalError (getLoc con) "something weird in a GADT constructor type"
+      where
+        fnResult = \case
+            C.Q _ _ _ _ _ rhs -> fnResult rhs
+            other -> other
+
+processType
+    :: (Labeled UniVar NameGen :> es, NameGen :> es, Diagnose :> es, State UniVars :> es, State TopLevel :> es)
+    => Context
+    -> Name
+    -> [VarBinder 'Fixity]
+    -> [Constructor 'Fixity]
+    -> Eff es (EDeclaration, VType)
+processType ctx name binders constructors = do
+    topLevel <- get @TopLevel
+    kind <- runReader topLevel $ removeUniVars ctx =<< typeFromTerm ctx (mkTypeKind binders)
+    univars <- get
+    let kindC = quote univars ctx.level kind
+        tyCon = mkTyCon kindC name
+    modify $ Map.insert (unLoc name) kind
+    let newCtx = ctx{env = ctx.env{V.topLevel = Map.insert (unLoc name) tyCon ctx.env.topLevel}}
+    topLevel <- get @TopLevel
+    runReader topLevel $ for_ (mkConstrSigs name binders constructors) \(con, sig) -> do
+        sigV <- removeUniVars newCtx =<< typeFromTerm newCtx sig
+        modify @TopLevel $ Map.insert (unLoc con) sigV
+    -- _conMapEntry <- mkConstructorTableEntry (map (.var) binders) (map (\con -> (con.name, con.args)) constrs)
+    let argVisibilities con = (Implicit <$ C.functionTypeArity kindC) <> fromList (Visible <$ con.args)
+    pure
+        (E.TypeD name (map (\con -> (con.name, argVisibilities con)) constructors), tyCon)
+  where
     -- convert a list of binders to a type expression
     -- e.g. a b (c : Int) d
     -- ===> foreach (a : Type) (b : Type) (c : Int) (d : Type) -> Type
     mkTypeKind = \case
-        [] -> T.Name (TypeName :@ loc) :@ loc
+        [] -> T.Name (TypeName :@ getLoc name) :@ getLoc name
         (binder : rest) ->
-            T.Q Forall Visible Retained binder{T.kind = Just (T.binderKind binder)} (mkTypeKind rest) :@ loc
+            T.Q Forall Visible Retained binder{T.kind = Just (T.binderKind binder)} (mkTypeKind rest) :@ getLoc name
 
     -- constructing constructor signatures as pre-typecheck terms is not nice,
     -- but we still need to typecheck them either way
@@ -122,20 +161,6 @@ processDeclaration ctx (decl :@ loc) = localLoc loc case decl of
             )
       where
         fullType loc' = foldl' (\lhs -> (:@ loc') . T.App Visible lhs) (T.Name name :@ getLoc name) ((:@ loc') . T.Name . (.var) <$> binders)
-
-    -- check that a GADT constructor actually returns the declared type
-    checkGadtConstructor :: TC es => Level -> Name -> Name -> VType -> Eff es ()
-    checkGadtConstructor lvl tyName con conTy = do
-        univars <- get @UniVars
-        case fnResult (quote univars lvl conTy) of
-            C.TyCon name _
-                | name /= tyName -> typeError $ ConstructorReturnType{con, expected = tyName, returned = name}
-                | otherwise -> pass
-            _ -> internalError (getLoc con) "something weird in a GADT constructor type"
-      where
-        fnResult = \case
-            C.Q _ _ _ _ _ rhs -> fnResult rhs
-            other -> other
 
 -- todo: this should also handle implicit pattern matches on existentials
 insertApp :: TC es => Context -> (ETerm, VType) -> Eff es (ETerm, VType)
