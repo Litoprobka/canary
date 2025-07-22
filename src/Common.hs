@@ -157,12 +157,15 @@ isInfixConstructor _ = False
 
 newtype UniVar = UniVar Id
     deriving (Show, Eq)
-    deriving newtype (Hashable, Enum)
+    deriving newtype (Hashable, Enum, HasId)
     deriving (Pretty) via (UnAnnotate UniVar)
 
 newtype Id = Id {id :: Int}
     deriving (Show, Eq)
     deriving newtype (Hashable, Pretty, Enum)
+
+instance HasId Id where
+    toId = (.id)
 
 newtype Scope = Scope Int deriving (Show, Eq, Ord)
 

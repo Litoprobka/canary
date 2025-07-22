@@ -10,7 +10,7 @@ import Data.Sequence qualified as Seq
 import Diagnostic (Diagnose, internalError')
 import Effectful.Error.Static (Error, runErrorNoCallStack, throwError_)
 import Effectful.Writer.Static.Local (Writer, tell)
-import LangPrelude hiding (cycle)
+import LangPrelude hiding (cycle, empty)
 import Relude.Extra (traverseToSnd)
 
 -- a partially ordered set implementation with an emphasis on equality
@@ -40,6 +40,10 @@ empty =
         , relations = EMap.empty
         }
 
+-- | create a Poset with no relations from a list of items
+fromList :: Map.HasId a => [a] -> Poset a
+fromList = foldl' (\poset x -> snd $ newClass x poset) empty
+
 lookup' :: (Error PosetError :> es, Enum k, Pretty k) => k -> EnumMap k v -> Eff es v
 lookup' k emap = maybe (throwError_ $ LookupError k) pure $ EMap.lookup k emap
 
@@ -47,7 +51,7 @@ lookup' k emap = maybe (throwError_ $ LookupError k) pure $ EMap.lookup k emap
 mergeStrict :: (Ctx es, CycleErrors a es) => EqClass a -> EqClass a -> Poset a -> Eff es (Poset a)
 mergeStrict l r = mergeWith (const $ throwError_ $ Cycle l r) l r
 
--- | merge two equvalience classes. If the classes already have a GT / LT relation, add a relation in the other direction instead
+-- | merge two equivalence classes. If the classes already have a GT / LT relation, add a relation in the other direction instead
 mergeLenient :: (Ctx es, CycleWarnings a es) => EqClass a -> EqClass a -> Poset a -> Eff es (Poset a)
 mergeLenient l r poset =
     mergeWith
