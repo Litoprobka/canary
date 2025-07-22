@@ -201,7 +201,7 @@ data Literal
     = IntLiteral Int
     | TextLiteral Text
     | CharLiteral Text
-    deriving (Eq, Ord)
+    deriving (Eq, Ord, Show)
     deriving (Pretty) via UnAnnotate Literal
 
 instance PrettyAnsi Literal where

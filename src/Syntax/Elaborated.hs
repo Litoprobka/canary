@@ -13,7 +13,7 @@ The elaborated AST is halfway between core and pre-typecheck passes
 -}
 
 infix 3 :::
-data Typed a = a ::: EType
+data Typed a = a ::: EType deriving (Show)
 type EType = ETerm
 
 unTyped :: Typed a -> a
@@ -43,6 +43,7 @@ data ETerm
       -- the old solution was a 'resugar' function that transformed core term back into elaborated terms,
       -- but it makes more sense to just keep inserted core as is
       Core CoreTerm
+    deriving (Show)
 
 data EPattern
     = VarP SimpleName_
@@ -53,17 +54,20 @@ data EPattern
     | SigmaP Visibility EPattern EPattern
     | ListP [EPattern]
     | LiteralP Literal
+    deriving (Show)
 
 -- where should the type info be?
 data EBinding
     = ValueB {name :: Name, body :: ETerm}
     | FunctionB {name :: Name, args :: NonEmpty (Visibility, EPattern), body :: ETerm}
+    deriving (Show)
 
 data EStatement
     = Bind EPattern ETerm
     | With EPattern ETerm
     | DoLet EBinding
     | Action ETerm
+    deriving (Show)
 
 data EDeclaration
     = ValueD EBinding -- no local bindings for now

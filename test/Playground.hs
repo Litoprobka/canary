@@ -10,8 +10,6 @@
 
 module Playground where
 
--- :load this module into a repl
-
 import Common hiding (Scope)
 import Common qualified (Scope)
 import Data.Char (isUpperCase)
@@ -19,7 +17,10 @@ import Data.DList (DList)
 import Data.EnumMap.Strict qualified as EMap
 import Data.HashMap.Strict qualified as HashMap
 import Data.HashSet qualified as HashSet
+import Data.IdMap qualified as LMap
+import Data.IdMap qualified as Map
 import Data.List.NonEmpty qualified as NE
+import Data.Row
 import Data.Type.Ord (type (<))
 import DependencyResolution (SimpleOutput (..), resolveDependenciesSimplified)
 import Diagnostic (Diagnose, runDiagnose, runDiagnose')
@@ -29,11 +30,8 @@ import Effectful.Labeled.Reader (Reader)
 import Effectful.Reader.Static qualified as S
 import Effectful.State.Static.Local (State, evalState, execState, runState)
 import Error.Diagnose (Diagnostic, Position (..))
-import Eval (ValueEnv)
 import Fixity (resolveFixity)
 import Fixity qualified (parse)
-import IdMap qualified as LMap
-import IdMap qualified as Map
 import LangPrelude
 import NameGen (NameGen, freshName, runNameGen)
 import NameResolution (ImplicitVars, Scope (..), declare, resolveNames, resolveTerm, runDeclare)
@@ -46,33 +44,12 @@ import Repl (ReplEnv (..))
 import Repl qualified
 import Syntax
 import Syntax.Declaration qualified as D
-import Syntax.Row
 import Syntax.Term (Erasure (..), Pattern_ (..), Quantifier (..), Visibility (..))
 import Syntax.Term qualified as E
 import Syntax.Term qualified as T
-import TypeChecker (Env)
-import TypeChecker qualified as TC (run)
-import TypeChecker.Backend (TC, TopLevel, Type')
-
--- some wrappers and syntactic niceties for testing
-
-testCheck
-    :: Eff [NameResolution.Declare, State ImplicitVars, State [DList Name], State Scope, Diagnose, NameGen] resolved
-    -> ( resolved
-         -> Eff
-                '[ TC
-                 , S.Reader Env
-                 , State TopLevel
-                 , Diagnose
-                 , NameGen
-                 ]
-                a
-       )
-    -> Maybe a
-testCheck toResolve action = fst $ runPureEff $ runNameGen $ runDiagnose' [("<none>", "")] do
-    ReplEnv{scope, types, values} <- Repl.mkDefaultEnv
-    resolved <- NameResolution.run scope toResolve
-    evalState types $ TC.run values $ action resolved
+import Syntax.Value (ValueEnv)
+import TypeChecker.Backend (TC, TopLevel)
+import TypeChecker.Backend qualified as TC (run)
 
 -- convenient definitions for testing
 
@@ -80,7 +57,7 @@ noLoc :: a -> Located a
 noLoc = Located pgLoc
 
 pgLoc :: Loc
-pgLoc = Loc Position{file = "<playgrond>", begin = (0, 0), end = (0, 0)}
+pgLoc = Loc Position{file = "<playground>", begin = (0, 0), end = (0, 0)}
 
 matchCase :: (Text -> a) -> (Text -> a) -> String -> a
 matchCase whenUpper whenLower str@(h : _)
@@ -124,7 +101,7 @@ from --> to = Located (zipLocOf from to) $ T.Function from to
 
 infixl 3 $:
 ($:) :: Type p -> Type p -> Type p
-($:) lhs = noLoc . T.App lhs
+($:) lhs = noLoc . T.App Visible lhs
 
 (∃) :: HasLoc (NameAt p) => NameAt p -> Type p -> Type p
 (∃) var body = Located (zipLocOf var body) $ T.Q Exists Implicit Erased (T.plainBinder var) body
@@ -147,7 +124,7 @@ listP :: [Pattern p] -> Pattern p
 listP = noLoc . ListP
 
 con :: NameAt p -> [Pattern p] -> Pattern p
-con name = noLoc . ConstructorP name
+con name = noLoc . ConstructorP name . map (Visible,)
 
 -- Expression
 
@@ -165,7 +142,7 @@ infixApp exprs = Located (zipLocOf (NE.head exprs) lastE) $ E.InfixE exprs' last
     exprs' = (,Nothing) <$> reverse nonLast
 
 λ :: Pattern p -> Expr p -> Expr p
-λ pat expr = Located (zipLocOf pat expr) $ E.Lambda pat expr
+λ pat expr = Located (zipLocOf pat expr) $ E.Lambda Visible pat expr
 
 lam :: Pattern p -> Expr p -> Expr p
 lam = λ

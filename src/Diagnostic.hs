@@ -23,6 +23,7 @@ module Diagnostic (
     internalError',
     reportExceptions,
     guardNoErrors,
+    ShowDiagnostic (..),
 ) where
 
 import Common (Loc, mkNotes)
@@ -36,6 +37,7 @@ import Effectful.Reader.Static (ask, local, runReader)
 import Effectful.State.Static.Local (gets, modify, runState)
 import Effectful.TH
 import Error.Diagnose
+import GHC.Show qualified
 import LangPrelude
 import Prettyprinter.Render.Terminal (AnsiStyle)
 
@@ -117,3 +119,7 @@ guardNoErrors :: Diagnose :> es => Eff es ()
 guardNoErrors = do
     ok <- noErrors
     unless ok $ fatal []
+
+newtype ShowDiagnostic = ShowDiagnostic (Diagnostic (Doc AnsiStyle))
+instance Show ShowDiagnostic where
+    show (ShowDiagnostic diagnostic) = show $ prettyDiagnostic' WithUnicode (TabSize 4) diagnostic

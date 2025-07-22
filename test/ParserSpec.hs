@@ -3,6 +3,8 @@
 
 module ParserSpec (spec) where
 
+import Data.Row (ExtRow (..))
+import Data.Row qualified as Row
 import Data.Traversable (for)
 import FlatParse.Stateful qualified as FP
 import Lexer (lex', mkTokenStream)
@@ -12,8 +14,7 @@ import Playground
 import Prettyprinter (Pretty, pretty)
 import Proto (eof, parse)
 import Relude hiding (readFile)
-import Syntax.Row (ExtRow (..))
-import Syntax.Row qualified as Row
+import Syntax
 import Syntax.Term (Pattern_ (..))
 import Syntax.Term qualified as E
 import System.Directory.OsPath
@@ -53,7 +54,7 @@ spec = do
         it "simple binding" do
             parsePretty code "x = 15" `shouldBePretty` Right [valueDec (E.ValueB "x" (literal_ $ intLit 15)) []]
         it "function definition" do
-            parsePretty code "f x = y" `shouldBePretty` Right [valueDec (E.FunctionB "f" ["x"] "y") []]
+            parsePretty code "f x = y" `shouldBePretty` Right [valueDec (E.FunctionB "f" [(Visible, "x")] "y") []]
         it "application" do
             parsePretty code "f = g x y" `shouldBePretty` Right [valueDec (E.ValueB "f" $ infixApp ["g", "x", "y"]) []]
         it "identifiers may contain keywords" do

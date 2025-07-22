@@ -72,7 +72,7 @@ data CoreTerm
     | RecordT (ExtRow CoreType)
     | UniVar UniVar
     | AppPruning CoreTerm Pruning
-    deriving (Pretty) via (UnAnnotate CoreTerm)
+    deriving (Pretty, Show) via (UnAnnotate CoreTerm)
 
 newtype Pruning = Pruning {getPruning :: [Maybe Visibility]}
 newtype ReversedPruning = ReversedPruning [Maybe Visibility]
@@ -147,8 +147,16 @@ instance PrettyAnsi CoreTerm where
                     prettyBinder env name ty <+> compressQ (prettyAnsi opts name : env) q vis e body
             other -> arrOrDot q vis <+> go 0 env other
 
-        prettyBinder _ name (TyCon (L TypeName) v) | Vec.null v = prettyAnsi opts name
-        prettyBinder env name ty = parens $ prettyAnsi opts name <+> specSym ":" <+> go 0 env ty
+        prettyBinder env name ty
+            | endsInType ty = prettyAnsi opts name
+            | otherwise = parens $ prettyAnsi opts name <+> specSym ":" <+> go 0 env ty
+          where
+            -- if the of a binder has the shape '... -> ... -> Type', it is probably used
+            -- like a scoped type parameter, so its actual type is not that important and can be omitted in pretty-printing
+            endsInType = \case
+                TyCon (L TypeName) v | Vec.null v -> True
+                Q _ _ _ _ _ body -> endsInType body
+                _ -> False
 
         arrOrDot Forall Visible = specSym "->"
         arrOrDot Exists Visible = specSym "**"
