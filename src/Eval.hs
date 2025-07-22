@@ -157,7 +157,13 @@ quoteWhnf univars = go
         C.UniVar uni -> case EMap.lookup uni univars of
             Just Solved{solution} -> go lvl solution
             _ -> C.UniVar uni
-        C.AppPruning lhs pruning -> C.AppPruning (subst lvl env lhs) pruning
+        C.AppPruning lhs pruning -> substPruning env (subst lvl env lhs) pruning.getPruning
+      where
+        substPruning env lhs pruning = case (env, pruning) of
+            ([], []) -> lhs
+            (v : env, Just vis : pruning) -> C.App vis (substPruning env lhs pruning) (go lvl v)
+            (_ : env, Nothing : pruning) -> substPruning env lhs pruning
+            (env, pruning) -> error $ "[subst] pruning-env length mismatch (" <> show (length pruning) <> " != " <> show (length env) <> ")"
 
     -- in terms of the printed output, it might be cleaner to evaluate nested pattern matches,
     -- because pattern matching only reduces the size of the output
@@ -203,9 +209,9 @@ evalCore env@ExtendedEnv{..} = \case
 
     evalAppPruning ls val pruning = case (ls, pruning) of
         ([], []) -> val
-        (t : ls', Just vis : rest) -> evalApp env.univars vis (evalAppPruning ls' val rest) t
-        (_ : ls', Nothing : rest) -> evalAppPruning ls' val rest
-        _ -> error "pruning-env length mismatch"
+        (t : ls, Just vis : pruning) -> evalApp env.univars vis (evalAppPruning ls val pruning) t
+        (_ : ls, Nothing : pruning) -> evalAppPruning ls val pruning
+        (env, pruning) -> error $ "[eval] pruning-env length mismatch (" <> show (length pruning) <> " != " <> show (length env) <> ")"
 
 nf :: Level -> ExtendedEnv -> CoreTerm -> CoreTerm
 nf lvl env term = quote env.univars lvl $ evalCore env term

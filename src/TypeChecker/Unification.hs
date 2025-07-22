@@ -27,6 +27,7 @@ import Eval (
 import LangPrelude hiding (force, lift)
 import Prettyprinter (vsep)
 import Syntax
+import Syntax.Core (reversedPruning)
 import Syntax.Core qualified as C
 import Syntax.Value as V hiding (lift)
 import TypeChecker.Backend hiding (ExType (..))
@@ -157,7 +158,7 @@ solveWithRenaming :: TC' es => UniVar -> (PartialRenaming, Maybe Pruning) -> Val
 solveWithRenaming uni (pren, pruneNonlinear) rhs = do
     univars <- get @UniVars
     ty <- typeOfUnsolvedUniVar uni
-    for_ pruneNonlinear \pruning -> pruneType (ReversedPruning $ reverse pruning.getPruning) ty
+    for_ pruneNonlinear \pruning -> pruneType (reversedPruning pruning) ty
     rhs' <- rename pren{uni = Just uni} rhs
     topLevel <- askValues
     let env = ExtendedEnv{univars, topLevel, locals = []}
@@ -288,16 +289,16 @@ pruneType (ReversedPruning initPruning) =
     go initPruning PartialRenaming{uni = Nothing, domain = Level 0, codomain = Level 0, renaming = EMap.empty}
   where
     go pruning pren ty = do
-        ty' <- forceM ty
+        ty <- forceM ty
         univars <- get
-        case (pruning, ty') of
-            ([], _) -> rename pren ty'
+        case (pruning, ty) of
+            ([], _) -> rename pren ty
             (Just _ : rest, Q Forall vis e closure) -> do
                 argTy <- rename pren closure.ty
                 body <- go rest (lift pren) (app univars closure (Var pren.codomain))
                 pure $ C.Q Forall vis e closure.var argTy body
             (Nothing : rest, Q Forall _ _ closure) -> go rest (skip pren) (app univars closure (Var pren.codomain))
-            _ -> error "pruning: not enough arguments on a pi type"
+            _ -> error "pruning: not enough arguments in a pi type"
 
 -- | apply a pruning to a univar, produce a new univar with its type also pruned
 pruneUniVar :: TC' es => Pruning -> UniVar -> Eff es UniVar
@@ -306,7 +307,7 @@ pruneUniVar pruning uni = do
     topLevel <- askValues
     ty <- typeOfUnsolvedUniVar uni
     let env = ExtendedEnv{locals = [], ..}
-    prunedType <- evalCore env <$> pruneType (ReversedPruning $ reverse pruning.getPruning) ty
+    prunedType <- evalCore env <$> pruneType (reversedPruning pruning) ty
     newUni <- newUniVar prunedType
     univars' <- get
     let env' = ExtendedEnv{locals = [], univars = univars', ..}

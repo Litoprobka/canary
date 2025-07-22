@@ -16,7 +16,7 @@ import Effectful.Labeled (Labeled, labeled, runLabeled)
 import Effectful.Reader.Static
 import Effectful.State.Static.Local
 import Effectful.Writer.Static.Local (Writer, runWriter, tell)
-import Eval (ExtendedEnv (..), UniVarState (..), UniVars, evalCore, nf, quote, quoteM, whnf)
+import Eval (ExtendedEnv (..), UniVarState (..), UniVars, evalCore, nf, quote, quoteM)
 import LangPrelude
 import NameGen (NameGen, freshId, runNameGen)
 import Syntax
@@ -175,7 +175,7 @@ removeUniVars' ctx (mbTerm, ty) = do
     -- and sort them wrt. dependencies
     sortedUnis <-
         runErrorNoCallStack @(Poset.Cycle UniVar) mkUniPoset >>= \case
-            Left{} -> internalError' "univars types are cyclic"
+            Left{} -> internalError' "univar types are cyclic"
             Right uniPoset -> pure uniPoset
 
     let solveToLvl i uni = do
@@ -200,8 +200,9 @@ removeUniVars' ctx (mbTerm, ty) = do
 
     univars <- get
     let mkName i = one $ chr (ord 'a' + i `mod` 26)
-    newNames <-
-        zipWithM (\i uni -> (Name' (mkName i),) . quote univars (Level $ ctx.level.getLevel + i) <$> typeOfUniVar uni) [0 ..] sortedUnis
+    newNames <- for (zip [0 ..] sortedUnis) \(i, uni) -> do
+        uniType <- quote univars (Level $ ctx.level.getLevel + i) <$> typeOfUniVar uni
+        pure (Name' (mkName i), uniType)
 
     let wrapInForalls body = foldr (uncurry (C.Q Forall Implicit Retained)) body newNames
     let wrapInLambdas body = foldr (\(name, _) -> E.Lambda Implicit (E.VarP name)) body newNames
@@ -226,7 +227,7 @@ removeUniVars' ctx (mbTerm, ty) = do
     zonkTerm c@(lvl, env@V.ValueEnv{..}) = \case
         E.Core coreTerm -> do
             env <- extendEnv env
-            let zonkedCore = whnf lvl env coreTerm
+            let zonkedCore = nf lvl env coreTerm
             univars <- get
             tell $ freeVarsInCore univars zonkedCore
             pure $ E.Core coreTerm

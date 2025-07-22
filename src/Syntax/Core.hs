@@ -77,6 +77,9 @@ data CoreTerm
 newtype Pruning = Pruning {getPruning :: [Maybe Visibility]}
 newtype ReversedPruning = ReversedPruning [Maybe Visibility]
 
+reversedPruning :: Pruning -> ReversedPruning
+reversedPruning = ReversedPruning . reverse . (.getPruning)
+
 instance PrettyAnsi CoreTerm where
     prettyAnsi opts = go 0 []
       where

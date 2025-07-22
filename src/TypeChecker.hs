@@ -265,7 +265,7 @@ infer ctx (t :@ loc) = localLoc loc case t of
                     argTy <- freshUniVarV ctx type_
                     univars <- get
                     x <- freshName_ "x"
-                    closure <- V.Closure (toSimpleName_ x) argTy ctx.env <$> freshUniVar (bind univars x argTy ctx) argTy
+                    closure <- V.Closure (toSimpleName_ x) argTy ctx.env <$> freshUniVar (bind univars x argTy ctx) type_
                     unify ctx (V.Q Forall vis Retained closure) other
                     pure closure
         eRhs <- check ctx rhs closure.ty
