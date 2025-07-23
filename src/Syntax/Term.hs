@@ -23,29 +23,31 @@ type Type_ = Term_
 type Expr_ = Term_
 
 data Term_ p
-    = -- terminal constructors
-      Name (NameAt p)
-    | -- | 'a
-      -- | type variables with an inferred forall binder
+    = Name (NameAt p)
+    | -- | @'a@
+      -- type variables with an inferred forall binder
       NameAt p ~ SimpleName => ImplicitVar (NameAt p)
     | NameAt p ~ SimpleName => Parens (Term p)
     | Literal Literal
     | -- shared between Expr and Type
 
-      -- | value : Type
+      -- | @value : Type@
       Annotation (Term p) (Type p)
-    | App Visibility (Term p) (Term p)
+    | -- |
+      --         @App Visible f x@ = @ f x@
+      --         @App Implicit f x@ = @f \@x@
+      App Visibility (Term p) (Term p)
     | -- expression-only stuff
       Lambda Visibility (Pattern p) (Expr p) -- it's still unclear to me whether I want to desugar multi-arg lambdas while parsing
-    | -- | (f _ x + _ y)
+    | -- | @(f _ x + _ y)@
       WildcardLambda (NonEmpty (NameAt p)) (Expr p)
     | Let (Binding p) (Expr p)
     | LetRec (NonEmpty (Binding p)) (Expr p)
     | Case (Expr p) [(Pattern p, Expr p)]
-    | -- | Haskell's \cases
+    | -- | Haskell's @\\cases@
       Match [(NonEmpty (Pattern p), Expr p)]
     | If (Expr p) (Expr p) (Expr p)
-    | -- | 'Constructor
+    | -- | @'Constructor@
       -- unlike the rest of the cases, variant tags and record fields
       -- don't need any kind of name resolution
       Variant OpenName

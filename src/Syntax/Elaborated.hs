@@ -1,11 +1,14 @@
+{-# LANGUAGE ApplicativeDo #-}
 {-# OPTIONS_GHC -Wno-partial-fields #-}
 
 module Syntax.Elaborated where
 
-import Common
+import Common (Name)
+import Common hiding (Name)
 import Data.Row
 import LangPrelude
 import Syntax.Core (CoreTerm)
+import Syntax.Core qualified as C
 import Syntax.Term (Erasure, Quantifier, Visibility)
 
 {-x
@@ -91,3 +94,51 @@ patternArity = go
         SigmaP _ lhs rhs -> go lhs + go rhs
         ListP args -> sum (map go args)
         LiteralP{} -> 0
+
+lift :: Int -> ETerm -> ETerm
+lift 0 = id
+lift n = go (Level 0)
+  where
+    go depth = \case
+        Var (Index index)
+            | index >= depth.getLevel -> Var (Index $ index + n)
+            | otherwise -> Var (Index index)
+        other -> elabTraversalPureWithLevel go (C.liftAt n) depth other
+
+elabTraversalWithLevel
+    :: Applicative f => (Level -> ETerm -> f ETerm) -> (Level -> CoreTerm -> f CoreTerm) -> Level -> ETerm -> f ETerm
+elabTraversalWithLevel recur recurCore lvl = \case
+    App vis lhs rhs -> App vis <$> recur lvl lhs <*> recur lvl rhs
+    Lambda vis pat body -> Lambda vis pat <$> recur (lvl `incLevel` patternArity pat) body
+    Let ValueB{name, body = bindingBody} body -> do
+        bindingBody <- recur lvl bindingBody
+        body <- recur (succ lvl) body
+        pure $ Let ValueB{name, body = bindingBody} body
+    Let FunctionB{name, args, body = fnBody} body -> do
+        let fnLevel = lvl `incLevel` sum (fmap (patternArity . snd) args)
+        fnBody <- recur fnLevel fnBody
+        body <- recur (succ lvl) body
+        pure $ Let FunctionB{name, args, body = fnBody} body
+    LetRec{} -> error "elabTraversal: let rec not supported yet"
+    Case arg branches -> Case <$> recur lvl arg <*> for branches \(pat, body) -> (pat,) <$> recur (lvl `incLevel` patternArity pat) body
+    Match branches ->
+        Match <$> for branches \(pats, body) ->
+            let innerLevel = lvl `incLevel` sum (fmap (patternArity . unTyped) pats)
+             in (pats,) <$> recur innerLevel body
+    If cond true false -> If <$> recur lvl cond <*> recur lvl true <*> recur lvl false
+    Record row -> Record <$> traverse (recur lvl) row
+    RecordAccess lhs field -> RecordAccess <$> recur lvl lhs <*> pure field
+    List itemType items -> List <$> recur lvl itemType <*> traverse (recur lvl) items
+    Sigma lhs rhs -> Sigma <$> recur lvl lhs <*> recur lvl rhs
+    Do{} -> error "elabTraversal: do-notation not supported yet"
+    Q q v e var body -> Q q v e var <$> recur (succ lvl) body
+    VariantT row -> VariantT <$> traverse (recur lvl) row
+    RecordT row -> RecordT <$> traverse (recur lvl) row
+    Core coreTerm -> Core <$> recurCore lvl coreTerm
+    Var index -> pure $ Var index
+    Name name -> pure $ Name name
+    Literal lit -> pure $ Literal lit
+    Variant name -> pure $ Variant name
+
+elabTraversalPureWithLevel :: (Level -> ETerm -> ETerm) -> (Level -> CoreTerm -> CoreTerm) -> Level -> ETerm -> ETerm
+elabTraversalPureWithLevel recur recurCore lvl = runIdentity . elabTraversalWithLevel (\lvl -> pure . recur lvl) (\lvl -> pure . recurCore lvl) lvl

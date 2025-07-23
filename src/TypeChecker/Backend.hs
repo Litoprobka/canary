@@ -187,16 +187,14 @@ removeUniVars' ctx (mbTerm, ty) = do
     -- solving univars like this makes sense only if this binding and its type are the only things that referred to them
     zipWithM_ solveToLvl [0 ..] sortedUnis
 
-    let (newLocals, newLevel) = liftLevel ctx.level (length sortedUnis)
-    let innerEnv = ctx.env{V.locals = newLocals <> ctx.env.locals}
+    let newBinderCount = length sortedUnis
+        (newLocals, newLevel) = liftLevel ctx.level newBinderCount
+        innerEnv = ctx.env{V.locals = newLocals <> ctx.env.locals}
 
     innerType <- do
         env <- extendEnv innerEnv
-        pure $ nf newLevel env tyC
-    (innerTerm, _) <- runWriter $ traverse (zonkTerm (newLevel, innerEnv)) mbTerm
-
-    -- if the context has local bindings, we'd have to lift our ETerm, and lifting for ETerms is not implemented yet
-    unless (ctx.level == Level 0) $ internalError' "generalisation in a context with local bindings is not supported yet"
+        pure $ nf newLevel env $ C.lift newBinderCount tyC
+    (innerTerm, _) <- runWriter $ traverse (zonkTerm (newLevel, innerEnv) . E.lift newBinderCount) mbTerm
 
     univars <- get
     let mkName i = one $ chr (ord 'a' + i `mod` 26)
@@ -223,6 +221,7 @@ removeUniVars' ctx (mbTerm, ty) = do
 
     -- the only important case is E.Core, which may actually contain univars
     -- the rest are just plain traversal logic
+    -- unfortunately, it doesn't quite fit 'elabTraversal', since the env logic is unique
     zonkTerm :: TC es => (Level, ValueEnv) -> ETerm -> Eff (Writer (EnumSet UniVar) : es) ETerm
     zonkTerm c@(lvl, env@V.ValueEnv{..}) = \case
         E.Core coreTerm -> do

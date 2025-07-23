@@ -221,7 +221,11 @@ coreTraversalPure recur = runIdentity . coreTraversal (pure . recur)
 I don't think it should traverse univars, since they are not supposed to reference any local variables
 -}
 lift :: Int -> CoreTerm -> CoreTerm
-lift n = go (Level 0)
+lift n = liftAt n (Level 0)
+
+liftAt :: Int -> Level -> CoreTerm -> CoreTerm
+liftAt 0 = \_ term -> term
+liftAt n = go
   where
     go depth = \case
         Var (Index index)

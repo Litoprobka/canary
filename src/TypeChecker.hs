@@ -1,4 +1,5 @@
 {-# LANGUAGE DuplicateRecordFields #-}
+{-# OPTIONS_GHC -Wno-incomplete-uni-patterns #-}
 
 module TypeChecker where
 
@@ -73,7 +74,19 @@ checkBinding ctx binding [] = do
     eBody <- runReader topLevel case Map.lookup (unLoc name) topLevel of
         Just sig -> check ctx body sig
         Nothing -> do
-            (eBody, ty) <- removeUniVarsT ctx =<< infer ctx body
+            -- since we don't have a signature for our binding, we need a placeholder type for recursive calls
+            recType <- freshUniVarV ctx (V.Type (TypeName :@ getLoc binding))
+            modify @TopLevel $ Map.insert (unLoc name) recType
+
+            inferred@(_, monoTy) <- infer ctx body
+
+            -- check that the type of recursive calls matches the inferred type
+            -- if there have been no recursive calls, 'monoTy' would stay the same
+            unify ctx recType monoTy
+
+            -- after checking recursive calls, we can generalise
+            -- TODO: when we generalise a recursive binding,
+            (eBody, ty) <- removeUniVarsT ctx inferred
             modify @TopLevel $ Map.insert (unLoc name) ty
             pure eBody
     -- ideally, we should unwrap the body and construct a FunctionB if the original binding was a function
