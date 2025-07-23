@@ -5,9 +5,10 @@ module TypeCheckerSpec (spec) where
 
 import Common
 import Data.Text qualified as Text
-import DependencyResolution (cast)
+import DependencyResolution (SimpleOutput (..), cast, resolveDependenciesSimplified')
 import Diagnostic (Diagnose, ShowDiagnostic (..), runDiagnose')
 import Effectful (Eff, runPureEff)
+import Eval (modifyEnv)
 import Fixity qualified
 import FlatParse.Stateful qualified as FP
 import Lexer (lex', mkTokenStream)
@@ -43,10 +44,18 @@ toSanityCheck =
     , "\\a b -> a (\\x -> b x) (\\z -> a b b) {}"
     ]
 
+toTypecheck :: [(Text, Text)]
+toTypecheck =
+    [ ("map", "map f xs = case xs of Nil -> Nil; Cons x xs -> Cons (f x) (map f xs)")
+    , ("len", "type Peano = S Peano | Z\nlen xs = case xs of Nil -> Z; Cons _ xs -> S (len xs)")
+    ]
+
 spec :: Spec
 spec = do
     describe "sanity check" do
         for_ toSanityCheck \input -> it ("infers a consistent type for " <> toString input) $ sanityCheck input
+    describe "typecheck" do
+        for_ toTypecheck \(name, input) -> it ("typechecks " <> toString name) $ typecheckDecls input
 
 -- verify that an expression typechecks with the type inferred for it
 sanityCheck :: Text -> Expectation
@@ -60,8 +69,25 @@ sanityCheck input =
                 Fixity.run env.fixityMap env.operatorPriorities $ Fixity.parse afterDepRes
             runDiagnose' [("test", input)] $ TC.run env.types do
                 let ctx = TC.emptyContext env.values
-                (_, vTy) <- TC.removeUniVarsT ctx =<< TC.infer ctx afterFixityRes
+                (_, vTy) <- TC.generaliseTerm ctx =<< TC.infer ctx afterFixityRes
                 TC.check ctx afterFixityRes vTy
+     in case mbResult of
+            Nothing -> expectationFailure . show $ ShowDiagnostic diagnostic
+            Just{} -> pass
+
+typecheckDecls :: Text -> Expectation
+typecheckDecls input =
+    let Right parsed = parsePretty Parser.code input
+        (mbResult, diagnostic) = runPureEff $ runNameGen do
+            env <- skipDiagnose Repl.mkDefaultEnv
+            fixityDecls <- skipDiagnose do
+                afterNameRes <- NameRes.run env.scope (NameRes.resolveNames parsed)
+                depResOutput <- skipDiagnose $ resolveDependenciesSimplified' env.fixityMap env.operatorPriorities afterNameRes
+                Fixity.resolveFixity depResOutput.fixityMap depResOutput.operatorPriorities depResOutput.declarations
+            runDiagnose' [("test", input)] $ (\f -> foldlM f (env.types, env.values) fixityDecls) \(topLevel, values) decl -> do
+                (eDecl, newTypes, newValues) <- TC.processDeclaration' topLevel values decl
+                newNewValues <- modifyEnv newValues [eDecl]
+                pure (newTypes, newNewValues)
      in case mbResult of
             Nothing -> expectationFailure . show $ ShowDiagnostic diagnostic
             Just{} -> pass
