@@ -51,7 +51,7 @@ processSignature
     -> Eff es EDeclaration
 processSignature ctx name sig = do
     topLevel <- get
-    sigV <- runReader @TopLevel topLevel $ removeUniVars ctx =<< typeFromTerm ctx sig
+    sigV <- runReader @TopLevel topLevel $ generalise ctx =<< typeFromTerm ctx sig
     univars <- get @UniVars
     let eSig = E.Core $ quote univars ctx.level sigV
     modify @TopLevel $ Map.insert (unLoc name) sigV
@@ -86,7 +86,7 @@ checkBinding ctx binding [] = do
 
             -- after checking recursive calls, we can generalise
             -- TODO: when we generalise a recursive binding,
-            (eBody, ty) <- removeUniVarsT ctx inferred
+            (eBody, ty) <- generaliseRecursiveTerm ctx name inferred
             modify @TopLevel $ Map.insert (unLoc name) ty
             pure eBody
     -- ideally, we should unwrap the body and construct a FunctionB if the original binding was a function
@@ -109,7 +109,7 @@ processGadt ctx name mbKind constructors = do
     let newCtx = ctx{env = ctx.env{V.topLevel = Map.insert (unLoc name) tyCon ctx.env.topLevel}}
     topLevel <- get @TopLevel
     constructors <- runReader topLevel $ for constructors \con -> do
-        conSig <- removeUniVars newCtx =<< typeFromTerm newCtx con.sig
+        conSig <- generalise newCtx =<< typeFromTerm newCtx con.sig
         checkGadtConstructor ctx.level name con.name conSig
         modify @TopLevel $ Map.insert (unLoc con.name) conSig
         pure (con, quote EMap.empty (Level 0) conSig)
@@ -138,7 +138,7 @@ processType
     -> Eff es (EDeclaration, VType)
 processType ctx name binders constructors = do
     topLevel <- get @TopLevel
-    kind <- runReader topLevel $ removeUniVars ctx =<< typeFromTerm ctx (mkTypeKind binders)
+    kind <- runReader topLevel $ generalise ctx =<< typeFromTerm ctx (mkTypeKind binders)
     univars <- get
     let kindC = quote univars ctx.level kind
         tyCon = mkTyCon kindC name
@@ -146,7 +146,7 @@ processType ctx name binders constructors = do
     let newCtx = ctx{env = ctx.env{V.topLevel = Map.insert (unLoc name) tyCon ctx.env.topLevel}}
     topLevel <- get @TopLevel
     runReader topLevel $ for_ (mkConstrSigs name binders constructors) \(con, sig) -> do
-        sigV <- removeUniVars newCtx =<< typeFromTerm newCtx sig
+        sigV <- generalise newCtx =<< typeFromTerm newCtx sig
         modify @TopLevel $ Map.insert (unLoc con) sigV
     -- _conMapEntry <- mkConstructorTableEntry (map (.var) binders) (map (\con -> (con.name, con.args)) constrs)
     let argVisibilities con = (Implicit <$ C.functionTypeArity kindC) <> fromList (Visible <$ con.args)

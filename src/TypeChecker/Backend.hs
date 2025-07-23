@@ -146,11 +146,14 @@ lookupSig name ctx = do
             ty <- freshUniVarV ctx (V.Type $ TypeName :@ getLoc name)
             (E.Name name,) <$> freshUniVarV ctx ty
 
-removeUniVars :: TC es => Context -> VType -> Eff es VType
-removeUniVars ctx ty = snd <$> generalise ctx (Nothing, ty)
+generalise :: TC es => Context -> VType -> Eff es VType
+generalise ctx ty = snd <$> generalise' ctx Nothing (Nothing, ty)
 
-removeUniVarsT :: TC es => Context -> (ETerm, VType) -> Eff es (ETerm, VType)
-removeUniVarsT ctx (term, ty) = first runIdentity <$> generalise ctx (Identity term, ty)
+generaliseTerm :: TC es => Context -> (ETerm, VType) -> Eff es (ETerm, VType)
+generaliseTerm ctx (term, ty) = first runIdentity <$> generalise' ctx Nothing (Identity term, ty)
+
+generaliseRecursiveTerm :: TC es => Context -> Name -> (ETerm, VType) -> Eff es (ETerm, VType)
+generaliseRecursiveTerm ctx name (term, ty) = first runIdentity <$> generalise' ctx (Just name) (Identity term, ty)
 
 -- | zonk unification variables from a term, report an error on leftover free variables
 zonkTerm :: TC es => Context -> ETerm -> Eff es ETerm
@@ -166,8 +169,8 @@ zonkTerm ctx term = do
 {- | zonk unification variables from a term and its type,
 generalise unsolved variables to new forall binders
 -}
-generalise :: (TC es, Traversable t) => Context -> (t ETerm, VType) -> Eff es (t ETerm, VType)
-generalise ctx (mbTerm, ty) = do
+generalise' :: (TC es, Traversable t) => Context -> Maybe Name -> (t ETerm, VType) -> Eff es (t ETerm, VType)
+generalise' ctx mbName (mbTerm, ty) = do
     -- quote forces a term to normal form and applies all solved univars
     -- quoteWhnf would also work here, I'm not sure which one is better in this case
     tyC <- quoteM ctx.level ty
@@ -217,11 +220,26 @@ generalise ctx (mbTerm, ty) = do
         uniType <- quote univars (ctx.level `incLevel` i) <$> typeOfUniVar uni
         pure (Name' (mkName i), uniType)
 
-    let wrapInForalls body = foldr (uncurry (C.Q Forall Implicit Retained)) body newNames
-    let wrapInLambdas body = foldr (\(name, _) -> E.Lambda Implicit (E.VarP name)) body newNames
+    let finalType = foldr (uncurry (C.Q Forall Implicit Retained)) innerType newNames
+        wrapInLambdas body = foldr (\(name, _) -> E.Lambda Implicit (E.VarP name)) body newNames
+        withApps lvl name =
+            foldl' (\acc vlvl -> C.App Implicit acc (C.Var $ levelToIndex lvl vlvl)) (C.Name name) [Level 0 .. pred (Level newBinderCount)]
+
+    -- after generalisation, the recursive calls to the same binding are
+    -- no longer well-typed - they are missing implicit applications
+    let withFixedCalls = case mbName of
+            Nothing -> id
+            Just name -> replaceRecursiveCalls name (`withApps` name) (Level newBinderCount)
 
     env <- extendEnv ctx.env
-    pure (wrapInLambdas <$> innerTerm, evalCore env (wrapInForalls innerType))
+    pure (wrapInLambdas . withFixedCalls <$> innerTerm, evalCore env finalType)
+  where
+    replaceRecursiveCalls fnName fixTerm lvl = \case
+        E.Name name | name == fnName -> E.Core (fixTerm lvl)
+        other -> E.elabTraversalPureWithLevel (replaceRecursiveCalls fnName fixTerm) (replaceRecursiveCallsCore fnName fixTerm) lvl other
+    replaceRecursiveCallsCore fnName fixTerm lvl = \case
+        C.Name name | name == fnName -> fixTerm lvl
+        other -> C.coreTraversalPureWithLevel (replaceRecursiveCallsCore fnName fixTerm) lvl other
 
 -- | collect all free vars in a zonked CoreTerm
 freeVarsInCore :: UniVars -> CoreTerm -> EnumSet UniVar

@@ -142,3 +142,6 @@ elabTraversalWithLevel recur recurCore lvl = \case
 
 elabTraversalPureWithLevel :: (Level -> ETerm -> ETerm) -> (Level -> CoreTerm -> CoreTerm) -> Level -> ETerm -> ETerm
 elabTraversalPureWithLevel recur recurCore lvl = runIdentity . elabTraversalWithLevel (\lvl -> pure . recur lvl) (\lvl -> pure . recurCore lvl) lvl
+
+elabTraversalPure :: (ETerm -> ETerm) -> (CoreTerm -> CoreTerm) -> ETerm -> ETerm
+elabTraversalPure recur recurCore = elabTraversalPureWithLevel (const recur) (const recurCore) (Level 0)

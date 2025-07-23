@@ -133,6 +133,6 @@ noteFromUnificationError = \case
     NotEq lhs rhs -> Note $ vsep ["specifically, these types are incompatible", prettyDef lhs, prettyDef rhs]
     PruneNonRenaming -> Note "can't prune a spine that's not a renaming"
     PruneNonPattern -> Note "can't prune a non-pattern spine"
-    NonVarInSpine term -> Note $ "non-var in spine:" <+> pretty term
+    NonVarInSpine term -> Note $ "non-var in spine:" <+> prettyDef term
     OccursCheck uni -> Note $ "solving the unification variable" <+> pretty uni <+> "resulted in a type that refers to itself"
     EscapingVariable lvl -> Note $ "variable" <+> "#" <> pretty lvl.getLevel <+> "is not in scope of a unification variable"

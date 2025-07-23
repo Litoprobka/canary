@@ -69,6 +69,7 @@ library
       NoFieldSelectors
       DisambiguateRecordFields
       DerivingVia
+      ApplicativeDo
   ghc-options: -Wall -Wcompat -Widentities -Wincomplete-record-updates -Wincomplete-uni-patterns -Wmissing-home-modules -Wpartial-fields -Wredundant-constraints -Wno-name-shadowing
   build-depends:
       base >=4.7 && <5
@@ -112,6 +113,7 @@ executable canary-exe
       NoFieldSelectors
       DisambiguateRecordFields
       DerivingVia
+      ApplicativeDo
   ghc-options: -Wall -Wcompat -Widentities -Wincomplete-record-updates -Wincomplete-uni-patterns -Wmissing-home-modules -Wpartial-fields -Wredundant-constraints -Wno-name-shadowing -threaded -rtsopts -with-rtsopts=-N
   build-depends:
       base >=4.7 && <5
@@ -162,6 +164,7 @@ test-suite canary-test
       NoFieldSelectors
       DisambiguateRecordFields
       DerivingVia
+      ApplicativeDo
   ghc-options: -Wall -Wcompat -Widentities -Wincomplete-record-updates -Wincomplete-uni-patterns -Wmissing-home-modules -Wpartial-fields -Wredundant-constraints -Wno-name-shadowing -threaded -rtsopts -with-rtsopts=-N
   build-depends:
       base >=4.7 && <5

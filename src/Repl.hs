@@ -335,7 +335,7 @@ replStep env@ReplEnv{loadedFiles} command = do
         afterFixityRes <- Fixity.run env.fixityMap env.operatorPriorities $ Fixity.parse skippedDepRes
         TC.run env.types do
             let ctx = emptyContext env.values
-            (eExpr, vTy) <- TC.removeUniVarsT ctx =<< TC.infer ctx afterFixityRes
+            (eExpr, vTy) <- TC.generaliseTerm ctx =<< TC.infer ctx afterFixityRes
             pure (eExpr, vTy)
 
     prettyVal val = do
