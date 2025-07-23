@@ -22,6 +22,7 @@ import Eval (
     force,
     forceM,
     quote,
+    quoteM,
     skolemizePatternClosure,
  )
 import LangPrelude hiding (force, lift)
@@ -87,8 +88,14 @@ unify' lvl lhsTy rhsTy = do
             lhsBody <- lhsClosure `appM` Var lvl
             rhsBody <- evalAppM vis nonLambda (Var lvl)
             unify' (succ lvl) lhsBody rhsBody
-        (TyCon lhs lhsArgs) (TyCon rhs rhsArgs) | lhs == rhs -> Vec.zipWithM_ (unify' lvl `on` snd) lhsArgs rhsArgs
-        (Con lhs lhsArgs) (Con rhs rhsArgs) | lhs == rhs -> Vec.zipWithM_ (unify' lvl `on` snd) lhsArgs rhsArgs
+
+        -- just like with lambdas, if the constructors are the same, their visibilities are guaranteed to match
+        (TyCon lhs lhsArgs) (TyCon rhs rhsArgs)
+            | lhs == rhs -> Vec.zipWithM_ (unify' lvl `on` snd) lhsArgs rhsArgs
+            | otherwise -> throwError_ (NotEq (C.TyCon lhs Vec.empty) (C.TyCon rhs Vec.empty))
+        (Con lhs lhsArgs) (Con rhs rhsArgs)
+            | lhs == rhs -> Vec.zipWithM_ (unify' lvl `on` snd) lhsArgs rhsArgs
+            | otherwise -> throwError_ (NotEq (C.Con lhs Vec.empty) (C.Con rhs Vec.empty))
         (Q Forall v _e closure) (Q Forall v2 _e2 closure2) | v == v2 -> do
             unify' lvl closure.ty closure2.ty
             body <- closure `appM` Var lvl
@@ -105,9 +112,8 @@ unify' lvl lhsTy rhsTy = do
                 zipWithM_ (unify' lvl) fn.captured fn2.captured
                 unify' lvl (Stuck arg) (Stuck arg2)
         lhs rhs -> do
-            univars <- get @UniVars
-            let lhsC = quote univars lvl lhs
-                rhsC = quote univars lvl rhs
+            lhsC <- quoteM lvl lhs
+            rhsC <- quoteM lvl rhs
             throwError_ (NotEq lhsC rhsC)
 
 unifySpine :: TC' es => Level -> Spine -> Spine -> Eff es ()
