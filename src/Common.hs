@@ -232,6 +232,9 @@ newtype Level = Level {getLevel :: Int} deriving (Show, Eq, Enum)
 levelToIndex :: Level -> Level -> Index
 levelToIndex (Level l) (Level x) = Index $ l - x - 1
 
+incLevel :: Level -> Int -> Level
+incLevel (Level l) n = Level $ l + n
+
 toSimpleName :: Name -> SimpleName
 toSimpleName (name :@ loc) = toSimpleName_ name :@ loc
 

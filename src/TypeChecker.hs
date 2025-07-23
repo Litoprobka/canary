@@ -330,7 +330,7 @@ infer ctx (t :@ loc) = localLoc loc case t of
         -- todo: if the `bodyTy` doesn't contain our new variables at all, we don't have to construct the case
         -- also, since the pattern is guaranteed to be infallible, we can define each new variable as 'case x of (Pat ... var ...) -> var'
         -- that way, unused variables would naturally disappear
-        let bodyTyC = quote univars (Level $ ctx.level.getLevel + E.patternArity ePat + 1) bodyTy
+        let bodyTyC = quote univars (ctx.level `incLevel` (E.patternArity ePat + 1)) bodyTy
             body = C.Case (C.Var (Index 0)) [(flattenPattern ePat, bodyTyC)]
             lambdaTy = V.Q Forall vis Retained V.Closure{ty, var = "x", env = ctx.env, body}
         pure (E.Lambda vis (E.VarP "x") eBody, lambdaTy)

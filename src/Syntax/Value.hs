@@ -112,7 +112,7 @@ lift n = go
         Stuck stuck -> Stuck (liftStuck stuck)
 
     liftStuck = \case
-        VarApp (Level lvl) spine -> VarApp (Level $ lvl + n) ((fmap . fmap) go spine)
+        VarApp lvl spine -> VarApp (lvl `incLevel` n) ((fmap . fmap) go spine)
         UniVarApp uni spine -> UniVarApp uni ((fmap . fmap) go spine)
         Fn fn stuck -> Fn (liftFunc fn) (liftStuck stuck)
         Case stuck branches -> Case (liftStuck stuck) (fmap liftPatternClosure branches)

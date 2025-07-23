@@ -180,7 +180,7 @@ removeUniVars' ctx (mbTerm, ty) = do
 
     let solveToLvl i uni = do
             ty <- typeOfUnsolvedUniVar uni
-            let newLevel = Level $ ctx.level.getLevel + i
+            let newLevel = ctx.level `incLevel` i
             modify @UniVars $ EMap.insert uni $ Solved{solution = V.Var newLevel, ty}
 
     -- DANGER: this step wouldn't work when I implement destructuring bindings
@@ -201,7 +201,7 @@ removeUniVars' ctx (mbTerm, ty) = do
     univars <- get
     let mkName i = one $ chr (ord 'a' + i `mod` 26)
     newNames <- for (zip [0 ..] sortedUnis) \(i, uni) -> do
-        uniType <- quote univars (Level $ ctx.level.getLevel + i) <$> typeOfUniVar uni
+        uniType <- quote univars (ctx.level `incLevel` i) <$> typeOfUniVar uni
         pure (Name' (mkName i), uniType)
 
     let wrapInForalls body = foldr (uncurry (C.Q Forall Implicit Retained)) body newNames
@@ -210,7 +210,7 @@ removeUniVars' ctx (mbTerm, ty) = do
     env <- extendEnv ctx.env
     pure (wrapInLambdas <$> innerTerm, evalCore env (wrapInForalls innerType))
   where
-    -- \| collect all free vars in a zonked CoreTerm
+    -- collect all free vars in a zonked CoreTerm
     freeVarsInCore :: UniVars -> CoreTerm -> EnumSet UniVar
     freeVarsInCore univars = \case
         C.UniVar uni -> case EMap.lookup uni univars of
@@ -270,4 +270,4 @@ removeUniVars' ctx (mbTerm, ty) = do
     liftLevel lvl diff = (freeVars, newLevel)
       where
         freeVars = V.Var <$> [pred newLevel, pred (pred newLevel) .. lvl]
-        newLevel = Level $ lvl.getLevel + diff
+        newLevel = lvl `incLevel` diff

@@ -18,6 +18,7 @@ import Common (
     SimpleName_ (..),
     UnAnnotate (..),
     UniVar,
+    incLevel,
     levelToIndex,
     prettyDef,
     unLoc,
@@ -131,7 +132,7 @@ quoteWhnf univars = go
       where
         env = freeVars <> closure.env.locals
         freeVars = Var <$> [pred newLevel, pred (pred newLevel) .. lvl]
-        newLevel = Level $ lvl.getLevel + C.patternArity closure.pat
+        newLevel = lvl `incLevel` C.patternArity closure.pat
 
     quoteClosure lvl Closure{env, body} = subst (succ lvl) (Var lvl : env.locals) body
 
@@ -171,7 +172,7 @@ quoteWhnf univars = go
     substBranch :: Level -> [Value] -> (CorePattern, CoreTerm) -> (CorePattern, CoreTerm)
     substBranch lvl env (pat, body) =
         let diff = C.patternArity pat
-            newLevel = Level $ lvl.getLevel + diff
+            newLevel = lvl `incLevel` diff
             freeVars = Var <$> [pred newLevel, pred (pred newLevel) .. lvl]
          in (pat, subst newLevel (freeVars <> env) body)
 
@@ -227,7 +228,19 @@ evalAppM vis lhs rhs = do
 evalApp :: UniVars -> Visibility -> Value -> Value -> Value
 evalApp univars vis = \cases
     (Lambda vis2 closure) arg | vis == vis2 -> app univars closure arg
-    (Lambda vis2 _) _ -> error $ "[eval] visibility mismatch " <> show vis <> " != " <> show vis2
+    lhs@(Lambda vis2 _) arg ->
+        error . show $
+            "[eval] visibility mismatch "
+                <> show vis
+                <> " != "
+                <> show vis2
+                <+> "when applying"
+                <> line
+                <> pretty lhs
+                <> line
+                <> "to"
+                <> line
+                <> pretty arg
     -- this is potentially problematic. primitive functions shouldn't accept anything
     -- that contains even a nested stuck term, e.g. 'Cons x []' where 'x' is stuck
     (PrimFunction fn) (Stuck stuck) -> Stuck $ Fn fn stuck
@@ -275,7 +288,7 @@ skolemizePatternClosure univars level closure = (evalCore env closure.body, newL
     ValueEnv{..} = closure.env
     env = ExtendedEnv{locals = freeVars <> locals, ..}
     freeVars = Var <$> [pred newLevel, pred (pred newLevel) .. level]
-    newLevel = Level $ level.getLevel + C.patternArity closure.pat
+    newLevel = level `incLevel` C.patternArity closure.pat
 
 -- | try to apply a pattern to a value, updating the given value env
 matchCore :: ExtendedEnv -> CorePattern -> Value -> Maybe ExtendedEnv

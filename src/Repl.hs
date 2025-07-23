@@ -51,7 +51,7 @@ import Syntax.Value (ValueEnv (..))
 import Syntax.Value qualified as V
 import System.Console.Isocline
 import TypeChecker qualified as TC
-import TypeChecker.Backend (Context (..), emptyContext)
+import TypeChecker.Backend (emptyContext)
 import TypeChecker.Backend qualified as TC
 
 data ReplCommand

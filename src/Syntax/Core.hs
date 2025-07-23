@@ -13,6 +13,7 @@ import Common (
     UnAnnotate (..),
     UniVar,
     conColor,
+    incLevel,
     keyword,
     specSym,
     typeColor,
@@ -178,16 +179,12 @@ instance PrettyAnsi CoreTerm where
 
 -- check whether a variable occurs in a term
 occurs :: Index -> CoreTerm -> Bool
-occurs var = getAny . getConst . go 0
+occurs var = getAny . getConst . go (Level 0)
   where
-    go :: Int -> CoreTerm -> Const Any CoreTerm
-    go n = \case
-        Var ix -> Const $ Any $ ix.getIndex == var.getIndex + n
-        l@Lambda{} -> coreTraversal (go $ succ n) l
-        Q _ _ _ _ ty body -> go n ty *> go (succ n) body
-        Let _ defn body -> go n defn *> go (succ n) body
-        -- todo: case
-        other -> coreTraversal (go n) other
+    go :: Level -> CoreTerm -> Const Any CoreTerm
+    go depth = \case
+        Var ix -> Const $ Any $ ix.getIndex == var.getIndex + depth.getLevel
+        other -> coreTraversalWithLevel go depth other
 
 coreTraversalWithLevel :: Applicative f => (Level -> CoreTerm -> f CoreTerm) -> Level -> CoreTerm -> f CoreTerm
 coreTraversalWithLevel recur lvl = \case
@@ -197,7 +194,7 @@ coreTraversalWithLevel recur lvl = \case
     Lambda vis var body -> Lambda vis var <$> recur (succ lvl) body
     App vis lhs rhs -> App vis <$> recur lvl lhs <*> recur lvl rhs
     Case arg matches ->
-        Case <$> recur lvl arg <*> traverse (\(pat, body) -> (pat,) <$> recur (Level $ lvl.getLevel + patternArity pat) body) matches
+        Case <$> recur lvl arg <*> traverse (\(pat, body) -> (pat,) <$> recur (lvl `incLevel` patternArity pat) body) matches
     Let name defn body -> Let name <$> recur lvl defn <*> recur (succ lvl) body
     Record row -> Record <$> traverse (recur lvl) row
     RecordT row -> RecordT <$> traverse (recur lvl) row
@@ -208,7 +205,7 @@ coreTraversalWithLevel recur lvl = \case
     Name name -> pure $ Name name
     Literal lit -> pure $ Literal lit
     UniVar uni -> pure $ UniVar uni
-    AppPruning lhs pruning -> pure $ AppPruning lhs pruning
+    AppPruning lhs pruning -> AppPruning <$> recur lvl lhs <*> pure pruning
 
 coreTraversal :: Applicative f => (CoreTerm -> f CoreTerm) -> CoreTerm -> f CoreTerm
 coreTraversal recur = coreTraversalWithLevel (const recur) (Level 0)
@@ -230,6 +227,11 @@ lift n = go (Level 0)
         Var (Index index)
             | index >= depth.getLevel -> Var (Index $ index + n)
             | otherwise -> Var (Index index)
+        -- the length of the pruning must match the current level, so if we change the level, we must also
+        -- add new Nothing masks in the right place
+        AppPruning lhs pruning ->
+            let (newer, older) = splitAt depth.getLevel pruning.getPruning
+             in AppPruning (go depth lhs) (Pruning $ newer <> replicate n Nothing <> older)
         other -> coreTraversalPureWithLevel go depth other
 
 -- | How many new variables (including wildcards) does a pattern bind?

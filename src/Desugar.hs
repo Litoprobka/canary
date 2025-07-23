@@ -17,7 +17,7 @@ desugar = \case
     E.Lambda vis (E.WildcardP arg) body -> C.Lambda vis (Name' arg) (go body)
     E.Lambda vis pat body -> C.Lambda vis "x" $ C.lift 1 $ go (E.Case (E.Var (Index (-1))) [(pat, body)])
     E.Let binding expr -> case binding of
-        E.ValueB name body -> C.Let (toSimpleName_ $ unLoc name) (desugar body) (C.lift 1 $ desugar expr)
+        E.ValueB name body -> C.Let (toSimpleName_ $ unLoc name) (desugar body) (desugar expr)
         E.FunctionB name args body -> desugar $ E.Let (E.ValueB name asLambda) expr
           where
             asLambda = foldr (uncurry E.Lambda) body args
