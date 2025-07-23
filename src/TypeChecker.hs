@@ -76,17 +76,18 @@ checkBinding ctx binding [] = do
         Nothing -> do
             -- since we don't have a signature for our binding, we need a placeholder type for recursive calls
             recType <- freshUniVarV ctx (V.Type (TypeName :@ getLoc binding))
+            let recCtx = ctx{env = ctx.env{V.topLevel = Map.insert (unLoc name) (V.Stuck $ V.Opaque name []) ctx.env.topLevel}}
             modify @TopLevel $ Map.insert (unLoc name) recType
 
-            inferred@(_, monoTy) <- infer ctx body
+            inferred@(_, monoTy) <- infer recCtx body
 
             -- check that the type of recursive calls matches the inferred type
             -- if there have been no recursive calls, 'monoTy' would stay the same
-            unify ctx recType monoTy
+            unify recCtx recType monoTy
 
             -- after checking recursive calls, we can generalise
             -- TODO: when we generalise a recursive binding,
-            (eBody, ty) <- generaliseRecursiveTerm ctx name inferred
+            (eBody, ty) <- generaliseRecursiveTerm recCtx name inferred
             modify @TopLevel $ Map.insert (unLoc name) ty
             pure eBody
     -- ideally, we should unwrap the body and construct a FunctionB if the original binding was a function
@@ -361,7 +362,12 @@ infer ctx (t :@ loc) = localLoc loc case t of
         (,result) <$> check ctx (case' :@ loc) result
     T.Match [] -> typeError $ EmptyMatch loc
     T.Match (branch : _) -> do
-        fullType <- mkMultiArgPi ctx (length branch)
+        -- if we try to infer a dependent type for a match, we quiclky run
+        -- into non-pattern unification cases, which we don't handle yet
+        --
+        -- inferring a non-dependent type seems like a reasonable compromise
+        env <- extendEnv ctx.env
+        fullType <- evalCore env <$> mkNonDependentPi ctx (length branch)
         (,fullType) <$> check ctx (t :@ loc) fullType
     -- we don't infer dependent if, because that would mask type errors a lot of the time
     T.If cond true false -> do
@@ -405,7 +411,7 @@ infer ctx (t :@ loc) = localLoc loc case t of
     T.Function from to -> do
         eFrom <- check ctx from type_
         env <- extendEnv ctx.env
-        x <- freshName_ "x"
+        x <- freshName_ "_"
         univars <- get
         eTo <- check (bind univars x (eval env eFrom) ctx) to type_
         pure (E.Q Forall Visible Retained (toSimpleName_ x ::: eFrom) eTo, type_)
@@ -418,17 +424,12 @@ infer ctx (t :@ loc) = localLoc loc case t of
   where
     type_ = V.Type $ TypeName :@ loc
 
-    mkMultiArgPi ctx n = do
-        env <- extendEnv ctx.env
-        evalCore env <$> mkMultiArgPi' ctx n
-
-    mkMultiArgPi' ctx 0 = freshUniVar ctx type_
-    mkMultiArgPi' ctx n = do
-        ty <- freshUniVar ctx type_
-        argName <- freshName_ "x"
-        env <- extendEnv ctx.env
-        resultTy <- mkMultiArgPi' (bind env.univars argName (evalCore env ty) ctx) (pred n)
-        pure $ C.Q Forall Visible Retained "x" ty resultTy
+    -- construct a multi-arg non-dependent function type
+    -- ?a -> ?b -> ?c -> ?d
+    mkNonDependentPi ctx n = do
+        argTypes <- replicateM n (freshUniVar ctx type_)
+        resultType <- freshUniVar ctx type_
+        pure $ foldr (C.Q Forall Visible Retained "_") (C.lift n resultType) $ zipWith C.lift [0 ..] argTypes
 
 -- check a term against Type and evaluate it
 typeFromTerm :: TC es => Context -> Term 'Fixity -> Eff es VType

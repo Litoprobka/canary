@@ -43,6 +43,8 @@ data Value
 
 data Stuck
     = VarApp Level Spine
+    | -- | bindings with an inaccessible definition
+      Opaque Name Spine
     | UniVarApp UniVar Spine
     | Fn PrimFunc Stuck
     | Case Stuck [PatternClosure ()]
@@ -114,6 +116,7 @@ lift n = go
     liftStuck = \case
         VarApp lvl spine -> VarApp (lvl `incLevel` n) ((fmap . fmap) go spine)
         UniVarApp uni spine -> UniVarApp uni ((fmap . fmap) go spine)
+        Opaque name spine -> Opaque name ((fmap . fmap) go spine)
         Fn fn stuck -> Fn (liftFunc fn) (liftStuck stuck)
         Case stuck branches -> Case (liftStuck stuck) (fmap liftPatternClosure branches)
 

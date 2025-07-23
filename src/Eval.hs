@@ -96,6 +96,7 @@ quoteWith quoteClosure quotePatternClosure unroll = go
                 -- if we get a stuck univar even after forcing, then the univar is unsolved
                 Stuck (UniVarApp uni spine) -> quoteSpine (C.UniVar uni) spine
                 nonStuck -> go lvl nonStuck
+        Opaque name spine -> quoteSpine (C.Name name) spine
         Fn fn acc -> C.App Visible (go lvl $ PrimFunction fn) (quoteStuck lvl acc)
         Case arg matches -> C.Case (quoteStuck lvl arg) (fmap (quotePatternClosure lvl) matches)
       where
@@ -179,7 +180,7 @@ quoteWhnf univars = go
 evalCore :: ExtendedEnv -> CoreTerm -> Value
 evalCore env@ExtendedEnv{..} = \case
     -- note that env.topLevel is a lazy IdMap, so we only force the outer structure here
-    C.Name name -> LMap.lookupDefault (error . show $ "unbound top-level name" <+> pretty name) (unLoc name) env.topLevel
+    C.Name name -> LMap.lookupDefault (Stuck $ Opaque name []) (unLoc name) env.topLevel
     C.Var index
         | index.getIndex < length env.locals -> env.locals !! index.getIndex
         | otherwise -> error . show $ "index" <+> pretty index.getIndex <+> "out of scope of env@" <> pretty (length env.locals)
@@ -246,8 +247,10 @@ evalApp univars vis = \cases
     (PrimFunction fn) (Stuck stuck) -> Stuck $ Fn fn stuck
     (PrimFunction PrimFunc{remaining = 1, captured, f}) arg -> f (arg :| captured)
     (PrimFunction PrimFunc{name, remaining, captured, f}) arg -> PrimFunction PrimFunc{name, remaining = pred remaining, captured = arg : captured, f}
+    (Stuck (Opaque name spine)) arg -> Stuck $ Opaque name ((vis, arg) : spine)
     (Stuck (VarApp lvl spine)) arg -> Stuck $ VarApp lvl ((vis, arg) : spine)
     (Stuck (UniVarApp uni spine)) arg -> Stuck $ UniVarApp uni ((vis, arg) : spine)
+    -- todo: seems like this would error on primitive functions with multiple stuck arguments
     nonFunc arg -> error . show $ "attempted to apply" <+> pretty nonFunc <+> "to" <+> pretty arg
 
 forceM :: State UniVars :> es => Value -> Eff es Value

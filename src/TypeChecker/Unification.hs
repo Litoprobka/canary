@@ -101,8 +101,15 @@ unify' lvl lhsTy rhsTy = do
             body <- closure `appM` Var lvl
             body2 <- closure2 `appM` Var lvl
             unify' (succ lvl) body body2
-        (Stuck (VarApp vlvl spine)) (Stuck (VarApp vlvl2 spine2)) | vlvl == vlvl2 -> do
-            unifySpine lvl spine spine2
+        (Stuck (VarApp vlvl spine)) (Stuck (VarApp vlvl2 spine2))
+            | vlvl == vlvl2 -> unifySpine lvl spine spine2
+            | otherwise -> do
+                lhs <- quoteM lvl (V.Var vlvl)
+                rhs <- quoteM lvl (V.Var vlvl2)
+                throwError_ (NotEq lhs rhs)
+        (Stuck (Opaque name spine)) (Stuck (Opaque name2 spine2))
+            | name == name2 -> unifySpine lvl spine spine2
+            | otherwise -> throwError_ $ NotEq (C.Name name) (C.Name name2)
         (Stuck (UniVarApp uni spine)) (Stuck (UniVarApp uni2 spine2)) | uni == uni2 -> intersect lvl uni spine spine2
         (Stuck (UniVarApp uni spine)) (Stuck (UniVarApp uni2 spine2)) -> uniUni lvl uni spine uni2 spine2
         (Stuck (UniVarApp uni spine)) ty -> solve lvl uni spine ty
@@ -258,6 +265,7 @@ rename pren ty =
         VariantT row -> C.VariantT <$> traverse (rename pren) row
         Sigma x y -> C.Sigma <$> rename pren x <*> rename pren y
         PrimValue lit -> pure $ C.Literal lit
+        Stuck (Opaque name spine) -> renameSpine pren (C.Name name) spine
         Stuck (Fn fn stuck) -> C.App Visible <$> rename pren (PrimFunction fn) <*> rename pren (Stuck stuck)
         Stuck (Case arg branches) -> C.Case <$> rename pren (Stuck arg) <*> traverse (renameBranch pren) branches
 

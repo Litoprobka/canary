@@ -23,9 +23,9 @@ desugar = \case
             asLambda = foldr (uncurry E.Lambda) body args
     E.LetRec _bindings _body -> error "todo: letrec desugar"
     E.Case arg matches -> C.Case (go arg) $ fmap (bimap flattenPattern go) matches
-    E.Match matches@((_ :| [], _) : _) -> C.Lambda Visible "x" $ C.lift 1 $ C.Case (C.Var (Index 0)) (fmap desugarMatchBranch matches)
+    E.Match matches@((_ :| [], _) : _) -> C.Lambda Visible "x" $ C.Case (C.Var (Index 0)) (fmap desugarMatchBranch matches)
       where
-        desugarMatchBranch ((pat ::: _) :| _, body) = (flattenPattern pat, go body)
+        desugarMatchBranch ((pat ::: _) :| _, body) = (flattenPattern pat, C.lift 1 $ go body)
     E.Match _ -> error "todo: multi-arg match desugar"
     E.If cond true false ->
         C.Case
