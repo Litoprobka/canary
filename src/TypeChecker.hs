@@ -72,7 +72,7 @@ checkBinding ctx binding [] = do
             pure (name, foldr (\(vis, var) -> (:@ getLoc body) . T.Lambda vis var) body args)
         T.ValueB pat _ -> internalError (getLoc pat) "pattern destructuring bindings are not supported yet"
     eBody <- runReader topLevel case Map.lookup (unLoc name) topLevel of
-        Just sig -> check ctx body sig
+        Just sig -> zonkTerm ctx =<< check ctx body sig
         Nothing -> do
             -- since we don't have a signature for our binding, we need a placeholder type for recursive calls
             recType <- freshUniVarV ctx (V.Type (TypeName :@ getLoc binding))
