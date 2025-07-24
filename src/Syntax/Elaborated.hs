@@ -119,7 +119,14 @@ elabTraversalWithLevel recur recurCore lvl = \case
         fnBody <- recur fnLevel fnBody
         body <- recur (succ lvl) body
         pure $ Let FunctionB{name, args, body = fnBody} body
-    LetRec{} -> error "elabTraversal: let rec not supported yet"
+    LetRec bindings body -> LetRec <$> traverse recurBinding bindings <*> recur bindingLvl body
+      where
+        bindingLvl = lvl `incLevel` length bindings
+        recurBinding = \case
+            ValueB name bindingBody -> ValueB name <$> recur bindingLvl bindingBody
+            FunctionB name args fnBody ->
+                let newLevel = bindingLvl `incLevel` sum (fmap (patternArity . snd) args)
+                 in FunctionB name args <$> recur newLevel fnBody
     Case arg branches -> Case <$> recur lvl arg <*> for branches \(pat, body) -> (pat,) <$> recur (lvl `incLevel` patternArity pat) body
     Match branches ->
         Match <$> for branches \(pats, body) ->

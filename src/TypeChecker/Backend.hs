@@ -15,7 +15,6 @@ import Effectful.Error.Static (runErrorNoCallStack)
 import Effectful.Labeled (Labeled, labeled, runLabeled)
 import Effectful.Reader.Static
 import Effectful.State.Static.Local
-import Effectful.Writer.Static.Local (Writer, runWriter, tell)
 import Eval (ExtendedEnv (..), UniVarState (..), UniVars, evalCore, nf, quote, quoteM)
 import LangPrelude
 import NameGen (NameGen, freshId, runNameGen)
@@ -158,7 +157,7 @@ generaliseRecursiveTerm ctx name (term, ty) = first runIdentity <$> generalise' 
 -- | zonk unification variables from a term, report an error on leftover free variables
 zonkTerm :: TC es => Context -> ETerm -> Eff es ETerm
 zonkTerm ctx term = do
-    (term, freeVars) <- runWriter @(EnumSet UniVar) $ zonkTerm' (ctx.level, ctx.env) term
+    (term, freeVars) <- runState ESet.empty $ zonkTerm' (ctx.level, ctx.env) term
 
     -- todo: this reports only the first variable
     -- also, I need a proper type error for this case
@@ -174,14 +173,14 @@ generalise' ctx mbName (mbTerm, ty) = do
     -- quote forces a term to normal form and applies all solved univars
     -- quoteWhnf would also work here, I'm not sure which one is better in this case
     tyC <- quoteM ctx.level ty
-    (mbTerm, freeVarsInTerm) <- runWriter @(EnumSet UniVar) $ traverse (zonkTerm' (ctx.level, ctx.env)) mbTerm
+    (mbTerm, freeVarsInTerm) <- runState ESet.empty $ traverse (zonkTerm' (ctx.level, ctx.env)) mbTerm
     univars <- get
-    let freeVars = freeVarsInCore univars tyC <> freeVarsInTerm
+    freeVars <- execState freeVarsInTerm $ freeVarsInCore univars tyC
 
     -- we collect a list of dependencies for each univar
     unisWithDependencies <- for (ESet.toList freeVars) \uni -> do
         uniType <- quoteM (Level 0) =<< typeOfUnsolvedUniVar uni
-        pure (uni, ESet.toList $ freeVarsInCore univars uniType)
+        (uni,) . ESet.toList <$> execState ESet.empty (freeVarsInCore univars uniType)
     let addDeps poset (uni, uniDeps) = foldlM (\p dep -> Poset.addRelationStrict uni dep GT p) poset uniDeps
     let mkUniPoset =
             Poset.reportError $
@@ -198,7 +197,7 @@ generalise' ctx mbName (mbTerm, ty) = do
             let newLevel = ctx.level `incLevel` i
             modify @UniVars $ EMap.insert uni $ Solved{solution = V.Var newLevel, ty}
 
-    -- DANGER: this step wouldn't work when I implement destructuring bindings
+    -- DANGER: this step wouldn't work when I implement destructuring bindings and mutually recursive binding groups
     -- solving univars like this makes sense only if this binding and its type are the only things that referred to them
     zipWithM_ solveToLvl [0 ..] sortedUnis
 
@@ -209,10 +208,14 @@ generalise' ctx mbName (mbTerm, ty) = do
     innerType <- do
         env <- extendEnv innerEnv
         pure $ nf newLevel env $ C.lift newBinderCount tyC
-    (innerTerm, stillFree) <- runWriter $ traverse (zonkTerm' (newLevel, innerEnv) . E.lift newBinderCount) mbTerm
 
     univars <- get
-    unless (ESet.null $ stillFree <> freeVarsInCore univars innerType) do
+    (innerTerm, freeVars) <- runState ESet.empty do
+        innerTerm <- traverse (zonkTerm' (newLevel, innerEnv) . E.lift newBinderCount) mbTerm
+        freeVarsInCore univars innerType
+        pure innerTerm
+
+    unless (ESet.null freeVars) do
         internalError' "zonking didn't remove all univars"
 
     let mkName i = one $ chr (ord 'a' + i `mod` 26)
@@ -242,26 +245,29 @@ generalise' ctx mbName (mbTerm, ty) = do
         other -> C.coreTraversalPureWithLevel (replaceRecursiveCallsCore fnName fixTerm) lvl other
 
 -- | collect all free vars in a zonked CoreTerm
-freeVarsInCore :: UniVars -> CoreTerm -> EnumSet UniVar
+freeVarsInCore :: UniVars -> CoreTerm -> Eff (State (EnumSet UniVar) : es) CoreTerm
 freeVarsInCore univars = \case
     C.UniVar uni -> case EMap.lookup uni univars of
-        Just Unsolved{ty} ->
+        Just Unsolved{ty} -> do
             let tyC = quote univars (Level 0) ty
-             in ESet.singleton uni <> freeVarsInCore univars tyC
+            unlessM (gets (ESet.member uni)) do
+                modify $ ESet.insert uni
+                void $ freeVarsInCore univars tyC
+            pure $ C.UniVar uni
         Just Solved{} -> error "freeVarsInCore: unexpected solved univar"
         Nothing -> error "freeVarsInCore: out of scope univar"
-    other -> getConst $ C.coreTraversal (Const . freeVarsInCore univars) other
+    other -> C.coreTraversal (freeVarsInCore univars) other
 
 -- the only important case is E.Core, which may actually contain univars
 -- the rest are just plain traversal logic
 -- unfortunately, it doesn't quite fit 'elabTraversal', since the env logic is unique
-zonkTerm' :: TC es => (Level, ValueEnv) -> ETerm -> Eff (Writer (EnumSet UniVar) : es) ETerm
+zonkTerm' :: TC es => (Level, ValueEnv) -> ETerm -> Eff (State (EnumSet UniVar) : es) ETerm
 zonkTerm' c@(lvl, env@V.ValueEnv{..}) = \case
     E.Core coreTerm -> do
         env <- extendEnv env
         let zonkedCore = nf lvl env coreTerm
         univars <- get
-        tell $ freeVarsInCore univars zonkedCore
+        freeVarsInCore univars zonkedCore
         pure $ E.Core zonkedCore
     E.App vis lhs rhs -> E.App vis <$> zonkTerm' c lhs <*> zonkTerm' c rhs
     E.Lambda vis pat body -> do

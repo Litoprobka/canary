@@ -8,6 +8,7 @@ import Data.EnumMap.Lazy qualified as EMap
 import Data.IdMap qualified as Map
 import Data.List.NonEmpty qualified as NE
 import Data.Row (ExtRow (..))
+import Data.Vector qualified as Vec
 import Desugar (desugar, flattenPattern)
 import Diagnostic
 import Effectful.Labeled (Labeled, runLabeled)
@@ -118,13 +119,13 @@ processGadt ctx name mbKind constructors = do
   where
     -- check that a GADT constructor actually returns the declared type
     checkGadtConstructor :: TC es => Level -> Name -> Name -> VType -> Eff es ()
-    checkGadtConstructor lvl tyName con conTy = do
+    checkGadtConstructor lvl typeName con conType = do
         univars <- get @UniVars
-        case fnResult (quote univars lvl conTy) of
+        case fnResult (quote univars lvl conType) of
             C.TyCon name _
-                | name /= tyName -> typeError $ ConstructorReturnType{con, expected = tyName, returned = name}
-                | otherwise -> pass
-            _ -> internalError (getLoc con) "something weird in a GADT constructor type"
+                | name == typeName -> pass
+                | otherwise -> typeError $ ConstructorReturnType{con, expected = typeName, returned = C.TyCon name Vec.empty}
+            returned -> typeError $ ConstructorReturnType{con, expected = typeName, returned}
       where
         fnResult = \case
             C.Q _ _ _ _ _ rhs -> fnResult rhs
@@ -232,13 +233,17 @@ check ctx (t :@ loc) ty = localLoc loc do
                 ((ePat, _), ctx) <- checkPattern ctx pat argTy
                 (ePat,) <$> check ctx body result
             pure (E.Case eArg eBranches)
-        (T.Match branches, ty) ->
+        -- an empty match checks against any type
+        -- it should be later caught by the exhaustiveness check, though
+        (T.Match [], _) -> pure $ E.Match []
+        (T.Match branches@((pats, _) : _), ty) ->
             E.Match <$> for branches \(pats, body) -> do
-                (ePats, ctx, bodyTy) <- checkPatterns ctx pats ty
+                (ePats, ctx, bodyTy) <- checkPatterns 0 ctx pats ty
                 (ePats,) <$> check ctx body bodyTy
           where
-            checkPatterns ctx (pat :| pats) fnTy = do
-                closure <- ensurePi ctx fnTy
+            errorMsg actualArgCount = NotEnoughArgumentsInTypeOfMatch{loc, expectedArgCount = length pats, actualArgCount, ty = quote univars ctx.level ty}
+            checkPatterns n ctx (pat :| pats) fnTy = do
+                closure <- ensurePi ctx (errorMsg n) fnTy
                 -- I'm not sure whether we should quote with
                 -- the old context or with the updated context
                 let patTy = E.Core $ quote univars ctx.level closure.ty
@@ -247,7 +252,7 @@ check ctx (t :@ loc) ty = localLoc loc do
                 case nonEmpty pats of
                     Nothing -> pure ((ePat ::: patTy) :| [], ctx, innerTy)
                     Just pats -> do
-                        (ePats, ctx, resultTy) <- checkPatterns ctx pats innerTy
+                        (ePats, ctx, resultTy) <- checkPatterns (succ n) ctx pats innerTy
                         pure (NE.cons (ePat ::: patTy) ePats, ctx, resultTy)
         (other, expected) -> do
             -- this case happens after the implicit forall case, so we know that we're checking against a monomorphic type here
@@ -259,7 +264,7 @@ check ctx (t :@ loc) ty = localLoc loc do
             pure eTerm
   where
     type_ = V.Type (TypeName :@ loc)
-    ensurePi ctx =
+    ensurePi ctx errorMsg =
         forceM >=> \case
             V.Pi closure -> pure closure
             uni@(V.Stuck V.UniVarApp{}) -> do
@@ -270,8 +275,7 @@ check ctx (t :@ loc) ty = localLoc loc do
                 let closure = V.Closure{var = "x", env = ctx.env, ty, body}
                 unify ctx uni (V.Pi closure)
                 pure closure
-            -- I think this should throw NotAFunction or something like that
-            other -> internalError' $ "ensurePi: not a pi type:" <+> pretty other
+            _ -> typeError errorMsg
 
 infer :: TC es => Context -> Term 'Fixity -> Eff es (ETerm, VType)
 infer ctx (t :@ loc) = localLoc loc case t of
@@ -368,7 +372,8 @@ infer ctx (t :@ loc) = localLoc loc case t of
         -- inferring a non-dependent type seems like a reasonable compromise
         env <- extendEnv ctx.env
         fullType <- evalCore env <$> mkNonDependentPi ctx (length branch)
-        (,fullType) <$> check ctx (t :@ loc) fullType
+        eBody <- check ctx (t :@ loc) fullType
+        pure (eBody, fullType)
     -- we don't infer dependent if, because that would mask type errors a lot of the time
     T.If cond true false -> do
         eCond <- check ctx cond $ V.Type (BoolName :@ loc)

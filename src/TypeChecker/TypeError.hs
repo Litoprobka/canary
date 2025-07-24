@@ -18,14 +18,14 @@ data TypeError
     | NotASubtype CType CType (Maybe OpenName)
     | MissingField (Either CType (Term 'Fixity)) OpenName
     | MissingVariant CType OpenName
-    | EmptyMatch Loc -- empty match expression
+    | EmptyMatch Loc
     | ArgCountMismatch Loc -- "different amount of arguments in a match expression"
+    | NotEnoughArgumentsInTypeOfMatch {loc :: Loc, expectedArgCount :: Int, actualArgCount :: Int, ty :: CoreType}
     | ArgCountMismatchPattern (Pattern 'Fixity) Int Int
-    | NotAFunction Loc CType -- pretty fTy <+> "is not a function type"
+    | NotAFunction Loc CType
     | NotASigma Loc CType
-    | SelfReferential Loc UniVar CType
     | NoVisibleTypeArgument Loc (Type 'Fixity) CType
-    | ConstructorReturnType {con :: Name, expected :: Name, returned :: Name}
+    | ConstructorReturnType {con :: Name, expected :: Name, returned :: CoreTerm}
 
 data UnificationError
     = NotEq CoreTerm CoreTerm
@@ -86,6 +86,12 @@ typeError =
                 ("incorrect arg count (" <> pretty got <> ") in pattern" <+> prettyDef pat <> ". Expected" <+> pretty expected)
                 (mkNotes [(getLoc pat, Blank)])
                 []
+        NotEnoughArgumentsInTypeOfMatch{loc, expectedArgCount, actualArgCount, ty} ->
+            Err
+                Nothing
+                ("this match expression has" <+> pretty expectedArgCount <+> "arguments, but its type has only" <+> pretty actualArgCount)
+                (mkNotes [(loc, This "match expression")])
+                [Note $ "type of the expression:" <+> prettyDef ty]
         NotAFunction loc ty ->
             Err
                 Nothing
@@ -97,12 +103,6 @@ typeError =
                 Nothing
                 (prettyDef ty <+> "is not a dependent pair type")
                 (mkNotes [(loc, This "arising from this dependent pair")])
-                []
-        SelfReferential loc var ty ->
-            Err
-                Nothing
-                ("self-referential type" <+> prettyDef var <+> "~" <+> prettyDef ty)
-                (mkNotes [(loc, This "arising from"), (getLoc ty, Where "and from")])
                 []
         NoVisibleTypeArgument loc tyArg ty ->
             Err
@@ -119,13 +119,10 @@ typeError =
             Err
                 Nothing
                 (prettyDef con <+> "doesn't return the right type") -- todo: proper wording
-                ( mkNotes
-                    [ (getLoc expected, This "expected return type")
-                    , (getLoc returned, Where "this type is returned instead")
-                    , (getLoc con, Where "in the definition of this constructor")
-                    ]
-                )
-                []
+                (mkNotes [(getLoc con, Where "in the definition of this constructor")])
+                [ Note $ "expected:" <+> prettyDef expected
+                , Note $ "got:" <+> prettyDef returned
+                ]
 
 -- todo: proper error messages
 noteFromUnificationError :: UnificationError -> Note (Doc AnsiStyle)
