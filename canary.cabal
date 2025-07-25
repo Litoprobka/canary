@@ -47,6 +47,7 @@ library
       Syntax.Term
       Syntax.Token
       Syntax.Value
+      Trace
       TypeChecker
       TypeChecker.Backend
       TypeChecker.Exhaustiveness

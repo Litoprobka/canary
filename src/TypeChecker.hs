@@ -23,33 +23,33 @@ import Syntax.Declaration qualified as D
 import Syntax.Elaborated qualified as E
 import Syntax.Term qualified as T
 import Syntax.Value qualified as V
+import Trace
 import TypeChecker.Backend
 import TypeChecker.TypeError (TypeError (..), typeError)
 import TypeChecker.Unification (unify)
 
+type DeclTC es =
+    (Labeled UniVar NameGen :> es, NameGen :> es, Diagnose :> es, Trace :> es, State UniVars :> es, State TopLevel :> es)
+
 processDeclaration'
-    :: (NameGen :> es, Diagnose :> es) => TopLevel -> ValueEnv -> Declaration 'Fixity -> Eff es (EDeclaration, TopLevel, ValueEnv)
+    :: (NameGen :> es, Diagnose :> es, Trace :> es)
+    => TopLevel
+    -> ValueEnv
+    -> Declaration 'Fixity
+    -> Eff es (EDeclaration, TopLevel, ValueEnv)
 processDeclaration' topLevel env decl = runLabeled @UniVar runNameGen do
     ((eDecl, diff), types) <- runState topLevel $ evalState @UniVars EMap.empty $ processDeclaration (emptyContext env) decl
     pure (eDecl, types, env{V.topLevel = diff env.topLevel})
 
 processDeclaration
-    :: (Labeled UniVar NameGen :> es, NameGen :> es, Diagnose :> es, State UniVars :> es, State TopLevel :> es)
-    => Context
-    -> Declaration 'Fixity
-    -> Eff es (EDeclaration, IdMap Name_ Value -> IdMap Name_ Value)
+    :: DeclTC es => Context -> Declaration 'Fixity -> Eff es (EDeclaration, IdMap Name_ Value -> IdMap Name_ Value)
 processDeclaration ctx (decl :@ loc) = localLoc loc case decl of
     D.Signature name sig -> (,id) <$> processSignature ctx name sig
     D.Value binding locals -> (,id) <$> checkBinding ctx binding locals
     D.GADT name mbKind constructors -> second (Map.insert (unLoc name)) <$> processGadt ctx name mbKind constructors
     D.Type name binders constructors -> second (Map.insert (unLoc name)) <$> processType ctx name binders constructors
 
-processSignature
-    :: (Labeled UniVar NameGen :> es, NameGen :> es, Diagnose :> es, State UniVars :> es, State TopLevel :> es)
-    => Context
-    -> Name
-    -> Term 'Fixity
-    -> Eff es EDeclaration
+processSignature :: DeclTC es => Context -> Name -> Term 'Fixity -> Eff es EDeclaration
 processSignature ctx name sig = do
     topLevel <- get
     sigV <- runReader @TopLevel topLevel $ generalise ctx =<< typeFromTerm ctx sig
@@ -59,7 +59,7 @@ processSignature ctx name sig = do
     pure (E.SignatureD name eSig)
 
 checkBinding
-    :: (Labeled UniVar NameGen :> es, NameGen :> es, Diagnose :> es, State UniVars :> es, State TopLevel :> es)
+    :: DeclTC es
     => Context
     -> Binding 'Fixity
     -> [Declaration 'Fixity]
@@ -94,13 +94,7 @@ checkBinding ctx binding [] = do
     -- ideally, we should unwrap the body and construct a FunctionB if the original binding was a function
     pure (E.ValueD (E.ValueB name eBody))
 
-processGadt
-    :: (Labeled UniVar NameGen :> es, NameGen :> es, Diagnose :> es, State UniVars :> es, State TopLevel :> es)
-    => Context
-    -> Name
-    -> Maybe (Type 'Fixity)
-    -> [GadtConstructor 'Fixity]
-    -> Eff es (EDeclaration, VType)
+processGadt :: DeclTC es => Context -> Name -> Maybe (Type 'Fixity) -> [GadtConstructor 'Fixity] -> Eff es (EDeclaration, VType)
 processGadt ctx name mbKind constructors = do
     -- we can probably infer the kind of a type from its constructors, but we don't do that for now
     topLevel <- get @TopLevel
@@ -131,13 +125,7 @@ processGadt ctx name mbKind constructors = do
             C.Q _ _ _ _ _ rhs -> fnResult rhs
             other -> other
 
-processType
-    :: (Labeled UniVar NameGen :> es, NameGen :> es, Diagnose :> es, State UniVars :> es, State TopLevel :> es)
-    => Context
-    -> Name
-    -> [VarBinder 'Fixity]
-    -> [Constructor 'Fixity]
-    -> Eff es (EDeclaration, VType)
+processType :: DeclTC es => Context -> Name -> [VarBinder 'Fixity] -> [Constructor 'Fixity] -> Eff es (EDeclaration, VType)
 processType ctx name binders constructors = do
     topLevel <- get @TopLevel
     kind <- runReader topLevel $ generalise ctx =<< typeFromTerm ctx (mkTypeKind binders)
@@ -197,7 +185,7 @@ insertNeutralApp ctx (term, ty) = case term of
     _ -> insertApp ctx (term, ty)
 
 check :: TC es => Context -> Term 'Fixity -> VType -> Eff es ETerm
-check ctx (t :@ loc) ty = localLoc loc do
+check ctx (t :@ loc) ty = traceScope_ (prettyDef t <+> specSymBlue "⇐" <+> prettyValCtx ctx ty) $ localLoc loc do
     ty' <- forceM ty
     univars <- get
     case (t, ty') of
@@ -278,7 +266,7 @@ check ctx (t :@ loc) ty = localLoc loc do
             _ -> typeError errorMsg
 
 infer :: TC es => Context -> Term 'Fixity -> Eff es (ETerm, VType)
-infer ctx (t :@ loc) = localLoc loc case t of
+infer ctx (t :@ loc) = traceScope (\(_, ty) -> prettyDef t <+> specSym "⇒" <+> prettyValCtx ctx ty) $ localLoc loc case t of
     T.Name name -> lookupSig name ctx
     T.Annotation term ty -> do
         vty <- typeFromTerm ctx ty
@@ -447,7 +435,7 @@ typeFromTerm ctx term = do
 checkPattern :: TC es => Context -> Pattern 'Fixity -> VType -> Eff es ((EPattern, Value), Context)
 checkPattern ctx (pat :@ pLoc) ty = do
     univars <- get
-    localLoc pLoc case pat of
+    traceScope_ (prettyDef pat <+> specSymBlue "⇐" <+> prettyValCtx ctx ty) $ localLoc pLoc case pat of
         T.VarP (L name) -> do
             value <- freshUniVarV ctx ty
             pure ((E.VarP (toSimpleName_ name), value), bind univars name ty ctx)
@@ -476,7 +464,7 @@ checkPattern ctx (pat :@ pLoc) ty = do
 inferPattern :: TC es => Context -> Pattern 'Fixity -> Eff es ((EPattern, Value), VType, Context)
 inferPattern ctx (p :@ loc) = do
     univars <- get
-    localLoc loc case p of
+    traceScope (\(_, ty, ctx) -> prettyDef p <+> specSym "⇒" <+> prettyValCtx ctx ty) $ localLoc loc case p of
         T.VarP (L name) -> do
             ty <- freshUniVarV ctx type_
             value <- freshUniVarV ctx ty

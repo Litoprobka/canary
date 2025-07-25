@@ -20,6 +20,7 @@ import Repl qualified
 import Syntax.Value (ValueEnv (..))
 import System.Console.Isocline (setHistory)
 import System.Directory
+import Trace
 
 data Args = Args
     { debug :: Bool
@@ -49,7 +50,7 @@ main :: IO ()
 main = do
     args <- execParser (info argParser mempty)
     case args.cmd of
-        Repl -> runRepl
+        Repl -> runRepl args
         Run path -> runFile args path =<< readFileBS path
         Check path -> checkFile args path =<< readFileBS path
         Load path -> loadFile args path =<< readFileBS path
@@ -61,7 +62,7 @@ runFile args fileName input = do
         decls <- parseModule (fileName, input)
         prettyAST args.debug decls
         env <- Repl.mkDefaultEnv
-        mbNewEnv <- Repl.replStep env $ Repl.Decls decls
+        mbNewEnv <- runTraceWhen args.debug $ Repl.replStep env $ Repl.Decls decls
         for mbNewEnv \newEnv -> do
             nameOfMain <-
                 NameResolution.run newEnv.scope $ resolve $ Located (Loc Position{file = "<main>", begin = (0, 0), end = (0, 0)}) "main"
@@ -77,7 +78,7 @@ checkFile args fileName input = do
         decls <- parseModule (fileName, input)
         prettyAST args.debug decls
         env <- Repl.mkDefaultEnv
-        void $ Repl.replStep env $ Repl.Decls decls
+        void $ runTraceWhen args.debug $ Repl.replStep env $ Repl.Decls decls
 
 loadFile :: Args -> FilePath -> ByteString -> IO ()
 loadFile args fileName input = do
@@ -87,13 +88,13 @@ loadFile args fileName input = do
         decls <- parseModule (fileName, input)
         prettyAST args.debug decls
         env <- Repl.mkDefaultEnv
-        mbEnv <- Repl.replStep env $ Repl.Decls decls
-        traverse_ Repl.run mbEnv
+        mbEnv <- runTraceWhen args.debug $ Repl.replStep env $ Repl.Decls decls
+        traverse_ (Repl.run args.debug) mbEnv
 
-runRepl :: IO ()
-runRepl = void $ runEff $ runDiagnose [] $ runNameGen do
+runRepl :: Args -> IO ()
+runRepl args = void $ runEff $ runDiagnose [] $ runNameGen do
     liftIO setupRepl
-    Repl.run =<< Repl.mkDefaultEnv
+    Repl.run args.debug =<< Repl.mkDefaultEnv
 
 -- | setup isocline settings and line buffering
 setupRepl :: IO ()
@@ -101,6 +102,10 @@ setupRepl = do
     historyFile <- liftIO $ getXdgDirectory XdgCache "canary/history.txt"
     liftIO $ setHistory historyFile (-1)
     liftIO $ hSetBuffering stdout NoBuffering
+
+runTraceWhen :: IOE :> es => Bool -> Eff (Trace : es) a -> Eff es a
+runTraceWhen True = runTraceIO
+runTraceWhen False = skipTrace
 
 prettyAST :: (Traversable t, PrettyAnsi a, MonadIO m) => Bool -> t a -> m ()
 prettyAST debug = when debug . liftIO . traverse_ (putDoc . (<> line) . prettyDef)

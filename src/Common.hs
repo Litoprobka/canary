@@ -172,9 +172,11 @@ newtype Scope = Scope Int deriving (Show, Eq, Ord)
 instance PrettyAnsi Name_ where
     prettyAnsi opts = \case
         (Name name id')
-            | opts.printIds -> pretty name <> "#" <> pretty id'
+            | opts.printIds -> pretty name <> pretty (lowerNumber id'.id)
             | otherwise -> pretty name
-        (Wildcard txt id') -> pretty txt <> "#" <> pretty id'
+        (Wildcard txt id')
+            | opts.printIds -> pretty txt <> pretty (lowerNumber id'.id)
+            | otherwise -> pretty txt
         BoolName -> "Bool"
         TrueName -> "True"
         ListName -> "List"
@@ -185,6 +187,24 @@ instance PrettyAnsi Name_ where
         TextName -> "Text"
         CharName -> "Char"
         TypeName -> "Type"
+
+-- | @"123" --> "₁₂₃"@
+lowerNumber :: Int -> Text
+lowerNumber = Text.map alterChar . show
+  where
+    alterChar = \case
+        '0' -> '₀'
+        '1' -> '₁'
+        '2' -> '₂'
+        '3' -> '₃'
+        '4' -> '₄'
+        '5' -> '₅'
+        '6' -> '₆'
+        '7' -> '₇'
+        '8' -> '₈'
+        '9' -> '₉'
+        c -> c
+
 instance PrettyAnsi UniVar where
     prettyAnsi _ (UniVar n) = "?" <> pretty n
 
@@ -276,17 +296,10 @@ instance PrettyAnsi a => Pretty (UnAnnotate a) where
 instance PrettyAnsi a => PrettyAnsi (Maybe a) where
     prettyAnsi opts = maybe "" (prettyAnsi opts)
 
-keyword :: Doc AnsiStyle -> Doc AnsiStyle
+keyword, opStyle, specSym, specSymBlue, conColor, typeColor :: Doc AnsiStyle -> Doc AnsiStyle
 keyword = annotate $ bold <> colorDull Magenta
-
-opStyle :: Doc AnsiStyle -> Doc AnsiStyle
 opStyle = annotate $ bold <> colorDull Green
-
-specSym :: Doc AnsiStyle -> Doc AnsiStyle
 specSym = annotate $ bold <> color Red
-
-conColor :: Doc AnsiStyle -> Doc AnsiStyle
+specSymBlue = annotate $ bold <> color Cyan
 conColor = annotate $ bold <> colorDull Yellow
-
-typeColor :: Doc AnsiStyle -> Doc AnsiStyle
 typeColor = annotate $ bold <> color Blue

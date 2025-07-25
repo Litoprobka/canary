@@ -34,6 +34,7 @@ import Relude as Reexport hiding (
     runState,
     some,
     state,
+    trace,
  )
 
 infixl 9 .>

@@ -31,6 +31,7 @@ import Syntax
 import Syntax.Core (reversedPruning)
 import Syntax.Core qualified as C
 import Syntax.Value as V hiding (lift)
+import Trace (trace)
 import TypeChecker.Backend hiding (ExType (..))
 import TypeChecker.TypeError (TypeError (..), UnificationError (..), typeError)
 
@@ -43,13 +44,14 @@ type TC' es = (TC es, Reader ValueTopLevel :> es, Error UnificationError :> es)
 
 unify :: TC es => Context -> Value -> Value -> Eff es ()
 unify ctx lhs rhs = do
+    univars <- get
+    let lhsC = quote univars ctx.level lhs
+        rhsC = quote univars ctx.level rhs
+    trace $ prettyCoreCtx ctx lhsC <+> specSym "~" <+> prettyCoreCtx ctx rhsC
     result <- runErrorNoCallStack @UnificationError $ runReader (ValueTopLevel ctx.env.topLevel) $ unify' ctx.level lhs rhs
     case result of
         Right () -> pass
         Left context -> do
-            univars <- get
-            let lhsC = quote univars ctx.level lhs
-                rhsC = quote univars ctx.level rhs
             -- fixme: location info should be handled outside of here
             loc <-
                 currentLoc >>= \case
@@ -131,10 +133,7 @@ unifySpine lvl = \cases
         unify' lvl ty1 ty2
     _ _ -> internalError' "spine length mismatch"
 
-{-
-the way we treat unification variables is based on the example implementation in elaboration-zoo
-by Andras Kovacs
--}
+-- pattern unification, based on the example implementation in elaboration-zoo by Andras Kovacs
 
 data PartialRenaming = PartialRenaming
     { uni :: Maybe UniVar -- unification variable for occurs check, if any

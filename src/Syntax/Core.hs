@@ -9,10 +9,12 @@ import Common (
     Name,
     Name_ (ConsName, NilName, TypeName),
     PrettyAnsi (..),
+    PrettyOptions,
     SimpleName_,
     UnAnnotate (..),
     UniVar,
     conColor,
+    defaultPrettyOptions,
     incLevel,
     keyword,
     specSym,
@@ -85,102 +87,109 @@ newtype ReversedPruning = ReversedPruning [Maybe Visibility]
 reversedPruning :: Pruning -> ReversedPruning
 reversedPruning = ReversedPruning . reverse . (.getPruning)
 
-instance PrettyAnsi CoreTerm where
-    prettyAnsi opts = go 0 []
+prettyEnvDef :: [Name_] -> CoreTerm -> Doc AnsiStyle
+prettyEnvDef = prettyEnv defaultPrettyOptions
+
+-- | pretty-print a core term with a list of known bindings
+prettyEnv :: PrettyOptions -> [Name_] -> CoreTerm -> Doc AnsiStyle
+prettyEnv opts = go 0 . map (prettyAnsi opts)
+  where
+    go :: Int -> [Doc AnsiStyle] -> CoreTerm -> Doc AnsiStyle
+    go n env term = case term of
+        Var index
+            | index.getIndex >= length env || index.getIndex < 0 -> "#" <> pretty index.getIndex
+            | otherwise -> env !! index.getIndex
+        Name name -> prettyAnsi opts name
+        TyCon name Nil -> typeColor $ prettyAnsi opts name
+        TyCon name args -> parensWhen 3 $ hsep (typeColor (prettyAnsi opts name) : map (\(vis, t) -> withVis vis (go 3 env t)) (Vec.toList args))
+        -- list sugar doesn't really make sense with explicit type applications, perhaps I should remove it
+        -- another option is `[a, b, c] @ty`
+        Con (L ConsName) (_ty :< (_, x) :< (_, Con (L NilName) Nil) :< Nil) -> brackets $ go 0 env x
+        Con (L ConsName) (_ty :< (_, x) :< (_, xs) :< Nil) | Just output <- prettyConsNil xs -> brackets $ go 0 env x <> output
+        Con (L NilName) (_ty :< Nil) -> "[]"
+        Con name Nil -> conColor $ prettyAnsi opts name
+        Con name args -> parensWhen 3 $ hsep (conColor (prettyAnsi opts name) : map (\(vis, t) -> withVis vis (go 3 env t)) (Vec.toList args))
+        lambda@Lambda{} -> parensWhen 1 $ specSym "λ" <> compressLambda env lambda
+        App vis lhs rhs -> parensWhen 3 $ go 2 env lhs <+> withVis vis (go 3 env rhs)
+        Record row -> prettyRecord "=" (prettyAnsi opts) (go 0 env) (NoExtRow row)
+        Sigma x y -> parensWhen 1 $ go 0 env x <+> specSym "**" <+> go 0 env y
+        Variant name arg -> parensWhen 3 $ conColor (prettyAnsi opts name) <+> go 3 env arg
+        Case arg matches ->
+            nest
+                4
+                ( vsep $
+                    (keyword "case" <+> go 0 env arg <+> keyword "of" :) $
+                        matches <&> \(pat, body) -> prettyAnsi opts pat <+> specSym "->" <+> go 0 (patternVars pat <> env) body
+                )
+        Let name body expr -> keyword "let" <+> prettyAnsi opts name <+> specSym "=" <+> go 0 env body <> ";" <+> go 0 env expr
+        Literal lit -> prettyAnsi opts lit
+        -- checking for variable occurances here is not ideal (potentially O(n^2) in AST size),
+        Q Forall Visible _e var ty body | not (occurs (Index 0) body) -> parensWhen 1 $ go 1 env ty <+> "->" <+> go 0 (prettyAnsi opts var : env) body
+        qq@(Q q vis er _ _ _) -> parensWhen 1 $ kw q er <+> compressQ env q vis er qq
+        VariantT row -> prettyVariant (prettyAnsi opts) (go 0 env) row
+        RecordT row -> prettyRecord ":" (prettyAnsi opts) (go 0 env) row
+        UniVar uni -> prettyAnsi opts uni
+        AppPruning lhs pruning -> parensWhen 3 $ go 2 env lhs <> prettyPruning env pruning.getPruning
       where
-        go :: Int -> [Doc AnsiStyle] -> CoreTerm -> Doc AnsiStyle
-        go n env term = case term of
-            Var index
-                | index.getIndex >= length env || index.getIndex < 0 -> "#" <> pretty index.getIndex
-                | otherwise -> env !! index.getIndex
-            Name name -> prettyAnsi opts name
-            TyCon name Nil -> typeColor $ prettyAnsi opts name
-            TyCon name args -> parensWhen 3 $ hsep (typeColor (prettyAnsi opts name) : map (\(vis, t) -> withVis vis (go 3 env t)) (Vec.toList args))
-            -- list sugar doesn't really make sense with explicit type applications, perhaps I should remove it
-            -- another option is `[a, b, c] @ty`
-            Con (L ConsName) (_ty :< (_, x) :< (_, Con (L NilName) Nil) :< Nil) -> brackets $ go 0 env x
-            Con (L ConsName) (_ty :< (_, x) :< (_, xs) :< Nil) | Just output <- prettyConsNil xs -> brackets $ go 0 env x <> output
-            Con (L NilName) (_ty :< Nil) -> "[]"
-            Con name Nil -> conColor $ prettyAnsi opts name
-            Con name args -> parensWhen 3 $ hsep (conColor (prettyAnsi opts name) : map (\(vis, t) -> withVis vis (go 3 env t)) (Vec.toList args))
-            lambda@Lambda{} -> parensWhen 1 $ specSym "λ" <> compressLambda env lambda
-            App vis lhs rhs -> parensWhen 3 $ go 2 env lhs <+> withVis vis (go 3 env rhs)
-            Record row -> prettyRecord "=" (prettyAnsi opts) (go 0 env) (NoExtRow row)
-            Sigma x y -> parensWhen 1 $ go 0 env x <+> specSym "**" <+> go 0 env y
-            Variant name arg -> parensWhen 3 $ conColor (prettyAnsi opts name) <+> go 3 env arg
-            Case arg matches ->
-                nest
-                    4
-                    ( vsep $
-                        (keyword "case" <+> go 0 env arg <+> keyword "of" :) $
-                            matches <&> \(pat, body) -> prettyAnsi opts pat <+> specSym "->" <+> go 0 (patternVars pat <> env) body
-                    )
-            Let name body expr -> keyword "let" <+> prettyAnsi opts name <+> specSym "=" <+> go 0 env body <> ";" <+> go 0 env expr
-            Literal lit -> prettyAnsi opts lit
-            -- checking for variable occurances here is not ideal (potentially O(n^2) in AST size),
-            Q Forall Visible _e var ty body | not (occurs (Index 0) body) -> parensWhen 1 $ go 1 env ty <+> "->" <+> go 0 (prettyAnsi opts var : env) body
-            qq@(Q q vis er _ _ _) -> parensWhen 1 $ kw q er <+> compressQ env q vis er qq
-            VariantT row -> prettyVariant (prettyAnsi opts) (go 0 env) row
-            RecordT row -> prettyRecord ":" (prettyAnsi opts) (go 0 env) row
-            UniVar uni -> prettyAnsi opts uni
-            AppPruning lhs pruning -> parensWhen 3 $ go 2 env lhs <> prettyPruning env pruning.getPruning
-          where
-            parensWhen minPrec
-                | n >= minPrec = parens
-                | otherwise = id
+        parensWhen minPrec
+            | n >= minPrec = parens
+            | otherwise = id
 
-            kw Forall Erased = keyword "∀"
-            kw Forall Retained = keyword "Π"
-            kw Exists Erased = keyword "∃"
-            kw Exists Retained = keyword "Σ"
+        kw Forall Erased = keyword "∀"
+        kw Forall Retained = keyword "Π"
+        kw Exists Erased = keyword "∃"
+        kw Exists Retained = keyword "Σ"
 
-            prettyConsNil = \case
-                Con (L ConsName) (_ty :< (_, x') :< (_, xs') :< Nil) -> (("," <+> go 0 env x') <>) <$> prettyConsNil xs'
-                Con (L NilName) (_ty :< Nil) -> Just ""
-                _ -> Nothing
+        prettyConsNil = \case
+            Con (L ConsName) (_ty :< (_, x') :< (_, xs') :< Nil) -> (("," <+> go 0 env x') <>) <$> prettyConsNil xs'
+            Con (L NilName) (_ty :< Nil) -> Just ""
+            _ -> Nothing
 
-        compressLambda env term = case term of
-            Lambda vis name body -> withVis vis (prettyAnsi opts name) <+> compressLambda (prettyAnsi opts name : env) body
-            other -> specSym "->" <+> go 0 env other
+    compressLambda env term = case term of
+        Lambda vis name body -> withVis vis (prettyAnsi opts name) <+> compressLambda (prettyAnsi opts name : env) body
+        other -> specSym "->" <+> go 0 env other
 
-        compressQ :: [Doc AnsiStyle] -> Quantifier -> Visibility -> Erasure -> CoreTerm -> Doc AnsiStyle
-        compressQ env Forall Visible e (Q Forall Visible e' name ty body)
-            | e == e' && not (occurs (Index 0) body) = "->" <+> go 1 env ty <+> "->" <+> go 0 (prettyAnsi opts name : env) body
-        compressQ env q vis e term = case term of
-            Q q' vis' e' name ty body
-                | q == q' && vis == vis' && e == e' ->
-                    prettyBinder env name ty <+> compressQ (prettyAnsi opts name : env) q vis e body
-            other -> arrOrDot q vis <+> go 0 env other
+    compressQ :: [Doc AnsiStyle] -> Quantifier -> Visibility -> Erasure -> CoreTerm -> Doc AnsiStyle
+    compressQ env Forall Visible e (Q Forall Visible e' name ty body)
+        | e == e' && not (occurs (Index 0) body) = "->" <+> go 1 env ty <+> "->" <+> go 0 (prettyAnsi opts name : env) body
+    compressQ env q vis e term = case term of
+        Q q' vis' e' name ty body
+            | q == q' && vis == vis' && e == e' ->
+                prettyBinder env name ty <+> compressQ (prettyAnsi opts name : env) q vis e body
+        other -> arrOrDot q vis <+> go 0 env other
 
-        prettyBinder env name ty
-            | endsInType ty = prettyAnsi opts name
-            | otherwise = parens $ prettyAnsi opts name <+> specSym ":" <+> go 0 env ty
-          where
-            -- if the of a binder has the shape '... -> ... -> Type', it is probably used
-            -- like a scoped type parameter, so its actual type is not that important and can be omitted in pretty-printing
-            endsInType = \case
-                TyCon (L TypeName) v | Vec.null v -> True
-                Q _ _ _ _ _ body -> endsInType body
-                _ -> False
+    prettyBinder env name ty
+        | endsInType ty = prettyAnsi opts name
+        | otherwise = parens $ prettyAnsi opts name <+> specSym ":" <+> go 0 env ty
+      where
+        -- if the of a binder has the shape '... -> ... -> Type', it is probably used
+        -- like a scoped type parameter, so its actual type is not that important and can be omitted in pretty-printing
+        endsInType = \case
+            TyCon (L TypeName) v | Vec.null v -> True
+            Q _ _ _ _ _ body -> endsInType body
+            _ -> False
 
-        arrOrDot Forall Visible = specSym "->"
-        arrOrDot Exists Visible = specSym "**"
-        arrOrDot _ _ = specSym "."
+    arrOrDot Forall Visible = specSym "->"
+    arrOrDot Exists Visible = specSym "**"
+    arrOrDot _ _ = specSym "."
 
-        -- this mirrors the logic in 'evalAppPruning'
-        prettyPruning = \cases
-            (var : rest) (Just vis : pruning) -> prettyPruning rest pruning <+> withVis vis var
-            (_ : rest) (Nothing : pruning) -> prettyPruning rest pruning
-            _ _ -> ""
+    -- this mirrors the logic in 'evalAppPruning'
+    prettyPruning = \cases
+        (var : rest) (Just vis : pruning) -> prettyPruning rest pruning <+> withVis vis var
+        (_ : rest) (Nothing : pruning) -> prettyPruning rest pruning
+        _ _ -> ""
 
-        patternVars = \case
-            var@VarP{} -> [prettyAnsi opts var]
-            ConstructorP _ args -> map (prettyAnsi opts . snd) $ reverse args
-            TypeP _ args -> map (prettyAnsi opts . snd) $ reverse args
-            VariantP _ arg -> [prettyAnsi opts arg]
-            RecordP row -> map (prettyAnsi opts) . reverse $ toList row
-            SigmaP _vis lhs rhs -> [prettyAnsi opts rhs, prettyAnsi opts lhs]
-            LiteralP{} -> []
+    patternVars = \case
+        var@VarP{} -> [prettyAnsi opts var]
+        ConstructorP _ args -> map (prettyAnsi opts . snd) $ reverse args
+        TypeP _ args -> map (prettyAnsi opts . snd) $ reverse args
+        VariantP _ arg -> [prettyAnsi opts arg]
+        RecordP row -> map (prettyAnsi opts) . reverse $ toList row
+        SigmaP _vis lhs rhs -> [prettyAnsi opts rhs, prettyAnsi opts lhs]
+        LiteralP{} -> []
+
+instance PrettyAnsi CoreTerm where
+    prettyAnsi opts = prettyEnv opts []
 
 -- check whether a variable occurs in a term
 occurs :: Index -> CoreTerm -> Bool

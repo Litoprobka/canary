@@ -18,10 +18,12 @@ import Effectful.State.Static.Local
 import Eval (ExtendedEnv (..), UniVarState (..), UniVars, evalCore, nf, quote, quoteM)
 import LangPrelude
 import NameGen (NameGen, freshId, runNameGen)
+import Prettyprinter.Render.Terminal (AnsiStyle)
 import Syntax
 import Syntax.Core qualified as C
 import Syntax.Elaborated qualified as E
 import Syntax.Value qualified as V
+import Trace
 
 newtype ConstructorTable = ConstructorTable
     { table :: IdMap Name_ (IdMap Name_ ([ExType] -> [ExType]))
@@ -55,7 +57,19 @@ emptyContext env =
         , pruning = Pruning []
         }
 
-type TC es = (Labeled UniVar NameGen :> es, NameGen :> es, Diagnose :> es, State UniVars :> es, Reader TopLevel :> es)
+prettyCoreCtx :: Context -> CoreTerm -> Doc AnsiStyle
+prettyCoreCtx ctx = C.prettyEnvDef (namesOfLocals ctx.locals)
+  where
+    namesOfLocals = \case
+        None -> []
+        Bind name _ rest -> name : namesOfLocals rest
+        Define name _ _ rest -> name : namesOfLocals rest
+
+prettyValCtx :: Context -> Value -> Doc AnsiStyle
+prettyValCtx ctx = prettyCoreCtx ctx . quote EMap.empty ctx.level
+
+type TC es =
+    (Labeled UniVar NameGen :> es, NameGen :> es, Diagnose :> es, Trace :> es, State UniVars :> es, Reader TopLevel :> es)
 
 run :: TopLevel -> Eff (State UniVars : Reader TopLevel : Labeled UniVar NameGen : es) a -> Eff es a
 run types = runLabeled @UniVar runNameGen . runReader types . evalState @UniVars EMap.empty

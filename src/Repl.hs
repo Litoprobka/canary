@@ -11,7 +11,6 @@ import Common (
     Name_ (TypeName),
     Pass (..),
     PrettyOptions (..),
-    SimpleName_ (Name'),
     prettyAnsi,
     prettyDef,
     unLoc,
@@ -50,6 +49,7 @@ import Syntax.Term
 import Syntax.Value (ValueEnv (..))
 import Syntax.Value qualified as V
 import System.Console.Isocline
+import Trace
 import TypeChecker qualified as TC
 import TypeChecker.Backend (emptyContext)
 import TypeChecker.Backend qualified as TC
@@ -113,7 +113,7 @@ mkDefaultEnv = do
         resolveDependenciesSimplified' emptyEnv.fixityMap emptyEnv.operatorPriorities $ preDecls <> afterNameRes
     fixityDecls <- Fixity.resolveFixity fixityMap operatorPriorities depResOutput.declarations
     (types, values) <- (\f -> foldlM f (emptyEnv.types, emptyEnv.values) fixityDecls) \(topLevel, values) decl -> do
-        (eDecl, newTypes, newValues) <- TC.processDeclaration' topLevel values decl
+        (eDecl, newTypes, newValues) <- skipTrace $ TC.processDeclaration' topLevel values decl
         newNewValues <- modifyEnv newValues [eDecl]
         pure (newTypes, newNewValues)
     guardNoErrors
@@ -132,29 +132,6 @@ mkDefaultEnv = do
                 }
     pure newEnv -- foldlM (flip mkBuiltin) newEnv builtins
   where
-    -- add a built-in function definition to the ReplEnv
-    mkBuiltin (rawName, argCount, rawTy, resolveF) env@ReplEnv{..} = do
-        ((name, ty, f), newScope) <- NameResolution.runWithEnv env.scope do
-            name <- NameResolution.declare $ Name' rawName :@ builtin
-            ty <- NameResolution.resolveTerm rawTy
-            f <- resolveF
-            pure (name, ty, f)
-        let val = V.PrimFunction V.PrimFunc{name, remaining = argCount, captured = [], f}
-        tyWithoutDepRes <- cast.term ty
-        afterFixityRes <- Fixity.run env.fixityMap env.operatorPriorities $ Fixity.parse tyWithoutDepRes
-        elaboratedTy <- TC.run env.types do
-            let ctx = emptyContext env.values
-            (eExpr, _) <- TC.infer ctx afterFixityRes
-            pure eExpr
-        let tyAsVal = V.eval V.ExtendedEnv{topLevel = env.values.topLevel, locals = [], univars = EMap.empty} elaboratedTy
-        pure
-            ReplEnv
-                { types = Map.insert (unLoc name) tyAsVal env.types
-                , values = ValueEnv{topLevel = Map.insert (unLoc name) val env.values.topLevel, locals = []}
-                , scope = newScope
-                , ..
-                }
-
     mkPreprelude :: NameGen :> es => Eff es ([Declaration 'NameRes], Scope)
     mkPreprelude = do
         false <- freshName' "False"
@@ -190,111 +167,29 @@ mkDefaultEnv = do
         pure (decls, scope)
     freshName' :: NameGen :> es => Text -> Eff es C.Name
     freshName' = freshName . noLoc . C.Name'
-    {-
-    builtins =
-        [
-            ( "reverse"
-            , 1
-            , T.Function (nameTerm "Text") (nameTerm "Text") :@ builtin
-            , pure \case
-                V.PrimValue (TextLiteral txt) :| _ -> V.PrimValue $ TextLiteral (Text.reverse txt)
-                _ -> error "reverse applied to a non-text value"
-            )
-        ,
-            ( "uncons"
-            , 1
-            , T.Function
-                (nameTerm "Text")
-                (T.RecordT (NoExtRow $ fromList [(name' "head", nameTerm "Char"), (name' "tail", nameTerm "Text")]) :@ builtin)
-                :@ builtin
-            , do
-                just <- NameResolution.resolve $ name' "Just"
-                nothing <- NameResolution.resolve $ name' "Nothing"
-                pure \case
-                    V.PrimValue (TextLiteral txt) :| _ -> case Text.uncons txt of
-                        Nothing -> V.Con nothing []
-                        Just (h, t) ->
-                            V.Con
-                                just
-                                [V.Record $ fromList [(name' "head", V.PrimValue $ CharLiteral (one h)), (name' "tail", V.PrimValue $ TextLiteral t)]]
-                    _ -> error "uncons applied to a non-text value"
-            )
-        ,
-            ( "add"
-            , 2
-            , T.Function (nameTerm "Int") (T.Function (nameTerm "Int") (nameTerm "Int") :@ builtin) :@ builtin
-            , pure \case
-                V.PrimValue (IntLiteral rhs) :| V.PrimValue (IntLiteral lhs) : _ -> V.PrimValue $ IntLiteral (lhs + rhs)
-                _ -> error "invalid arguments to add"
-            )
-        ,
-            ( "sub"
-            , 2
-            , T.Function (nameTerm "Int") (T.Function (nameTerm "Int") (nameTerm "Int") :@ builtin) :@ builtin
-            , pure \case
-                V.PrimValue (IntLiteral rhs) :| V.PrimValue (IntLiteral lhs) : _ -> V.PrimValue $ IntLiteral (lhs - rhs)
-                _ -> error "invalid arguments to sub"
-            )
-        ]
-    -}
+
     prelude :: [Declaration 'Parse]
     prelude = []
 
-{-[ D.Type
-        (name' "Maybe")
-        [VarBinder{var = name' "a", kind = Nothing}]
-        [D.Constructor builtin (name' "Just") [nameTerm "a"], D.Constructor builtin (name' "Nothing") []]
-        :@ builtin
-    ]
-name' txt = Name' txt :@ builtin
-nameTerm txt = T.Name (name' txt) :@ builtin
--}
-
-{- D.Type Blank "Unit" [] [D.Constructor Blank "MkUnit" []]
--- , D.Value Blank (FunctionB "id" [VarP "x"] (Name "x")) []
--- , D.Value Blank (FunctionB "const" [VarP "x", VarP "y"] (Name "x")) []
--- , D.Fixity Blank C.InfixL "|>" (C.PriorityRelation [] [] [])
--- , D.Fixity Blank C.InfixR "<|" (C.PriorityRelation [] ["|>"] [])
--- , D.Fixity Blank C.InfixR "<<" (C.PriorityRelation [] [] [">>"]) -- this is bugged atm
--- , D.Fixity Blank C.InfixL ">>" (C.PriorityRelation [Just "|>"] [] [])
--- , D.Value Blank (FunctionB "|>" [VarP "x", VarP "f"] (Name "f" `App` Name "x")) []
--- , D.Value Blank (FunctionB "<|" [VarP "f", VarP "x"] (Name "f" `App` Name "x")) []
--- , D.Value Blank (FunctionB ">>" [VarP "f", VarP "g", VarP "x"] (Name "g" `App` (Name "f" `App` Name "x"))) []
--- , D.Value Blank (FunctionB "<<" [VarP "f", VarP "g", VarP "x"] (Name "f" `App` (Name "g" `App` Name "x"))) []
-, D.Value
-    Blank
-    ( FunctionB
-        "map"
-        [VarP "f", VarP "xs"]
-        ( Case
-            Blank
-            (Name "xs")
-            [ (ConstructorP "Nil" [], Name "Nil")
-            , (ConstructorP "Cons" [VarP "h", VarP "t"], app "Cons" [App "f" "h", app "map" ["f", "t"]])
-            ]
-        )
-    )
-    []
-
-app :: Term p -> [Term p] -> Term p
-app = foldl' App
--}
-
-run :: ReplCtx es => ReplEnv -> Eff es ()
-run env = do
+run :: ReplCtx es => Bool -> ReplEnv -> Eff es ()
+run debug env = do
     nextLine <- liftIO $ fromString <$> readlineEx "λ" (Just $ completer env) Nothing
     let nextLineBS = Text.encodeUtf8 nextLine
         input = env.input <> nextLine
         inputBS = env.inputBS <> nextLineBS
         envWithInput = env{input = input <> "\n", inputBS = inputBS <> "\n"}
-    newEnv <- localDiagnose envWithInput [] do
+    newEnv <- runTrace' $ localDiagnose envWithInput [] do
         cmd <- case parseCommand nextLineBS of
             Right cmd -> pure cmd
             Left (newOffset, parser) -> Parser.runWithOffset (BS.length env.inputBS + newOffset) ("<interactive>", inputBS) parser
         replStep envWithInput cmd
-    traverse_ run newEnv
+    traverse_ (run debug) newEnv
+  where
+    runTrace'
+        | debug = runTraceIO
+        | otherwise = skipTrace
 
-replStep :: forall es. (ReplCtx es, Diagnose :> es) => ReplEnv -> ReplCommand -> Eff es (Maybe ReplEnv)
+replStep :: forall es. (ReplCtx es, Diagnose :> es, Trace :> es) => ReplEnv -> ReplCommand -> Eff es (Maybe ReplEnv)
 replStep env@ReplEnv{loadedFiles} command = do
     case command of
         Decls decls -> processDecls env decls
@@ -350,7 +245,7 @@ localDiagnose env@ReplEnv{input, loadedFiles} files action =
     oldFilesWithInteractive = addFile loadedFiles "<interactive>" (toString input)
     newFiles = foldr (\(path, contents) acc -> addFile acc path (toString contents)) oldFilesWithInteractive files
 
-processDecls :: (Diagnose :> es, ReplCtx es) => ReplEnv -> [Declaration 'Parse] -> Eff es (Maybe ReplEnv)
+processDecls :: (Diagnose :> es, Trace :> es, ReplCtx es) => ReplEnv -> [Declaration 'Parse] -> Eff es (Maybe ReplEnv)
 processDecls env@ReplEnv{loadedFiles} decls = do
     (afterNameRes, newScope) <- NameResolution.runWithEnv env.scope $ resolveNames decls
     depResOutput@SimpleOutput{fixityMap, operatorPriorities} <-

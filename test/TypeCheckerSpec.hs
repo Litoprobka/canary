@@ -25,6 +25,7 @@ import Syntax.AstTraversal
 import Syntax.Elaborated qualified as E
 import Syntax.Term qualified as T
 import Test.Hspec
+import Trace
 import TypeChecker qualified as TC
 import TypeChecker.Backend qualified as TC
 
@@ -75,7 +76,7 @@ sanityCheck input =
                 afterNameRes <- NameRes.run env.scope (resolveTerm parsed)
                 afterDepRes <- skipDiagnose $ cast.term afterNameRes
                 Fixity.run env.fixityMap env.operatorPriorities $ Fixity.parse afterDepRes
-            runDiagnose' [("test", input)] $ TC.run env.types do
+            skipTrace $ runDiagnose' [("test", input)] $ TC.run env.types do
                 let ctx = TC.emptyContext env.values
                 (_, vTy) <- TC.generaliseTerm ctx =<< TC.infer ctx afterFixityRes
                 TC.check ctx afterFixityRes vTy
@@ -92,7 +93,7 @@ typecheckDecls input =
                 afterNameRes <- NameRes.run env.scope (NameRes.resolveNames parsed)
                 depResOutput <- skipDiagnose $ resolveDependenciesSimplified' env.fixityMap env.operatorPriorities afterNameRes
                 Fixity.resolveFixity depResOutput.fixityMap depResOutput.operatorPriorities depResOutput.declarations
-            runDiagnose' [("test", input)] $ (\f -> foldlM f (env.types, env.values) fixityDecls) \(topLevel, values) decl -> do
+            skipTrace $ runDiagnose' [("test", input)] $ (\f -> foldlM f (env.types, env.values) fixityDecls) \(topLevel, values) decl -> do
                 (eDecl, newTypes, newValues) <- TC.processDeclaration' topLevel values decl
                 newNewValues <- modifyEnv newValues [eDecl]
                 pure (newTypes, newNewValues)
