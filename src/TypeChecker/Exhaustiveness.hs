@@ -111,6 +111,7 @@ simplifyPattern = \case
     E.WildcardP{} -> Wildcard
     -- ideally, we should retain visibility information for cleaner errors
     E.ConstructorP name pats -> Con (unLoc name) $ fmap (simplifyPattern . snd) pats
+    E.TypeP{} -> error "todo: exhaustiveness checking for type patterns"
     E.ListP pats -> foldr (\x xs -> Con ConsName [simplifyPattern x, xs]) (Con NilName []) pats
     E.VariantP name arg -> VariantP (unLoc name) $ simplifyPattern arg
     E.RecordP row -> RecordP $ fmap simplifyPattern row

@@ -15,7 +15,6 @@ type CType = Located CoreType
 
 data TypeError
     = CannotUnify {loc :: Loc, lhs :: CoreType, rhs :: CoreType, context :: UnificationError}
-    | NotASubtype CType CType (Maybe OpenName)
     | MissingField (Either CType (Term 'Fixity)) OpenName
     | MissingVariant CType OpenName
     | EmptyMatch Loc
@@ -24,8 +23,12 @@ data TypeError
     | ArgCountMismatchPattern (Pattern 'Fixity) Int Int
     | NotAFunction Loc CType
     | NotASigma Loc CType
-    | NoVisibleTypeArgument Loc (Type 'Fixity) CType
+    | NoVisibleTypeArgument Loc (Type 'Fixity) CoreType
+    | SigmaVisibilityMismatch {loc :: Loc, expectedVis :: Visibility, actualVis :: Visibility}
+    | ConstructorVisibilityMismatch {loc :: Loc}
     | ConstructorReturnType {con :: Name, expected :: Name, returned :: CoreTerm}
+    | TooManyArgumentsInPattern {loc :: Loc}
+    | NotEnoughArgumentsInPattern {loc :: Loc}
 
 data UnificationError
     = NotEq CoreTerm CoreTerm
@@ -46,16 +49,6 @@ typeError =
                 [ Note $ vsep ["when trying to unify", prettyDef lhs, prettyDef rhs]
                 , noteFromUnificationError context
                 ]
-        NotASubtype lhs rhs mbField ->
-            Err
-                Nothing
-                (prettyDef lhs <+> "is not a subtype of" <+> prettyDef rhs <> fieldMsg)
-                (mkNotes [(getLoc lhs, This "lhs"), (getLoc rhs, This "rhs")])
-                []
-          where
-            fieldMsg = case mbField of
-                Nothing -> ""
-                Just field -> ": right hand side does not contain" <+> prettyDef field
         MissingField row field ->
             Err
                 Nothing
@@ -111,9 +104,23 @@ typeError =
                 ( mkNotes
                     [ (loc, This "when applying this expression")
                     , (getLoc tyArg, This "to this type")
-                    , (getLoc ty, Where $ "where the expression has type" <+> prettyDef ty)
                     ]
                 )
+                [Note $ "the expression has type" <+> prettyDef ty]
+        -- perhaps the two visibility mismatch errors should be unified
+        SigmaVisibilityMismatch{loc, expectedVis, actualVis} ->
+            Err
+                Nothing
+                "visibility mismatch in dependent pair argument"
+                (mkNotes [(loc, This "in this pattern")])
+                [ Note $ "the pattern is expected to be" <+> pretty (show @Text expectedVis)
+                , Note $ "but it is" <+> pretty (show @Text actualVis)
+                ]
+        ConstructorVisibilityMismatch{loc} ->
+            Err
+                Nothing
+                "unexpected implicit argument in pattern"
+                (mkNotes [(loc, This "explicit argument expected here")])
                 []
         ConstructorReturnType{con, expected, returned} ->
             Err
@@ -123,6 +130,15 @@ typeError =
                 [ Note $ "expected:" <+> prettyDef expected
                 , Note $ "got:" <+> prettyDef returned
                 ]
+        -- these two error messages are pretty crappy. They need, at list, expected and actual argument counts
+        TooManyArgumentsInPattern{loc} ->
+            Err Nothing "too many arguments in a constructor" (mkNotes [(loc, This "this constructor pattern has too many arguments")]) []
+        NotEnoughArgumentsInPattern{loc} ->
+            Err
+                Nothing
+                "not enough arguments in a constructor"
+                (mkNotes [(loc, This "this constructor pattern doesn't have enough arguments")])
+                []
 
 -- todo: proper error messages
 noteFromUnificationError :: UnificationError -> Note (Doc AnsiStyle)

@@ -66,6 +66,7 @@ ghc-options:
 - -Wpartial-fields
 - -Wredundant-constraints
 - -Wno-name-shadowing
+- -Werror=incomplete-patterns
 
 library:
   source-dirs: src

@@ -52,6 +52,7 @@ data EPattern
     = VarP SimpleName_
     | WildcardP Text
     | ConstructorP Name [(Visibility, EPattern)]
+    | TypeP Name [(Visibility, EPattern)]
     | VariantP OpenName EPattern
     | RecordP (Row EPattern)
     | SigmaP Visibility EPattern EPattern
@@ -87,8 +88,9 @@ patternArity = go
   where
     go = \case
         VarP{} -> 1
-        WildcardP{} -> 1 -- should it also be 0?
+        WildcardP{} -> 1 -- further types may still depend on the value of a wildcard, so it is treated as a variable here
         ConstructorP _ args -> sum (map (go . snd) args)
+        TypeP _ args -> sum (map (go . snd) args)
         VariantP _ arg -> go arg
         RecordP row -> sum (fmap go row)
         SigmaP _ lhs rhs -> go lhs + go rhs
@@ -96,8 +98,10 @@ patternArity = go
         LiteralP{} -> 0
 
 lift :: Int -> ETerm -> ETerm
-lift 0 = id
-lift n = go (Level 0)
+lift n = liftAt n (Level 0)
+
+liftAt :: Int -> Level -> ETerm -> ETerm
+liftAt n = go
   where
     go depth = \case
         Var (Index index)

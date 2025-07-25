@@ -301,6 +301,8 @@ matchCore ExtendedEnv{..} = \cases
         | pname == name ->
             -- since locals is a SnocList, we have to reverse args before appending
             Just ExtendedEnv{locals = reverse (map snd $ toList args) <> locals, ..}
+    (C.TypeP pname _) (TyCon (L name) args)
+        | pname == name -> Just ExtendedEnv{locals = reverse (map snd $ toList args) <> locals, ..}
     (C.VariantP pname _) (Variant name val)
         | pname == name -> Just ExtendedEnv{locals = val : locals, ..}
     (C.RecordP _varRow) (Record _row) -> error "todo: row matching (must preserve original field order)"

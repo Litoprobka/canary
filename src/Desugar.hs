@@ -15,7 +15,7 @@ desugar = \case
     E.App vis lhs rhs -> C.App vis (go lhs) (go rhs)
     E.Lambda vis (E.VarP arg) body -> C.Lambda vis arg (go body)
     E.Lambda vis (E.WildcardP arg) body -> C.Lambda vis (Name' arg) (go body)
-    E.Lambda vis pat body -> C.Lambda vis "x" $ C.lift 1 $ go (E.Case (E.Var (Index (-1))) [(pat, body)])
+    E.Lambda vis pat body -> C.Lambda vis "x" $ go (E.Case (E.Var (Index 0)) [(pat, E.liftAt 1 (Level $ E.patternArity pat) body)])
     E.Let binding expr -> case binding of
         E.ValueB name body -> C.Let (toSimpleName_ $ unLoc name) (desugar body) (desugar expr)
         E.FunctionB name args body -> desugar $ E.Let (E.ValueB name asLambda) expr
@@ -25,7 +25,7 @@ desugar = \case
     E.Case arg matches -> C.Case (go arg) $ fmap (bimap flattenPattern go) matches
     E.Match matches@((_ :| [], _) : _) -> C.Lambda Visible "x" $ C.Case (C.Var (Index 0)) (fmap desugarMatchBranch matches)
       where
-        desugarMatchBranch ((pat ::: _) :| _, body) = (flattenPattern pat, C.lift 1 $ go body)
+        desugarMatchBranch ((pat ::: _) :| _, body) = (flattenPattern pat, C.liftAt 1 (Level $ C.patternArity $ flattenPattern pat) $ go body)
     E.Match _ -> error "todo: multi-arg match desugar"
     E.If cond true false ->
         C.Case
@@ -66,6 +66,7 @@ flattenPattern p = case p of
     E.VarP name -> C.VarP name
     E.WildcardP name -> C.VarP (Name' name)
     E.ConstructorP name pats -> C.ConstructorP (unLoc name) ((fmap . fmap) asVar pats)
+    E.TypeP name pats -> C.TypeP (unLoc name) ((fmap . fmap) asVar pats)
     E.VariantP name pat -> C.VariantP name (asVar pat)
     E.RecordP row -> C.RecordP $ fmap asVar row
     E.SigmaP vis lhs rhs -> C.SigmaP vis (asVar lhs) (asVar rhs)

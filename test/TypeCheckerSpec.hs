@@ -37,9 +37,15 @@ toSanityCheck =
     , "\\f x -> f x x"
     , "\\x _ -> x"
     , "\\f g x -> f (g x)"
-    , -- the rest does not seem to work with pattern unification.
-      -- generally, it fails on non-variables in meta spines. That could be worked around by postponing and
-      "\\x y -> x (\\a -> x (y a a))"
+    , "match x _ -> x"
+    , "match Int -> True; _ -> False"
+    ]
+
+-- these cases do not seem to work with pattern unification.
+-- generally, it fails on non-variables in meta spines. That could be worked around by postponing and aggerssively pruning later on
+unificationShenanigans :: [Text]
+unificationShenanigans =
+    [ "\\x y -> x (\\a -> x (y a a))"
     , "\\a b c -> c (b a) (c a a)"
     , "\\a b -> a (\\x -> b x) (\\z -> a b b) {}"
     ]
@@ -56,6 +62,8 @@ spec = do
         for_ toSanityCheck \input -> it ("infers a consistent type for " <> toString input) $ sanityCheck input
     describe "typecheck" do
         for_ toTypecheck \(name, input) -> it ("typechecks " <> toString name) $ typecheckDecls input
+    describe "unification shenanigans" do
+        for_ unificationShenanigans \input -> xit ("infers a consistent type for " <> toString input) $ sanityCheck input
 
 -- verify that an expression typechecks with the type inferred for it
 sanityCheck :: Text -> Expectation

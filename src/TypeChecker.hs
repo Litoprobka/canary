@@ -124,8 +124,8 @@ processGadt ctx name mbKind constructors = do
         case fnResult (quote univars lvl conType) of
             C.TyCon name _
                 | name == typeName -> pass
-                | otherwise -> typeError $ ConstructorReturnType{con, expected = typeName, returned = C.TyCon name Vec.empty}
-            returned -> typeError $ ConstructorReturnType{con, expected = typeName, returned}
+                | otherwise -> typeError ConstructorReturnType{con, expected = typeName, returned = C.TyCon name Vec.empty}
+            returned -> typeError ConstructorReturnType{con, expected = typeName, returned}
       where
         fnResult = \case
             C.Q _ _ _ _ _ rhs -> fnResult rhs
@@ -302,8 +302,9 @@ infer ctx (t :@ loc) = localLoc loc case t of
             _ -> infer ctx lhs
         closure <-
             forceM lhsTy >>= \case
-                V.Q Forall vis2 _e closure | vis == vis2 -> pure closure
-                V.Q Forall vis2 _e _ -> internalError' $ "visibility mismatch" <+> pretty (show @Text vis) <+> "!=" <+> pretty (show @Text vis2)
+                lhsTy@(V.Q Forall vis2 _e closure)
+                    | vis == vis2 -> pure closure
+                    | otherwise -> typeError . NoVisibleTypeArgument loc rhs =<< quoteM ctx.level lhsTy
                 other -> do
                     argTy <- freshUniVarV ctx type_
                     univars <- get
@@ -459,7 +460,7 @@ checkPattern ctx (pat :@ pLoc) ty = do
         T.SigmaP vis lhs rhs -> do
             forceM ty >>= \case
                 V.Q Exists vis2 _e closure
-                    | vis /= vis2 -> internalError' "sigma type: visibility mismatch"
+                    | vis /= vis2 -> typeError SigmaVisibilityMismatch{loc = getLoc lhs, expectedVis = vis, actualVis = vis2}
                     | otherwise -> do
                         ((eLhs, lhsV), ctx) <- checkPattern ctx lhs closure.ty
                         ((eRhs, rhsV), ctx) <- checkPattern ctx rhs =<< closure `appM` lhsV
@@ -491,10 +492,13 @@ inferPattern ctx (p :@ loc) = do
             pure (ePat, tyV, newLocals)
         T.ConstructorP name args -> do
             (_, conType) <- lookupSig name ctx
-            (argsWithVals, ty, ctx) <- inferConArgs ctx conType args
+            (argsWithVals, isType, ty, ctx) <- inferConArgs ctx conType args
             let (eArgs, argVals) = unzip argsWithVals
                 valsWithVis = zip (map fst eArgs) argVals
-            pure ((E.ConstructorP name eArgs, V.Con name (fromList valsWithVis)), ty, ctx)
+            let (con, vCon)
+                    | isType = (E.TypeP, V.TyCon)
+                    | otherwise = (E.ConstructorP, V.Con)
+            pure ((con name eArgs, vCon name (fromList valsWithVis)), ty, ctx)
         T.SigmaP{} -> internalError' "todo: not sure how to infer sigma"
         -- this is a lazy desugaring, I can do better
         T.ListP pats -> do
@@ -517,27 +521,25 @@ inferPattern ctx (p :@ loc) = do
     type_ = V.Type $ TypeName :@ loc
 
     inferConArgs
-        :: TC es => Context -> VType -> [(Visibility, Pattern 'Fixity)] -> Eff es ([((Visibility, EPattern), Value)], VType, Context)
+        :: TC es => Context -> VType -> [(Visibility, Pattern 'Fixity)] -> Eff es ([((Visibility, EPattern), Value)], Bool, VType, Context)
     inferConArgs ctx conType args = do
         conType <- forceM conType
         case (conType, args) of
             (V.Q Forall vis _e closure, (vis2, arg) : rest) | vis == vis2 -> do
                 ((eArg, argV), ctx) <- checkPattern ctx arg closure.ty
                 univars <- get
-                (pats, vty, ctx) <- inferConArgs ctx (app univars closure argV) rest
-                pure (((vis, eArg), argV) : pats, vty, ctx)
+                (pats, isType, vty, ctx) <- inferConArgs ctx (app univars closure argV) rest
+                pure (((vis, eArg), argV) : pats, isType, vty, ctx)
             -- insert an implicit argument: 'Cons x xs' --> 'Cons @a x xs'
             (V.Q Forall vis _e closure, args) | vis /= Visible -> do
                 name <- freshName_ "a"
                 ((insertedPat, insertedVal), ctx) <- checkPattern ctx (T.VarP (name :@ loc) :@ loc) closure.ty
                 univars <- get
-                (pats, vty, ctx) <- inferConArgs ctx (app univars closure insertedVal) args
-                pure (((vis, insertedPat), insertedVal) : pats, vty, ctx)
-            (V.Q Forall Visible _ _, (vis2, _) : _) ->
-                internalError' $
-                    "visibility mismatch: expected a visible argument, got an" <+> pretty (show @Text vis2) <+> "one."
+                (pats, isType, vty, ctx) <- inferConArgs ctx (app univars closure insertedVal) args
+                pure (((vis, insertedPat), insertedVal) : pats, isType, vty, ctx)
+            (V.Q Forall Visible _ _, (_, _ :@ loc) : _) -> typeError ConstructorVisibilityMismatch{loc}
             (V.Q Exists _ _ _, _) -> internalError' "existentials in constructor types are not supported yet"
-            (ty@V.TyCon{}, []) -> do
-                pure (mempty, ty, ctx)
-            (V.TyCon{}, _) -> internalError' "too many arguments in a pattern"
-            _ -> internalError' "not enough arguments in a pattern"
+            (ty@(V.TyCon (L TypeName) _), _) -> pure (mempty, True, ty, ctx)
+            (ty@V.TyCon{}, []) -> pure (mempty, False, ty, ctx)
+            (V.TyCon{}, _) -> typeError TooManyArgumentsInPattern{loc}
+            _ -> typeError NotEnoughArgumentsInPattern{loc}

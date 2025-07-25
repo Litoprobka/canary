@@ -30,6 +30,7 @@ import Syntax.Term (Erasure (..), Quantifier (..), Visibility (..), withVis)
 data CorePattern
     = VarP SimpleName_
     | ConstructorP Name_ [(Visibility, SimpleName_)]
+    | TypeP Name_ [(Visibility, SimpleName_)]
     | VariantP OpenName SimpleName_
     | RecordP (Row SimpleName_)
     | SigmaP Visibility SimpleName_ SimpleName_
@@ -40,12 +41,15 @@ instance PrettyAnsi CorePattern where
         VarP name -> prettyAnsi opts name
         ConstructorP name [] -> prettyCon name
         ConstructorP name args -> parens $ hsep (prettyCon name : map (\(vis, arg) -> withVis vis (prettyAnsi opts arg)) args)
+        TypeP name [] -> prettyType name
+        TypeP name args -> parens $ hsep (prettyType name : map (\(vis, arg) -> withVis vis (prettyAnsi opts arg)) args)
         VariantP name arg -> parens $ prettyCon name <+> prettyAnsi opts arg
         RecordP row -> braces . sep . punctuate comma . map recordField $ sortedRow row
         SigmaP vis lhs rhs -> parens $ withVis vis (pretty lhs) <+> "**" <+> pretty rhs
         LiteralP lit -> prettyAnsi opts lit
       where
         prettyCon name = conColor $ prettyAnsi opts name
+        prettyType name = typeColor $ prettyAnsi opts name
         recordField (name, pat) = prettyAnsi opts name <+> "=" <+> prettyAnsi opts pat
 
 type CoreType = CoreTerm
@@ -172,6 +176,7 @@ instance PrettyAnsi CoreTerm where
         patternVars = \case
             var@VarP{} -> [prettyAnsi opts var]
             ConstructorP _ args -> map (prettyAnsi opts . snd) $ reverse args
+            TypeP _ args -> map (prettyAnsi opts . snd) $ reverse args
             VariantP _ arg -> [prettyAnsi opts arg]
             RecordP row -> map (prettyAnsi opts) . reverse $ toList row
             SigmaP _vis lhs rhs -> [prettyAnsi opts rhs, prettyAnsi opts lhs]
@@ -243,6 +248,7 @@ patternArity :: CorePattern -> Int
 patternArity = \case
     VarP{} -> 1
     ConstructorP _ args -> length args
+    TypeP _ args -> length args
     VariantP{} -> 1
     RecordP row -> length row
     SigmaP{} -> 2
