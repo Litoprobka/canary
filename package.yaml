@@ -41,7 +41,9 @@ dependencies:
 - directory
 - dlist
 - effectful >= 2.3 && < 3
+- effectful-core >= 2.3 && < 3
 - effectful-th
+- effectful-plugin
 - enummapset
 - flatparse
 - isocline
@@ -70,6 +72,7 @@ ghc-options:
 
 library:
   source-dirs: src
+  ghc-options: -fplugin=Effectful.Plugin
 
 executables:
   canary-exe:
@@ -79,6 +82,7 @@ executables:
     - -threaded
     - -rtsopts
     - -with-rtsopts=-N
+    - -fplugin=Effectful.Plugin
     dependencies:
     - canary
     - optparse-applicative

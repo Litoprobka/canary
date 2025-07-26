@@ -72,7 +72,7 @@ type TC es =
     (Labeled UniVar NameGen :> es, NameGen :> es, Diagnose :> es, Trace :> es, State UniVars :> es, Reader TopLevel :> es)
 
 run :: TopLevel -> Eff (State UniVars : Reader TopLevel : Labeled UniVar NameGen : es) a -> Eff es a
-run types = runLabeled @UniVar runNameGen . runReader types . evalState @UniVars EMap.empty
+run types = runLabeled @UniVar runNameGen . runReader types . evalState EMap.empty
 
 -- | insert a new UniVar applied to all bound variables in scope
 freshUniVar :: (Labeled UniVar NameGen :> es, State UniVars :> es) => Context -> VType -> Eff es CoreTerm
@@ -84,8 +84,8 @@ freshUniVar ctx vty = do
 
 newUniVar :: (Labeled UniVar NameGen :> es, State UniVars :> es) => VType -> Eff es UniVar
 newUniVar ty = do
-    uni <- Common.UniVar <$> labeled @UniVar @NameGen freshId
-    modify @UniVars $ EMap.insert uni Unsolved{ty}
+    uni <- Common.UniVar <$> labeled @UniVar freshId
+    modify $ EMap.insert uni Unsolved{ty}
     pure uni
 
 typeOfUnsolvedUniVar :: (Diagnose :> es, State UniVars :> es) => UniVar -> Eff es VType
@@ -112,7 +112,7 @@ closeType locals body = case locals of
 freshUniVarV :: (Labeled UniVar NameGen :> es, State UniVars :> es) => Context -> VType -> Eff es Value
 freshUniVarV ctx vty = do
     uniTerm <- freshUniVar ctx vty
-    univars <- get @UniVars
+    univars <- get
     let V.ValueEnv{..} = ctx.env
         env = ExtendedEnv{..}
     pure $ evalCore env uniTerm
@@ -120,7 +120,7 @@ freshUniVarV ctx vty = do
 -- | extend the value environment with current UniVar state for pure evaluation
 extendEnv :: State UniVars :> es => ValueEnv -> Eff es ExtendedEnv
 extendEnv V.ValueEnv{..} = do
-    univars <- get @UniVars
+    univars <- get
     pure ExtendedEnv{..}
 
 bind :: UniVars -> Name_ -> VType -> Context -> Context
@@ -151,7 +151,7 @@ define name val vval ty vty Context{env = V.ValueEnv{locals = vlocals, ..}, ..} 
 
 lookupSig :: TC es => Name -> Context -> Eff es (ETerm, VType)
 lookupSig name ctx = do
-    topLevel <- ask @TopLevel
+    topLevel <- ask
     case (Map.lookup (unLoc name) ctx.types, Map.lookup (unLoc name) topLevel) of
         (Just (lvl, ty), _) -> pure (E.Var (levelToIndex ctx.level lvl), ty)
         (_, Just ty) -> pure (E.Name name, ty)
@@ -202,14 +202,14 @@ generalise' ctx mbName (mbTerm, ty) = do
 
     -- and sort them wrt. dependencies
     sortedUnis <-
-        runErrorNoCallStack @(Poset.Cycle UniVar) mkUniPoset >>= \case
+        runErrorNoCallStack mkUniPoset >>= \case
             Left{} -> internalError' "univar types are cyclic"
             Right uniPoset -> pure uniPoset
 
     let solveToLvl i uni = do
             ty <- typeOfUnsolvedUniVar uni
             let newLevel = ctx.level `incLevel` i
-            modify @UniVars $ EMap.insert uni $ Solved{solution = V.Var newLevel, ty}
+            modify $ EMap.insert uni $ Solved{solution = V.Var newLevel, ty}
 
     -- DANGER: this step wouldn't work when I implement destructuring bindings and mutually recursive binding groups
     -- solving univars like this makes sense only if this binding and its type are the only things that referred to them

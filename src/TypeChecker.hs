@@ -38,7 +38,7 @@ processDeclaration'
     -> Declaration 'Fixity
     -> Eff es (EDeclaration, TopLevel, ValueEnv)
 processDeclaration' topLevel env decl = runLabeled @UniVar runNameGen do
-    ((eDecl, diff), types) <- runState topLevel $ evalState @UniVars EMap.empty $ processDeclaration (emptyContext env) decl
+    ((eDecl, diff), types) <- runState topLevel $ evalState EMap.empty $ processDeclaration (emptyContext env) decl
     pure (eDecl, types, env{V.topLevel = diff env.topLevel})
 
 processDeclaration
@@ -52,10 +52,10 @@ processDeclaration ctx (decl :@ loc) = localLoc loc case decl of
 processSignature :: DeclTC es => Context -> Name -> Term 'Fixity -> Eff es EDeclaration
 processSignature ctx name sig = do
     topLevel <- get
-    sigV <- runReader @TopLevel topLevel $ generalise ctx =<< typeFromTerm ctx sig
-    univars <- get @UniVars
+    sigV <- runReader topLevel $ generalise ctx =<< typeFromTerm ctx sig
+    univars <- get
     let eSig = E.Core $ quote univars ctx.level sigV
-    modify @TopLevel $ Map.insert (unLoc name) sigV
+    modify $ Map.insert (unLoc name) sigV
     pure (E.SignatureD name eSig)
 
 checkBinding
@@ -66,7 +66,7 @@ checkBinding
     -> Eff es EDeclaration
 checkBinding _ binding (_ : _) = internalError (getLoc binding) "todo: proper support for where clauses"
 checkBinding ctx binding [] = do
-    topLevel <- get @TopLevel
+    topLevel <- get
     (name, body) <- case binding of
         (T.ValueB (L (T.VarP name)) body) -> pure (name, body)
         (T.FunctionB name args body) ->
@@ -78,7 +78,7 @@ checkBinding ctx binding [] = do
             -- since we don't have a signature for our binding, we need a placeholder type for recursive calls
             recType <- freshUniVarV ctx (V.Type (TypeName :@ getLoc binding))
             let recCtx = ctx{env = ctx.env{V.topLevel = Map.insert (unLoc name) (V.Stuck $ V.Opaque name []) ctx.env.topLevel}}
-            modify @TopLevel $ Map.insert (unLoc name) recType
+            modify $ Map.insert (unLoc name) recType
 
             inferred@(_, monoTy) <- infer recCtx body
 
@@ -89,7 +89,7 @@ checkBinding ctx binding [] = do
             -- after checking recursive calls, we can generalise
             -- TODO: when we generalise a recursive binding,
             (eBody, ty) <- generaliseRecursiveTerm recCtx name inferred
-            modify @TopLevel $ Map.insert (unLoc name) ty
+            modify $ Map.insert (unLoc name) ty
             pure eBody
     -- ideally, we should unwrap the body and construct a FunctionB if the original binding was a function
     pure (E.ValueD (E.ValueB name eBody))
@@ -97,24 +97,24 @@ checkBinding ctx binding [] = do
 processGadt :: DeclTC es => Context -> Name -> Maybe (Type 'Fixity) -> [GadtConstructor 'Fixity] -> Eff es (EDeclaration, VType)
 processGadt ctx name mbKind constructors = do
     -- we can probably infer the kind of a type from its constructors, but we don't do that for now
-    topLevel <- get @TopLevel
+    topLevel <- get
     kind <- runReader topLevel $ maybe (pure $ V.Type (TypeName :@ getLoc name)) (typeFromTerm ctx) mbKind
     kindC <- quoteM ctx.level kind
     let tyCon = mkTyCon kindC name
-    modify @TopLevel $ Map.insert (unLoc name) kind
+    modify $ Map.insert (unLoc name) kind
     let newCtx = ctx{env = ctx.env{V.topLevel = Map.insert (unLoc name) tyCon ctx.env.topLevel}}
-    topLevel <- get @TopLevel
+    topLevel <- get
     constructors <- runReader topLevel $ for constructors \con -> do
         conSig <- generalise newCtx =<< typeFromTerm newCtx con.sig
         checkGadtConstructor ctx.level name con.name conSig
-        modify @TopLevel $ Map.insert (unLoc con.name) conSig
+        modify $ Map.insert (unLoc con.name) conSig
         pure (con, quote EMap.empty (Level 0) conSig)
     pure (E.TypeD name (map (\(con, conSig) -> (con.name, C.functionTypeArity conSig)) constructors), tyCon)
   where
     -- check that a GADT constructor actually returns the declared type
     checkGadtConstructor :: TC es => Level -> Name -> Name -> VType -> Eff es ()
     checkGadtConstructor lvl typeName con conType = do
-        univars <- get @UniVars
+        univars <- get
         case fnResult (quote univars lvl conType) of
             C.TyCon name _
                 | name == typeName -> pass
@@ -127,17 +127,17 @@ processGadt ctx name mbKind constructors = do
 
 processType :: DeclTC es => Context -> Name -> [VarBinder 'Fixity] -> [Constructor 'Fixity] -> Eff es (EDeclaration, VType)
 processType ctx name binders constructors = do
-    topLevel <- get @TopLevel
+    topLevel <- get
     kind <- runReader topLevel $ generalise ctx =<< typeFromTerm ctx (mkTypeKind binders)
     univars <- get
     let kindC = quote univars ctx.level kind
         tyCon = mkTyCon kindC name
     modify $ Map.insert (unLoc name) kind
     let newCtx = ctx{env = ctx.env{V.topLevel = Map.insert (unLoc name) tyCon ctx.env.topLevel}}
-    topLevel <- get @TopLevel
+    topLevel <- get
     runReader topLevel $ for_ (mkConstrSigs name binders constructors) \(con, sig) -> do
         sigV <- generalise newCtx =<< typeFromTerm newCtx sig
-        modify @TopLevel $ Map.insert (unLoc con) sigV
+        modify $ Map.insert (unLoc con) sigV
     -- _conMapEntry <- mkConstructorTableEntry (map (.var) binders) (map (\con -> (con.name, con.args)) constrs)
     let argVisibilities con = (Implicit <$ C.functionTypeArity kindC) <> fromList (Visible <$ con.args)
     pure
@@ -385,7 +385,7 @@ infer ctx (t :@ loc) = traceScope (\(_, ty) -> prettyDef t <+> specSym "⇒" <+>
         env <- extendEnv ctx.env
         x <- freshName_ "x"
         (eRhs, rhsTy) <- infer (define x (desugar eLhs) (eval env eLhs) (quote env.univars ctx.level lhsTy) lhsTy ctx) rhs
-        univars <- get @UniVars
+        univars <- get
         -- I *think* we have to quote with increased level here, but I'm not sure
         let body = quote univars (succ ctx.level) rhsTy
         pure (E.Sigma eLhs eRhs, V.Q Exists Visible Retained $ V.Closure{ty = lhsTy, var = "x", env = ctx.env, body})

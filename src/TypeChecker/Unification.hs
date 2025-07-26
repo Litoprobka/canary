@@ -48,7 +48,7 @@ unify ctx lhs rhs = do
     let lhsC = quote univars ctx.level lhs
         rhsC = quote univars ctx.level rhs
     trace $ prettyCoreCtx ctx lhsC <+> specSym "~" <+> prettyCoreCtx ctx rhsC
-    result <- runErrorNoCallStack @UnificationError $ runReader (ValueTopLevel ctx.env.topLevel) $ unify' ctx.level lhs rhs
+    result <- runErrorNoCallStack $ runReader (ValueTopLevel ctx.env.topLevel) $ unify' ctx.level lhs rhs
     case result of
         Right () -> pass
         Left context -> do
@@ -325,7 +325,7 @@ pruneUniVar pruning uni = do
     univars' <- get
     let env' = ExtendedEnv{locals = [], univars = univars', ..}
         solution = evalCore env' $ lambdas univars (Level $ length pruning.getPruning) ty $ C.AppPruning (C.UniVar newUni) pruning
-    modify @UniVars $ EMap.insert uni $ Solved{solution, ty}
+    modify $ EMap.insert uni $ Solved{solution, ty}
     pure newUni
 
 -- try to solve the inner univar with the outer one

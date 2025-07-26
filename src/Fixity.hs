@@ -122,7 +122,7 @@ parseDeclaration = traverse \case
         D.GADT name <$> traverse parse mbKind <*> traverse (travGadtConstructor traversal) constrs
     D.Signature name ty -> D.Signature name <$> parse ty
 
-traversal :: forall es. (Applicative (Eff es), Ctx es) => AstTraversal 'DependencyRes 'Fixity (Eff es)
+traversal :: forall es. Ctx es => AstTraversal 'DependencyRes 'Fixity (Eff es)
 traversal =
     tie
         UntiedTraversal
