@@ -2,13 +2,13 @@
 {-# LANGUAGE DataKinds #-}
 {-# LANGUAGE DeriveAnyClass #-}
 {-# LANGUAGE DerivingVia #-}
+{-# LANGUAGE ImplicitParams #-}
 {-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE OverloadedRecordDot #-}
 {-# LANGUAGE PatternSynonyms #-}
 {-# LANGUAGE TypeFamilies #-}
 {-# LANGUAGE UndecidableInstances #-}
 {-# LANGUAGE NoFieldSelectors #-}
-{-# OPTIONS_GHC -Wno-orphans #-}
 
 module Common where
 
@@ -141,14 +141,14 @@ instance HasLoc (Located a) where
     getLoc (Located loc _) = loc
 
 instance PrettyAnsi a => PrettyAnsi (Located a) where
-    prettyAnsi opts (L x) = prettyAnsi opts x
+    prettyAnsi (L x) = prettyAnsi x
 
 instance HasId a => HasId (Located a) where
     toId (L x) = toId x
 
 instance PrettyAnsi SimpleName_ where
-    prettyAnsi _ (Name' name) = pretty name
-    prettyAnsi _ (Wildcard' txt) = pretty txt
+    prettyAnsi (Name' name) = pretty name
+    prettyAnsi (Wildcard' txt) = pretty txt
 
 -- | does the name belong to an infix constructor?
 isInfixConstructor :: Name -> Bool
@@ -170,12 +170,12 @@ instance HasId Id where
 newtype Scope = Scope Int deriving (Show, Eq, Ord)
 
 instance PrettyAnsi Name_ where
-    prettyAnsi opts = \case
+    prettyAnsi = \case
         (Name name id')
-            | opts.printIds -> pretty name <> pretty (lowerNumber id'.id)
+            | ?opts.printIds -> pretty name <> pretty (lowerNumber id'.id)
             | otherwise -> pretty name
         (Wildcard txt id')
-            | opts.printIds -> pretty txt <> pretty (lowerNumber id'.id)
+            | ?opts.printIds -> pretty txt <> pretty (lowerNumber id'.id)
             | otherwise -> pretty txt
         BoolName -> "Bool"
         TrueName -> "True"
@@ -206,7 +206,7 @@ lowerNumber = Text.map alterChar . show
         c -> c
 
 instance PrettyAnsi UniVar where
-    prettyAnsi _ (UniVar n) = "?" <> pretty n
+    prettyAnsi (UniVar n) = "?" <> pretty n
 
 newtype Loc = Loc Position
     deriving (Show)
@@ -225,7 +225,7 @@ data Literal
     deriving (Pretty) via UnAnnotate Literal
 
 instance PrettyAnsi Literal where
-    prettyAnsi _ = \case
+    prettyAnsi = \case
         IntLiteral num -> pretty num
         TextLiteral txt -> dquotes $ pretty txt
         CharLiteral c -> "'" <> pretty c <> "'"
@@ -281,10 +281,10 @@ newtype PrettyOptions = PrettyOptions {printIds :: Bool}
 defaultPrettyOptions :: PrettyOptions
 defaultPrettyOptions = PrettyOptions{printIds = True}
 class PrettyAnsi a where
-    prettyAnsi :: PrettyOptions -> a -> Doc AnsiStyle
+    prettyAnsi :: (?opts :: PrettyOptions) => a -> Doc AnsiStyle
 
 prettyDef :: PrettyAnsi a => a -> Doc AnsiStyle
-prettyDef = prettyAnsi defaultPrettyOptions
+prettyDef = let ?opts = defaultPrettyOptions in prettyAnsi
 
 newtype UnAnnotate a = UnAnnotate a
 
@@ -294,7 +294,7 @@ instance PrettyAnsi a => Pretty (UnAnnotate a) where
     pretty (UnAnnotate x) = unAnnotate $ prettyDef x
 
 instance PrettyAnsi a => PrettyAnsi (Maybe a) where
-    prettyAnsi opts = maybe "" (prettyAnsi opts)
+    prettyAnsi = maybe "" prettyAnsi
 
 keyword, opStyle, specSym, specSymBlue, conColor, typeColor :: Doc AnsiStyle -> Doc AnsiStyle
 keyword = annotate $ bold <> colorDull Magenta

@@ -1,3 +1,4 @@
+{-# LANGUAGE ImplicitParams #-}
 {-# LANGUAGE OverloadedRecordDot #-}
 {-# LANGUAGE RecordWildCards #-}
 {-# LANGUAGE TemplateHaskell #-}
@@ -234,7 +235,8 @@ replStep env@ReplEnv{loadedFiles} command = do
             pure (eExpr, vTy)
 
     prettyVal val = do
-        liftIO $ putDoc $ prettyAnsi PrettyOptions{printIds = False} val <> Pretty.line
+        let ?opts = PrettyOptions{printIds = False}
+        liftIO $ putDoc $ prettyAnsi val <> Pretty.line
 
 localDiagnose :: IOE :> es => ReplEnv -> [(FilePath, Text)] -> Eff (Diagnose : es) (Maybe ReplEnv) -> Eff es (Maybe ReplEnv)
 localDiagnose env@ReplEnv{input, loadedFiles} files action =

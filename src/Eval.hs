@@ -55,7 +55,7 @@ data ExtendedEnv = ExtendedEnv
 
 -- an orphan instance, since I don't want to merge 'Value.hs' and 'Eval.hs'
 instance PrettyAnsi Value where
-    prettyAnsi opts = prettyAnsi opts . quoteWhnf EMap.empty (Level 0)
+    prettyAnsi = prettyAnsi . quoteWhnf EMap.empty (Level 0)
 
 deriving via (UnAnnotate Value) instance Pretty Value
 deriving via (UnAnnotate Value) instance Show Value

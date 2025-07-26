@@ -1,5 +1,6 @@
 {-# LANGUAGE DerivingVia #-}
 {-# LANGUAGE GADTs #-}
+{-# LANGUAGE ImplicitParams #-}
 {-# LANGUAGE UndecidableInstances #-}
 {-# OPTIONS_GHC -Wno-partial-fields #-}
 
@@ -123,16 +124,16 @@ instance Pretty (Pattern_ p) => Show (Pattern_ p) where
     show = show . pretty
 
 instance PrettyAnsi (NameAt p) => PrettyAnsi (Binding p) where
-    prettyAnsi opts = \case
-        ValueB pat body -> prettyAnsi opts pat <+> "=" <+> prettyAnsi opts body
+    prettyAnsi = \case
+        ValueB pat body -> prettyAnsi pat <+> "=" <+> prettyAnsi body
         FunctionB name args body ->
-            prettyAnsi opts name
-                <+> concatWith (<+>) (args <&> \(vis, pat) -> withVis vis (prettyAnsi opts pat))
+            prettyAnsi name
+                <+> concatWith (<+>) (args <&> \(vis, pat) -> withVis vis (prettyAnsi pat))
                 <+> "="
-                <+> prettyAnsi opts body
+                <+> prettyAnsi body
 
 instance PrettyAnsi (NameAt p) => PrettyAnsi (Expr_ p) where
-    prettyAnsi opts = go 0 . Located dummyLoc
+    prettyAnsi = go 0 . Located dummyLoc
       where
         go :: Int -> Expr p -> Doc AnsiStyle
         go n (e :@ loc) = case e of
@@ -141,30 +142,30 @@ instance PrettyAnsi (NameAt p) => PrettyAnsi (Expr_ p) where
             WildcardLambda _ r@(L Record{}) -> go 0 r
             WildcardLambda _ body -> "(" <> go 0 body <> ")"
             App vis lhs rhs -> parensWhen 3 $ go 2 lhs <+> withVis vis (go 3 rhs)
-            Let binding body -> "let" <+> prettyAnsi opts binding <> ";" <+> go 0 body
-            LetRec bindings body -> "let rec" <+> sep ((<> ";") . prettyAnsi opts <$> NE.toList bindings) <+> go 0 body
-            Case arg matches -> nest 4 (vsep $ ("case" <+> go 0 arg <+> "of" :) $ matches <&> \(pat, body) -> prettyAnsi opts pat <+> "->" <+> go 0 body)
+            Let binding body -> "let" <+> prettyAnsi binding <> ";" <+> go 0 body
+            LetRec bindings body -> "let rec" <+> sep ((<> ";") . prettyAnsi <$> NE.toList bindings) <+> go 0 body
+            Case arg matches -> nest 4 (vsep $ ("case" <+> go 0 arg <+> "of" :) $ matches <&> \(pat, body) -> prettyAnsi pat <+> "->" <+> go 0 body)
             Match matches ->
                 nest
                     4
-                    (vsep $ ("match" :) $ matches <&> \(pats, body) -> (sep . toList) (parens . prettyAnsi opts <$> pats) <+> "->" <+> go 0 body)
+                    (vsep $ ("match" :) $ matches <&> \(pats, body) -> (sep . toList) (parens . prettyAnsi <$> pats) <+> "->" <+> go 0 body)
             If cond true false -> "if" <+> go 0 cond <+> "then" <+> go 0 true <+> "else" <+> go 0 false
             Annotation expr ty -> parensWhen 1 $ go 0 expr <+> ":" <+> go 0 ty
-            Name name -> prettyAnsi opts name
-            ImplicitVar var -> prettyAnsi opts var
+            Name name -> prettyAnsi name
+            ImplicitVar var -> prettyAnsi var
             Parens expr -> parens $ go 0 expr
-            Variant name -> prettyAnsi opts name
-            Record row -> prettyRecord "=" (prettyAnsi opts) (go 0) (NoExtRow row)
+            Variant name -> prettyAnsi name
+            Record row -> prettyRecord "=" prettyAnsi (go 0) (NoExtRow row)
             RecordAccess record field -> go 4 record <> "." <> pretty field
             Sigma x y -> parensWhen 1 $ go 0 x <+> "**" <+> go 0 y
             List xs -> brackets . sep . punctuate comma $ go 0 <$> xs
-            Do stmts lastAction -> nest 2 $ vsep ("do" : fmap (prettyAnsi opts) stmts <> [go 0 lastAction])
-            Literal lit -> prettyAnsi opts lit
-            InfixE pairs last' -> "?(" <> sep (concatMap (\(lhs, op) -> go 3 lhs : maybe [] (pure . prettyAnsi opts) op) pairs <> [go 0 last']) <> ")"
+            Do stmts lastAction -> nest 2 $ vsep ("do" : fmap prettyAnsi stmts <> [go 0 lastAction])
+            Literal lit -> prettyAnsi lit
+            InfixE pairs last' -> "?(" <> sep (concatMap (\(lhs, op) -> go 3 lhs : maybe [] (pure . prettyAnsi) op) pairs <> [go 0 last']) <> ")"
             Function from to -> parensWhen 2 $ go 2 from <+> "->" <+> go 0 to
             qq@(Q q vis er _ _) -> parensWhen 2 $ kw q er <+> compressQ q vis er qq
-            VariantT row -> prettyVariant (prettyAnsi opts) (go 0) row
-            RecordT row -> prettyRecord ":" (prettyAnsi opts) (go 0) row
+            VariantT row -> prettyVariant prettyAnsi (go 0) row
+            RecordT row -> prettyRecord ":" prettyAnsi (go 0) row
           where
             parensWhen minPrec
                 | n >= minPrec = parens
@@ -176,13 +177,13 @@ instance PrettyAnsi (NameAt p) => PrettyAnsi (Expr_ p) where
             kw Exists Retained = "Σ"
 
             compressLambda = \case
-                Lambda vis pat body -> withVis vis (prettyAnsi opts pat) <+> compressLambda (unLoc body)
+                Lambda vis pat body -> withVis vis (prettyAnsi pat) <+> compressLambda (unLoc body)
                 other -> "->" <+> go 0 (other :@ loc)
 
             compressQ q vis er = \case
                 Q q' vis' er' binder body
                     | q == q' && vis == vis' && er == er' ->
-                        prettyBinder opts binder <+> compressQ q vis er (unLoc body)
+                        prettyBinder binder <+> compressQ q vis er (unLoc body)
                 other -> arrOrDot q vis <+> pretty other
 
             arrOrDot Forall Visible = "->"
@@ -204,16 +205,16 @@ dummyLoc = C.Loc Position{file = "<none>", begin = (0, 0), end = (0, 0)}
 instance PrettyAnsi (NameAt pass) => PrettyAnsi (VarBinder pass) where
     prettyAnsi = prettyBinder
 
-prettyBinder :: PrettyAnsi (NameAt pass) => PrettyOptions -> VarBinder pass -> Doc AnsiStyle
-prettyBinder opts (VarBinder var Nothing) = prettyAnsi opts var
-prettyBinder opts (VarBinder var (Just kind)) = parens $ prettyAnsi opts var <+> ":" <+> prettyAnsi opts kind
+prettyBinder :: (PrettyAnsi (NameAt pass), ?opts :: PrettyOptions) => VarBinder pass -> Doc AnsiStyle
+prettyBinder (VarBinder var Nothing) = prettyAnsi var
+prettyBinder (VarBinder var (Just kind)) = parens $ prettyAnsi var <+> ":" <+> prettyAnsi kind
 
 instance PrettyAnsi (NameAt p) => PrettyAnsi (DoStatement_ p) where
-    prettyAnsi opts = \case
-        Bind pat expr -> prettyAnsi opts pat <+> "<-" <+> prettyAnsi opts expr
-        With pat expr -> "with" <+> prettyAnsi opts pat <+> "<-" <+> prettyAnsi opts expr
-        DoLet binding -> prettyAnsi opts binding
-        Action expr -> prettyAnsi opts expr
+    prettyAnsi = \case
+        Bind pat expr -> prettyAnsi pat <+> "<-" <+> prettyAnsi expr
+        With pat expr -> "with" <+> prettyAnsi pat <+> "<-" <+> prettyAnsi expr
+        DoLet binding -> prettyAnsi binding
+        Action expr -> prettyAnsi expr
 
 instance Pretty (Expr_ p) => Show (Expr_ p) where
     show = show . pretty
@@ -228,23 +229,23 @@ instance HasLoc (NameAt pass) => HasLoc (VarBinder pass) where
     getLoc VarBinder{var, kind = Just ty} = zipLocOf var ty
 
 instance PrettyAnsi (NameAt pass) => PrettyAnsi (Pattern_ pass) where
-    prettyAnsi opts = go 0 . Located dummyLoc
+    prettyAnsi = go 0 . Located dummyLoc
       where
         go :: Int -> Pattern pass -> Doc AnsiStyle
         go n (L p) = case p of
-            VarP name -> prettyAnsi opts name
+            VarP name -> prettyAnsi name
             WildcardP txt -> pretty txt
-            AnnotationP pat ty -> parens $ go 0 pat <+> ":" <+> prettyAnsi opts ty
-            ConstructorP name args -> parensWhen 1 $ sep (prettyAnsi opts name : map (\(vis, pat) -> withVis vis $ go 1 pat) args)
-            VariantP name body -> parensWhen 1 $ prettyAnsi opts name <+> go 1 body -- todo: special case for unit?
+            AnnotationP pat ty -> parens $ go 0 pat <+> ":" <+> prettyAnsi ty
+            ConstructorP name args -> parensWhen 1 $ sep (prettyAnsi name : map (\(vis, pat) -> withVis vis $ go 1 pat) args)
+            VariantP name body -> parensWhen 1 $ prettyAnsi name <+> go 1 body -- todo: special case for unit?
             RecordP row -> braces . sep . punctuate comma . map recordField $ sortedRow row
             SigmaP vis lhs rhs -> parensWhen 1 $ withVis vis (go 0 lhs) <+> "**" <+> go 0 rhs
             ListP items -> brackets . sep $ map (go 0) items
-            LiteralP lit -> prettyAnsi opts lit
-            InfixP pairs last' -> "?(" <> sep (concatMap (\(lhs, op) -> go 3 lhs : (pure . prettyAnsi opts) op) pairs <> [go 0 last']) <> ")"
+            LiteralP lit -> prettyAnsi lit
+            InfixP pairs last' -> "?(" <> sep (concatMap (\(lhs, op) -> go 3 lhs : (pure . prettyAnsi) op) pairs <> [go 0 last']) <> ")"
           where
             parensWhen minPrec
                 | n >= minPrec = parens
                 | otherwise = id
 
-            recordField (name, pat) = prettyAnsi opts name <+> "=" <+> go 0 pat
+            recordField (name, pat) = prettyAnsi name <+> "=" <+> go 0 pat

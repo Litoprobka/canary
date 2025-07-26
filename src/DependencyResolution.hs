@@ -39,8 +39,8 @@ data Op = Op Name | AppOp
     deriving (Eq)
     deriving (Pretty) via (UnAnnotate Op)
 instance PrettyAnsi Op where
-    prettyAnsi opts = \case
-        Op name -> prettyAnsi opts name
+    prettyAnsi = \case
+        Op name -> prettyAnsi name
         AppOp -> "function application"
 instance Map.HasId Op where
     toId = \case

@@ -39,7 +39,7 @@ data Token
     deriving (Pretty, Show) via (UnAnnotate Token)
 
 instance PrettyAnsi Token where
-    prettyAnsi _ = \case
+    prettyAnsi = \case
         LowerName name -> pretty name
         UpperName name -> pretty name
         VariantName name -> pretty name

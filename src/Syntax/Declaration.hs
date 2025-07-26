@@ -46,20 +46,20 @@ data GadtConstructor p = GadtConstructor {loc :: Loc, name :: NameAt p, sig :: T
 deriving instance (Eq (NameAt p), Eq (Type p)) => Eq (GadtConstructor p)
 
 instance PrettyAnsi (NameAt p) => PrettyAnsi (Declaration_ p) where
-    prettyAnsi opts = \case
-        Value binding locals -> prettyAnsi opts binding <> line <> whereIfNonEmpty locals <> line <> nest 4 (vsep (prettyAnsi opts <$> locals))
-        Signature name ty -> prettyAnsi opts name <+> ":" <+> prettyAnsi opts ty
+    prettyAnsi = \case
+        Value binding locals -> prettyAnsi binding <> line <> whereIfNonEmpty locals <> line <> nest 4 (vsep (prettyAnsi <$> locals))
+        Signature name ty -> prettyAnsi name <+> ":" <+> prettyAnsi ty
         Type name vars cons ->
-            sep ("type" : prettyAnsi opts name : map (prettyAnsi opts) vars)
+            sep ("type" : prettyAnsi name : map prettyAnsi vars)
                 <+> encloseSep
                     "= "
                     ""
                     (space <> "|" <> space)
-                    (cons <&> \(Constructor _ con args) -> sep (prettyAnsi opts con : map (prettyAnsi opts) args))
-        GADT name mbKind constrs -> "type" <+> nameWithKind name mbKind <+> "where" <> line <> nest 4 (vsep (prettyAnsi opts <$> constrs))
+                    (cons <&> \(Constructor _ con args) -> sep (prettyAnsi con : map prettyAnsi args))
+        GADT name mbKind constrs -> "type" <+> nameWithKind name mbKind <+> "where" <> line <> nest 4 (vsep (prettyAnsi <$> constrs))
         Fixity fixity op priority ->
             fixityKeyword fixity
-                <+> prettyAnsi opts op
+                <+> prettyAnsi op
                 <> listIfNonEmpty "above" priority.above
                 <> listIfNonEmpty "below" priority.below
                 <> listIfNonEmpty "equals" priority.equal
@@ -73,16 +73,16 @@ instance PrettyAnsi (NameAt p) => PrettyAnsi (Declaration_ p) where
 
         listIfNonEmpty :: PrettyAnsi a => Doc AnsiStyle -> [a] -> Doc AnsiStyle
         listIfNonEmpty _ [] = ""
-        listIfNonEmpty kw xs = " " <> kw <+> sep (punctuate comma $ map (prettyAnsi opts) xs)
+        listIfNonEmpty kw xs = " " <> kw <+> sep (punctuate comma $ map prettyAnsi xs)
         whereIfNonEmpty locals
             | null locals = ""
             | otherwise = nest 2 "where"
 
-        nameWithKind name Nothing = prettyAnsi opts name
-        nameWithKind name (Just k) = parens $ prettyAnsi opts name <+> ":" <+> prettyAnsi opts k
+        nameWithKind name Nothing = prettyAnsi name
+        nameWithKind name (Just k) = parens $ prettyAnsi name <+> ":" <+> prettyAnsi k
 
 instance PrettyAnsi (NameAt p) => PrettyAnsi (GadtConstructor p) where
-    prettyAnsi opts (GadtConstructor _ name sig) = prettyAnsi opts name <+> ":" <+> prettyAnsi opts sig
+    prettyAnsi (GadtConstructor _ name sig) = prettyAnsi name <+> ":" <+> prettyAnsi sig
 
 instance HasLoc (Constructor p) where
     getLoc Constructor{loc} = loc
