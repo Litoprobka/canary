@@ -206,7 +206,7 @@ lowerNumber = Text.map alterChar . show
         c -> c
 
 instance PrettyAnsi UniVar where
-    prettyAnsi (UniVar n) = "?" <> pretty n
+    prettyAnsi (UniVar n) = opStyle $ "?" <> pretty n
 
 newtype Loc = Loc Position
     deriving (Show)

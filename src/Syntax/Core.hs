@@ -125,7 +125,7 @@ prettyEnv = go 0 . map prettyAnsi
         Let name body expr -> keyword "let" <+> prettyAnsi name <+> specSym "=" <+> go 0 env body <> ";" <+> go 0 env expr
         Literal lit -> prettyAnsi lit
         -- checking for variable occurances here is not ideal (potentially O(n^2) in AST size),
-        Q Forall Visible _e var ty body | not (occurs (Index 0) body) -> parensWhen 1 $ go 1 env ty <+> "->" <+> go 0 (prettyAnsi var : env) body
+        Q Forall Visible _e var ty body | not (occurs (Index 0) body) -> parensWhen 1 $ go 1 env ty <+> specSym "->" <+> go 0 (prettyAnsi var : env) body
         qq@(Q q vis er _ _ _) -> parensWhen 1 $ kw q er <+> compressQ env q vis er qq
         VariantT row -> prettyVariant prettyAnsi (go 0 env) row
         RecordT row -> prettyRecord ":" prettyAnsi (go 0 env) row
@@ -152,7 +152,7 @@ prettyEnv = go 0 . map prettyAnsi
 
     compressQ :: [Doc AnsiStyle] -> Quantifier -> Visibility -> Erasure -> CoreTerm -> Doc AnsiStyle
     compressQ env Forall Visible e (Q Forall Visible e' name ty body)
-        | e == e' && not (occurs (Index 0) body) = "->" <+> go 1 env ty <+> "->" <+> go 0 (prettyAnsi name : env) body
+        | e == e' && not (occurs (Index 0) body) = specSym "->" <+> go 1 env ty <+> specSym "->" <+> go 0 (prettyAnsi name : env) body
     compressQ env q vis e term = case term of
         Q q' vis' e' name ty body
             | q == q' && vis == vis' && e == e' ->

@@ -254,7 +254,7 @@ rename pren ty =
             bodyToRename <- closure `appM` Var pren.codomain
             C.Q q v e closure.var argTy <$> rename (lift pren) bodyToRename
         TyCon name args -> C.TyCon name <$> (traverse . traverse) (rename pren) args
-        Con name args -> C.TyCon name <$> (traverse . traverse) (rename pren) args
+        Con name args -> C.Con name <$> (traverse . traverse) (rename pren) args
         Variant name arg -> C.Variant name <$> rename pren arg
         PrimFunction fn -> do
             captured <- traverse (rename pren) fn.captured

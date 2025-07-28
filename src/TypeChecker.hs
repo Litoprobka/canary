@@ -218,7 +218,7 @@ check ctx (t :@ loc) ty = traceScope_ (prettyDef t <+> specSymBlue "⇐" <+> pre
         (T.Case arg branches, result) -> do
             (eArg, argTy) <- infer ctx arg
             eBranches <- for branches \(pat, body) -> do
-                ((ePat, _), ctx) <- checkPattern ctx pat argTy
+                ((ePat, _), ctx) <- checkPattern Rigid ctx pat argTy
                 (ePat,) <$> check ctx body result
             pure (E.Case eArg eBranches)
         -- an empty match checks against any type
@@ -235,7 +235,7 @@ check ctx (t :@ loc) ty = traceScope_ (prettyDef t <+> specSymBlue "⇐" <+> pre
                 -- I'm not sure whether we should quote with
                 -- the old context or with the updated context
                 let patTy = E.Core $ quote univars ctx.level closure.ty
-                ((ePat, patVal), ctx) <- checkPattern ctx pat closure.ty
+                ((ePat, patVal), ctx) <- checkPattern Rigid ctx pat closure.ty
                 innerTy <- closure `appM` patVal
                 case nonEmpty pats of
                     Nothing -> pure ((ePat ::: patTy) :| [], ctx, innerTy)
@@ -330,7 +330,7 @@ infer ctx (t :@ loc) = traceScope (\(_, ty) -> prettyDef t <+> specSym "⇒" <+>
         arg <- freshName_ "x"
         univars <- get
         let ctx' = bind univars arg argTy ctx
-        ((ePat, _), ty, ctx) <- inferPattern ctx' pat
+        ((ePat, _), ty, ctx) <- inferPattern Rigid ctx' pat
         unify ctx argTy ty
         (eBody, bodyTy) <- insertNeutralApp ctx =<< infer ctx body
         univars <- get
@@ -432,16 +432,24 @@ typeFromTerm ctx term = do
     env <- extendEnv ctx.env
     pure $ eval env eTerm
 
-checkPattern :: TC es => Context -> Pattern 'Fixity -> VType -> Eff es ((EPattern, Value), Context)
-checkPattern ctx (pat :@ pLoc) ty = do
+-- | how to treat freshly bound variables in patterns
+data Flexible = Flex | Rigid
+
+-- | produce the value of a pattern depending on flexibility
+valueFlex :: TC es => Flexible -> Context -> VType -> Eff es Value
+valueFlex Flex ctx ty = freshUniVarV ctx ty
+valueFlex Rigid ctx _ = pure $ V.Var ctx.level
+
+checkPattern :: TC es => Flexible -> Context -> Pattern 'Fixity -> VType -> Eff es ((EPattern, Value), Context)
+checkPattern flex ctx (pat :@ pLoc) ty = do
     univars <- get
     traceScope_ (prettyDef pat <+> specSymBlue "⇐" <+> prettyValCtx ctx ty) $ localLoc pLoc case pat of
         T.VarP (L name) -> do
-            value <- freshUniVarV ctx ty
+            value <- valueFlex flex ctx ty
             pure ((E.VarP (toSimpleName_ name), value), bind univars name ty ctx)
         T.WildcardP txt -> do
             name <- freshName_ $ Name' txt
-            value <- freshUniVarV ctx ty
+            value <- valueFlex flex ctx ty
             pure ((E.WildcardP txt, value), bind univars name ty ctx)
         T.VariantP{} -> internalError' "todo: check variant pattern"
         T.RecordP{} -> internalError' "todo: check record pattern"
@@ -450,33 +458,33 @@ checkPattern ctx (pat :@ pLoc) ty = do
                 V.Q Exists vis2 _e closure
                     | vis /= vis2 -> typeError SigmaVisibilityMismatch{loc = getLoc lhs, expectedVis = vis, actualVis = vis2}
                     | otherwise -> do
-                        ((eLhs, lhsV), ctx) <- checkPattern ctx lhs closure.ty
-                        ((eRhs, rhsV), ctx) <- checkPattern ctx rhs =<< closure `appM` lhsV
+                        ((eLhs, lhsV), ctx) <- checkPattern flex ctx lhs closure.ty
+                        ((eRhs, rhsV), ctx) <- checkPattern flex ctx rhs =<< closure `appM` lhsV
                         pure ((E.SigmaP vis eLhs eRhs, V.Sigma lhsV rhsV), ctx)
                 _ -> fallthroughToInfer
         _ -> fallthroughToInfer
   where
     fallthroughToInfer = do
-        (ePat, inferred, ctx) <- inferPattern ctx $ pat :@ pLoc
+        (ePat, inferred, ctx) <- inferPattern flex ctx $ pat :@ pLoc
         unify ctx inferred ty
         pure (ePat, ctx)
 
-inferPattern :: TC es => Context -> Pattern 'Fixity -> Eff es ((EPattern, Value), VType, Context)
-inferPattern ctx (p :@ loc) = do
+inferPattern :: TC es => Flexible -> Context -> Pattern 'Fixity -> Eff es ((EPattern, Value), VType, Context)
+inferPattern flex ctx (p :@ loc) = do
     univars <- get
     traceScope (\(_, ty, ctx) -> prettyDef p <+> specSym "⇒" <+> prettyValCtx ctx ty) $ localLoc loc case p of
         T.VarP (L name) -> do
             ty <- freshUniVarV ctx type_
-            value <- freshUniVarV ctx ty
+            value <- valueFlex flex ctx ty
             pure ((E.VarP (toSimpleName_ name), value), ty, bind univars name ty ctx)
         T.WildcardP txt -> do
             name <- freshName_ $ Name' txt
             ty <- freshUniVarV ctx type_
-            value <- freshUniVarV ctx ty
+            value <- valueFlex flex ctx ty
             pure ((E.WildcardP txt, value), ty, bind univars name ty ctx)
         (T.AnnotationP pat ty) -> do
             tyV <- typeFromTerm ctx ty
-            (ePat, newLocals) <- checkPattern ctx pat tyV
+            (ePat, newLocals) <- checkPattern flex ctx pat tyV
             pure (ePat, tyV, newLocals)
         T.ConstructorP name args -> do
             (_, conType) <- lookupSig name ctx
@@ -495,7 +503,7 @@ inferPattern ctx (p :@ loc) = do
                 patToCheck = case pats of
                     [] -> T.ConstructorP (NilName :@ loc) [] :@ loc
                     (pat : pats) -> T.ConstructorP (ConsName :@ loc) [(Visible, pat), (Visible, T.ListP pats :@ loc)] :@ loc
-            (ePat, ctx) <- checkPattern ctx patToCheck listType
+            (ePat, ctx) <- checkPattern flex ctx patToCheck listType
             pure (ePat, listType, ctx)
         T.LiteralP lit -> do
             let litTypeName = case lit of
@@ -514,20 +522,24 @@ inferPattern ctx (p :@ loc) = do
         conType <- forceM conType
         case (conType, args) of
             (V.Q Forall vis _e closure, (vis2, arg) : rest) | vis == vis2 -> do
-                ((eArg, argV), ctx) <- checkPattern ctx arg closure.ty
+                ((eArg, argV), ctx) <- checkPattern Flex ctx arg closure.ty
                 univars <- get
                 (pats, isType, vty, ctx) <- inferConArgs ctx (app univars closure argV) rest
                 pure (((vis, eArg), argV) : pats, isType, vty, ctx)
             -- insert an implicit argument: 'Cons x xs' --> 'Cons @a x xs'
             (V.Q Forall vis _e closure, args) | vis /= Visible -> do
                 name <- freshName_ "a"
-                ((insertedPat, insertedVal), ctx) <- checkPattern ctx (T.VarP (name :@ loc) :@ loc) closure.ty
+                ((insertedPat, insertedVal), ctx) <- checkPattern Flex ctx (T.VarP (name :@ loc) :@ loc) closure.ty
                 univars <- get
                 (pats, isType, vty, ctx) <- inferConArgs ctx (app univars closure insertedVal) args
                 pure (((vis, insertedPat), insertedVal) : pats, isType, vty, ctx)
             (V.Q Forall Visible _ _, (_, _ :@ loc) : _) -> typeError ConstructorVisibilityMismatch{loc}
             (V.Q Exists _ _ _, _) -> internalError' "existentials in constructor types are not supported yet"
-            (ty@(V.TyCon (L TypeName) _), _) -> pure (mempty, True, ty, ctx)
-            (ty@V.TyCon{}, []) -> pure (mempty, False, ty, ctx)
+            (ty@(V.TyCon (L TypeName) _), _) -> do
+                trace "inferred type constructor"
+                pure (mempty, True, ty, ctx)
+            (ty@V.TyCon{}, []) -> do
+                trace "inferred value constructor"
+                pure (mempty, False, ty, ctx)
             (V.TyCon{}, _) -> typeError TooManyArgumentsInPattern{loc}
             _ -> typeError NotEnoughArgumentsInPattern{loc}

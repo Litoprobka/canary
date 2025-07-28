@@ -30,7 +30,7 @@ skipTrace = interpret \env -> \case
     Trace _ -> pass
 
 runTrace :: Eff (Trace : es) a -> Eff es (a, [TraceTree])
-runTrace = reinterpret (fmap (second toList) . runState @(DList TraceTree) mempty) \env -> \case
+runTrace = reinterpret (fmap (second toList) . runState mempty) \env -> \case
     Trace doc -> modify (`DList.snoc` Branch doc [])
     TraceScope mkDoc action -> do
         -- todo: I think we lose the whole branch on exception
@@ -40,12 +40,13 @@ runTrace = reinterpret (fmap (second toList) . runState @(DList TraceTree) mempt
   where
     -- effectful doesn't provide 'censor' for its writer effect, so we have to stick to State
     -- plain 'runWriter' could work instead, but juggling effects is annoying
+    scoped :: State (DList TraceTree) :> es => Eff es a -> Eff es (a, DList TraceTree)
     scoped action = do
         current <- get
-        put @(DList TraceTree) mempty
+        put mempty
         output <- action
-        new <- get @(DList TraceTree)
-        put @(DList TraceTree) current
+        new <- get
+        put current
         pure (output, new)
 
 -- | run 'Trace' effect by printing collected traces to stdout
