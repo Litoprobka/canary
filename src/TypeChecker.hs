@@ -13,7 +13,7 @@ import Desugar (desugar, flattenPattern)
 import Diagnostic
 import Effectful.Labeled (Labeled, runLabeled)
 import Effectful.Reader.Static
-import Effectful.State.Static.Local (State, evalState, get, modify, runState)
+import Effectful.State.Static.Local (State, evalState, get, modify)
 import Eval (ExtendedEnv (univars), UniVars, app, appM, eval, evalCore, forceM, mkTyCon, quote, quoteM)
 import LangPrelude
 import NameGen (NameGen, freshName, freshName_, runNameGen)
@@ -29,17 +29,23 @@ import TypeChecker.TypeError (TypeError (..), typeError)
 import TypeChecker.Unification (unify)
 
 type DeclTC es =
-    (Labeled UniVar NameGen :> es, NameGen :> es, Diagnose :> es, Trace :> es, State UniVars :> es, State TopLevel :> es)
+    ( Labeled UniVar NameGen :> es
+    , NameGen :> es
+    , Diagnose :> es
+    , Trace :> es
+    , State UniVars :> es
+    , State TopLevel :> es
+    , State ConMetaTable :> es
+    )
 
 processDeclaration'
-    :: (NameGen :> es, Diagnose :> es, Trace :> es)
-    => TopLevel
-    -> ValueEnv
+    :: (NameGen :> es, Diagnose :> es, Trace :> es, State TopLevel :> es, State ConMetaTable :> es)
+    => ValueEnv
     -> Declaration 'Fixity
-    -> Eff es (EDeclaration, TopLevel, ValueEnv)
-processDeclaration' topLevel env decl = runLabeled @UniVar runNameGen do
-    ((eDecl, diff), types) <- runState topLevel $ evalState EMap.empty $ processDeclaration (emptyContext env) decl
-    pure (eDecl, types, env{V.topLevel = diff env.topLevel})
+    -> Eff es (EDeclaration, ValueEnv)
+processDeclaration' env decl = runLabeled @UniVar runNameGen do
+    (eDecl, diff) <- evalState EMap.empty $ processDeclaration (emptyContext env) decl
+    pure (eDecl, env{V.topLevel = diff env.topLevel})
 
 processDeclaration
     :: DeclTC es => Context -> Declaration 'Fixity -> Eff es (EDeclaration, IdMap Name_ Value -> IdMap Name_ Value)
@@ -51,8 +57,7 @@ processDeclaration ctx (decl :@ loc) = localLoc loc case decl of
 
 processSignature :: DeclTC es => Context -> Name -> Term 'Fixity -> Eff es EDeclaration
 processSignature ctx name sig = do
-    topLevel <- get
-    sigV <- runReader topLevel $ generalise ctx =<< typeFromTerm ctx sig
+    sigV <- withTopLevel $ generalise ctx =<< typeFromTerm ctx sig
     univars <- get
     let eSig = E.Core $ quote univars ctx.level sigV
     modify $ Map.insert (unLoc name) sigV
@@ -72,7 +77,7 @@ checkBinding ctx binding [] = do
         (T.FunctionB name args body) ->
             pure (name, foldr (\(vis, var) -> (:@ getLoc body) . T.Lambda vis var) body args)
         T.ValueB pat _ -> internalError (getLoc pat) "pattern destructuring bindings are not supported yet"
-    eBody <- runReader topLevel case Map.lookup (unLoc name) topLevel of
+    eBody <- withTopLevel case Map.lookup (unLoc name) topLevel of
         Just sig -> zonkTerm ctx =<< check ctx body sig
         Nothing -> do
             -- since we don't have a signature for our binding, we need a placeholder type for recursive calls
@@ -97,17 +102,17 @@ checkBinding ctx binding [] = do
 processGadt :: DeclTC es => Context -> Name -> Maybe (Type 'Fixity) -> [GadtConstructor 'Fixity] -> Eff es (EDeclaration, VType)
 processGadt ctx name mbKind constructors = do
     -- we can probably infer the kind of a type from its constructors, but we don't do that for now
-    topLevel <- get
-    kind <- runReader topLevel $ maybe (pure $ V.Type (TypeName :@ getLoc name)) (typeFromTerm ctx) mbKind
+    kind <- withTopLevel $ maybe (pure $ V.Type (TypeName :@ getLoc name)) (typeFromTerm ctx) mbKind
     kindC <- quoteM ctx.level kind
     let tyCon = mkTyCon kindC name
     modify $ Map.insert (unLoc name) kind
+    modify $ Map.insert (unLoc name) (mkTypeConstructorMetadata (getLoc name) kind)
     let newCtx = ctx{env = ctx.env{V.topLevel = Map.insert (unLoc name) tyCon ctx.env.topLevel}}
-    topLevel <- get
-    constructors <- runReader topLevel $ for constructors \con -> do
+    constructors <- withTopLevel $ for constructors \con -> do
         conSig <- generalise newCtx =<< typeFromTerm newCtx con.sig
         checkGadtConstructor ctx.level name con.name conSig
         modify $ Map.insert (unLoc con.name) conSig
+        modify $ Map.insert (unLoc con.name) (mkConstructorMetadata (name, kind) conSig)
         pure (con, quote EMap.empty (Level 0) conSig)
     pure (E.TypeD name (map (\(con, conSig) -> (con.name, C.functionTypeArity conSig)) constructors), tyCon)
   where
@@ -127,17 +132,17 @@ processGadt ctx name mbKind constructors = do
 
 processType :: DeclTC es => Context -> Name -> [VarBinder 'Fixity] -> [Constructor 'Fixity] -> Eff es (EDeclaration, VType)
 processType ctx name binders constructors = do
-    topLevel <- get
-    kind <- runReader topLevel $ generalise ctx =<< typeFromTerm ctx (mkTypeKind binders)
+    kind <- withTopLevel $ generalise ctx =<< typeFromTerm ctx (mkTypeKind binders)
     univars <- get
     let kindC = quote univars ctx.level kind
         tyCon = mkTyCon kindC name
     modify $ Map.insert (unLoc name) kind
+    modify $ Map.insert (unLoc name) (mkTypeConstructorMetadata (getLoc name) kind)
     let newCtx = ctx{env = ctx.env{V.topLevel = Map.insert (unLoc name) tyCon ctx.env.topLevel}}
-    topLevel <- get
-    runReader topLevel $ for_ (mkConstrSigs name binders constructors) \(con, sig) -> do
+    withTopLevel $ for_ (mkConstrSigs name binders constructors) \(con, sig) -> do
         sigV <- generalise newCtx =<< typeFromTerm newCtx sig
         modify $ Map.insert (unLoc con) sigV
+        modify $ Map.insert (unLoc con) (mkConstructorMetadata (name, kind) sigV)
     -- _conMapEntry <- mkConstructorTableEntry (map (.var) binders) (map (\con -> (con.name, con.args)) constrs)
     let argVisibilities con = (Implicit <$ C.functionTypeArity kindC) <> fromList (Visible <$ con.args)
     pure
@@ -164,6 +169,51 @@ processType ctx name binders constructors = do
             )
       where
         fullType loc' = foldl' (\lhs -> (:@ loc') . T.App Visible lhs) (T.Name name :@ getLoc name) ((:@ loc') . T.Name . (.var) <$> binders)
+
+mkTypeConstructorMetadata :: Loc -> VType -> ConMetadata
+mkTypeConstructorMetadata loc = mkConstructorMetadata (TypeName :@ loc, V.Type (TypeName :@ loc))
+
+mkConstructorMetadata :: (Name, VType) -> VType -> ConMetadata
+mkConstructorMetadata (typeName, kind) conType = ConMetadata \ctx -> do
+    params <- getTypeParams ctx.level conType
+    levelsAndUnis <- instantiate ctx kind (map snd params)
+    let goalType = V.TyCon typeName $ fromList $ zipWith (\(vis, _) (_, uni) -> (vis, uni)) params levelsAndUnis
+    univars <- get
+    pure (goalType, go univars (EMap.fromList levelsAndUnis) ctx.level conType)
+  where
+    getTypeParams lvl = \case
+        V.Q Forall _vis _e closure -> getTypeParams (succ lvl) =<< closure `appM` V.Var lvl
+        V.TyCon name params | typeName == name -> pure $ toList params
+        _ -> internalError' "invalid constructor type"
+
+    -- \| instantiate type parameters with fresh unification variables:
+    -- 'List : Type -> Type' --> '?a'
+    instantiate :: (UniEffs es, Diagnose :> es) => Context -> VType -> [Value] -> Eff es [(Level, Value)]
+    instantiate ctx = \cases
+        (V.Q Forall _ _ closure) (V.Var vlvl : rest) -> do
+            uniV <- freshUniVarV ctx closure.ty
+            innerType <- closure `appM` uniV
+            ((vlvl, uniV) :) <$> instantiate ctx innerType rest -- I'm not sure whether it's right to reuse the outer context
+        (V.Q Forall _ _ _) (_nonVar : _) -> internalError' "GADT-style indexed types are not supported yet"
+        (V.Type (L TypeName)) [] -> pure []
+        _ _ -> internalError' "parameter count mismatch"
+
+    go univars params lvl = \case
+        (V.Q Forall vis _e closure) -> case EMap.lookup lvl params of
+            Just val -> Param vis closure.ty val (go univars params (succ lvl) (app univars closure val))
+            Nothing -> Arg vis closure.ty (go univars params (succ lvl) . app univars closure)
+        V.TyCon{} -> NoMoreArgs
+        _ -> error "invalid constructor type"
+
+-- the type is slightly imprecise, but whatever
+
+-- | a helper for 'processDeclaration' subfunctions that provides the current metadata table and top level binding state as read only
+withTopLevel
+    :: (State TopLevel :> es, State ConMetaTable :> es) => Eff (Reader TopLevel : Reader ConMetaTable : es) a -> Eff es a
+withTopLevel action = do
+    topLevel <- get
+    metaTable <- get
+    runReader topLevel $ runReader metaTable action
 
 -- todo: this should also handle implicit pattern matches on existentials
 insertApp :: TC es => Context -> (ETerm, VType) -> Eff es (ETerm, VType)
@@ -487,16 +537,17 @@ inferPattern flex ctx (p :@ loc) = do
             (ePat, newLocals) <- checkPattern flex ctx pat tyV
             pure (ePat, tyV, newLocals)
         T.ConstructorP name args -> do
-            (_, conType) <- lookupSig name ctx
-            (argsWithVals, isType, ty, ctx) <- inferConArgs ctx conType args
+            conMeta <-
+                asks @ConMetaTable (Map.lookup $ unLoc name) >>= \case
+                    Just conMeta -> pure conMeta
+                    Nothing -> internalError' $ "no constructor metadata for" <+> prettyDef name
+            (goalType, argsOrParams) <- getConMetadata conMeta ctx
+            (argsWithVals, ctx) <- inferConArgs ctx argsOrParams args
             let (eArgs, argVals) = unzip argsWithVals
                 valsWithVis = zip (map fst eArgs) argVals
-            let (con, vCon)
-                    | isType = (E.TypeP, V.TyCon)
-                    | otherwise = (E.ConstructorP, V.Con)
-            pure ((con name eArgs, vCon name (fromList valsWithVis)), ty, ctx)
+            pure ((E.ConstructorP name eArgs, V.Con name (fromList valsWithVis)), goalType, ctx)
         T.SigmaP{} -> internalError' "todo: not sure how to infer sigma"
-        -- this is a lazy desugaring, I can do better
+        -- list patterns should be desugared later on
         T.ListP pats -> do
             itemType <- freshUniVarV ctx type_
             let listType = V.TyCon (ListName :@ loc) $ fromList [(Visible, itemType)]
@@ -517,29 +568,34 @@ inferPattern flex ctx (p :@ loc) = do
     type_ = V.Type $ TypeName :@ loc
 
     inferConArgs
-        :: TC es => Context -> VType -> [(Visibility, Pattern 'Fixity)] -> Eff es ([((Visibility, EPattern), Value)], Bool, VType, Context)
-    inferConArgs ctx conType args = do
-        conType <- forceM conType
-        case (conType, args) of
-            (V.Q Forall vis _e closure, (vis2, arg) : rest) | vis == vis2 -> do
-                ((eArg, argV), ctx) <- checkPattern Flex ctx arg closure.ty
-                univars <- get
-                (pats, isType, vty, ctx) <- inferConArgs ctx (app univars closure argV) rest
-                pure (((vis, eArg), argV) : pats, isType, vty, ctx)
-            -- insert an implicit argument: 'Cons x xs' --> 'Cons @a x xs'
-            (V.Q Forall vis _e closure, args) | vis /= Visible -> do
-                name <- freshName_ "a"
-                ((insertedPat, insertedVal), ctx) <- checkPattern Flex ctx (T.VarP (name :@ loc) :@ loc) closure.ty
-                univars <- get
-                (pats, isType, vty, ctx) <- inferConArgs ctx (app univars closure insertedVal) args
-                pure (((vis, insertedPat), insertedVal) : pats, isType, vty, ctx)
-            (V.Q Forall Visible _ _, (_, _ :@ loc) : _) -> typeError ConstructorVisibilityMismatch{loc}
-            (V.Q Exists _ _ _, _) -> internalError' "existentials in constructor types are not supported yet"
-            (ty@(V.TyCon (L TypeName) _), _) -> do
-                trace "inferred type constructor"
-                pure (mempty, True, ty, ctx)
-            (ty@V.TyCon{}, []) -> do
-                trace "inferred value constructor"
-                pure (mempty, False, ty, ctx)
-            (V.TyCon{}, _) -> typeError TooManyArgumentsInPattern{loc}
-            _ -> typeError NotEnoughArgumentsInPattern{loc}
+        :: TC es => Context -> ConArgList -> [(Visibility, Pattern 'Fixity)] -> Eff es ([((Visibility, EPattern), Value)], Context)
+    inferConArgs ctx = \cases
+        NoMoreArgs [] -> pure ([], ctx)
+        argOrParam@ArgOrParam{vis, ty} ((vis2, pat) : pats) | vis == vis2 -> do
+            (((ePat, patV), ctx), rest) <- case argOrParam of
+                Param{unifyWith, rest} -> do
+                    checked@((_, patV), ctx) <- checkPattern Flex ctx pat ty
+                    unify ctx patV unifyWith -- this is imperfect, Flex should probably take a value to use directly or unify against
+                    pure (checked, rest)
+                Arg{mkRest} -> do
+                    checked@((_, patV), _) <- checkPattern Rigid ctx pat ty
+                    pure (checked, mkRest patV)
+                NoMoreArgs -> error "[bug] ArgOrParam matches NoMoreArgs"
+            (pats, ctx) <- inferConArgs ctx rest pats
+            pure (((vis, ePat), patV) : pats, ctx)
+        argOrParam@ArgOrParam{vis, ty} pats | vis /= Visible -> do
+            name <- freshName_ "a"
+            (((insertedPat, insertedVal), ctx), rest) <- case argOrParam of
+                Param{unifyWith, rest} -> do
+                    checked@((_, insertedVal), ctx) <- checkPattern Flex ctx (T.VarP (name :@ loc) :@ loc) ty
+                    unify ctx insertedVal unifyWith -- same as in the previous case
+                    pure (checked, rest)
+                Arg{mkRest} -> do
+                    checked@((_, patV), _) <- checkPattern Rigid ctx (T.VarP (name :@ loc) :@ loc) ty
+                    pure (checked, mkRest patV)
+                NoMoreArgs -> error "[bug] ArgOrParam matches NoMoreArgs"
+            (pats, ctx) <- inferConArgs ctx rest pats
+            pure (((vis, insertedPat), insertedVal) : pats, ctx)
+        ArgOrParam{} (_ : _) -> typeError ConstructorVisibilityMismatch{loc}
+        NoMoreArgs (_ : _) -> typeError TooManyArgumentsInPattern{loc}
+        ArgOrParam{} [] -> typeError NotEnoughArgumentsInPattern{loc}

@@ -1,5 +1,3 @@
-{-# LANGUAGE NoFieldSelectors #-}
-
 module TypeChecker.Exhaustiveness (
     checkCompletePattern,
     checkCaseExhaustiveness,

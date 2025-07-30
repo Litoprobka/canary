@@ -29,6 +29,7 @@ import Data.Text.Encoding qualified as Text
 import DependencyResolution (FixityMap, Op (..), SimpleOutput (..), cast, resolveDependenciesSimplified')
 import Diagnostic (Diagnose, fatal, guardNoErrors, reportExceptions, runDiagnoseWith)
 import Effectful
+import Effectful.State.Static.Local (runState)
 import Error.Diagnose (Diagnostic, Position (..), Report (..), addFile)
 import Eval (eval, modifyEnv)
 import Eval qualified as V
@@ -71,6 +72,7 @@ data ReplEnv = ReplEnv
     , operatorPriorities :: Poset Op
     , scope :: Scope
     , types :: IdMap Name_ VType
+    , conMetadata :: TC.ConMetaTable
     , -- , constructorTable :: TC.ConstructorTable
       lastLoadedFile :: Maybe FilePath
     , loadedFiles :: forall msg. Diagnostic msg -- an empty diagnostic with files
@@ -96,6 +98,7 @@ emptyEnv = ReplEnv{loadedFiles = mempty, ..}
     values = ValueEnv{topLevel = Map.one TypeName (V.Type (noLoc TypeName)), locals = []}
     fixityMap = Map.one AppOp InfixL
     types = Map.one TypeName (V.Type (noLoc TypeName))
+    conMetadata = Map.empty
     scope = Scope $ HashMap.singleton "Type" (noLoc TypeName)
     (_, operatorPriorities) = Poset.eqClass AppOp Poset.empty
     lastLoadedFile = Nothing
@@ -113,10 +116,9 @@ mkDefaultEnv = do
     depResOutput@SimpleOutput{fixityMap, operatorPriorities} <-
         resolveDependenciesSimplified' emptyEnv.fixityMap emptyEnv.operatorPriorities $ preDecls <> afterNameRes
     fixityDecls <- Fixity.resolveFixity fixityMap operatorPriorities depResOutput.declarations
-    (types, values) <- (\f -> foldlM f (emptyEnv.types, emptyEnv.values) fixityDecls) \(topLevel, values) decl -> do
-        (eDecl, newTypes, newValues) <- skipTrace $ TC.processDeclaration' topLevel values decl
-        newNewValues <- modifyEnv newValues [eDecl]
-        pure (newTypes, newNewValues)
+    ((values, types), conMetadata) <- runState emptyEnv.conMetadata $ runState emptyEnv.types $ (\f -> foldlM f emptyEnv.values fixityDecls) \values decl -> do
+        (eDecl, newValues) <- skipTrace $ TC.processDeclaration' values decl
+        modifyEnv newValues [eDecl]
     guardNoErrors
     let newEnv =
             ReplEnv
@@ -125,6 +127,7 @@ mkDefaultEnv = do
                 , operatorPriorities
                 , scope = newScope
                 , types
+                , conMetadata
                 , lastLoadedFile = Nothing
                 , loadedFiles = mempty
                 , inputBS = BS.empty
@@ -191,49 +194,39 @@ run debug env = do
         | otherwise = skipTrace
 
 replStep :: forall es. (ReplCtx es, Diagnose :> es, Trace :> es) => ReplEnv -> ReplCommand -> Eff es (Maybe ReplEnv)
-replStep env@ReplEnv{loadedFiles} command = do
-    case command of
-        Decls decls -> processDecls env decls
-        Expr expr -> do
-            (checkedExpr, _) <- processExpr expr
-            guardNoErrors
-            prettyVal $ eval V.ExtendedEnv{locals = [], topLevel = env.values.topLevel, univars = EMap.empty} checkedExpr
-            pure $ Just env
-        Type_ expr -> do
-            (_, ty) <- processExpr expr
-            prettyVal ty
-            pure $ Just env
-        Load path -> do
-            fileContents <- reportExceptions @SomeException (readFileBS path)
-            let fileText = decodeUtf8 fileContents
-            localDiagnose env [(path, fileText)] do
-                decls <- Parser.parseModule (path, fileContents)
-                newEnv <- processDecls (env{lastLoadedFile = Just path, loadedFiles = addFile loadedFiles path (toString fileText)}) decls
-                newEnv <$ print (pretty path <+> "loaded.")
-        Reload -> do
-            defaultEnv <- mkDefaultEnv
-            case env.lastLoadedFile of
-                Nothing -> pure $ Just defaultEnv
-                Just path -> replStep defaultEnv (Load path)
-        Env -> do
-            let mergedEnv = Map.merge (\ty val -> (Just ty, Just val)) ((,Nothing) . Just) ((Nothing,) . Just) env.types env.values.topLevel
-            for_ (Map.toList mergedEnv) \(name, (mbTy, mbVal)) -> do
-                for_ mbTy \ty -> print $ prettyDef name <+> ":" <+> prettyDef ty
-                for_ mbVal \value -> print $ prettyDef name <+> "=" <+> prettyDef value
-            pure $ Just env
-        Quit -> pure Nothing
-        UnknownCommand cmd -> fatal . one $ Err Nothing ("Unknown command:" <+> pretty cmd) [] []
+replStep env@ReplEnv{loadedFiles} = \case
+    Decls decls -> Just <$> processDecls env decls
+    Expr expr -> do
+        (checkedExpr, _) <- processExpr env expr
+        guardNoErrors
+        prettyVal $ eval V.ExtendedEnv{locals = [], topLevel = env.values.topLevel, univars = EMap.empty} checkedExpr
+        pure $ Just env
+    Type_ expr -> do
+        (_, ty) <- processExpr env expr
+        prettyVal ty
+        pure $ Just env
+    Load path -> do
+        fileContents <- reportExceptions @SomeException (readFileBS path)
+        let fileText = decodeUtf8 fileContents
+        localDiagnose env [(path, fileText)] do
+            decls <- Parser.parseModule (path, fileContents)
+            newEnv <- processDecls (env{lastLoadedFile = Just path, loadedFiles = addFile loadedFiles path (toString fileText)}) decls
+            print (pretty path <+> "loaded.")
+            pure $ Just newEnv
+    Reload -> do
+        defaultEnv <- mkDefaultEnv
+        case env.lastLoadedFile of
+            Nothing -> pure $ Just defaultEnv
+            Just path -> replStep defaultEnv (Load path)
+    Env -> do
+        let mergedEnv = Map.merge (\ty val -> (Just ty, Just val)) ((,Nothing) . Just) ((Nothing,) . Just) env.types env.values.topLevel
+        for_ (Map.toList mergedEnv) \(name, (mbTy, mbVal)) -> do
+            for_ mbTy \ty -> print $ prettyDef name <+> ":" <+> prettyDef ty
+            for_ mbVal \value -> print $ prettyDef name <+> "=" <+> prettyDef value
+        pure $ Just env
+    Quit -> pure Nothing
+    UnknownCommand cmd -> fatal . one $ Err Nothing ("Unknown command:" <+> pretty cmd) [] []
   where
-    processExpr :: Term 'Parse -> Eff es (ETerm, VType)
-    processExpr expr = do
-        afterNameRes <- NameResolution.run env.scope $ resolveTerm expr
-        skippedDepRes <- cast.term afterNameRes
-        afterFixityRes <- Fixity.run env.fixityMap env.operatorPriorities $ Fixity.parse skippedDepRes
-        TC.run env.types do
-            let ctx = emptyContext env.values
-            (eExpr, vTy) <- TC.generaliseTerm ctx =<< TC.infer ctx afterFixityRes
-            pure (eExpr, vTy)
-
     prettyVal val = do
         let ?opts = PrettyOptions{printIds = False}
         liftIO $ putDoc $ prettyAnsi val <> Pretty.line
@@ -247,30 +240,40 @@ localDiagnose env@ReplEnv{input, loadedFiles} files action =
     oldFilesWithInteractive = addFile loadedFiles "<interactive>" (toString input)
     newFiles = foldr (\(path, contents) acc -> addFile acc path (toString contents)) oldFilesWithInteractive files
 
-processDecls :: (Diagnose :> es, Trace :> es, ReplCtx es) => ReplEnv -> [Declaration 'Parse] -> Eff es (Maybe ReplEnv)
+processDecls :: (Diagnose :> es, Trace :> es, NameGen :> es) => ReplEnv -> [Declaration 'Parse] -> Eff es ReplEnv
 processDecls env@ReplEnv{loadedFiles} decls = do
     (afterNameRes, newScope) <- NameResolution.runWithEnv env.scope $ resolveNames decls
     depResOutput@SimpleOutput{fixityMap, operatorPriorities} <-
         resolveDependenciesSimplified' env.fixityMap env.operatorPriorities afterNameRes
     fixityDecls <- Fixity.resolveFixity fixityMap operatorPriorities depResOutput.declarations
-    (types, values) <- (\f -> foldlM f (env.types, env.values) fixityDecls) \(topLevel, values) decl -> do
-        (eDecl, newTypes, newValues) <- TC.processDeclaration' topLevel values decl
-        newNewValues <- modifyEnv newValues [eDecl]
-        pure (newTypes, newNewValues)
+    ((values, types), conMetadata) <- runState env.conMetadata $ runState env.types $ (\f -> foldlM f env.values fixityDecls) \values decl -> do
+        (eDecl, newValues) <- TC.processDeclaration' values decl
+        modifyEnv newValues [eDecl]
     guardNoErrors
-    pure . Just $
+    pure
         ReplEnv
             { values
             , fixityMap
             , operatorPriorities
             , scope = newScope
             , types
+            , conMetadata
             , lastLoadedFile = env.lastLoadedFile
             , loadedFiles = loadedFiles
             , input = env.input
             , inputBS = env.inputBS
             -- , constructorTable
             }
+
+processExpr :: (Diagnose :> es, Trace :> es, NameGen :> es) => ReplEnv -> Term 'Parse -> Eff es (ETerm, VType)
+processExpr env expr = do
+    afterNameRes <- NameResolution.run env.scope $ resolveTerm expr
+    skippedDepRes <- cast.term afterNameRes
+    afterFixityRes <- Fixity.run env.fixityMap env.operatorPriorities $ Fixity.parse skippedDepRes
+    TC.run env.types env.conMetadata do
+        let ctx = emptyContext env.values
+        (eExpr, vTy) <- TC.generaliseTerm ctx =<< TC.infer ctx afterFixityRes
+        pure (eExpr, vTy)
 
 -- takes a line of input, or a bunch of lines in :{ }:
 takeInputChunk :: IO Text

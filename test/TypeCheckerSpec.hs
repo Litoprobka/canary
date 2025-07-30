@@ -8,6 +8,7 @@ import Data.Text qualified as Text
 import DependencyResolution (SimpleOutput (..), cast, resolveDependenciesSimplified')
 import Diagnostic (Diagnose, ShowDiagnostic (..), runDiagnose')
 import Effectful (Eff, runPureEff)
+import Error.Diagnose (Diagnostic)
 import Eval (modifyEnv)
 import Fixity qualified
 import FlatParse.Stateful qualified as FP
@@ -17,6 +18,7 @@ import NameResolution
 import NameResolution qualified as NameRes
 import Parser
 import Prettyprinter hiding (list)
+import Prettyprinter.Render.Terminal (AnsiStyle)
 import Proto (eof, parse)
 import Relude hiding (State)
 import Repl qualified
@@ -51,10 +53,16 @@ unificationShenanigans =
     , "\\a b -> a (\\x -> b x) (\\z -> a b b) {}"
     ]
 
-toTypecheck :: [(Text, Text)]
+toTypecheck :: [(String, Text)]
 toTypecheck =
-    [ ("map", "map f xs = case xs of Nil -> Nil; Cons x xs -> Cons (f x) (map f xs)")
+    [ ("null", "null = match Nil -> True; (Cons _ _) -> False")
+    , ("map", "map f xs = case xs of Nil -> Nil; Cons x xs -> Cons (f x) (map f xs)")
     , ("len", "type Peano = S Peano | Z\nlen xs = case xs of Nil -> Z; Cons _ xs -> S (len xs)")
+    ]
+
+toReject :: [(String, Text)]
+toReject =
+    [ ("pattern matching on existentials", "type Any where MkAny : 'a -> Any\ninvalid (MkAny 11) = True")
     ]
 
 spec :: Spec
@@ -62,9 +70,11 @@ spec = do
     describe "sanity check" do
         for_ toSanityCheck \input -> it ("infers a consistent type for " <> toString input) $ sanityCheck input
     describe "typecheck" do
-        for_ toTypecheck \(name, input) -> it ("typechecks " <> toString name) $ typecheckDecls input
+        for_ toTypecheck \(name, input) -> it ("typechecks " <> name) $ acceptsDecls input
     describe "unification shenanigans" do
         for_ unificationShenanigans \input -> xit ("infers a consistent type for " <> toString input) $ sanityCheck input
+    describe "should reject some invalid programs" do
+        for_ toReject \(name, input) -> it ("rejects " <> name) $ rejectsDecls input
 
 -- verify that an expression typechecks with the type inferred for it
 sanityCheck :: Text -> Expectation
@@ -76,7 +86,7 @@ sanityCheck input =
                 afterNameRes <- NameRes.run env.scope (resolveTerm parsed)
                 afterDepRes <- skipDiagnose $ cast.term afterNameRes
                 Fixity.run env.fixityMap env.operatorPriorities $ Fixity.parse afterDepRes
-            skipTrace $ runDiagnose' [("test", input)] $ TC.run env.types do
+            skipTrace $ runDiagnose' [("test", input)] $ TC.run env.types env.conMetadata do
                 let ctx = TC.emptyContext env.values
                 (_, vTy) <- TC.generaliseTerm ctx =<< TC.infer ctx afterFixityRes
                 TC.check ctx afterFixityRes vTy
@@ -84,22 +94,22 @@ sanityCheck input =
             Nothing -> expectationFailure . show $ ShowDiagnostic diagnostic
             Just{} -> pass
 
-typecheckDecls :: Text -> Expectation
+typecheckDecls :: Text -> (Maybe Repl.ReplEnv, Diagnostic (Doc AnsiStyle))
 typecheckDecls input =
-    let Right parsed = parsePretty Parser.code input
-        (mbResult, diagnostic) = runPureEff $ runNameGen do
+    let Right decls = parsePretty Parser.code input
+     in runPureEff $ runNameGen do
             env <- skipDiagnose Repl.mkDefaultEnv
-            fixityDecls <- skipDiagnose do
-                afterNameRes <- NameRes.run env.scope (NameRes.resolveNames parsed)
-                depResOutput <- skipDiagnose $ resolveDependenciesSimplified' env.fixityMap env.operatorPriorities afterNameRes
-                Fixity.resolveFixity depResOutput.fixityMap depResOutput.operatorPriorities depResOutput.declarations
-            skipTrace $ runDiagnose' [("test", input)] $ (\f -> foldlM f (env.types, env.values) fixityDecls) \(topLevel, values) decl -> do
-                (eDecl, newTypes, newValues) <- TC.processDeclaration' topLevel values decl
-                newNewValues <- modifyEnv newValues [eDecl]
-                pure (newTypes, newNewValues)
-     in case mbResult of
-            Nothing -> expectationFailure . show $ ShowDiagnostic diagnostic
-            Just{} -> pass
+            runDiagnose' [("test", input)] $ skipTrace $ Repl.processDecls env decls
+
+acceptsDecls :: Text -> Expectation
+acceptsDecls input = case typecheckDecls input of
+    (Nothing, diagnostic) -> expectationFailure . show $ ShowDiagnostic diagnostic
+    (Just{}, _) -> pass
+
+rejectsDecls :: Text -> Expectation
+rejectsDecls input = case fst $ typecheckDecls input of
+    Nothing -> pass
+    Just{} -> expectationFailure "expected to reject program"
 
 skipDiagnose :: Eff (Diagnose : es) a -> Eff es a
 skipDiagnose = fmap (fromMaybe (error "got a fatal error diagnostic") . fst) . runDiagnose' []

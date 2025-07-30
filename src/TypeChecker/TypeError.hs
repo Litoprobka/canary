@@ -6,15 +6,17 @@ import Common
 import Data.Row (OpenName)
 import Diagnostic
 import Error.Diagnose (Marker (..), Note (Note), Report (..))
+import Eval ()
 import LangPrelude
-import Prettyprinter (vsep)
+import Prettyprinter (sep, vsep)
 import Prettyprinter.Render.Terminal (AnsiStyle)
 import Syntax
+import Syntax.Term (withVis)
 
 type CType = Located CoreType
 
 data TypeError
-    = CannotUnify {loc :: Loc, lhs :: CoreType, rhs :: CoreType, context :: UnificationError}
+    = CannotUnify {loc :: Loc, lhs :: Doc AnsiStyle, rhs :: Doc AnsiStyle, context :: UnificationError}
     | MissingField (Either CType (Term 'Fixity)) OpenName
     | MissingVariant CType OpenName
     | EmptyMatch Loc
@@ -30,13 +32,15 @@ data TypeError
     | TooManyArgumentsInPattern {loc :: Loc}
     | NotEnoughArgumentsInPattern {loc :: Loc}
 
+type Spine = [(Visibility, Value)]
+
 data UnificationError
     = NotEq CoreTerm CoreTerm
-    | PruneNonRenaming
-    | PruneNonPattern
+    | PruneNonRenaming Spine
+    | PruneNonPattern Spine
     | NonVarInSpine CoreTerm
     | OccursCheck UniVar
-    | EscapingVariable Level
+    | EscapingVariable (Maybe UniVar) Level
 
 typeError :: Diagnose :> es => TypeError -> Eff es a
 typeError =
@@ -46,7 +50,7 @@ typeError =
                 Nothing
                 "Type error"
                 (mkNotes [(loc, This "when typechecking this")])
-                [ Note $ vsep ["when trying to unify", prettyDef lhs, prettyDef rhs]
+                [ Note $ vsep ["when trying to unify", lhs, rhs]
                 , noteFromUnificationError context
                 ]
         MissingField row field ->
@@ -144,8 +148,11 @@ typeError =
 noteFromUnificationError :: UnificationError -> Note (Doc AnsiStyle)
 noteFromUnificationError = \case
     NotEq lhs rhs -> Note $ vsep ["specifically, these types are incompatible", prettyDef lhs, prettyDef rhs]
-    PruneNonRenaming -> Note "can't prune a spine that's not a renaming"
-    PruneNonPattern -> Note "can't prune a non-pattern spine"
+    PruneNonRenaming spine -> Note $ "can't prune a spine that's not a renaming:" <+> prettySpine spine
+    PruneNonPattern spine -> Note $ "can't prune a non-pattern spine:" <+> prettySpine spine
     NonVarInSpine term -> Note $ "non-var in spine:" <+> prettyDef term
-    OccursCheck uni -> Note $ "solving the unification variable" <+> pretty uni <+> "resulted in a type that refers to itself"
-    EscapingVariable lvl -> Note $ "variable" <+> "#" <> pretty lvl.getLevel <+> "is not in scope of a unification variable"
+    OccursCheck uni -> Note $ "solving the unification variable" <+> prettyDef uni <+> "resulted in a type that refers to itself"
+    EscapingVariable (Just uni) lvl -> Note $ "variable" <+> "#" <> pretty lvl.getLevel <+> "is not in scope of" <+> prettyDef uni
+    EscapingVariable Nothing lvl -> Note $ "variable" <+> "#" <> pretty lvl.getLevel <+> "is not in scope of a renaming"
+  where
+    prettySpine = sep . map (\(vis, val) -> withVis vis (prettyDef val))

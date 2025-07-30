@@ -1,6 +1,7 @@
 {-# LANGUAGE DuplicateRecordFields #-}
 {-# LANGUAGE RecordWildCards #-}
-{-# LANGUAGE NoFieldSelectors #-}
+{-# LANGUAGE ViewPatterns #-}
+{-# OPTIONS_GHC -Wno-partial-fields #-}
 
 module TypeChecker.Backend where
 
@@ -30,6 +31,39 @@ newtype ConstructorTable = ConstructorTable
     }
 data ExType = TyCon Name_ [ExType] | ExVariant (ExtRow ExType) | ExRecord (Row ExType) | OpaqueTy
     deriving (Show)
+
+{-
+maybeMetadata = ConMetadata
+    { mkGoalType = \ctx -> do
+        a <- freshUniVar ctx type_
+        pure (TyCon "Maybe" [a], eval ... [a])
+    , args = [ConParameter Type, ConArgument (Index 0)]
+    }
+-}
+newtype ConMetadata = ConMetadata (forall es. (UniEffs es, Diagnose :> es, NameGen :> es) => Context -> Eff es (VType, ConArgList))
+
+getConMetadata :: forall es. (UniEffs es, Diagnose :> es, NameGen :> es) => ConMetadata -> Context -> Eff es (VType, ConArgList)
+getConMetadata (ConMetadata f) = f
+
+type UniEffs es = (State UniVars :> es, Labeled UniVar NameGen :> es)
+
+data ConArgList
+    = Arg {vis :: Visibility, ty :: VType, mkRest :: Value -> ConArgList}
+    | Param {vis :: Visibility, ty :: VType, unifyWith :: Value, rest :: ConArgList}
+    | NoMoreArgs
+
+pattern ArgOrParam :: Visibility -> VType -> ConArgList
+pattern ArgOrParam{vis, ty} <- (getArgOrParam -> Just (vis, ty))
+
+{-# COMPLETE ArgOrParam, NoMoreArgs #-}
+
+getArgOrParam :: ConArgList -> Maybe (Visibility, VType)
+getArgOrParam = \case
+    Arg{vis, ty} -> Just (vis, ty)
+    Param{vis, ty} -> Just (vis, ty)
+    NoMoreArgs -> Nothing
+
+type ConMetaTable = IdMap Name_ ConMetadata
 
 -- | types of top-level bindings
 type TopLevel = IdMap Name_ VType
@@ -69,20 +103,24 @@ prettyValCtx :: Context -> Value -> Doc AnsiStyle
 prettyValCtx ctx = prettyCoreCtx ctx . quote EMap.empty ctx.level
 
 type TC es =
-    (Labeled UniVar NameGen :> es, NameGen :> es, Diagnose :> es, Trace :> es, State UniVars :> es, Reader TopLevel :> es)
+    (UniEffs es, NameGen :> es, Diagnose :> es, Trace :> es, Reader TopLevel :> es, Reader ConMetaTable :> es)
 
-run :: TopLevel -> Eff (State UniVars : Reader TopLevel : Labeled UniVar NameGen : es) a -> Eff es a
-run types = runLabeled @UniVar runNameGen . runReader types . evalState EMap.empty
+run
+    :: TopLevel
+    -> ConMetaTable
+    -> Eff (State UniVars : Reader TopLevel : Reader ConMetaTable : Labeled UniVar NameGen : es) a
+    -> Eff es a
+run types conMeta = runLabeled @UniVar runNameGen . runReader conMeta . runReader types . evalState EMap.empty
 
 -- | insert a new UniVar applied to all bound variables in scope
-freshUniVar :: (Labeled UniVar NameGen :> es, State UniVars :> es) => Context -> VType -> Eff es CoreTerm
+freshUniVar :: UniEffs es => Context -> VType -> Eff es CoreTerm
 freshUniVar ctx vty = do
     env <- extendEnv ctx.env
     let fullType = evalCore env $ closeType ctx.locals (quote env.univars ctx.level vty)
     uni <- newUniVar fullType
     pure $ C.AppPruning (C.UniVar uni) ctx.pruning
 
-newUniVar :: (Labeled UniVar NameGen :> es, State UniVars :> es) => VType -> Eff es UniVar
+newUniVar :: UniEffs es => VType -> Eff es UniVar
 newUniVar ty = do
     uni <- Common.UniVar <$> labeled @UniVar freshId
     modify $ EMap.insert uni Unsolved{ty}

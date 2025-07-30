@@ -5,7 +5,6 @@
 {-# LANGUAGE MonoLocalBinds #-}
 {-# LANGUAGE OverloadedRecordDot #-}
 {-# LANGUAGE UndecidableInstances #-}
-{-# LANGUAGE NoFieldSelectors #-}
 
 module Syntax.Declaration (Declaration_ (..), Declaration, Constructor (..), GadtConstructor (..)) where
 

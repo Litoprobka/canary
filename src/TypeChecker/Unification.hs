@@ -38,16 +38,16 @@ import TypeChecker.TypeError (TypeError (..), UnificationError (..), typeError)
 newtype ValueTopLevel = ValueTopLevel {getValues :: IdMap Name_ Value}
 
 askValues :: Reader ValueTopLevel :> es => Eff es (IdMap Name_ Value)
-askValues = asks @ValueTopLevel (.getValues)
+askValues = asks (.getValues)
 
 type TC' es = (TC es, Reader ValueTopLevel :> es, Error UnificationError :> es)
 
 unify :: TC es => Context -> Value -> Value -> Eff es ()
 unify ctx lhs rhs = do
     univars <- get
-    let lhsC = quote univars ctx.level lhs
-        rhsC = quote univars ctx.level rhs
-    trace $ prettyCoreCtx ctx lhsC <+> specSym "~" <+> prettyCoreCtx ctx rhsC
+    let lhsC = prettyCoreCtx ctx $ quote univars ctx.level lhs
+        rhsC = prettyCoreCtx ctx $ quote univars ctx.level rhs
+    trace $ lhsC <+> specSym "~" <+> rhsC
     result <- runErrorNoCallStack $ runReader (ValueTopLevel ctx.env.topLevel) $ unify' ctx.level lhs rhs
     case result of
         Right () -> pass
@@ -229,10 +229,10 @@ pruneUniVarApp pren uni spine = do
         forceM ty >>= \case
             Var vlvl -> case (EMap.lookup vlvl pren.renaming, status) of
                 (Just targetLvl, _) -> pure ((vis, Just $ C.Var $ levelToIndex pren.domain targetLvl) : spine', status)
-                (Nothing, NonRenaming) -> throwError_ PruneNonRenaming
+                (Nothing, NonRenaming) -> throwError_ (PruneNonRenaming spine)
                 (Nothing, _) -> pure ((vis, Nothing) : spine', NeedsPruning)
             other -> case status of
-                NeedsPruning -> throwError_ PruneNonPattern
+                NeedsPruning -> throwError_ (PruneNonPattern spine)
                 _ -> do
                     term <- rename pren other
                     pure ((vis, Just term) : spine', NonRenaming)
@@ -244,7 +244,7 @@ rename pren ty =
             | pren.uni == Just uni2 -> throwError_ (OccursCheck uni2)
             | otherwise -> pruneUniVarApp pren uni2 spine
         Stuck (VarApp lvl spine) -> case EMap.lookup lvl pren.renaming of
-            Nothing -> throwError_ (EscapingVariable lvl)
+            Nothing -> throwError_ (EscapingVariable pren.uni lvl)
             Just x -> renameSpine pren (C.Var $ levelToIndex pren.domain x) spine
         Lambda vis closure -> do
             bodyToRename <- closure `appM` Var pren.codomain
@@ -303,14 +303,13 @@ pruneType (ReversedPruning initPruning) =
   where
     go pruning pren ty = do
         ty <- forceM ty
-        univars <- get
         case (pruning, ty) of
             ([], _) -> rename pren ty
             (Just _ : rest, Q Forall vis e closure) -> do
                 argTy <- rename pren closure.ty
-                body <- go rest (lift pren) (app univars closure (Var pren.codomain))
+                body <- go rest (lift pren) =<< closure `appM` Var pren.codomain
                 pure $ C.Q Forall vis e closure.var argTy body
-            (Nothing : rest, Q Forall _ _ closure) -> go rest (skip pren) (app univars closure (Var pren.codomain))
+            (Nothing : rest, Q Forall _ _ closure) -> go rest (skip pren) =<< closure `appM` Var pren.codomain
             _ -> error "pruning: not enough arguments in a pi type"
 
 -- | apply a pruning to a univar, produce a new univar with its type also pruned
