@@ -1,13 +1,13 @@
 {-# LANGUAGE DuplicateRecordFields #-}
 {-# LANGUAGE RecordWildCards #-}
 
-module TypeChecker.Unification (unify) where
+module TypeChecker.Unification (unify, refine) where
 
 import Common
 import Data.EnumMap.Strict qualified as EMap
 import Data.EnumSet qualified as ESet
 import Data.Vector qualified as Vec
-import Diagnostic (currentLoc, internalError')
+import Diagnostic (internalError')
 import Effectful.Error.Static (Error, runErrorNoCallStack, throwError_, tryError)
 import Effectful.Reader.Static (Reader, asks, runReader)
 import Effectful.State.Static.Local (get, modify)
@@ -17,6 +17,7 @@ import Eval (
     UniVars,
     app,
     appM,
+    applySpine,
     evalAppM,
     evalCore,
     force,
@@ -33,14 +34,15 @@ import Syntax.Core qualified as C
 import Syntax.Value as V hiding (lift)
 import Trace (trace)
 import TypeChecker.Backend hiding (ExType (..))
-import TypeChecker.TypeError (TypeError (..), UnificationError (..), typeError)
+import TypeChecker.TypeError (TypeError (..), UnificationError (..), typeErrorWithLoc)
 
 newtype ValueTopLevel = ValueTopLevel {getValues :: IdMap Name_ Value}
+newtype LocalEq = LocalEq {getLocalEq :: EnumMap Level Value}
 
 askValues :: Reader ValueTopLevel :> es => Eff es (IdMap Name_ Value)
 askValues = asks (.getValues)
 
-type TC' es = (TC es, Reader ValueTopLevel :> es, Error UnificationError :> es)
+type TC' es = (TC es, Reader ValueTopLevel :> es, Reader LocalEq :> es, Error UnificationError :> es)
 
 unify :: TC es => Context -> Value -> Value -> Eff es ()
 unify ctx lhs rhs = do
@@ -48,24 +50,46 @@ unify ctx lhs rhs = do
     let lhsC = prettyCoreCtx ctx $ quote univars ctx.level lhs
         rhsC = prettyCoreCtx ctx $ quote univars ctx.level rhs
     trace $ lhsC <+> specSym "~" <+> rhsC
-    result <- runErrorNoCallStack $ runReader (ValueTopLevel ctx.env.topLevel) $ unify' ctx.level lhs rhs
+    result <-
+        runErrorNoCallStack
+            . runReader (ValueTopLevel ctx.env.topLevel)
+            . runReader (LocalEq ctx.localEquality)
+            $ unify' ctx.level lhs rhs
     case result of
         Right () -> pass
-        Left context -> do
-            -- fixme: location info should be handled outside of here
-            loc <-
-                currentLoc >>= \case
-                    Just loc -> pure loc
-                    Nothing -> internalError' "no loc available in unify"
-            typeError CannotUnify{loc, lhs = lhsC, rhs = rhsC, context}
+        Left context ->
+            typeErrorWithLoc \loc -> CannotUnify{loc, lhs = lhsC, rhs = rhsC, context}
+
+refine :: TC es => Context -> Value -> Value -> Eff es Context
+refine ctx lhs rhs = do
+    univars <- get
+    let lhsC = prettyCoreCtx ctx $ quote univars ctx.level lhs
+        rhsC = prettyCoreCtx ctx $ quote univars ctx.level rhs
+    trace $ "refine" <+> lhsC <+> specSym "~" <+> rhsC
+    result <- runErrorNoCallStack $ refine' ctx lhs rhs
+    case result of
+        Right ctx -> pure ctx
+        Left context ->
+            typeErrorWithLoc \loc -> CannotUnify{loc, lhs = lhsC, rhs = rhsC, context}
 
 unify' :: TC' es => Level -> Value -> Value -> Eff es ()
 unify' lvl lhsTy rhsTy = do
     lhs' <- forceM lhsTy
     rhs' <- forceM rhsTy
-    match lhs' rhs'
+    localEq <- asks @LocalEq (.getLocalEq)
+    match localEq lhs' rhs'
   where
-    match = \cases
+    match localEq = \cases
+        (Var vlvl) (Var vlvl2) | vlvl == vlvl2 -> pass
+        (Stuck (VarApp vlvl spine)) rhs | Just refined <- EMap.lookup vlvl localEq -> do
+            univars <- get
+            let lhs = applySpine univars refined spine
+            unify' lvl lhs rhs
+        lhs (Stuck (VarApp vlvl spine)) | Just refined <- EMap.lookup vlvl localEq -> do
+            univars <- get
+            let rhs = applySpine univars refined spine
+            unify' lvl lhs rhs
+
         -- since unify is only ever called on two values of the same type,
         -- we known that these lambdas must have the same visibility
         (Lambda _vis lhsClosure) (Lambda _vis2 rhsClosure) -> do
@@ -131,6 +155,46 @@ unifySpine lvl = \cases
     ((_, ty1) : s1) ((_, ty2) : s2) -> do
         unifySpine lvl s1 s2
         unify' lvl ty1 ty2
+    _ _ -> internalError' "spine length mismatch"
+
+-- | given two values of the same type, add local equality constraints to the given context such that the values become equal
+refine' :: (TC es, Error UnificationError :> es) => Context -> Value -> Value -> Eff es Context
+refine' ctx lhs' rhs' = do
+    lhs' <- forceM lhs'
+    rhs' <- forceM rhs'
+    match lhs' rhs'
+  where
+    -- ideally, refinement logic should mirror all the pattern unification machinery, but with rigid variables
+    match = \cases
+        (Var vlvl) (Var vlvl2) | vlvl == vlvl2 -> pure ctx
+        (Var vlvl) rhs -> case EMap.lookup vlvl ctx.localEquality of
+            Just refined -> refine' ctx refined rhs
+            Nothing -> pure ctx{localEquality = EMap.insert vlvl rhs ctx.localEquality}
+        lhs (Var vlvl) -> case EMap.lookup vlvl ctx.localEquality of
+            Just refined -> refine' ctx lhs refined
+            Nothing -> pure ctx{localEquality = EMap.insert vlvl lhs ctx.localEquality}
+        (Stuck (VarApp vlvl spine)) rhs | Just refined <- EMap.lookup vlvl ctx.localEquality -> do
+            univars <- get
+            refine' ctx (applySpine univars refined spine) rhs
+        (Stuck (VarApp vlvl spine)) (Stuck (VarApp vlvl2 spine2)) | vlvl == vlvl2 -> refineSpine ctx spine spine2
+        lhs (Stuck (VarApp vlvl spine)) | Just refined <- EMap.lookup vlvl ctx.localEquality -> do
+            univars <- get
+            refine' ctx lhs (applySpine univars refined spine)
+        (TyCon lhs lhsArgs) (TyCon rhs rhsArgs)
+            | lhs == rhs -> foldlM (\ctx ((_, lhsArg), (_, rhsArg)) -> refine' ctx lhsArg rhsArg) ctx $ Vec.zip lhsArgs rhsArgs
+            | otherwise -> throwError_ (NotEq (C.TyCon lhs Vec.empty) (C.TyCon rhs Vec.empty))
+        (Con lhs lhsArgs) (Con rhs rhsArgs)
+            | lhs == rhs -> foldlM (\ctx ((_, lhsArg), (_, rhsArg)) -> refine' ctx lhsArg rhsArg) ctx $ Vec.zip lhsArgs rhsArgs
+            | otherwise -> throwError_ (NotEq (C.Con lhs Vec.empty) (C.Con rhs Vec.empty))
+        -- fallback to unification if there's nothing to refine
+        lhs rhs -> ctx <$ unify ctx lhs rhs
+
+refineSpine :: (TC es, Error UnificationError :> es) => Context -> Spine -> Spine -> Eff es Context
+refineSpine ctx = \cases
+    [] [] -> pure ctx
+    ((_, ty1) : s1) ((_, ty2) : s2) -> do
+        ctx <- refineSpine ctx s1 s2
+        refine' ctx ty1 ty2
     _ _ -> internalError' "spine length mismatch"
 
 -- pattern unification, based on the example implementation in elaboration-zoo by Andras Kovacs

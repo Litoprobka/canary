@@ -1,6 +1,6 @@
 {-# OPTIONS_GHC -Wno-partial-fields #-}
 
-module TypeChecker.TypeError (TypeError (..), typeError, UnificationError (..)) where
+module TypeChecker.TypeError (TypeError (..), typeError, UnificationError (..), typeErrorWithLoc) where
 
 import Common
 import Data.Row (OpenName)
@@ -41,6 +41,12 @@ data UnificationError
     | NonVarInSpine CoreTerm
     | OccursCheck UniVar
     | EscapingVariable (Maybe UniVar) Level
+
+typeErrorWithLoc :: Diagnose :> es => (Loc -> TypeError) -> Eff es a
+typeErrorWithLoc mkTypeError =
+    currentLoc >>= \case
+        Nothing -> internalError' "typeErrorWithLoc: no location available"
+        Just loc -> typeError $ mkTypeError loc
 
 typeError :: Diagnose :> es => TypeError -> Eff es a
 typeError =

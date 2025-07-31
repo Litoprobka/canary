@@ -32,36 +32,35 @@ newtype ConstructorTable = ConstructorTable
 data ExType = TyCon Name_ [ExType] | ExVariant (ExtRow ExType) | ExRecord (Row ExType) | OpaqueTy
     deriving (Show)
 
-{-
-maybeMetadata = ConMetadata
-    { mkGoalType = \ctx -> do
-        a <- freshUniVar ctx type_
-        pure (TyCon "Maybe" [a], eval ... [a])
-    , args = [ConParameter Type, ConArgument (Index 0)]
-    }
--}
-newtype ConMetadata = ConMetadata (forall es. (UniEffs es, Diagnose :> es, NameGen :> es) => Context -> Eff es (VType, ConArgList))
+newtype ConMetadata
+    = ConMetadata
+        (forall es. (UniEffs es, Reader TopLevel :> es, Diagnose :> es, NameGen :> es) => Context -> Eff es (VType, ConArgList))
 
-getConMetadata :: forall es. (UniEffs es, Diagnose :> es, NameGen :> es) => ConMetadata -> Context -> Eff es (VType, ConArgList)
+getConMetadata
+    :: forall es
+     . (UniEffs es, Reader TopLevel :> es, Diagnose :> es, NameGen :> es)
+    => ConMetadata
+    -> Context
+    -> Eff es (VType, ConArgList)
 getConMetadata (ConMetadata f) = f
 
 type UniEffs es = (State UniVars :> es, Labeled UniVar NameGen :> es)
 
 data ConArgList
-    = Arg {vis :: Visibility, ty :: VType, mkRest :: Value -> ConArgList}
-    | Param {vis :: Visibility, ty :: VType, unifyWith :: Value, rest :: ConArgList}
-    | NoMoreArgs
+    = UnusedInType {vis :: Visibility, ty :: VType, mkRest :: Value -> ConArgList}
+    | UsedInType {vis :: Visibility, ty :: VType, unifyWith :: Value, rest :: ConArgList}
+    | FinalType VType
 
-pattern ArgOrParam :: Visibility -> VType -> ConArgList
-pattern ArgOrParam{vis, ty} <- (getArgOrParam -> Just (vis, ty))
+pattern Arg :: Visibility -> VType -> ConArgList
+pattern Arg{vis, ty} <- (getArg -> Just (vis, ty))
 
-{-# COMPLETE ArgOrParam, NoMoreArgs #-}
+{-# COMPLETE Arg, FinalType #-}
 
-getArgOrParam :: ConArgList -> Maybe (Visibility, VType)
-getArgOrParam = \case
-    Arg{vis, ty} -> Just (vis, ty)
-    Param{vis, ty} -> Just (vis, ty)
-    NoMoreArgs -> Nothing
+getArg :: ConArgList -> Maybe (Visibility, VType)
+getArg = \case
+    UnusedInType{vis, ty} -> Just (vis, ty)
+    UsedInType{vis, ty} -> Just (vis, ty)
+    FinalType{} -> Nothing
 
 type ConMetaTable = IdMap Name_ ConMetadata
 
@@ -70,6 +69,7 @@ type TopLevel = IdMap Name_ VType
 
 data Context = Context
     { env :: ValueEnv
+    , localEquality :: EnumMap Level Value
     , level :: Level
     , locals :: Locals
     , pruning :: Pruning -- a mask that's used for fresh univars
@@ -85,6 +85,7 @@ emptyContext :: ValueEnv -> Context
 emptyContext env =
     Context
         { env
+        , localEquality = EMap.empty
         , level = Level 0
         , types = Map.empty
         , locals = None
@@ -169,6 +170,7 @@ bind univars name ty Context{env = V.ValueEnv{locals = vlocals, ..}, ..} =
         , types = Map.insert name (level, ty) types
         , locals = Bind name (quote univars level ty) locals
         , pruning = Pruning (Just Visible : pruning.getPruning) -- 'bind' should probably take a visibility argument
+        , ..
         }
 
 {- | bind a list of new vars, where the first var in the list is the most recently bound
@@ -185,9 +187,10 @@ define name val vval ty vty Context{env = V.ValueEnv{locals = vlocals, ..}, ..} 
         , types = Map.insert name (level, vty) types
         , locals = Define name ty val locals
         , pruning = Pruning (Nothing : pruning.getPruning)
+        , ..
         }
 
-lookupSig :: TC es => Name -> Context -> Eff es (ETerm, VType)
+lookupSig :: (Reader TopLevel :> es, UniEffs es) => Name -> Context -> Eff es (ETerm, VType)
 lookupSig name ctx = do
     topLevel <- ask
     case (Map.lookup (unLoc name) ctx.types, Map.lookup (unLoc name) topLevel) of

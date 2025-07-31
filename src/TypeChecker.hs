@@ -26,7 +26,7 @@ import Syntax.Value qualified as V
 import Trace
 import TypeChecker.Backend
 import TypeChecker.TypeError (TypeError (..), typeError)
-import TypeChecker.Unification (unify)
+import TypeChecker.Unification (refine, unify)
 
 type DeclTC es =
     ( Labeled UniVar NameGen :> es
@@ -78,8 +78,9 @@ checkBinding ctx binding [] = do
             pure (name, foldr (\(vis, var) -> (:@ getLoc body) . T.Lambda vis var) body args)
         T.ValueB pat _ -> internalError (getLoc pat) "pattern destructuring bindings are not supported yet"
     eBody <- withTopLevel case Map.lookup (unLoc name) topLevel of
-        Just sig -> zonkTerm ctx =<< check ctx body sig
-        Nothing -> do
+        Just sig -> traceScope_ (specSymBlue "check" <+> prettyDef name <+> ":" <+> prettyValCtx ctx sig) do
+            zonkTerm ctx =<< check ctx body sig
+        Nothing -> traceScope_ (specSym "infer" <+> prettyDef name) do
             -- since we don't have a signature for our binding, we need a placeholder type for recursive calls
             recType <- freshUniVarV ctx (V.Type (TypeName :@ getLoc binding))
             let recCtx = ctx{env = ctx.env{V.topLevel = Map.insert (unLoc name) (V.Stuck $ V.Opaque name []) ctx.env.topLevel}}
@@ -92,7 +93,6 @@ checkBinding ctx binding [] = do
             unify recCtx recType monoTy
 
             -- after checking recursive calls, we can generalise
-            -- TODO: when we generalise a recursive binding,
             (eBody, ty) <- generaliseRecursiveTerm recCtx name inferred
             modify $ Map.insert (unLoc name) ty
             pure eBody
@@ -176,33 +176,53 @@ mkTypeConstructorMetadata loc = mkConstructorMetadata (TypeName :@ loc, V.Type (
 mkConstructorMetadata :: (Name, VType) -> VType -> ConMetadata
 mkConstructorMetadata (typeName, kind) conType = ConMetadata \ctx -> do
     params <- getTypeParams ctx.level conType
-    levelsAndUnis <- instantiate ctx kind (map snd params)
-    let goalType = V.TyCon typeName $ fromList $ zipWith (\(vis, _) (_, uni) -> (vis, uni)) params levelsAndUnis
+    (lvlMap, uniParams) <- instantiate ctx EMap.empty kind params
+    let goalType = V.TyCon typeName $ fromList uniParams
     univars <- get
-    pure (goalType, go univars (EMap.fromList levelsAndUnis) ctx.level conType)
+    pure (goalType, go univars lvlMap ctx.level conType)
   where
     getTypeParams lvl = \case
         V.Q Forall _vis _e closure -> getTypeParams (succ lvl) =<< closure `appM` V.Var lvl
         V.TyCon name params | typeName == name -> pure $ toList params
         _ -> internalError' "invalid constructor type"
 
-    -- \| instantiate type parameters with fresh unification variables:
+    --  instantiate type parameters with fresh unification variables:
     -- 'List : Type -> Type' --> '?a'
-    instantiate :: (UniEffs es, Diagnose :> es) => Context -> VType -> [Value] -> Eff es [(Level, Value)]
-    instantiate ctx = \cases
-        (V.Q Forall _ _ closure) (V.Var vlvl : rest) -> do
-            uniV <- freshUniVarV ctx closure.ty
-            innerType <- closure `appM` uniV
-            ((vlvl, uniV) :) <$> instantiate ctx innerType rest -- I'm not sure whether it's right to reuse the outer context
+    instantiate
+        :: (UniEffs es, Reader TopLevel :> es, Diagnose :> es)
+        => Context
+        -> EnumMap Level Value
+        -> VType
+        -> [(Visibility, Value)]
+        -> Eff es (EnumMap Level Value, [(Visibility, Value)])
+    instantiate ctx lvlMap = \cases
+        -- in the future, this should be generalised to any value
+        (V.Q Forall _ _ closure) ((vis, V.Con name conArgs) : rest) -> do
+            (_, conType) <- lookupSig name ctx
+            (lvlMap, newArgs) <- instantiate ctx lvlMap conType (toList conArgs)
+            let val = V.Con name $ fromList newArgs
+            innerType <- closure `appM` val
+            second ((vis, val) :) <$> instantiate ctx lvlMap innerType rest
+        (V.Q Forall _ _ closure) ((vis, V.TyCon name conArgs) : rest) -> do
+            (_, conType) <- lookupSig name ctx
+            (lvlMap, newArgs) <- instantiate ctx lvlMap conType (toList conArgs)
+            let val = V.Con name $ fromList newArgs
+            innerType <- closure `appM` val
+            second ((vis, val) :) <$> instantiate ctx lvlMap innerType rest
+        (V.Q Forall _ _ closure) ((vis, V.Var vlvl) : rest) -> do
+            val <- freshUniVarV ctx closure.ty
+            innerType <- closure `appM` val
+            second ((vis, val) :) <$> instantiate ctx (EMap.insert vlvl val lvlMap) innerType rest
         (V.Q Forall _ _ _) (_nonVar : _) -> internalError' "GADT-style indexed types are not supported yet"
-        (V.Type (L TypeName)) [] -> pure []
+        -- this case is slightly more permissive, so that `instantiate` can also be used on constructor signatures
+        (V.TyCon{}) [] -> pure (mempty, [])
         _ _ -> internalError' "parameter count mismatch"
 
     go univars params lvl = \case
         (V.Q Forall vis _e closure) -> case EMap.lookup lvl params of
-            Just val -> Param vis closure.ty val (go univars params (succ lvl) (app univars closure val))
-            Nothing -> Arg vis closure.ty (go univars params (succ lvl) . app univars closure)
-        V.TyCon{} -> NoMoreArgs
+            Just val -> UsedInType vis closure.ty val (go univars params (succ lvl) (app univars closure val))
+            Nothing -> UnusedInType vis closure.ty (go univars params (succ lvl) . app univars closure)
+        ty@V.TyCon{} -> FinalType ty
         _ -> error "invalid constructor type"
 
 -- the type is slightly imprecise, but whatever
@@ -243,7 +263,7 @@ check ctx (t :@ loc) ty = traceScope_ (prettyDef t <+> specSymBlue "⇐" <+> pre
             bodyTy <- closure `appM` V.Var ctx.level
             eBody <- check (bind univars (unLoc arg) closure.ty ctx) body bodyTy
             pure $ E.Lambda vis (E.VarP (toSimpleName_ $ unLoc arg)) eBody
-        -- this case doesn't work, but I don't why
+        -- this case doesn't work, but I'm not sure why
         {-
          (T.Lambda vis pat body, V.Q Forall qvis _e closure) | vis == qvis -> do
              arg <- freshName_ "x"
@@ -268,7 +288,7 @@ check ctx (t :@ loc) ty = traceScope_ (prettyDef t <+> specSymBlue "⇐" <+> pre
         (T.Case arg branches, result) -> do
             (eArg, argTy) <- infer ctx arg
             eBranches <- for branches \(pat, body) -> do
-                ((ePat, _), ctx) <- checkPattern Rigid ctx pat argTy
+                ((ePat, _), ctx) <- checkPattern ctx pat argTy
                 (ePat,) <$> check ctx body result
             pure (E.Case eArg eBranches)
         -- an empty match checks against any type
@@ -285,7 +305,7 @@ check ctx (t :@ loc) ty = traceScope_ (prettyDef t <+> specSymBlue "⇐" <+> pre
                 -- I'm not sure whether we should quote with
                 -- the old context or with the updated context
                 let patTy = E.Core $ quote univars ctx.level closure.ty
-                ((ePat, patVal), ctx) <- checkPattern Rigid ctx pat closure.ty
+                ((ePat, patVal), ctx) <- checkPattern ctx pat closure.ty
                 innerTy <- closure `appM` patVal
                 case nonEmpty pats of
                     Nothing -> pure ((ePat ::: patTy) :| [], ctx, innerTy)
@@ -380,7 +400,7 @@ infer ctx (t :@ loc) = traceScope (\(_, ty) -> prettyDef t <+> specSym "⇒" <+>
         arg <- freshName_ "x"
         univars <- get
         let ctx' = bind univars arg argTy ctx
-        ((ePat, _), ty, ctx) <- inferPattern Rigid ctx' pat
+        ((ePat, _), ty, ctx) <- inferPattern ctx' pat
         unify ctx argTy ty
         (eBody, bodyTy) <- insertNeutralApp ctx =<< infer ctx body
         univars <- get
@@ -482,24 +502,16 @@ typeFromTerm ctx term = do
     env <- extendEnv ctx.env
     pure $ eval env eTerm
 
--- | how to treat freshly bound variables in patterns
-data Flexible = Flex | Rigid
-
--- | produce the value of a pattern depending on flexibility
-valueFlex :: TC es => Flexible -> Context -> VType -> Eff es Value
-valueFlex Flex ctx ty = freshUniVarV ctx ty
-valueFlex Rigid ctx _ = pure $ V.Var ctx.level
-
-checkPattern :: TC es => Flexible -> Context -> Pattern 'Fixity -> VType -> Eff es ((EPattern, Value), Context)
-checkPattern flex ctx (pat :@ pLoc) ty = do
+checkPattern :: TC es => Context -> Pattern 'Fixity -> VType -> Eff es ((EPattern, Value), Context)
+checkPattern ctx (pat :@ pLoc) ty = do
     univars <- get
     traceScope_ (prettyDef pat <+> specSymBlue "⇐" <+> prettyValCtx ctx ty) $ localLoc pLoc case pat of
         T.VarP (L name) -> do
-            value <- valueFlex flex ctx ty
+            let value = V.Var ctx.level
             pure ((E.VarP (toSimpleName_ name), value), bind univars name ty ctx)
         T.WildcardP txt -> do
             name <- freshName_ $ Name' txt
-            value <- valueFlex flex ctx ty
+            let value = V.Var ctx.level
             pure ((E.WildcardP txt, value), bind univars name ty ctx)
         T.VariantP{} -> internalError' "todo: check variant pattern"
         T.RecordP{} -> internalError' "todo: check record pattern"
@@ -508,33 +520,33 @@ checkPattern flex ctx (pat :@ pLoc) ty = do
                 V.Q Exists vis2 _e closure
                     | vis /= vis2 -> typeError SigmaVisibilityMismatch{loc = getLoc lhs, expectedVis = vis, actualVis = vis2}
                     | otherwise -> do
-                        ((eLhs, lhsV), ctx) <- checkPattern flex ctx lhs closure.ty
-                        ((eRhs, rhsV), ctx) <- checkPattern flex ctx rhs =<< closure `appM` lhsV
+                        ((eLhs, lhsV), ctx) <- checkPattern ctx lhs closure.ty
+                        ((eRhs, rhsV), ctx) <- checkPattern ctx rhs =<< closure `appM` lhsV
                         pure ((E.SigmaP vis eLhs eRhs, V.Sigma lhsV rhsV), ctx)
                 _ -> fallthroughToInfer
         _ -> fallthroughToInfer
   where
     fallthroughToInfer = do
-        (ePat, inferred, ctx) <- inferPattern flex ctx $ pat :@ pLoc
+        (ePat, inferred, ctx) <- inferPattern ctx $ pat :@ pLoc
         unify ctx inferred ty
         pure (ePat, ctx)
 
-inferPattern :: TC es => Flexible -> Context -> Pattern 'Fixity -> Eff es ((EPattern, Value), VType, Context)
-inferPattern flex ctx (p :@ loc) = do
+inferPattern :: TC es => Context -> Pattern 'Fixity -> Eff es ((EPattern, Value), VType, Context)
+inferPattern ctx (p :@ loc) = do
     univars <- get
     traceScope (\(_, ty, ctx) -> prettyDef p <+> specSym "⇒" <+> prettyValCtx ctx ty) $ localLoc loc case p of
         T.VarP (L name) -> do
             ty <- freshUniVarV ctx type_
-            value <- valueFlex flex ctx ty
+            let value = V.Var ctx.level
             pure ((E.VarP (toSimpleName_ name), value), ty, bind univars name ty ctx)
         T.WildcardP txt -> do
             name <- freshName_ $ Name' txt
             ty <- freshUniVarV ctx type_
-            value <- valueFlex flex ctx ty
+            let value = V.Var ctx.level
             pure ((E.WildcardP txt, value), ty, bind univars name ty ctx)
         (T.AnnotationP pat ty) -> do
             tyV <- typeFromTerm ctx ty
-            (ePat, newLocals) <- checkPattern flex ctx pat tyV
+            (ePat, newLocals) <- checkPattern ctx pat tyV
             pure (ePat, tyV, newLocals)
         T.ConstructorP name args -> do
             conMeta <-
@@ -554,7 +566,7 @@ inferPattern flex ctx (p :@ loc) = do
                 patToCheck = case pats of
                     [] -> T.ConstructorP (NilName :@ loc) [] :@ loc
                     (pat : pats) -> T.ConstructorP (ConsName :@ loc) [(Visible, pat), (Visible, T.ListP pats :@ loc)] :@ loc
-            (ePat, ctx) <- checkPattern flex ctx patToCheck listType
+            (ePat, ctx) <- checkPattern ctx patToCheck listType
             pure (ePat, listType, ctx)
         T.LiteralP lit -> do
             let litTypeName = case lit of
@@ -570,32 +582,32 @@ inferPattern flex ctx (p :@ loc) = do
     inferConArgs
         :: TC es => Context -> ConArgList -> [(Visibility, Pattern 'Fixity)] -> Eff es ([((Visibility, EPattern), Value)], Context)
     inferConArgs ctx = \cases
-        NoMoreArgs [] -> pure ([], ctx)
-        argOrParam@ArgOrParam{vis, ty} ((vis2, pat) : pats) | vis == vis2 -> do
-            (((ePat, patV), ctx), rest) <- case argOrParam of
-                Param{unifyWith, rest} -> do
-                    checked@((_, patV), ctx) <- checkPattern Flex ctx pat ty
-                    unify ctx patV unifyWith -- this is imperfect, Flex should probably take a value to use directly or unify against
+        FinalType{} [] -> pure ([], ctx)
+        arg@Arg{vis, ty} ((vis2, pat) : pats) | vis == vis2 -> do
+            (((ePat, patV), ctx), rest) <- case arg of
+                UsedInType{unifyWith, rest} -> do
+                    checked@((_, patV), ctx) <- checkPattern ctx pat ty
+                    refine ctx patV unifyWith -- this is imperfect, Flex should probably take a value to use directly or unify against
                     pure (checked, rest)
-                Arg{mkRest} -> do
-                    checked@((_, patV), _) <- checkPattern Rigid ctx pat ty
+                UnusedInType{mkRest} -> do
+                    checked@((_, patV), _) <- checkPattern ctx pat ty
                     pure (checked, mkRest patV)
-                NoMoreArgs -> error "[bug] ArgOrParam matches NoMoreArgs"
+                FinalType{} -> error "[bug] ArgOrParam matches NoMoreArgs"
             (pats, ctx) <- inferConArgs ctx rest pats
             pure (((vis, ePat), patV) : pats, ctx)
-        argOrParam@ArgOrParam{vis, ty} pats | vis /= Visible -> do
+        arg@Arg{vis, ty} pats | vis /= Visible -> do
             name <- freshName_ "a"
-            (((insertedPat, insertedVal), ctx), rest) <- case argOrParam of
-                Param{unifyWith, rest} -> do
-                    checked@((_, insertedVal), ctx) <- checkPattern Flex ctx (T.VarP (name :@ loc) :@ loc) ty
-                    unify ctx insertedVal unifyWith -- same as in the previous case
+            (((insertedPat, insertedVal), ctx), rest) <- case arg of
+                UsedInType{unifyWith, rest} -> do
+                    checked@((_, insertedVal), ctx) <- checkPattern ctx (T.VarP (name :@ loc) :@ loc) ty
+                    refine ctx insertedVal unifyWith -- same as in the previous case
                     pure (checked, rest)
-                Arg{mkRest} -> do
-                    checked@((_, patV), _) <- checkPattern Rigid ctx (T.VarP (name :@ loc) :@ loc) ty
+                UnusedInType{mkRest} -> do
+                    checked@((_, patV), _) <- checkPattern ctx (T.VarP (name :@ loc) :@ loc) ty
                     pure (checked, mkRest patV)
-                NoMoreArgs -> error "[bug] ArgOrParam matches NoMoreArgs"
+                FinalType{} -> error "[bug] ArgOrParam matches NoMoreArgs"
             (pats, ctx) <- inferConArgs ctx rest pats
             pure (((vis, insertedPat), insertedVal) : pats, ctx)
-        ArgOrParam{} (_ : _) -> typeError ConstructorVisibilityMismatch{loc}
-        NoMoreArgs (_ : _) -> typeError TooManyArgumentsInPattern{loc}
-        ArgOrParam{} [] -> typeError NotEnoughArgumentsInPattern{loc}
+        Arg{} (_ : _) -> typeError ConstructorVisibilityMismatch{loc}
+        FinalType{} (_ : _) -> typeError TooManyArgumentsInPattern{loc}
+        Arg{} [] -> typeError NotEnoughArgumentsInPattern{loc}

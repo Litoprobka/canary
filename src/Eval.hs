@@ -143,7 +143,6 @@ quoteWhnf univars = go
         C.Name name -> C.Name name
         C.Literal lit -> C.Literal lit
         C.Var index -> go lvl $ env !! index.getIndex
-        -- \| otherwise -> traceShow ("not in scope!" <+> pretty index.getIndex <> "@" <> pretty index.getIndex <> "," <+> pretty (length env)) $ C.Var index -- does this case ever happen?
         C.TyCon name args -> C.TyCon name $ (fmap . fmap) (subst lvl env) args
         C.Con name args -> C.Con name $ (fmap . fmap) (subst lvl env) args
         C.Variant name arg -> C.Variant name $ subst lvl env arg
@@ -265,7 +264,7 @@ force !univars = \case
         -- an out of scope univar indicates a bug, but a non-fatal one
         Nothing -> Stuck $ UniVarApp uni spine
         Just Unsolved{} -> Stuck $ UniVarApp uni spine
-        Just (Solved{solution}) -> force univars $ applySpine solution spine
+        Just (Solved{solution}) -> force univars $ applySpine univars solution spine
     Stuck (Fn fn arg) -> case force univars (Stuck arg) of
         Stuck stillStuck -> Stuck (Fn fn stillStuck)
         noLongerStuck -> force univars $ evalApp univars Visible (PrimFunction fn) noLongerStuck
@@ -273,8 +272,9 @@ force !univars = \case
         Stuck stillStuck -> Stuck (Case stillStuck matches)
         noLongerStuck -> fromMaybe (error "couldn't match") $ asum $ fmap (\closure -> tryApplyPatternClosure univars closure noLongerStuck) matches
     other -> other
-  where
-    applySpine = foldr (\(vis, arg) acc -> evalApp univars vis acc arg)
+
+applySpine :: UniVars -> Value -> Spine -> Value
+applySpine !univars = foldr (\(vis, arg) acc -> evalApp univars vis acc arg)
 
 app :: UniVars -> Closure ty -> Value -> Value
 app univars Closure{env = ValueEnv{..}, body} arg = evalCore (ExtendedEnv{locals = arg : locals, ..}) body
