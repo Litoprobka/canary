@@ -197,6 +197,7 @@ mkConstructorMetadata (typeName, kind) conType = ConMetadata \ctx -> do
         -> Eff es (EnumMap Level Value, [(Visibility, Value)])
     instantiate ctx lvlMap = \cases
         -- in the future, this should be generalised to any value
+
         (V.Q Forall _ _ closure) ((vis, V.Con name conArgs) : rest) -> do
             (_, conType) <- lookupSig name ctx
             (lvlMap, newArgs) <- instantiate ctx lvlMap conType (toList conArgs)
@@ -287,8 +288,11 @@ check ctx (t :@ loc) ty = traceScope_ (prettyDef t <+> specSymBlue "⇐" <+> pre
             pure $ E.Lambda vis (E.VarP closure.var) eBody
         (T.Case arg branches, result) -> do
             (eArg, argTy) <- infer ctx arg
+            env <- extendEnv ctx.env
+            let argV = eval env eArg
             eBranches <- for branches \(pat, body) -> do
-                ((ePat, _), ctx) <- checkPattern ctx pat argTy
+                ((ePat, patV), ctx) <- checkPattern ctx pat argTy
+                ctx <- refine ctx patV argV
                 (ePat,) <$> check ctx body result
             pure (E.Case eArg eBranches)
         -- an empty match checks against any type
@@ -554,7 +558,8 @@ inferPattern ctx (p :@ loc) = do
                     Just conMeta -> pure conMeta
                     Nothing -> internalError' $ "no constructor metadata for" <+> prettyDef name
             (goalType, argsOrParams) <- getConMetadata conMeta ctx
-            (argsWithVals, ctx) <- inferConArgs ctx argsOrParams args
+            (argsWithVals, actualType, ctx) <- inferConArgs ctx argsOrParams args
+            ctx <- refine ctx actualType goalType
             let (eArgs, argVals) = unzip argsWithVals
                 valsWithVis = zip (map fst eArgs) argVals
             pure ((E.ConstructorP name eArgs, V.Con name (fromList valsWithVis)), goalType, ctx)
@@ -580,21 +585,21 @@ inferPattern ctx (p :@ loc) = do
     type_ = V.Type $ TypeName :@ loc
 
     inferConArgs
-        :: TC es => Context -> ConArgList -> [(Visibility, Pattern 'Fixity)] -> Eff es ([((Visibility, EPattern), Value)], Context)
+        :: TC es => Context -> ConArgList -> [(Visibility, Pattern 'Fixity)] -> Eff es ([((Visibility, EPattern), Value)], VType, Context)
     inferConArgs ctx = \cases
-        FinalType{} [] -> pure ([], ctx)
+        (FinalType ty) [] -> pure ([], ty, ctx)
         arg@Arg{vis, ty} ((vis2, pat) : pats) | vis == vis2 -> do
             (((ePat, patV), ctx), rest) <- case arg of
                 UsedInType{unifyWith, rest} -> do
                     checked@((_, patV), ctx) <- checkPattern ctx pat ty
-                    refine ctx patV unifyWith -- this is imperfect, Flex should probably take a value to use directly or unify against
+                    refine ctx patV unifyWith
                     pure (checked, rest)
                 UnusedInType{mkRest} -> do
                     checked@((_, patV), _) <- checkPattern ctx pat ty
                     pure (checked, mkRest patV)
-                FinalType{} -> error "[bug] ArgOrParam matches NoMoreArgs"
-            (pats, ctx) <- inferConArgs ctx rest pats
-            pure (((vis, ePat), patV) : pats, ctx)
+                FinalType{} -> error "[bug] Arg matches FinalType"
+            (pats, ty, ctx) <- inferConArgs ctx rest pats
+            pure (((vis, ePat), patV) : pats, ty, ctx)
         arg@Arg{vis, ty} pats | vis /= Visible -> do
             name <- freshName_ "a"
             (((insertedPat, insertedVal), ctx), rest) <- case arg of
@@ -605,9 +610,9 @@ inferPattern ctx (p :@ loc) = do
                 UnusedInType{mkRest} -> do
                     checked@((_, patV), _) <- checkPattern ctx (T.VarP (name :@ loc) :@ loc) ty
                     pure (checked, mkRest patV)
-                FinalType{} -> error "[bug] ArgOrParam matches NoMoreArgs"
-            (pats, ctx) <- inferConArgs ctx rest pats
-            pure (((vis, insertedPat), insertedVal) : pats, ctx)
+                FinalType{} -> error "[bug] Arg matches FinalType"
+            (pats, ty, ctx) <- inferConArgs ctx rest pats
+            pure (((vis, insertedPat), insertedVal) : pats, ty, ctx)
         Arg{} (_ : _) -> typeError ConstructorVisibilityMismatch{loc}
         FinalType{} (_ : _) -> typeError TooManyArgumentsInPattern{loc}
         Arg{} [] -> typeError NotEnoughArgumentsInPattern{loc}
