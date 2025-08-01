@@ -1,0 +1,22 @@
+type List a 
+    = Cons a (List a)
+    | Nil
+
+type Peano = S Peano | Z
+
+null xs = case xs of
+    Nil -> True
+    _ -> False
+
+notNull xs = case xs of
+    Cons x _ -> x
+
+length : forall a. List a -> Peano
+length xs = case xs of
+    Nil -> Z
+    Cons x xs' -> S (length xs')
+
+map : forall a b. (a -> b) -> List a -> List b
+map f xs = case xs of
+    Nil -> Nil
+    Cons x xs' -> Cons (f x) (map f xs')

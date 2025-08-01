@@ -316,30 +316,13 @@ spec = do
             parsePretty term "∃'a 'b. 'a -> 'b" `shouldBePretty` Right ((∃) "'a" $ (∃) "'b" $ "'a" --> "'b")
 
     describe "full programs" do
-        it "parses the old lambdaTest (with tabs)" do
-            let program =
-                    [text|
-                    main = testt (λx y -> y) where
-                     test z = z z
-                     f y = y
-                    
-                    testt = λx y -> id x
-                     (λx -> id x) 
-                     2 y
-                    
-                    id x = x
-                    ap = λf x -> f x
-                    const x y = x
-                    
-                    
-                    list = λc n -> c 1 (c 2 (c 3 n))
-                    map = λf xs cons -> xs (b cons f)
-                    b f g x = f (g x)
-                    |]
-            parsePretty code program `shouldSatisfy` isRight
-        sequenceA_ =<< runIO do
-            let testDir = [osp|./lang-tests/should-compile|]
-            fileNames <- listDirectory testDir
-            for fileNames \file -> do
-                fileContents <- decodeUtf8 <$> readFile (testDir </> file)
-                pure $ it (show $ takeFileName file) (parsePretty code fileContents `shouldSatisfy` isRight)
+        testDir [osp|./test/parser|]
+        testDir [osp|./test/typecheck|]
+
+testDir :: OsString -> Spec
+testDir dir =
+    sequenceA_ =<< runIO do
+        fileNames <- listDirectory dir
+        for fileNames \file -> do
+            fileContents <- decodeUtf8 <$> readFile (dir </> file)
+            pure $ it ("parses " <> show (takeFileName file)) (parsePretty code fileContents `shouldSatisfy` isRight)
