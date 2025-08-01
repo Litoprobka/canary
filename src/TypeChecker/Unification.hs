@@ -1,4 +1,5 @@
 {-# LANGUAGE DuplicateRecordFields #-}
+{-# LANGUAGE ImplicitParams #-}
 {-# LANGUAGE RecordWildCards #-}
 
 module TypeChecker.Unification (unify, refine) where
@@ -9,7 +10,7 @@ import Data.EnumSet qualified as ESet
 import Data.Vector qualified as Vec
 import Diagnostic (internalError')
 import Effectful.Error.Static (Error, runErrorNoCallStack, throwError_, tryError)
-import Effectful.Reader.Static (Reader, asks, runReader)
+import Effectful.Reader.Static (runReader)
 import Effectful.State.Static.Local (get, modify)
 import Eval (
     ExtendedEnv (..),
@@ -39,10 +40,7 @@ import TypeChecker.TypeError (TypeError (..), UnificationError (..), typeErrorWi
 newtype ValueTopLevel = ValueTopLevel {getValues :: IdMap Name_ Value}
 newtype LocalEq = LocalEq {getLocalEq :: EnumMap Level Value}
 
-askValues :: Reader ValueTopLevel :> es => Eff es (IdMap Name_ Value)
-askValues = asks (.getValues)
-
-type TC' es = (TC es, Reader ValueTopLevel :> es, Reader LocalEq :> es, Error UnificationError :> es)
+type TC' es = (TC es, ?topLevel :: ValueTopLevel, ?localEq :: LocalEq, Error UnificationError :> es)
 
 unify :: TC es => Context -> Value -> Value -> Eff es ()
 unify ctx lhs rhs = do
@@ -51,10 +49,11 @@ unify ctx lhs rhs = do
         rhsC = prettyCoreCtx ctx $ quote univars ctx.level rhs
     trace $ lhsC <+> specSym "~" <+> rhsC
     result <-
-        runErrorNoCallStack
-            . runReader (ValueTopLevel ctx.env.topLevel)
-            . runReader (LocalEq ctx.localEquality)
-            $ unify' ctx.level lhs rhs
+        let ?localEq = LocalEq ctx.localEquality
+         in let ?topLevel = ValueTopLevel ctx.env.topLevel
+             in runErrorNoCallStack
+                    . runReader ()
+                    $ unify' ctx.level lhs rhs
     case result of
         Right () -> pass
         Left context ->
@@ -80,16 +79,15 @@ unify' :: TC' es => Level -> Value -> Value -> Eff es ()
 unify' lvl lhsTy rhsTy = do
     lhs' <- forceM lhsTy
     rhs' <- forceM rhsTy
-    localEq <- asks @LocalEq (.getLocalEq)
-    match localEq lhs' rhs'
+    match lhs' rhs'
   where
-    match localEq = \cases
+    match = \cases
         (Var vlvl) (Var vlvl2) | vlvl == vlvl2 -> pass
-        (Stuck (VarApp vlvl spine)) rhs | Just refined <- EMap.lookup vlvl localEq -> do
+        (Stuck (VarApp vlvl spine)) rhs | Just refined <- EMap.lookup vlvl ?localEq.getLocalEq -> do
             univars <- get
             let lhs = applySpine univars refined spine
             unify' lvl lhs rhs
-        lhs (Stuck (VarApp vlvl spine)) | Just refined <- EMap.lookup vlvl localEq -> do
+        lhs (Stuck (VarApp vlvl spine)) | Just refined <- EMap.lookup vlvl ?localEq.getLocalEq -> do
             univars <- get
             let rhs = applySpine univars refined spine
             unify' lvl lhs rhs
@@ -240,8 +238,7 @@ solveWithRenaming uni (pren, pruneNonlinear) rhs = do
     ty <- typeOfUnsolvedUniVar uni
     for_ pruneNonlinear \pruning -> pruneType (reversedPruning pruning) ty
     rhs' <- rename pren{uni = Just uni} rhs
-    topLevel <- askValues
-    let env = ExtendedEnv{univars, topLevel, locals = []}
+    let env = ExtendedEnv{univars, topLevel = ?topLevel.getValues, locals = []}
     let solution = evalCore env $ lambdas univars pren.domain ty rhs'
     modify @UniVars $ EMap.insert uni $ Solved{solution, ty}
 
@@ -312,9 +309,8 @@ rename pren ty =
             | pren.uni == Just uni2 -> throwError_ (OccursCheck uni2)
             | otherwise -> pruneUniVarApp pren uni2 spine
         Stuck (VarApp lvl spine) -> do
-            localEq <- asks @LocalEq (.getLocalEq)
             univars <- get
-            case (EMap.lookup lvl pren.renaming, EMap.lookup lvl localEq) of
+            case (EMap.lookup lvl pren.renaming, EMap.lookup lvl ?localEq.getLocalEq) of
                 (Nothing, Nothing) -> throwError_ (EscapingVariable pren.uni lvl)
                 (Just x, _) -> renameSpine pren (C.Var $ levelToIndex pren.domain x) spine
                 (Nothing, Just refined) -> rename pren (applySpine univars refined spine)
@@ -388,13 +384,12 @@ pruneType (ReversedPruning initPruning) =
 pruneUniVar :: TC' es => Pruning -> UniVar -> Eff es UniVar
 pruneUniVar pruning uni = do
     univars <- get
-    topLevel <- askValues
     ty <- typeOfUnsolvedUniVar uni
-    let env = ExtendedEnv{locals = [], ..}
+    let env = ExtendedEnv{locals = [], topLevel = ?topLevel.getValues, ..}
     prunedType <- evalCore env <$> pruneType (reversedPruning pruning) ty
     newUni <- newUniVar prunedType
     univars' <- get
-    let env' = ExtendedEnv{locals = [], univars = univars', ..}
+    let env' = ExtendedEnv{locals = [], univars = univars', topLevel = ?topLevel.getValues}
         solution = evalCore env' $ lambdas univars (Level $ length pruning.getPruning) ty $ C.AppPruning (C.UniVar newUni) pruning
     modify $ EMap.insert uni $ Solved{solution, ty}
     pure newUni
