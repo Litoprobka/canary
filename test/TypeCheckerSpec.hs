@@ -1,31 +1,26 @@
+{-# LANGUAGE QuasiQuotes #-}
 {-# OPTIONS_GHC -Wno-incomplete-uni-patterns #-}
-{-# OPTIONS_GHC -Wno-unused-imports #-}
 
 module TypeCheckerSpec (spec) where
 
-import Common
-import Data.Text qualified as Text
-import DependencyResolution (SimpleOutput (..), cast, resolveDependenciesSimplified')
+import DependencyResolution (cast)
 import Diagnostic (Diagnose, ShowDiagnostic (..), runDiagnose')
 import Effectful (Eff, runPureEff)
 import Error.Diagnose (Diagnostic)
-import Eval (modifyEnv)
 import Fixity qualified
 import FlatParse.Stateful qualified as FP
 import Lexer (lex', mkTokenStream)
 import NameGen
 import NameResolution
 import NameResolution qualified as NameRes
+import NeatInterpolation
 import Parser
 import Prettyprinter hiding (list)
 import Prettyprinter.Render.Terminal (AnsiStyle)
 import Proto (eof, parse)
 import Relude hiding (State)
 import Repl qualified
-import Syntax
 import Syntax.AstTraversal
-import Syntax.Elaborated qualified as E
-import Syntax.Term qualified as T
 import Test.Hspec
 import Trace
 import TypeChecker qualified as TC
@@ -53,12 +48,38 @@ unificationShenanigans =
     , "\\a b -> a (\\x -> b x) (\\z -> a b b) {}"
     ]
 
-toTypecheck :: [(String, Text)]
-toTypecheck =
+toInfer :: [(String, Text)]
+toInfer =
     [ ("null", "null = match Nil -> True; (Cons _ _) -> False")
     , ("map", "map f xs = case xs of Nil -> Nil; Cons x xs -> Cons (f x) (map f xs)")
     , ("len", "type Peano = S Peano | Z\nlen xs = case xs of Nil -> Z; Cons _ xs -> S (len xs)")
     ]
+
+gadt :: Text
+gadt =
+    [text|
+    type Peano = S Peano | Z
+    
+    type Vec : Peano -> Type -> Type where
+      VNil : forall a . Vec Z a
+      VCons : forall (n : Peano) a . a -> Vec n a -> Vec (S n) a
+    
+    
+    len : forall a n. Vec n a -> Peano
+    len @a @n xs = case xs of
+      VNil -> Z
+      VCons _ xs -> S (len xs)
+    
+    replicate : forall a. foreach (n : Peano) -> a -> Vec n a
+    replicate @a n x = case n of
+        Z -> VNil
+        S n' -> VCons x (replicate n' x)
+    
+    vmap : forall (n : Peano) a b. (a -> b) -> Vec n a -> Vec n b
+    vmap f vec = case vec of
+      VNil -> VNil
+      VCons x xs -> VCons (f x) (vmap f xs)
+    |]
 
 toReject :: [(String, Text)]
 toReject =
@@ -70,9 +91,11 @@ spec = do
     describe "sanity check" do
         for_ toSanityCheck \input -> it ("infers a consistent type for " <> toString input) $ sanityCheck input
     describe "typecheck" do
-        for_ toTypecheck \(name, input) -> it ("typechecks " <> name) $ acceptsDecls input
+        for_ toInfer \(name, input) -> it ("infers " <> name) $ acceptsDecls input
     describe "unification shenanigans" do
         for_ unificationShenanigans \input -> xit ("infers a consistent type for " <> toString input) $ sanityCheck input
+    describe "dependent pattern matching" do
+        it "typechecks some functions on length-indexed Vec" $ acceptsDecls gadt
     describe "should reject some invalid programs" do
         for_ toReject \(name, input) -> it ("rejects " <> name) $ rejectsDecls input
 

@@ -304,6 +304,9 @@ check ctx (t :@ loc) ty = traceScope_ (prettyDef t <+> specSymBlue "⇐" <+> pre
                 (ePats,) <$> check ctx body bodyTy
           where
             errorMsg actualArgCount = NotEnoughArgumentsInTypeOfMatch{loc, expectedArgCount = length pats, actualArgCount, ty = quote univars ctx.level ty}
+            -- todo: when checking a match expression, implicit arguments may appear between other binders
+            -- we need to insert new implicit arguments if needed; I'm not sure whether it makes sense to allow
+            -- allow an implicit argument in one branch and lack thereof in others
             checkPatterns n ctx (pat :| pats) fnTy = do
                 closure <- ensurePi ctx (errorMsg n) fnTy
                 -- I'm not sure whether we should quote with
@@ -517,6 +520,17 @@ checkPattern ctx (pat :@ pLoc) ty = do
             name <- freshName_ $ Name' txt
             let value = V.Var ctx.level
             pure ((E.WildcardP txt, value), bind univars name ty ctx)
+        T.ConstructorP name args -> do
+            conMeta <-
+                asks @ConMetaTable (Map.lookup $ unLoc name) >>= \case
+                    Just conMeta -> pure conMeta
+                    Nothing -> internalError' $ "no constructor metadata for" <+> prettyDef name
+            (_, argsOrParams) <- getConMetadata conMeta ctx
+            (argsWithVals, actualType, ctx) <- inferConArgs pLoc ctx argsOrParams args
+            ctx <- refine ctx actualType ty
+            let (eArgs, argVals) = unzip argsWithVals
+                valsWithVis = zip (map fst eArgs) argVals
+            pure ((E.ConstructorP name eArgs, V.Con name (fromList valsWithVis)), ctx)
         T.VariantP{} -> internalError' "todo: check variant pattern"
         T.RecordP{} -> internalError' "todo: check record pattern"
         T.SigmaP vis lhs rhs -> do
@@ -558,7 +572,7 @@ inferPattern ctx (p :@ loc) = do
                     Just conMeta -> pure conMeta
                     Nothing -> internalError' $ "no constructor metadata for" <+> prettyDef name
             (goalType, argsOrParams) <- getConMetadata conMeta ctx
-            (argsWithVals, actualType, ctx) <- inferConArgs ctx argsOrParams args
+            (argsWithVals, actualType, ctx) <- inferConArgs loc ctx argsOrParams args
             ctx <- refine ctx actualType goalType
             let (eArgs, argVals) = unzip argsWithVals
                 valsWithVis = zip (map fst eArgs) argVals
@@ -584,35 +598,40 @@ inferPattern ctx (p :@ loc) = do
   where
     type_ = V.Type $ TypeName :@ loc
 
-    inferConArgs
-        :: TC es => Context -> ConArgList -> [(Visibility, Pattern 'Fixity)] -> Eff es ([((Visibility, EPattern), Value)], VType, Context)
-    inferConArgs ctx = \cases
-        (FinalType ty) [] -> pure ([], ty, ctx)
-        arg@Arg{vis, ty} ((vis2, pat) : pats) | vis == vis2 -> do
-            (((ePat, patV), ctx), rest) <- case arg of
-                UsedInType{unifyWith, rest} -> do
-                    checked@((_, patV), ctx) <- checkPattern ctx pat ty
-                    refine ctx patV unifyWith
-                    pure (checked, rest)
-                UnusedInType{mkRest} -> do
-                    checked@((_, patV), _) <- checkPattern ctx pat ty
-                    pure (checked, mkRest patV)
-                FinalType{} -> error "[bug] Arg matches FinalType"
-            (pats, ty, ctx) <- inferConArgs ctx rest pats
-            pure (((vis, ePat), patV) : pats, ty, ctx)
-        arg@Arg{vis, ty} pats | vis /= Visible -> do
-            name <- freshName_ "a"
-            (((insertedPat, insertedVal), ctx), rest) <- case arg of
-                UsedInType{unifyWith, rest} -> do
-                    checked@((_, insertedVal), ctx) <- checkPattern ctx (T.VarP (name :@ loc) :@ loc) ty
-                    refine ctx insertedVal unifyWith -- same as in the previous case
-                    pure (checked, rest)
-                UnusedInType{mkRest} -> do
-                    checked@((_, patV), _) <- checkPattern ctx (T.VarP (name :@ loc) :@ loc) ty
-                    pure (checked, mkRest patV)
-                FinalType{} -> error "[bug] Arg matches FinalType"
-            (pats, ty, ctx) <- inferConArgs ctx rest pats
-            pure (((vis, insertedPat), insertedVal) : pats, ty, ctx)
-        Arg{} (_ : _) -> typeError ConstructorVisibilityMismatch{loc}
-        FinalType{} (_ : _) -> typeError TooManyArgumentsInPattern{loc}
-        Arg{} [] -> typeError NotEnoughArgumentsInPattern{loc}
+inferConArgs
+    :: TC es
+    => Loc
+    -> Context
+    -> ConArgList
+    -> [(Visibility, Pattern 'Fixity)]
+    -> Eff es ([((Visibility, EPattern), Value)], VType, Context)
+inferConArgs loc ctx = \cases
+    (FinalType ty) [] -> pure ([], ty, ctx)
+    arg@Arg{vis, ty} ((vis2, pat) : pats) | vis == vis2 -> do
+        (((ePat, patV), ctx), rest) <- case arg of
+            UsedInType{unifyWith, rest} -> do
+                (ePat@(_, patV), ctx) <- checkPattern ctx pat ty
+                ctx <- refine ctx patV unifyWith
+                pure ((ePat, ctx), rest)
+            UnusedInType{mkRest} -> do
+                checked@((_, patV), _) <- checkPattern ctx pat ty
+                pure (checked, mkRest patV)
+            FinalType{} -> error "[bug] Arg matches FinalType"
+        (pats, ty, ctx) <- inferConArgs loc ctx rest pats
+        pure (((vis, ePat), patV) : pats, ty, ctx)
+    arg@Arg{vis, ty} pats | vis /= Visible -> do
+        name <- freshName_ "a"
+        (((insertedPat, insertedVal), ctx), rest) <- case arg of
+            UsedInType{unifyWith, rest} -> do
+                (inserted@(_, insertedVal), ctx) <- checkPattern ctx (T.VarP (name :@ loc) :@ loc) ty
+                ctx <- refine ctx insertedVal unifyWith
+                pure ((inserted, ctx), rest)
+            UnusedInType{mkRest} -> do
+                checked@((_, patV), _) <- checkPattern ctx (T.VarP (name :@ loc) :@ loc) ty
+                pure (checked, mkRest patV)
+            FinalType{} -> error "[bug] Arg matches FinalType"
+        (pats, ty, ctx) <- inferConArgs loc ctx rest pats
+        pure (((vis, insertedPat), insertedVal) : pats, ty, ctx)
+    Arg{} (_ : _) -> typeError ConstructorVisibilityMismatch{loc}
+    FinalType{} (_ : _) -> typeError TooManyArgumentsInPattern{loc}
+    Arg{} [] -> typeError NotEnoughArgumentsInPattern{loc}

@@ -60,6 +60,10 @@ unify ctx lhs rhs = do
         Left context ->
             typeErrorWithLoc \loc -> CannotUnify{loc, lhs = lhsC, rhs = rhsC, context}
 
+{- | given two values of the same type, add local equality constraints to the given context such that the values become equal
+note that refinement is not symmetrical wrt. local equality constraints and unification variables,
+so you generally want a value from an inner scope as the first argument and from an outer scope as the second
+-}
 refine :: TC es => Context -> Value -> Value -> Eff es Context
 refine ctx lhs rhs = do
     univars <- get
@@ -157,7 +161,6 @@ unifySpine lvl = \cases
         unify' lvl ty1 ty2
     _ _ -> internalError' "spine length mismatch"
 
--- | given two values of the same type, add local equality constraints to the given context such that the values become equal
 refine' :: (TC es, Error UnificationError :> es) => Context -> Value -> Value -> Eff es Context
 refine' ctx lhs' rhs' = do
     lhs' <- forceM lhs'
@@ -186,8 +189,9 @@ refine' ctx lhs' rhs' = do
         (Con lhs lhsArgs) (Con rhs rhsArgs)
             | lhs == rhs -> foldlM (\ctx ((_, lhsArg), (_, rhsArg)) -> refine' ctx lhsArg rhsArg) ctx $ Vec.zip lhsArgs rhsArgs
             | otherwise -> throwError_ (NotEq (C.Con lhs Vec.empty) (C.Con rhs Vec.empty))
-        -- fallback to unification if there's nothing to refine
         lhs rhs -> ctx <$ unify ctx lhs rhs
+
+-- lhs rhs -> internalError' $ "refine is too dumb for" <+> prettyValCtx ctx lhs <+> "and" <+> prettyValCtx ctx rhs
 
 refineSpine :: (TC es, Error UnificationError :> es) => Context -> Spine -> Spine -> Eff es Context
 refineSpine ctx = \cases
@@ -307,9 +311,13 @@ rename pren ty =
         Stuck (UniVarApp uni2 spine)
             | pren.uni == Just uni2 -> throwError_ (OccursCheck uni2)
             | otherwise -> pruneUniVarApp pren uni2 spine
-        Stuck (VarApp lvl spine) -> case EMap.lookup lvl pren.renaming of
-            Nothing -> throwError_ (EscapingVariable pren.uni lvl)
-            Just x -> renameSpine pren (C.Var $ levelToIndex pren.domain x) spine
+        Stuck (VarApp lvl spine) -> do
+            localEq <- asks @LocalEq (.getLocalEq)
+            univars <- get
+            case (EMap.lookup lvl pren.renaming, EMap.lookup lvl localEq) of
+                (Nothing, Nothing) -> throwError_ (EscapingVariable pren.uni lvl)
+                (Just x, _) -> renameSpine pren (C.Var $ levelToIndex pren.domain x) spine
+                (Nothing, Just refined) -> rename pren (applySpine univars refined spine)
         Lambda vis closure -> do
             bodyToRename <- closure `appM` Var pren.codomain
             C.Lambda vis closure.var <$> rename (lift pren) bodyToRename
