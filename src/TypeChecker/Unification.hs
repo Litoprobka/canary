@@ -33,7 +33,7 @@ import Syntax
 import Syntax.Core (reversedPruning)
 import Syntax.Core qualified as C
 import Syntax.Value as V hiding (lift)
-import Trace (trace)
+import Trace (trace, traceScope_)
 import TypeChecker.Backend hiding (ExType (..))
 import TypeChecker.TypeError (TypeError (..), UnificationError (..), typeErrorWithLoc)
 
@@ -68,12 +68,12 @@ refine ctx lhs rhs = do
     univars <- get
     let lhsC = prettyCoreCtx ctx $ quote univars ctx.level lhs
         rhsC = prettyCoreCtx ctx $ quote univars ctx.level rhs
-    trace $ "refine" <+> lhsC <+> specSym "~" <+> rhsC
-    result <- runErrorNoCallStack $ refine' ctx lhs rhs
-    case result of
-        Right ctx -> pure ctx
-        Left context ->
-            typeErrorWithLoc \loc -> CannotUnify{loc, lhs = lhsC, rhs = rhsC, context}
+    traceScope_ (specSym "refine" <+> lhsC <+> specSym "~" <+> rhsC) do
+        result <- runErrorNoCallStack $ refine' ctx lhs rhs
+        case result of
+            Right ctx -> pure ctx
+            Left context ->
+                typeErrorWithLoc \loc -> CannotUnify{loc, lhs = lhsC, rhs = rhsC, context}
 
 unify' :: TC' es => Level -> Value -> Value -> Eff es ()
 unify' lvl lhsTy rhsTy = do

@@ -47,19 +47,19 @@ getConMetadata (ConMetadata f) = f
 type UniEffs es = (State UniVars :> es, Labeled UniVar NameGen :> es)
 
 data ConArgList
-    = UnusedInType {vis :: Visibility, ty :: VType, mkRest :: Value -> ConArgList}
-    | UsedInType {vis :: Visibility, ty :: VType, unifyWith :: Value, rest :: ConArgList}
+    = UnusedInType {vis :: Visibility, name :: SimpleName_, ty :: VType, mkRest :: Value -> ConArgList}
+    | UsedInType {vis :: Visibility, name :: SimpleName_, ty :: VType, unifyWith :: Value, rest :: ConArgList}
     | FinalType VType
 
-pattern Arg :: Visibility -> VType -> ConArgList
-pattern Arg{vis, ty} <- (getArg -> Just (vis, ty))
+pattern Arg :: Visibility -> SimpleName_ -> VType -> ConArgList
+pattern Arg{vis, name, ty} <- (getArg -> Just (vis, name, ty))
 
 {-# COMPLETE Arg, FinalType #-}
 
-getArg :: ConArgList -> Maybe (Visibility, VType)
+getArg :: ConArgList -> Maybe (Visibility, SimpleName_, VType)
 getArg = \case
-    UnusedInType{vis, ty} -> Just (vis, ty)
-    UsedInType{vis, ty} -> Just (vis, ty)
+    UnusedInType{vis, name, ty} -> Just (vis, name, ty)
+    UsedInType{vis, name, ty} -> Just (vis, name, ty)
     FinalType{} -> Nothing
 
 type ConMetaTable = IdMap Name_ ConMetadata

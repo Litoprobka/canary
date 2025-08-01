@@ -1,0 +1,20 @@
+type Peano = S Peano | Z
+    
+type Vec : Peano -> Type -> Type where
+  VNil : forall a . Vec Z a
+  VCons : forall (n : Peano) a . a -> Vec n a -> Vec (S n) a
+
+len : forall a n. Vec n a -> Peano
+len @a @n xs = case xs of
+  VNil -> Z
+  VCons _ xs -> S (len xs)
+
+replicate : forall a. foreach (n : Peano) -> a -> Vec n a
+replicate @a n x = case n of
+    Z -> VNil
+    S n' -> VCons x (replicate n' x)
+
+vmap : forall (n : Peano) a b. (a -> b) -> Vec n a -> Vec n b
+vmap f vec = case vec of
+  VNil -> VNil
+  VCons x xs -> VCons (f x) (vmap f xs)

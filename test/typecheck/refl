@@ -1,0 +1,33 @@
+type (===) : forall a. a -> a -> Type where
+    Refl : forall a (x : a). x === x
+
+type Maybe a = Just a | Nothing
+
+indeed : forall a b. a === b -> a -> b
+indeed r x = case r of
+    Refl -> x
+
+nested : forall a b. a === b -> Maybe a -> Maybe b
+nested r x = case r of
+    Refl -> x
+
+nestedRefl : forall a b. a === b -> Maybe a === Maybe b
+nestedRefl r = case r of
+    Refl -> Refl
+
+unnested : forall a b. Maybe a === Maybe b -> a -> b
+unnested r x = case r of
+    Refl -> x
+
+symmetric : forall a b. a === b -> b === a
+symmetric r = case r of
+    Refl -> Refl
+
+transitive : forall a b c. a === b -> b === c -> a === c
+transitive ab bc = case ab of
+    Refl -> case bc of
+        Refl -> Refl
+
+underApp : forall a b f. a === b -> f a === f b
+underApp r = case r of
+    Refl -> Refl

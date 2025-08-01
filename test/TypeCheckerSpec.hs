@@ -14,7 +14,6 @@ import Lexer (lex', mkTokenStream)
 import NameGen
 import NameResolution
 import NameResolution qualified as NameRes
-import NeatInterpolation
 import Parser
 import Prettyprinter hiding (list)
 import Prettyprinter.Render.Terminal (AnsiStyle)
@@ -59,70 +58,6 @@ toInfer =
     , ("len", "type Peano = S Peano | Z\nlen xs = case xs of Nil -> Z; Cons _ xs -> S (len xs)")
     ]
 
-gadt :: Text
-gadt =
-    [text|
-    type Peano = S Peano | Z
-    
-    type Vec : Peano -> Type -> Type where
-      VNil : forall a . Vec Z a
-      VCons : forall (n : Peano) a . a -> Vec n a -> Vec (S n) a
-    
-    
-    len : forall a n. Vec n a -> Peano
-    len @a @n xs = case xs of
-      VNil -> Z
-      VCons _ xs -> S (len xs)
-    
-    replicate : forall a. foreach (n : Peano) -> a -> Vec n a
-    replicate @a n x = case n of
-        Z -> VNil
-        S n' -> VCons x (replicate n' x)
-    
-    vmap : forall (n : Peano) a b. (a -> b) -> Vec n a -> Vec n b
-    vmap f vec = case vec of
-      VNil -> VNil
-      VCons x xs -> VCons (f x) (vmap f xs)
-    |]
-
-refl :: Text
-refl =
-    [text|
-    type (===) : forall a. a -> a -> Type where
-        Refl : forall a (x : a). x === x
-
-    type Maybe a = Just a | Nothing
-
-    indeed : forall a b. a === b -> a -> b
-    indeed r x = case r of
-        Refl -> x
-
-    nested : forall a b. a === b -> Maybe a -> Maybe b
-    nested r x = case r of
-        Refl -> x
-
-    nestedRefl : forall a b. a === b -> Maybe a === Maybe b
-    nestedRefl r = case r of
-        Refl -> Refl
-
-    unnested : forall a b. Maybe a === Maybe b -> a -> b
-    unnested r x = case r of
-        Refl -> x
-
-    symmetric : forall a b. a === b -> b === a
-    symmetric r = case r of
-        Refl -> Refl
-
-    transitive : forall a b c. a === b -> b === c -> a === c
-    transitive ab bc = case ab of
-        Refl -> case bc of
-            Refl -> Refl
-
-    underApp : forall a b f. a === b -> f a === f b
-    underApp r = case r of
-        Refl -> Refl
-    |]
-
 toReject :: [(String, Text)]
 toReject =
     [ ("pattern matching on existentials", "type Any where MkAny : 'a -> Any\ninvalid (MkAny 11) = True")
@@ -138,9 +73,6 @@ spec = do
         for_ unificationShenanigans \input -> it ("infers a consistent type for " <> toString input) do
             pendingWith "smarter unification and postponing"
             sanityCheck input
-    describe "dependent pattern matching" do
-        it "typechecks some functions on length-indexed Vec" $ acceptsDecls gadt
-        it "typechecks refl" $ acceptsDecls refl
     describe "should reject some invalid programs" do
         for_ toReject \(name, input) -> it ("rejects " <> name) $ rejectsDecls input
 
@@ -150,7 +82,7 @@ spec = do
             fileNames <- listDirectory testDir
             for fileNames \file -> do
                 fileContents <- decodeUtf8 <$> readFile (testDir </> file)
-                pure $ it ("typechecks " <> show (takeFileName file)) (parsePretty code fileContents `shouldSatisfy` isRight)
+                pure $ it ("typechecks " <> show (takeFileName file)) (acceptsDecls fileContents)
 
 -- verify that an expression typechecks with the type inferred for it
 sanityCheck :: Text -> Expectation

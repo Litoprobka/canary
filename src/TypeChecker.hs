@@ -196,33 +196,22 @@ mkConstructorMetadata (typeName, kind) conType = ConMetadata \ctx -> do
         -> [(Visibility, Value)]
         -> Eff es (EnumMap Level Value, [(Visibility, Value)])
     instantiate ctx lvlMap = \cases
-        -- in the future, this should be generalised to any value
-
-        (V.Q Forall _ _ closure) ((vis, V.Con name conArgs) : rest) -> do
-            (_, conType) <- lookupSig name ctx
-            (lvlMap, newArgs) <- instantiate ctx lvlMap conType (toList conArgs)
-            let val = V.Con name $ fromList newArgs
-            innerType <- closure `appM` val
-            second ((vis, val) :) <$> instantiate ctx lvlMap innerType rest
-        (V.Q Forall _ _ closure) ((vis, V.TyCon name conArgs) : rest) -> do
-            (_, conType) <- lookupSig name ctx
-            (lvlMap, newArgs) <- instantiate ctx lvlMap conType (toList conArgs)
-            let val = V.Con name $ fromList newArgs
-            innerType <- closure `appM` val
-            second ((vis, val) :) <$> instantiate ctx lvlMap innerType rest
         (V.Q Forall _ _ closure) ((vis, V.Var vlvl) : rest) -> do
             val <- freshUniVarV ctx closure.ty
             innerType <- closure `appM` val
             second ((vis, val) :) <$> instantiate ctx (EMap.insert vlvl val lvlMap) innerType rest
-        (V.Q Forall _ _ _) (_nonVar : _) -> internalError' "GADT-style indexed types are not supported yet"
+        (V.Q Forall _ _ closure) ((vis, _) : rest) -> do
+            val <- freshUniVarV ctx closure.ty
+            innerType <- closure `appM` val
+            second ((vis, val) :) <$> instantiate ctx lvlMap innerType rest
         -- this case is slightly more permissive, so that `instantiate` can also be used on constructor signatures
-        (V.TyCon{}) [] -> pure (mempty, [])
+        (V.TyCon{}) [] -> pure (lvlMap, [])
         _ _ -> internalError' "parameter count mismatch"
 
     go univars params lvl = \case
         (V.Q Forall vis _e closure) -> case EMap.lookup lvl params of
-            Just val -> UsedInType vis closure.ty val (go univars params (succ lvl) (app univars closure val))
-            Nothing -> UnusedInType vis closure.ty (go univars params (succ lvl) . app univars closure)
+            Just val -> UsedInType vis closure.var closure.ty val (go univars params (succ lvl) (app univars closure val))
+            Nothing -> UnusedInType vis closure.var closure.ty (go univars params (succ lvl) . app univars closure)
         ty@V.TyCon{} -> FinalType ty
         _ -> error "invalid constructor type"
 
@@ -525,8 +514,9 @@ checkPattern ctx (pat :@ pLoc) ty = do
                 asks @ConMetaTable (Map.lookup $ unLoc name) >>= \case
                     Just conMeta -> pure conMeta
                     Nothing -> internalError' $ "no constructor metadata for" <+> prettyDef name
-            (_, argsOrParams) <- getConMetadata conMeta ctx
+            (goalType, argsOrParams) <- getConMetadata conMeta ctx
             (argsWithVals, actualType, ctx) <- inferConArgs pLoc ctx argsOrParams args
+            unify ctx goalType ty
             ctx <- refine ctx actualType ty
             let (eArgs, argVals) = unzip argsWithVals
                 valsWithVis = zip (map fst eArgs) argVals
@@ -619,8 +609,8 @@ inferConArgs loc ctx = \cases
             FinalType{} -> error "[bug] Arg matches FinalType"
         (pats, ty, ctx) <- inferConArgs loc ctx rest pats
         pure (((vis, ePat), patV) : pats, ty, ctx)
-    arg@Arg{vis, ty} pats | vis /= Visible -> do
-        name <- freshName_ "a"
+    arg@Arg{vis, name, ty} pats | vis /= Visible -> do
+        name <- freshName_ name
         (((insertedPat, insertedVal), ctx), rest) <- case arg of
             UsedInType{unifyWith, rest} -> do
                 (inserted@(_, insertedVal), ctx) <- checkPattern ctx (T.VarP (name :@ loc) :@ loc) ty
