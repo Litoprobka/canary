@@ -1,7 +1,6 @@
 module Desugar where
 
 import Common
-import Error.Diagnose (Position (..))
 import LangPrelude
 import Syntax
 import Syntax.Core qualified as C
@@ -17,7 +16,7 @@ desugar = \case
     E.Lambda vis (E.WildcardP arg) body -> C.Lambda vis (Name' arg) (go body)
     E.Lambda vis pat body -> C.Lambda vis "x" $ go (E.Case (E.Var (Index 0)) [(pat, E.liftAt 1 (Level $ E.patternArity pat) body)])
     E.Let binding expr -> case binding of
-        E.ValueB name body -> C.Let (toSimpleName_ $ unLoc name) (desugar body) (desugar expr)
+        E.ValueB name body -> C.Let (toSimpleName_ name) (desugar body) (desugar expr)
         E.FunctionB name args body -> desugar $ E.Let (E.ValueB name asLambda) expr
           where
             asLambda = foldr (uncurry E.Lambda) body args
@@ -46,8 +45,8 @@ desugar = \case
     E.List ty xs ->
         let cty = go ty
          in foldr
-                (\x xs -> C.Con cons $ fromList [(Implicit, cty), (Visible, go x), (Visible, xs)])
-                (C.Con nil $ fromList [(Implicit, cty)])
+                (\x xs -> C.Con ConsName $ fromList [(Implicit, cty), (Visible, go x), (Visible, xs)])
+                (C.Con NilName $ fromList [(Implicit, cty)])
                 xs
     E.Do{} -> error "todo: desugar do blocks"
     E.Q q vis er (var ::: kind) body -> C.Q q vis er var (go kind) (go body)
@@ -56,17 +55,14 @@ desugar = \case
     E.Core coreTerm -> coreTerm
   where
     go = desugar
-    cons = ConsName :@ loc
-    nil = NilName :@ loc
-    loc = Loc Position{begin = (0, 0), end = (0, 0), file = "<eval>"}
 
 -- we only support non-nested patterns for now
 flattenPattern :: EPattern -> CorePattern
 flattenPattern p = case p of
     E.VarP name -> C.VarP name
     E.WildcardP name -> C.VarP (Name' name)
-    E.ConstructorP name pats -> C.ConstructorP (unLoc name) ((fmap . fmap) asVar pats)
-    E.TypeP name pats -> C.TypeP (unLoc name) ((fmap . fmap) asVar pats)
+    E.ConstructorP name pats -> C.ConstructorP name ((fmap . fmap) asVar pats)
+    E.TypeP name pats -> C.TypeP name ((fmap . fmap) asVar pats)
     E.VariantP name pat -> C.VariantP name (asVar pat)
     E.RecordP row -> C.RecordP $ fmap asVar row
     E.SigmaP vis lhs rhs -> C.SigmaP vis (asVar lhs) (asVar rhs)

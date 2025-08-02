@@ -28,7 +28,7 @@ data TypeError
     | NoVisibleTypeArgument Loc (Type 'Fixity) CoreType
     | SigmaVisibilityMismatch {loc :: Loc, expectedVis :: Visibility, actualVis :: Visibility}
     | ConstructorVisibilityMismatch {loc :: Loc}
-    | ConstructorReturnType {con :: Name, expected :: Name, returned :: CoreTerm}
+    | ConstructorReturnType {con :: Name, expected :: Name_, returned :: CoreTerm}
     | TooManyArgumentsInPattern {loc :: Loc}
     | NotEnoughArgumentsInPattern {loc :: Loc}
 

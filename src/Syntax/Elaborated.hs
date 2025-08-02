@@ -3,7 +3,6 @@
 
 module Syntax.Elaborated where
 
-import Common (Name)
 import Common hiding (Name)
 import Data.Row
 import LangPrelude
@@ -24,7 +23,7 @@ unTyped (x ::: _) = x
 
 data ETerm
     = Var Index
-    | Name Name -- top-level binding
+    | Name Name_ -- top-level binding
     | Literal Literal
     | App Visibility ETerm ETerm
     | Lambda Visibility EPattern ETerm
@@ -51,8 +50,8 @@ data ETerm
 data EPattern
     = VarP SimpleName_
     | WildcardP Text
-    | ConstructorP Name [(Visibility, EPattern)]
-    | TypeP Name [(Visibility, EPattern)]
+    | ConstructorP Name_ [(Visibility, EPattern)]
+    | TypeP Name_ [(Visibility, EPattern)]
     | VariantP OpenName EPattern
     | RecordP (Row EPattern)
     | SigmaP Visibility EPattern EPattern
@@ -62,8 +61,8 @@ data EPattern
 
 -- where should the type info be?
 data EBinding
-    = ValueB {name :: Name, body :: ETerm}
-    | FunctionB {name :: Name, args :: NonEmpty (Visibility, EPattern), body :: ETerm}
+    = ValueB {name :: Name_, body :: ETerm}
+    | FunctionB {name :: Name_, args :: NonEmpty (Visibility, EPattern), body :: ETerm}
     deriving (Show)
 
 data EStatement
@@ -76,8 +75,8 @@ data EStatement
 data EDeclaration
     = ValueD EBinding -- no local bindings for now
     -- I'm not sure which representation for typechecked constructors makes more sense, this is the bare minimum
-    | TypeD Name [(Name, Vector Visibility)]
-    | SignatureD Name EType
+    | TypeD Name_ [(Name_, Vector Visibility)]
+    | SignatureD Name_ EType
 
 instance HasLoc a => HasLoc (Typed a) where
     getLoc (x ::: _) = getLoc x

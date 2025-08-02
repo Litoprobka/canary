@@ -61,7 +61,7 @@ processSignature ctx name sig = do
     univars <- get
     let eSig = E.Core $ quote univars ctx.level sigV
     modify $ Map.insert (unLoc name) sigV
-    pure (E.SignatureD name eSig)
+    pure (E.SignatureD (unLoc name) eSig)
 
 checkBinding
     :: DeclTC es
@@ -82,8 +82,8 @@ checkBinding ctx binding [] = do
             zonkTerm ctx =<< check ctx body sig
         Nothing -> traceScope_ (specSym "infer" <+> prettyDef name) do
             -- since we don't have a signature for our binding, we need a placeholder type for recursive calls
-            recType <- freshUniVarV ctx (V.Type (TypeName :@ getLoc binding))
-            let recCtx = ctx{env = ctx.env{V.topLevel = Map.insert (unLoc name) (V.Stuck $ V.Opaque name []) ctx.env.topLevel}}
+            recType <- freshUniVarV ctx (V.Type TypeName)
+            let recCtx = ctx{env = ctx.env{V.topLevel = Map.insert (unLoc name) (V.Stuck $ V.Opaque (unLoc name) []) ctx.env.topLevel}}
             modify $ Map.insert (unLoc name) recType
 
             inferred@(_, monoTy) <- infer recCtx body
@@ -93,31 +93,31 @@ checkBinding ctx binding [] = do
             unify recCtx recType monoTy
 
             -- after checking recursive calls, we can generalise
-            (eBody, ty) <- generaliseRecursiveTerm recCtx name inferred
+            (eBody, ty) <- generaliseRecursiveTerm recCtx (unLoc name) inferred
             modify $ Map.insert (unLoc name) ty
             pure eBody
     -- ideally, we should unwrap the body and construct a FunctionB if the original binding was a function
-    pure (E.ValueD (E.ValueB name eBody))
+    pure (E.ValueD (E.ValueB (unLoc name) eBody))
 
 processGadt :: DeclTC es => Context -> Name -> Maybe (Type 'Fixity) -> [GadtConstructor 'Fixity] -> Eff es (EDeclaration, VType)
 processGadt ctx name mbKind constructors = do
     -- we can probably infer the kind of a type from its constructors, but we don't do that for now
-    kind <- withTopLevel $ maybe (pure $ V.Type (TypeName :@ getLoc name)) (typeFromTerm ctx) mbKind
+    kind <- withTopLevel $ maybe (pure $ V.Type TypeName) (typeFromTerm ctx) mbKind
     kindC <- quoteM ctx.level kind
-    let tyCon = mkTyCon kindC name
+    let tyCon = mkTyCon kindC (unLoc name)
     modify $ Map.insert (unLoc name) kind
     modify $ Map.insert (unLoc name) (mkTypeConstructorMetadata (getLoc name) kind)
     let newCtx = ctx{env = ctx.env{V.topLevel = Map.insert (unLoc name) tyCon ctx.env.topLevel}}
     constructors <- withTopLevel $ for constructors \con -> do
         conSig <- generalise newCtx =<< typeFromTerm newCtx con.sig
-        checkGadtConstructor ctx.level name con.name conSig
+        checkGadtConstructor ctx.level (unLoc name) con.name conSig
         modify $ Map.insert (unLoc con.name) conSig
         modify $ Map.insert (unLoc con.name) (mkConstructorMetadata (name, kind) conSig)
         pure (con, quote EMap.empty (Level 0) conSig)
-    pure (E.TypeD name (map (\(con, conSig) -> (con.name, C.functionTypeArity conSig)) constructors), tyCon)
+    pure (E.TypeD (unLoc name) (map (\(con, conSig) -> (unLoc con.name, C.functionTypeArity conSig)) constructors), tyCon)
   where
     -- check that a GADT constructor actually returns the declared type
-    checkGadtConstructor :: TC es => Level -> Name -> Name -> VType -> Eff es ()
+    checkGadtConstructor :: TC es => Level -> Name_ -> Name -> VType -> Eff es ()
     checkGadtConstructor lvl typeName con conType = do
         univars <- get
         case fnResult (quote univars lvl conType) of
@@ -135,7 +135,7 @@ processType ctx name binders constructors = do
     kind <- withTopLevel $ generalise ctx =<< typeFromTerm ctx (mkTypeKind binders)
     univars <- get
     let kindC = quote univars ctx.level kind
-        tyCon = mkTyCon kindC name
+        tyCon = mkTyCon kindC (unLoc name)
     modify $ Map.insert (unLoc name) kind
     modify $ Map.insert (unLoc name) (mkTypeConstructorMetadata (getLoc name) kind)
     let newCtx = ctx{env = ctx.env{V.topLevel = Map.insert (unLoc name) tyCon ctx.env.topLevel}}
@@ -146,7 +146,7 @@ processType ctx name binders constructors = do
     -- _conMapEntry <- mkConstructorTableEntry (map (.var) binders) (map (\con -> (con.name, con.args)) constrs)
     let argVisibilities con = (Implicit <$ C.functionTypeArity kindC) <> fromList (Visible <$ con.args)
     pure
-        (E.TypeD name (map (\con -> (con.name, argVisibilities con)) constructors), tyCon)
+        (E.TypeD (unLoc name) (map (\con -> (unLoc con.name, argVisibilities con)) constructors), tyCon)
   where
     -- convert a list of binders to a type expression
     -- e.g. a b (c : Int) d
@@ -171,10 +171,10 @@ processType ctx name binders constructors = do
         fullType loc' = foldl' (\lhs -> (:@ loc') . T.App Visible lhs) (T.Name name :@ getLoc name) ((:@ loc') . T.Name . (.var) <$> binders)
 
 mkTypeConstructorMetadata :: Loc -> VType -> ConMetadata
-mkTypeConstructorMetadata loc = mkConstructorMetadata (TypeName :@ loc, V.Type (TypeName :@ loc))
+mkTypeConstructorMetadata loc = mkConstructorMetadata (TypeName :@ loc, V.Type TypeName)
 
 mkConstructorMetadata :: (Name, VType) -> VType -> ConMetadata
-mkConstructorMetadata (typeName, kind) conType = ConMetadata \ctx -> do
+mkConstructorMetadata (L typeName, kind) conType = ConMetadata \ctx -> do
     params <- getTypeParams ctx.level conType
     (lvlMap, uniParams) <- instantiate ctx EMap.empty kind params
     let goalType = V.TyCon typeName $ fromList uniParams
@@ -266,7 +266,7 @@ check ctx (t :@ loc) ty = traceScope_ (prettyDef t <+> specSymBlue "⇐" <+> pre
         -}
         -- we can check against a dependent type, but I'm not sure how
         (T.If cond true false, _) -> do
-            eCond <- check ctx cond $ V.Type (BoolName :@ loc)
+            eCond <- check ctx cond $ V.Type BoolName
             eTrue <- check ctx true ty'
             eFalse <- check ctx false ty'
             pure (E.If eCond eTrue eFalse)
@@ -318,7 +318,7 @@ check ctx (t :@ loc) ty = traceScope_ (prettyDef t <+> specSymBlue "⇐" <+> pre
             unify ctx inferred expected
             pure eTerm
   where
-    type_ = V.Type (TypeName :@ loc)
+    type_ = V.Type TypeName
     ensurePi ctx errorMsg =
         forceM >=> \case
             V.Pi closure -> pure closure
@@ -338,9 +338,9 @@ infer ctx (t :@ loc) = traceScope (\(_, ty) -> prettyDef t <+> specSym "⇒" <+>
     T.Annotation term ty -> do
         vty <- typeFromTerm ctx ty
         (,vty) <$> check ctx term vty
-    T.Literal lit -> pure (E.Literal lit, V.Type $ litTypeName :@ loc)
+    T.Literal lit -> pure (E.Literal lit, litType)
       where
-        litTypeName = case lit of
+        litType = V.Type case lit of
             IntLiteral{} -> IntName
             TextLiteral{} -> TextName
             CharLiteral{} -> CharName
@@ -417,7 +417,7 @@ infer ctx (t :@ loc) = traceScope (\(_, ty) -> prettyDef t <+> specSym "⇒" <+>
         (eDef, ty) <- infer ctx definition
         env <- extendEnv ctx.env
         (eBody, bodyTy) <- infer (define (unLoc name) (desugar eDef) (eval env eDef) (quote env.univars ctx.level ty) ty ctx) body
-        pure (E.Let (E.ValueB name eDef) eBody, bodyTy)
+        pure (E.Let (E.ValueB (unLoc name) eDef) eBody, bodyTy)
     T.Let{} -> internalError' "destructuring bindings and function bindings are not supported yet"
     T.LetRec{} -> internalError' "let rec not supported yet"
     T.Do{} -> internalError' "do notation not supported yet"
@@ -436,7 +436,7 @@ infer ctx (t :@ loc) = traceScope (\(_, ty) -> prettyDef t <+> specSym "⇒" <+>
         pure (eBody, fullType)
     -- we don't infer dependent if, because that would mask type errors a lot of the time
     T.If cond true false -> do
-        eCond <- check ctx cond $ V.Type (BoolName :@ loc)
+        eCond <- check ctx cond $ V.Type BoolName
         (eTrue, trueTy) <- infer ctx true
         (eFalse, falseTy) <- infer ctx false
         unify ctx trueTy falseTy
@@ -465,7 +465,7 @@ infer ctx (t :@ loc) = traceScope (\(_, ty) -> prettyDef t <+> specSym "⇒" <+>
         env <- extendEnv ctx.env
         let itemTyV = evalCore env itemTy
         eItems <- traverse (\item -> check ctx item itemTyV) items
-        pure (E.List (E.Core itemTy) eItems, V.TyCon (ListName :@ loc) $ fromList [(Visible, itemTyV)])
+        pure (E.List (E.Core itemTy) eItems, V.TyCon ListName $ fromList [(Visible, itemTyV)])
     T.RecordT row -> do
         eRow <- traverse (\field -> check ctx field type_) row
         pure (E.RecordT eRow, type_)
@@ -487,7 +487,7 @@ infer ctx (t :@ loc) = traceScope (\(_, ty) -> prettyDef t <+> specSym "⇒" <+>
         eBody <- check (bind univars (unLoc binder.var) (eval env eTy) ctx) body type_
         pure (E.Q q v e (unLoc (toSimpleName binder.var) ::: eTy) eBody, type_)
   where
-    type_ = V.Type $ TypeName :@ loc
+    type_ = V.Type TypeName
 
     -- construct a multi-arg non-dependent function type
     -- ?a -> ?b -> ?c -> ?d
@@ -499,7 +499,7 @@ infer ctx (t :@ loc) = traceScope (\(_, ty) -> prettyDef t <+> specSym "⇒" <+>
 -- check a term against Type and evaluate it
 typeFromTerm :: TC es => Context -> Term 'Fixity -> Eff es VType
 typeFromTerm ctx term = do
-    eTerm <- check ctx term (V.Type (TypeName :@ getLoc term))
+    eTerm <- check ctx term (V.Type TypeName)
     env <- extendEnv ctx.env
     pure $ eval env eTerm
 
@@ -514,9 +514,9 @@ checkPattern ctx (pat :@ pLoc) ty = do
             name <- freshName_ $ Name' txt
             let value = V.Var ctx.level
             pure ((E.WildcardP txt, value), bind univars name ty ctx)
-        T.ConstructorP name args -> do
+        T.ConstructorP (L name) args -> do
             conMeta <-
-                asks @ConMetaTable (Map.lookup $ unLoc name) >>= \case
+                asks @ConMetaTable (Map.lookup name) >>= \case
                     Just conMeta -> pure conMeta
                     Nothing -> internalError' $ "no constructor metadata for" <+> prettyDef name
             (goalType, argsOrParams) <- getConMetadata conMeta ctx
@@ -561,9 +561,9 @@ inferPattern ctx (p :@ loc) = do
             tyV <- typeFromTerm ctx ty
             (ePat, newLocals) <- checkPattern ctx pat tyV
             pure (ePat, tyV, newLocals)
-        T.ConstructorP name args -> do
+        T.ConstructorP (L name) args -> do
             conMeta <-
-                asks @ConMetaTable (Map.lookup $ unLoc name) >>= \case
+                asks @ConMetaTable (Map.lookup name) >>= \case
                     Just conMeta -> pure conMeta
                     Nothing -> internalError' $ "no constructor metadata for" <+> prettyDef name
             (goalType, argsOrParams) <- getConMetadata conMeta ctx
@@ -576,22 +576,22 @@ inferPattern ctx (p :@ loc) = do
         -- list patterns should be desugared later on
         T.ListP pats -> do
             itemType <- freshUniVarV ctx type_
-            let listType = V.TyCon (ListName :@ loc) $ fromList [(Visible, itemType)]
+            let listType = V.TyCon ListName $ fromList [(Visible, itemType)]
                 patToCheck = case pats of
                     [] -> T.ConstructorP (NilName :@ loc) [] :@ loc
                     (pat : pats) -> T.ConstructorP (ConsName :@ loc) [(Visible, pat), (Visible, T.ListP pats :@ loc)] :@ loc
             (ePat, ctx) <- checkPattern ctx patToCheck listType
             pure (ePat, listType, ctx)
-        T.LiteralP lit -> do
-            let litTypeName = case lit of
-                    IntLiteral{} -> IntName
-                    TextLiteral{} -> TextName
-                    CharLiteral{} -> CharName
-            pure ((E.LiteralP lit, V.PrimValue lit), V.Type (litTypeName :@ loc), ctx)
+        T.LiteralP lit -> pure ((E.LiteralP lit, V.PrimValue lit), litType, ctx)
+          where
+            litType = V.Type case lit of
+                IntLiteral{} -> IntName
+                TextLiteral{} -> TextName
+                CharLiteral{} -> CharName
         T.VariantP{} -> internalError' "todo: infer variant pattern"
         T.RecordP{} -> internalError' "todo: infer record pattern"
   where
-    type_ = V.Type $ TypeName :@ loc
+    type_ = V.Type TypeName
 
 inferConArgs
     :: TC es

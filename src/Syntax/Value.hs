@@ -24,9 +24,9 @@ type VType = Value
 
 data Value
     = -- | a fully-applied type constructor
-      TyCon Name (Vector (Visibility, Value))
+      TyCon Name_ (Vector (Visibility, Value))
     | -- | a fully-applied counstructor
-      Con Name (Vector (Visibility, Value))
+      Con Name_ (Vector (Visibility, Value))
     | Lambda Visibility (Closure ())
     | -- | an escape hatch for interpreter primitives and similar stuff
       PrimFunction PrimFunc
@@ -44,7 +44,7 @@ data Value
 data Stuck
     = VarApp Level Spine
     | -- | bindings with an inaccessible definition
-      Opaque Name Spine
+      Opaque Name_ Spine
     | UniVarApp UniVar Spine
     | Fn PrimFunc Stuck
     | Case Stuck [PatternClosure ()]
@@ -59,7 +59,7 @@ pattern UniVar uni <- Stuck (UniVarApp uni [])
     where
         UniVar uni = Stuck (UniVarApp uni [])
 
-pattern Type :: Name -> Value
+pattern Type :: Name_ -> Value
 pattern Type name <- TyCon name (Vec.null -> True)
     where
         Type name = TyCon name Vec.empty
@@ -70,7 +70,7 @@ pattern Pi closure <- Q Forall Visible Retained closure
         Pi closure = Q Forall Visible Retained closure
 
 data PrimFunc = PrimFunc
-    { name :: Name
+    { name :: Name_
     , remaining :: Int
     , captured :: [Value]
     , f :: NonEmpty Value -> Value

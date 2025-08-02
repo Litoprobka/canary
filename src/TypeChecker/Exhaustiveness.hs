@@ -108,7 +108,7 @@ simplifyPattern = \case
     E.VarP{} -> Wildcard
     E.WildcardP{} -> Wildcard
     -- ideally, we should retain visibility information for cleaner errors
-    E.ConstructorP name pats -> Con (unLoc name) $ fmap (simplifyPattern . snd) pats
+    E.ConstructorP name pats -> Con name $ fmap (simplifyPattern . snd) pats
     E.TypeP{} -> error "todo: exhaustiveness checking for type patterns"
     E.ListP pats -> foldr (\x xs -> Con ConsName [simplifyPattern x, xs]) (Con NilName []) pats
     E.VariantP name arg -> VariantP (unLoc name) $ simplifyPattern arg
@@ -127,7 +127,7 @@ simplifyPatternTypeWith = \case
     V.Var{} -> pure $ const OpaqueTy
     V.TyCon name args -> do
         argFns <- traverse (simplifyPatternTypeWith . snd) args
-        pure $ \env -> TyCon (unLoc name) $ map ($ env) (toList argFns)
+        pure $ \env -> TyCon name $ map ($ env) (toList argFns)
     -- todo: compress the rows wrt. solved univars
     V.VariantT row -> do
         fnRow <- traverse simplifyPatternTypeWith row

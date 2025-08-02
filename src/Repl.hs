@@ -95,9 +95,9 @@ noLoc = C.Located builtin
 emptyEnv :: ReplEnv
 emptyEnv = ReplEnv{loadedFiles = mempty, ..}
   where
-    values = ValueEnv{topLevel = Map.one TypeName (V.Type (noLoc TypeName)), locals = []}
+    values = ValueEnv{topLevel = Map.one TypeName (V.Type TypeName), locals = []}
     fixityMap = Map.one AppOp InfixL
-    types = Map.one TypeName (V.Type (noLoc TypeName))
+    types = Map.one TypeName (V.Type TypeName)
     conMetadata = Map.empty
     scope = Scope $ HashMap.singleton "Type" (noLoc TypeName)
     (_, operatorPriorities) = Poset.eqClass AppOp Poset.empty

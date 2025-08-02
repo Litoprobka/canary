@@ -195,10 +195,10 @@ lookupSig name ctx = do
     topLevel <- ask
     case (Map.lookup (unLoc name) ctx.types, Map.lookup (unLoc name) topLevel) of
         (Just (lvl, ty), _) -> pure (E.Var (levelToIndex ctx.level lvl), ty)
-        (_, Just ty) -> pure (E.Name name, ty)
+        (_, Just ty) -> pure (E.Name $ unLoc name, ty)
         (Nothing, Nothing) -> do
-            ty <- freshUniVarV ctx (V.Type $ TypeName :@ getLoc name)
-            (E.Name name,) <$> freshUniVarV ctx ty
+            ty <- freshUniVarV ctx (V.Type TypeName)
+            (E.Name $ unLoc name,) <$> freshUniVarV ctx ty
 
 generalise :: TC es => Context -> VType -> Eff es VType
 generalise ctx ty = snd <$> generalise' ctx Nothing (Nothing, ty)
@@ -206,7 +206,7 @@ generalise ctx ty = snd <$> generalise' ctx Nothing (Nothing, ty)
 generaliseTerm :: TC es => Context -> (ETerm, VType) -> Eff es (ETerm, VType)
 generaliseTerm ctx (term, ty) = first runIdentity <$> generalise' ctx Nothing (Identity term, ty)
 
-generaliseRecursiveTerm :: TC es => Context -> Name -> (ETerm, VType) -> Eff es (ETerm, VType)
+generaliseRecursiveTerm :: TC es => Context -> Name_ -> (ETerm, VType) -> Eff es (ETerm, VType)
 generaliseRecursiveTerm ctx name (term, ty) = first runIdentity <$> generalise' ctx (Just name) (Identity term, ty)
 
 -- | zonk unification variables from a term, report an error on leftover free variables
@@ -223,7 +223,7 @@ zonkTerm ctx term = do
 {- | zonk unification variables from a term and its type,
 generalise unsolved variables to new forall binders
 -}
-generalise' :: (TC es, Traversable t) => Context -> Maybe Name -> (t ETerm, VType) -> Eff es (t ETerm, VType)
+generalise' :: (TC es, Traversable t) => Context -> Maybe Name_ -> (t ETerm, VType) -> Eff es (t ETerm, VType)
 generalise' ctx mbName (mbTerm, ty) = do
     -- quote forces a term to normal form and applies all solved univars
     -- quoteWhnf would also work here, I'm not sure which one is better in this case

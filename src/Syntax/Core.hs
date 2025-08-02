@@ -7,7 +7,6 @@ import Common (
     Index (..),
     Level (..),
     Literal,
-    Name,
     Name_ (ConsName, NilName, TypeName),
     PrettyAnsi (..),
     PrettyOptions,
@@ -20,7 +19,6 @@ import Common (
     keyword,
     specSym,
     typeColor,
-    pattern L,
  )
 import Data.List ((!!))
 import Data.Row (ExtRow (..), OpenName, Row, prettyRecord, prettyVariant, sortedRow)
@@ -59,13 +57,13 @@ type CoreType = CoreTerm
 
 data CoreTerm
     = Var Index
-    | Name Name
+    | Name Name_
     | -- TyCon and Con are treated more or less the same way everywhere
       -- it could have made sense to merge them, except an optimised representation of Con
       -- would probably store a constructor tag (e.g. 0 for False, 1 for True) instead of a global name
       -- I guess, for now it's easier to keep the redundant TyCon
-      TyCon Name (Vector (Visibility, CoreTerm))
-    | Con Name (Vector (Visibility, CoreTerm))
+      TyCon Name_ (Vector (Visibility, CoreTerm))
+    | Con Name_ (Vector (Visibility, CoreTerm))
     | Variant OpenName CoreTerm
     | Lambda Visibility SimpleName_ CoreTerm
     | App Visibility CoreTerm CoreTerm
@@ -105,9 +103,9 @@ prettyEnv = go 0 . map prettyAnsi
         TyCon name args -> parensWhen 3 $ hsep (typeColor (prettyAnsi name) : map (\(vis, t) -> withVis vis (go 3 env t)) (Vec.toList args))
         -- list sugar doesn't really make sense with explicit type applications, perhaps I should remove it
         -- another option is `[a, b, c] @ty`
-        Con (L ConsName) (_ty :< (_, x) :< (_, Con (L NilName) Nil) :< Nil) -> brackets $ go 0 env x
-        Con (L ConsName) (_ty :< (_, x) :< (_, xs) :< Nil) | Just output <- prettyConsNil xs -> brackets $ go 0 env x <> output
-        Con (L NilName) (_ty :< Nil) -> "[]"
+        Con ConsName (_ty :< (_, x) :< (_, Con NilName Nil) :< Nil) -> brackets $ go 0 env x
+        Con ConsName (_ty :< (_, x) :< (_, xs) :< Nil) | Just output <- prettyConsNil xs -> brackets $ go 0 env x <> output
+        Con NilName (_ty :< Nil) -> "[]"
         Con name Nil -> conColor $ prettyAnsi name
         Con name args -> parensWhen 3 $ hsep (conColor (prettyAnsi name) : map (\(vis, t) -> withVis vis (go 3 env t)) (Vec.toList args))
         lambda@Lambda{} -> parensWhen 1 $ specSym "λ" <> compressLambda env lambda
@@ -142,8 +140,8 @@ prettyEnv = go 0 . map prettyAnsi
         kw Exists Retained = keyword "Σ"
 
         prettyConsNil = \case
-            Con (L ConsName) (_ty :< (_, x') :< (_, xs') :< Nil) -> (("," <+> go 0 env x') <>) <$> prettyConsNil xs'
-            Con (L NilName) (_ty :< Nil) -> Just ""
+            Con ConsName (_ty :< (_, x') :< (_, xs') :< Nil) -> (("," <+> go 0 env x') <>) <$> prettyConsNil xs'
+            Con NilName (_ty :< Nil) -> Just ""
             _ -> Nothing
 
     compressLambda env term = case term of
@@ -166,7 +164,7 @@ prettyEnv = go 0 . map prettyAnsi
         -- if the of a binder has the shape '... -> ... -> Type', it is probably used
         -- like a scoped type parameter, so its actual type is not that important and can be omitted in pretty-printing
         endsInType = \case
-            TyCon (L TypeName) v | Vec.null v -> True
+            TyCon TypeName v | Vec.null v -> True
             Q _ _ _ _ _ body -> endsInType body
             _ -> False
 

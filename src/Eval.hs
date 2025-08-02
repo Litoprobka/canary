@@ -12,7 +12,6 @@ module Eval where
 import Common (
     Index (..),
     Level (..),
-    Name,
     Name_,
     PrettyAnsi (..),
     SimpleName_ (..),
@@ -21,8 +20,6 @@ import Common (
     incLevel,
     levelToIndex,
     prettyDef,
-    unLoc,
-    pattern L,
  )
 
 -- IdMap is currently lazy anyway, but it's up to change
@@ -179,7 +176,7 @@ quoteWhnf univars = go
 evalCore :: ExtendedEnv -> CoreTerm -> Value
 evalCore env@ExtendedEnv{..} = \case
     -- note that env.topLevel is a lazy IdMap, so we only force the outer structure here
-    C.Name name -> LMap.lookupDefault (Stuck $ Opaque name []) (unLoc name) env.topLevel
+    C.Name name -> LMap.lookupDefault (Stuck $ Opaque name []) name env.topLevel
     C.Var index
         | index.getIndex < length env.locals -> env.locals !! index.getIndex
         | otherwise -> error . show $ "index" <+> pretty index.getIndex <+> "out of scope of env@" <> pretty (length env.locals)
@@ -297,11 +294,11 @@ skolemizePatternClosure univars level closure = (evalCore env closure.body, newL
 matchCore :: ExtendedEnv -> CorePattern -> Value -> Maybe ExtendedEnv
 matchCore ExtendedEnv{..} = \cases
     C.VarP{} val -> Just $ ExtendedEnv{locals = val : locals, ..}
-    (C.ConstructorP pname _) (Con (L name) args)
+    (C.ConstructorP pname _) (Con name args)
         | pname == name ->
             -- since locals is a SnocList, we have to reverse args before appending
             Just ExtendedEnv{locals = reverse (map snd $ toList args) <> locals, ..}
-    (C.TypeP pname _) (TyCon (L name) args)
+    (C.TypeP pname _) (TyCon name args)
         | pname == name -> Just ExtendedEnv{locals = reverse (map snd $ toList args) <> locals, ..}
     (C.VariantP pname _) (Variant name val)
         | pname == name -> Just ExtendedEnv{locals = val : locals, ..}
@@ -332,14 +329,14 @@ modifyEnv ValueEnv{..} decls = do
   where
     collectBindings :: EDeclaration -> Eff es [(Name_, Either Value ETerm)]
     collectBindings decl = case decl of
-        D.ValueD (E.ValueB name body) -> pure [(unLoc name, Right body)]
-        D.ValueD (E.FunctionB name args body) -> pure [(unLoc name, Right $ foldr (uncurry E.Lambda) body args)]
+        D.ValueD (E.ValueB name body) -> pure [(name, Right body)]
+        D.ValueD (E.FunctionB name args body) -> pure [(name, Right $ foldr (uncurry E.Lambda) body args)]
         -- todo: value constructors have to be in scope by the time we typecheck definitions that depend on them (say, GADTs)
         -- the easiest way is to just apply `typecheck` and `modifyEnv` declaration-by-declaration
         D.TypeD _ constrs -> pure $ fmap mkConstr constrs
         D.SignatureD{} -> pure mempty
 
-    mkConstr (name, vises) = (unLoc name, Left $ mkConLambda vises (C.Con name))
+    mkConstr (name, vises) = (name, Left $ mkConLambda vises (C.Con name))
 
 -- todo: [Visibility] -> Name -> Value
 mkConLambda :: Vector Visibility -> (Vector (Visibility, CoreTerm) -> CoreTerm) -> Value
@@ -351,5 +348,5 @@ mkConLambda vises con = evalCore emptyEnv lambdas
     body = con $ Vec.zipWith (\vis ix -> (vis, C.Var (Index ix))) vises (Vec.fromListN n [n - 1, n - 2 .. 0])
     emptyEnv = ExtendedEnv{univars = EMap.empty, topLevel = LMap.empty, locals = []}
 
-mkTyCon :: CoreType -> Name -> Value
+mkTyCon :: CoreType -> Name_ -> Value
 mkTyCon ty name = mkConLambda (C.functionTypeArity ty) (C.TyCon name)
