@@ -9,7 +9,7 @@ import Data.IdMap qualified as Map
 import Data.List.NonEmpty qualified as NE
 import Data.Row (ExtRow (..))
 import Data.Vector qualified as Vec
-import Desugar (desugar, flattenPattern)
+import Desugar (desugar)
 import Diagnostic
 import Effectful.Labeled (Labeled, runLabeled)
 import Effectful.Reader.Static
@@ -253,15 +253,16 @@ check ctx (t :@ loc) ty = traceScope_ (prettyDef t <+> specSymBlue "⇐" <+> pre
             bodyTy <- closure `appM` V.Var ctx.level
             eBody <- check (bind univars (unLoc arg) closure.ty ctx) body bodyTy
             pure $ E.Lambda vis (E.VarP (toSimpleName_ $ unLoc arg)) eBody
-        -- this case doesn't work, but I'm not sure why
+        -- this case doesn't work at the moment, because the new var is not
+        -- present in the elaborated term, and the indices no longer line up
         {-
-         (T.Lambda vis pat body, V.Q Forall qvis _e closure) | vis == qvis -> do
-             arg <- freshName_ "x"
-             let ctx' = bind univars arg closure.ty ctx
-             ((ePat, val), ctx) <- checkPattern ctx' pat closure.ty
-             bodyTy <- closure `appM` val
-             eBody <- check ctx body bodyTy
-             pure (E.Lambda vis ePat eBody)
+        (T.Lambda vis pat body, V.Q Forall qvis _e closure) | vis == qvis -> do
+            arg <- freshName_ "x"
+            let ctx' = bind univars arg closure.ty ctx
+            ((ePat, val), ctx) <- checkPattern ctx' pat closure.ty
+            bodyTy <- closure `appM` val
+            eBody <- check ctx body bodyTy
+            pure (E.Lambda vis ePat eBody)
         -}
         -- we can check against a dependent type, but I'm not sure how
         (T.If cond true false, _) -> do
@@ -390,7 +391,10 @@ infer ctx (t :@ loc) = traceScope (\(_, ty) -> prettyDef t <+> specSym "⇒" <+>
         let var = toSimpleName_ arg
             quotedBody = quote univars (succ ctx.level) bodyTy
         pure (E.Lambda vis (E.VarP var) eBody, V.Q Forall vis Retained V.Closure{ty, var, env = ctx.env, body = quotedBody})
+    T.Lambda{} -> internalError' "can't infer a type for a non-trivial pattern lambda (yet)"
     -- the type of a pattern lambda has the shape '(x : argTy) -> (case x of pat -> bodyTy)'
+    -- this case is broken for the same reason as the `check` case for pattern lambdas
+    {-
     T.Lambda vis pat body -> do
         argTy <- freshUniVarV ctx type_
         arg <- freshName_ "x"
@@ -406,7 +410,8 @@ infer ctx (t :@ loc) = traceScope (\(_, ty) -> prettyDef t <+> specSym "⇒" <+>
         let bodyTyC = quote univars (ctx.level `incLevel` (E.patternArity ePat + 1)) bodyTy
             body = C.Case (C.Var (Index 0)) [(flattenPattern ePat, bodyTyC)]
             lambdaTy = V.Q Forall vis Retained V.Closure{ty, var = "x", env = ctx.env, body}
-        pure (E.Lambda vis (E.VarP "x") eBody, lambdaTy)
+        pure (E.Lambda vis ePat eBody, lambdaTy)
+    -}
     T.WildcardLambda{} -> internalError' "wip: wildcard lambda"
     T.Let (T.ValueB (T.VarP name :@ _) definition) body -> do
         (eDef, ty) <- infer ctx definition
@@ -563,7 +568,7 @@ inferPattern ctx (p :@ loc) = do
                     Nothing -> internalError' $ "no constructor metadata for" <+> prettyDef name
             (goalType, argsOrParams) <- getConMetadata conMeta ctx
             (argsWithVals, actualType, ctx) <- inferConArgs loc ctx argsOrParams args
-            ctx <- refine ctx actualType goalType
+            unify ctx actualType goalType
             let (eArgs, argVals) = unzip argsWithVals
                 valsWithVis = zip (map fst eArgs) argVals
             pure ((E.ConstructorP name eArgs, V.Con name (fromList valsWithVis)), goalType, ctx)

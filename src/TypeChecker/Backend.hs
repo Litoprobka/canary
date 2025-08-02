@@ -16,7 +16,7 @@ import Effectful.Error.Static (runErrorNoCallStack)
 import Effectful.Labeled (Labeled, labeled, runLabeled)
 import Effectful.Reader.Static
 import Effectful.State.Static.Local
-import Eval (ExtendedEnv (..), UniVarState (..), UniVars, evalCore, nf, quote, quoteM)
+import Eval (ExtendedEnv (..), UniVarState (..), UniVars, evalCore, nf, quote, quoteM, quoteWhnf)
 import LangPrelude
 import NameGen (NameGen, freshId, runNameGen)
 import Prettyprinter.Render.Terminal (AnsiStyle)
@@ -101,7 +101,7 @@ prettyCoreCtx ctx = C.prettyEnvDef (namesOfLocals ctx.locals)
         Define name _ _ rest -> name : namesOfLocals rest
 
 prettyValCtx :: Context -> Value -> Doc AnsiStyle
-prettyValCtx ctx = prettyCoreCtx ctx . quote EMap.empty ctx.level
+prettyValCtx ctx = prettyCoreCtx ctx . quoteWhnf EMap.empty ctx.level
 
 type TC es =
     (UniEffs es, NameGen :> es, Diagnose :> es, Trace :> es, Reader TopLevel :> es, Reader ConMetaTable :> es)

@@ -23,8 +23,8 @@ import Eval (
     evalCore,
     force,
     forceM,
-    quote,
     quoteM,
+    quoteWhnf,
     skolemizePatternClosure,
  )
 import LangPrelude hiding (force, lift)
@@ -45,8 +45,9 @@ type TC' es = (TC es, ?topLevel :: ValueTopLevel, ?localEq :: LocalEq, Error Uni
 unify :: TC es => Context -> Value -> Value -> Eff es ()
 unify ctx lhs rhs = do
     univars <- get
-    let lhsC = prettyCoreCtx ctx $ quote univars ctx.level lhs
-        rhsC = prettyCoreCtx ctx $ quote univars ctx.level rhs
+    -- prettyValCtx doesn't unroll solved univars, which is something that we need here
+    let lhsC = prettyCoreCtx ctx $ quoteWhnf univars ctx.level lhs
+        rhsC = prettyCoreCtx ctx $ quoteWhnf univars ctx.level rhs
     trace $ lhsC <+> specSym "~" <+> rhsC
     result <-
         let ?localEq = LocalEq ctx.localEquality
@@ -66,8 +67,8 @@ so you generally want a value from an inner scope as the first argument and from
 refine :: TC es => Context -> Value -> Value -> Eff es Context
 refine ctx lhs rhs = do
     univars <- get
-    let lhsC = prettyCoreCtx ctx $ quote univars ctx.level lhs
-        rhsC = prettyCoreCtx ctx $ quote univars ctx.level rhs
+    let lhsC = prettyCoreCtx ctx $ quoteWhnf univars ctx.level lhs
+        rhsC = prettyCoreCtx ctx $ quoteWhnf univars ctx.level rhs
     traceScope_ (specSym "refine" <+> lhsC <+> specSym "~" <+> rhsC) do
         result <- runErrorNoCallStack $ refine' ctx lhs rhs
         case result of
@@ -271,7 +272,7 @@ invert codomain spine = do
                 | otherwise ->
                     pure (succ domain, EMap.insert vlvl domain renaming, nonLinears, (vis, vlvl) : rest)
             -- TODO: Level 0 is obviously incorrect here, but I'm not sure whether we should use the domain or the codomain
-            other -> throwError_ (NonVarInSpine $ quote EMap.empty (Level 0) other)
+            other -> throwError_ (NonVarInSpine $ quoteWhnf EMap.empty (Level 0) other)
 
 data PruneStatus
     = Renaming
