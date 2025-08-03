@@ -1,121 +1,110 @@
 # A very WIP programming language
 
-Canary (name subject to change), a Haskell-like programming languge
+Canary (name subject to change), an ML family dependently-typed programming languge
 
 There's no concrete plan for the language. For the most part, I'm just figuring out how compilers work.
+
+The language recently underwent a type checker rewrite, and some features, such as polymorphic records and variants, are not supported by the new type checker yet.
 
 ## What is implemented
 
 - a parser
 - name resolution
-- type checking with dependent types (but no higher order unification yet), pattern exhaustiveness checking
+- elaboration with dependent types, NbE and pattern unification, exhaustiveness check (currently unused)
+  - dependent pattern matching
 - custom operators
-- a tree-walk interpeter that's used for elaboration
+- a REPL that piggybacks off the existing NbE interpreter used in elaboration
 
 ## What is lacking
 
-- actual compilation (duh). The compile targets I've considered so far are [HVM-lang](https://github.com/HigherOrderCO/hvm-lang/), LLVM, Cranelift and GRIN (WASM support is planned as well, but not as the main target).
+- actual compilation (duh)
+- define-before-use and mutually recursive definitions are not supported by the type checker yet
+- erasure is not implemented yet, which also means polymorphic functions aren't guaranteed to be parametric
+- totality checking
+- postponing is not implemented yet, so the type checker infers less than it could
+- desugaring for nested patterns and multi-arg match
 - support for modules, namespacing, imports, etc.
 - pretty much everything else
 
 ## Overview
 
-The syntax is heavily inspired by the ML-family, notably Haskell.
-Whether the language is going to be strict or lazy is to be decided
+Syntax-wise, the language is very close to Haskell and Idris.
 
 ```haskell
 type List a = Cons a (List a) | Nil
 
 map : forall a b. (a -> b) -> List a -> b
 map f = match
-    (List.Cons x xs) -> List.Cons (f x) (map f xs)
-    List.Nil -> List.Nil
+    (Cons x xs) -> Cons (f x) (map f xs)
+    Nil -> Nil
 ```
 
-Right away, you may notice some differences. Compared to Haskell,
-- type signatures use `:` instead of `::`.
-- Forall clauses are required. This way, type names don't have to be uppercase, and value-level identifiers may be used at the type level with no ambiguity, which is a most for dependent types.
-- functions may not have multiple bodies. Instead, there's a `match` expression that behaves the same as `\cases` in Haskell.
-- (currently unimplemented) types have their own namespaces, and constructors have to be qualified by default
+Unlike Haskell, type signatures use a single colon. Multiple function bodies are not allowed, but we have the `match` expression (equivalent to `\cases` in Haskell) to help with that.
 
-### Type system
-
-Canary features a dependently-typed system with Type-In-Type and no higher order unification yet.
-
-The type checker algorithm was based on *Complete And Easy Bidirectional Typechecking for Higher-Rank Polymorphism* with some elements of Hindley-Milner, and was further extended with dependent type support.
-
-It can infer anything that HM can, but for higher-rank types, explicit annotations are required.
-
-#### First-class existentials
-
-The language supports existential quantification as well as universal quantification. Type variables are treated as universally quantified by default, so existentials require an explicit `exists` clause.
+The compiler infers forall clauses for names prefixed by a quote, so these two bindings are equivalent:
 
 ```haskell
-listOfSomething : exists a. List a
-listOfSomething = ["a", "is", "Text,", "actually"]
-```
-In simple cases like this, existentials don't make much sense - we could have just annotated `listOfSomething` with `List Text` instead!
+id1 : 'a -> 'a
+id1 x = x
 
-One interesting use case is a more lightweight alternative for rank 2 types. For example, `runST` is typed like this in Haskell:
+id2 : forall a. a -> a
+id2 x = x
+```
+
+### Dependent pattern matching
+
+Just like in most dependently-typed languages, matching on a value refines its type in the local context
 
 ```haskell
-runST :: (forall s. ST s a) -> a
-```
-Instead, we could write
-```haskell
-runST : exists s. ST s a -> a
-```
-This way, there are no impredicative instantiations going on when we write
-```haskell
-computation = runST <| do
-    ...
-```
-and there's no need to special case `<|` [like GHC used to have](https://gitlab.haskell.org/ghc/ghc/blob/795986aaf33e2ffc233836b86a92a77366c91db2/compiler/typecheck/TcExpr.hs#L323-L334) with `$`
+type Peano = S Peano | Z
 
-In general, wherever Haskell type checking failed with the funky message about a skolem escaping its scope, Canary tries to infer an existential or a bottom (`forall a. a`) depending on variance.
+type Vec : Peano -> Type -> Type where
+    VNil : forall a. Vec Z a
+    VCons : forall a n. a -> Vec n a -> Vec (S n) a
 
-Some other use cases:
+-- foreach is our syntax for dependent functions, which is probably going to be replaced by Idris-like `(x : a) -> b x`
+replicate : forall a. foreach (n : Peano) -> a -> Vec n a
+replicate x = match
+    Z -> VNil                      -- in this branch, the output type is Vec Z a, so VNil is well-typed
+    S m -> VCons x (replicate m x) -- in this branch, the output type is Vec (S m) a
+```
+
+We can also define our own equality type
 
 ```haskell
-type Relativity = Abs | Rel
-type Path ('a : Relativity) = ...
+type (===) : forall a. a -> a -> Type where
+    Refl : forall a (x : a). a === a
 
-readSymlink : forall any. Path any -> IO (exists rel. Path rel)
-
--- todo: a concatenative DSL example
+cast : ('a === 'b) -> 'a -> 'b
+cast equality x = case equality of
+    Refl -> x
 ```
 
-Existentials are good at types-that-cannot-be-named. Here's how the Haskell library justified-containers would look like
-```haskell
-type JMap ph k v
-type Key ph k
+### Row polymorphism
 
-justify : forall k v. Map k v -> exists ph. JMap ph k v
-fromJustified : forall ph k v. JMap ph k v -> Map k v
+The language has polymorphic records and variants, based on *Extensible records with scoped labels*. No dependently-typed records (yet?).
 
-member : forall ph k v. k -> JMap ph k v -> Maybe (Key ph k)
-lookup : forall ph k v. Key ph k -> JMap ph k v -> v
-update : forall ph k v. (v -> v) -> Key ph k -> JMap ph k v -> JMap ph k v
-
-insert : forall ph k v. k -> v -> JMap ph k v -> exists ph2. JMap ph2 k v
-delete : forall ph k v. Key ph k -> JMap ph k v -> exists ph2. JMap ph2 k v
-```
-
-The API is almost exactly the same, except that we don't need an ad-hoc continuation to introduce a scope, we can use the justified map directly
+As of the type checker rewrite, records and variants are not implemented yet.
 
 ```haskell
-example : forall k v. List (k, v) -> Map k v -> Map k v
-example kvPairs map' = fromJustified <| foldr (uncurry insert) jmap matchingKeys where
-    jmap = justify map
-    matchingKeys = keys |> mapMaybe \(k, v) -> map (_, v) (lookup _ jmap)
+getX : { x : 'a | 'r } -> 'a
+getX record = record.x
+
+These : Type -> Type -> Type Type
+These a b = [| 'This a, 'That b, 'These (Pair a b) |]
+
+getA : These a -> Maybe a
+getA = match
+    'This x -> Just x
+    'These (MkPair x _) -> Just x
+    _ -> Nothing
+
+-- open variants
+getThis : [| 'This 'a | r] -> Maybe 'a
+getThis = match
+    'This x -> Just x
+    _ -> Nothing
 ```
-
-*(currently unimplemented)*
-There's a subtle quirk that makes this style possible - whenever a local binding with an outer `exists` quantifier is introduced, the existential is implicitly instantiated to a skolem. That way, multiple uses of that binding share the same type.
-
-#### Row polymorphism
-
-The usual polymorphic records and variants with support for duplicate labels and row extensions, as described in *Extensible records with scoped labels*. No dependently-typed records (yet?).
 
 ### Wildcard lambdas
 
