@@ -7,7 +7,7 @@ import Common (
     Index (..),
     Level (..),
     Literal,
-    Name_ (ConsName, NilName, TypeName),
+    Name_ (ConsName, NilName, RecordName, TypeName, VariantName),
     PrettyAnsi (..),
     PrettyOptions,
     SimpleName_,
@@ -21,7 +21,7 @@ import Common (
     typeColor,
  )
 import Data.List ((!!))
-import Data.Row (ExtRow (..), OpenName, Row, prettyRecord, prettyVariant, sortedRow)
+import Data.Row (ExtRow (..), OpenName, Row, prettyRecord, prettyRow, prettyVariant, sortedRow)
 import Data.Vector qualified as Vec
 import LangPrelude
 import Prettyprinter
@@ -72,10 +72,8 @@ data CoreTerm
     | Literal Literal
     | Record (Row CoreTerm)
     | Sigma CoreTerm CoreTerm
-    | -- types
-      Q Quantifier Visibility Erasure SimpleName_ CoreType CoreTerm
-    | VariantT (ExtRow CoreType)
-    | RecordT (ExtRow CoreType)
+    | Q Quantifier Visibility Erasure SimpleName_ CoreType CoreTerm
+    | Row (ExtRow CoreType)
     | UniVar UniVar
     | AppPruning CoreTerm Pruning
     deriving (Pretty, Show) via (UnAnnotate CoreTerm)
@@ -100,6 +98,10 @@ prettyEnv = go 0 . map prettyAnsi
             | otherwise -> env !! index.getIndex
         Name name -> prettyAnsi name
         TyCon name Nil -> typeColor $ prettyAnsi name
+        TyCon VariantName ((_, Row row) :< Nil) -> prettyVariant prettyAnsi (go 0 env) row
+        TyCon VariantName ((_, nonRow) :< Nil) -> brackets $ "|" <+> go 0 env nonRow
+        TyCon RecordName ((_, Row row) :< Nil) -> prettyRecord ":" prettyAnsi (go 0 env) row
+        TyCon RecordName ((_, nonRow) :< Nil) -> braces $ "|" <+> go 0 env nonRow
         TyCon name args -> parensWhen 3 $ hsep (typeColor (prettyAnsi name) : map (\(vis, t) -> withVis vis (go 3 env t)) (Vec.toList args))
         -- list sugar doesn't really make sense with explicit type applications, perhaps I should remove it
         -- another option is `[a, b, c] @ty`
@@ -125,8 +127,7 @@ prettyEnv = go 0 . map prettyAnsi
         -- checking for variable occurances here is not ideal (potentially O(n^2) in AST size),
         Q Forall Visible _e var ty body | not (occurs (Index 0) body) -> parensWhen 1 $ go 1 env ty <+> specSym "->" <+> go 0 (prettyAnsi var : env) body
         qq@(Q q vis er _ _ _) -> parensWhen 1 $ kw q er <+> compressQ env q vis er qq
-        VariantT row -> prettyVariant prettyAnsi (go 0 env) row
-        RecordT row -> prettyRecord ":" prettyAnsi (go 0 env) row
+        Row row -> prettyRow prettyAnsi (go 0 env) row
         UniVar uni -> prettyAnsi uni
         AppPruning lhs pruning -> parensWhen 3 $ go 2 env lhs <> prettyPruning env pruning.getPruning
       where
@@ -210,8 +211,7 @@ coreTraversalWithLevel recur lvl = \case
         Case <$> recur lvl arg <*> traverse (\(pat, body) -> (pat,) <$> recur (lvl `incLevel` patternArity pat) body) matches
     Let name defn body -> Let name <$> recur lvl defn <*> recur (succ lvl) body
     Record row -> Record <$> traverse (recur lvl) row
-    RecordT row -> RecordT <$> traverse (recur lvl) row
-    VariantT row -> VariantT <$> traverse (recur lvl) row
+    Row row -> Row <$> traverse (recur lvl) row
     Sigma x y -> Sigma <$> recur lvl x <*> recur lvl y
     Q q v e name ty body -> Q q v e name <$> recur lvl ty <*> recur (succ lvl) body
     Var index -> pure $ Var index

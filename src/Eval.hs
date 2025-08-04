@@ -27,6 +27,7 @@ import Common (
 import Data.EnumMap.Lazy qualified as EMap
 import Data.IdMap qualified as LMap
 import Data.List ((!!))
+import Data.Row (ExtRow (..))
 import Data.Vector qualified as Vec
 import Desugar (desugar)
 import Effectful.State.Static.Local (State, get)
@@ -80,8 +81,8 @@ quoteWith quoteClosure quotePatternClosure unroll = go
         Variant name val -> C.Variant name (go lvl val)
         PrimValue lit -> C.Literal lit
         Q q v e closure -> C.Q q v e closure.var (go lvl closure.ty) $ quoteClosure lvl closure
-        VariantT row -> C.VariantT $ fmap (go lvl) row
-        RecordT row -> C.RecordT $ fmap (go lvl) row
+        Row row Nothing -> C.Row $ fmap (go lvl) (NoExtRow row)
+        Row row (Just ext) -> C.Row $ fmap (go lvl) (ExtRow row (Stuck ext))
         Stuck stuck -> quoteStuck lvl stuck
 
     quoteStuck :: Level -> Stuck -> CoreTerm
@@ -148,8 +149,7 @@ quoteWhnf univars = go
         C.Case arg branches -> C.Case (subst lvl env arg) $ fmap (substBranch lvl env) branches
         C.Let name expr body -> C.Let name (subst lvl env expr) (subst (succ lvl) (Var lvl : env) body)
         C.Record row -> C.Record (fmap (subst lvl env) row)
-        C.RecordT row -> C.RecordT (fmap (subst lvl env) row)
-        C.VariantT row -> C.VariantT (fmap (subst lvl env) row)
+        C.Row row -> C.Row (fmap (subst lvl env) row)
         C.Sigma lhs rhs -> C.Sigma (subst lvl env lhs) (subst lvl env rhs)
         C.Q q vis e var ty body -> C.Q q vis e var (subst lvl env ty) (subst (succ lvl) (Var lvl : env) body)
         C.UniVar uni -> case EMap.lookup uni univars of
@@ -197,8 +197,11 @@ evalCore env@ExtendedEnv{..} = \case
     C.Record row -> Record $ evalCore env <$> row
     C.Sigma x y -> Sigma (evalCore env x) (evalCore env y)
     C.Q q vis e var ty body -> Q q vis e $ Closure{var, ty = evalCore env ty, env = ValueEnv{..}, body}
-    C.VariantT row -> VariantT $ evalCore env <$> row
-    C.RecordT row -> RecordT $ evalCore env <$> row
+    C.Row (NoExtRow row) -> Row (fmap (evalCore env) row) Nothing
+    C.Row (ExtRow row ext) -> case evalCore env ext of
+        Stuck stuck -> Row (fmap (evalCore env) row) (Just stuck)
+        Row innerRow innerExt -> Row (fmap (evalCore env) row <> innerRow) innerExt
+        nonRow -> error . show $ "[eval] non-row value in a row:" <+> pretty nonRow
     C.UniVar uni -> force univars (UniVar uni)
     C.AppPruning lhs pruning -> evalAppPruning env.locals (evalCore env lhs) pruning.getPruning
   where
@@ -254,9 +257,16 @@ forceM val = do
     univars <- get @UniVars
     pure $ force univars val
 
--- try to evaluate an expression that was previously stuck on an unsolved skolem
+-- try to evaluate an expression that was previously stuck on a unification variable
 force :: UniVars -> Value -> Value
 force !univars = \case
+    Row row Nothing -> Row row Nothing
+    Row row (Just ext) -> case force univars (Stuck ext) of
+        Stuck stillStuck -> Row row (Just stillStuck)
+        (Row innerRow innerExt) -> force univars $ Row (row <> innerRow) innerExt
+        nonRow -> error . show $ "[eval] non-row value in a row:" <+> pretty nonRow
+    RecordType row -> RecordType $ force univars row
+    VariantType row -> VariantType $ force univars row
     Stuck (UniVarApp uni spine) -> case EMap.lookup uni univars of
         -- an out of scope univar indicates a bug, but a non-fatal one
         Nothing -> Stuck $ UniVarApp uni spine

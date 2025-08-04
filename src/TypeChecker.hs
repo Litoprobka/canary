@@ -5,17 +5,20 @@ module TypeChecker where
 
 import Common
 import Data.EnumMap.Lazy qualified as EMap
+import Data.Functor (unzip)
 import Data.IdMap qualified as Map
 import Data.List.NonEmpty qualified as NE
 import Data.Row (ExtRow (..))
+import Data.Row qualified as Row
 import Data.Vector qualified as Vec
 import Desugar (desugar)
 import Diagnostic
 import Effectful.Labeled (Labeled, runLabeled)
 import Effectful.Reader.Static
-import Effectful.State.Static.Local (State, evalState, get, modify)
+import Effectful.State.Static.Local (State, evalState, get, modify, put, runState)
 import Eval (ExtendedEnv (univars), UniVars, app, appM, eval, evalCore, forceM, mkTyCon, quote, quoteM)
-import LangPrelude
+import GHC.IsList qualified as IsList
+import LangPrelude hiding (unzip)
 import NameGen (NameGen, freshName, freshName_, runNameGen)
 import Syntax
 import Syntax.Core qualified as C
@@ -309,6 +312,22 @@ check ctx (t :@ loc) ty = traceScope_ (prettyDef t <+> specSymBlue "⇐" <+> pre
                     Just pats -> do
                         (ePats, ctx, resultTy) <- checkPatterns (succ n) ctx pats innerTy
                         pure (NE.cons (ePat ::: patTy) ePats, ctx, resultTy)
+        (T.Record exprRow, V.RecordType (V.Row typeRow ext)) -> do
+            let (both, onlyExpr, onlyType) = Row.zipRows exprRow typeRow
+            eBoth <- traverse (uncurry $ check ctx) both
+            for_ (IsList.toList onlyType) \(_field, _item) -> do
+                internalError' "missing field in record" -- typeError $ MissingField (Left $ item :@ loc) field
+            eOnlyExpr <- case ext of
+                _ | Row.isEmpty onlyExpr -> pure Row.empty
+                Nothing -> internalError' "missing field in type"
+                -- the extension is a VType, and we want a Row here
+                -- perhaps RecordT / VariantT should be single-argument constructors that expect a row?
+                Just ext -> do
+                    onlyExprAsRec <- check ctx (T.Record onlyExpr :@ loc) (V.RecordType (V.Stuck ext))
+                    case onlyExprAsRec of
+                        E.Record row -> pure row
+                        _ -> internalError' "elaborated a record to a non-record"
+            pure $ E.Record (eBoth <> eOnlyExpr)
         (other, expected) -> do
             -- this case happens after the implicit forall case, so we know that we're checking against a monomorphic type here
             --
@@ -348,8 +367,8 @@ infer ctx (t :@ loc) = traceScope (\(_, ty) -> prettyDef t <+> specSym "⇒" <+>
     -- but since variants are guaranteed to have exactly one argument, checking it right away feels cleaner
     T.App Visible (L (T.Variant con)) payload -> do
         (ePayload, payloadTy) <- infer ctx payload
-        rowExt <- freshUniVarV ctx type_
-        let ty = V.VariantT $ ExtRow (fromList [(con, payloadTy)]) rowExt
+        rowExt <- freshUniVarS ctx type_
+        let ty = V.VariantType $ V.Row (fromList [(con, payloadTy)]) (Just rowExt)
         pure (E.App Visible (E.Variant con) ePayload, ty)
     T.App vis lhs rhs -> do
         (eLhs, lhsTy) <- case vis of
@@ -446,11 +465,24 @@ infer ctx (t :@ loc) = traceScope (\(_, ty) -> prettyDef t <+> specSym "⇒" <+>
         payload <- freshName_ "payload"
         univars <- get
         rowExt <- freshUniVar (bind univars payload payloadTy ctx) type_
-        let body = C.VariantT $ ExtRow (fromList [(con, quote univars ctx.level payloadTy)]) rowExt
+        let mkVariant row = C.TyCon RowName ((Visible, row) :< Nil)
+        let body = mkVariant $ C.Row $ ExtRow (fromList [(con, quote univars ctx.level payloadTy)]) rowExt
         -- '(x : ?a) -> [| Con ?a | ?r x ]'
         pure (E.Variant con, V.Pi V.Closure{env = ctx.env, ty = payloadTy, var = toSimpleName_ payload, body})
-    T.RecordAccess{} -> internalError' "wip: record access"
-    T.Record{} -> internalError' "wip: record"
+    T.RecordAccess record field -> do
+        (eRecord, recordType) <- infer ctx record
+        fieldType <- case recordType of
+            V.RecordType (V.Row typeRow _) | Just fieldType <- Row.lookup field typeRow -> pure fieldType
+            V.RecordType (V.Row _ Nothing) -> internalError' "missing field"
+            other -> do
+                fieldType <- freshUniVarV ctx type_
+                fieldExt <- freshUniVarS ctx (V.Type RowName)
+                unify ctx (V.RecordType $ V.Row (fromList [(field, fieldType)]) (Just fieldExt)) other
+                pure fieldType
+        pure (E.RecordAccess eRecord field, fieldType)
+    T.Record row -> do
+        (fields, types) <- unzip <$> traverse (infer ctx) row
+        pure (E.Record fields, V.RecordType $ V.Row types Nothing)
     T.Sigma lhs rhs -> do
         (eLhs, lhsTy) <- infer ctx lhs
         env <- extendEnv ctx.env
@@ -526,8 +558,22 @@ checkPattern ctx (pat :@ pLoc) ty = do
             let (eArgs, argVals) = unzip argsWithVals
                 valsWithVis = zip (map fst eArgs) argVals
             pure ((E.ConstructorP name eArgs, V.Con name (fromList valsWithVis)), ctx)
-        T.VariantP{} -> internalError' "todo: check variant pattern"
-        T.RecordP{} -> internalError' "todo: check record pattern"
+        T.VariantP con arg ->
+            forceM ty >>= \case
+                V.VariantType (V.Row row _) | Just argType <- Row.lookup con row -> do
+                    ((eArg, argV), ctx) <- checkPattern ctx arg argType
+                    pure ((E.VariantP con eArg, V.Variant con argV), ctx)
+                _ -> fallthroughToInfer
+        T.RecordP row ->
+            forceM ty >>= \case
+                V.RecordType (V.Row typeRow _ext) -> do
+                    let (both, _onlyPat, _onlyType) = Row.zipRows row typeRow
+                    (_ctx, _eBoth) <- runState ctx $ for both \(pat, ty) -> do
+                        ctx <- get
+                        (output, ctx) <- checkPattern ctx pat ty
+                        output <$ put ctx
+                    internalError' "wip: check RecordP"
+                _ -> fallthroughToInfer
         T.SigmaP vis lhs rhs -> do
             forceM ty >>= \case
                 V.Q Exists vis2 _e closure
@@ -588,7 +634,11 @@ inferPattern ctx (p :@ loc) = do
                 IntLiteral{} -> IntName
                 TextLiteral{} -> TextName
                 CharLiteral{} -> CharName
-        T.VariantP{} -> internalError' "todo: infer variant pattern"
+        T.VariantP con arg -> do
+            ext <- freshUniVarS ctx (V.Type RowName)
+            ((eArg, argV), patType, ctx) <- inferPattern ctx arg
+            pure ((E.VariantP con eArg, V.Variant con argV), V.VariantType $ V.Row (fromList [(con, patType)]) (Just ext), ctx)
+        -- since records are non-dependent, we can't just infer field types one by one and pass the context
         T.RecordP{} -> internalError' "todo: infer record pattern"
   where
     type_ = V.Type TypeName

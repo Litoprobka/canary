@@ -21,6 +21,7 @@ module Data.Row (
     takeField,
     prettyRecord,
     prettyVariant,
+    prettyRow,
 ) where
 
 import Common (SimpleName)
@@ -28,7 +29,7 @@ import Data.HashMap.Strict qualified as HashMap
 import Data.Sequence.NonEmpty (NESeq (..))
 import Data.Sequence.NonEmpty qualified as NESeq
 import GHC.IsList qualified as IsList
-import Prettyprinter (Doc, braces, brackets, comma, punctuate, sep, (<+>))
+import Prettyprinter (Doc, braces, brackets, comma, parens, punctuate, sep, (<+>))
 import Relude hiding (empty)
 
 type OpenName = SimpleName
@@ -150,6 +151,12 @@ prettyVariant prettyName prettyField row = brackets . ("|" <+>) . withExt pretty
   where
     -- todo: a special case for unit
     variantItem (name, ty) = prettyName name <+> prettyField ty
+
+-- | pretty-print a row value
+prettyRow :: (SimpleName -> Doc ann) -> (a -> Doc ann) -> ExtRow a -> Doc ann
+prettyRow prettyName prettyField row = parens . withExt prettyField row . sep . punctuate comma . map rowItem $ sortedRow row.row
+  where
+    rowItem (name, field) = prettyName name <+> ":" <+> prettyField field
 
 -- | a helper for the pretty-printing functions
 withExt :: (a -> Doc ann) -> ExtRow a -> Doc ann -> Doc ann

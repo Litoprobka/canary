@@ -3,7 +3,7 @@
 module TypeChecker.TypeError (TypeError (..), typeError, UnificationError (..), typeErrorWithLoc) where
 
 import Common
-import Data.Row (OpenName)
+import Data.Row (ExtRow (..), OpenName, prettyRow)
 import Diagnostic
 import Error.Diagnose (Marker (..), Note (Note), Report (..))
 import Eval ()
@@ -41,6 +41,7 @@ data UnificationError
     | NonVarInSpine CoreTerm
     | OccursCheck UniVar
     | EscapingVariable (Maybe UniVar) Level
+    | MissingFields {row :: Row CoreType, missing :: Row CoreType}
 
 typeErrorWithLoc :: Diagnose :> es => (Loc -> TypeError) -> Eff es a
 typeErrorWithLoc mkTypeError =
@@ -160,5 +161,7 @@ noteFromUnificationError = \case
     OccursCheck uni -> Note $ "solving the unification variable" <+> prettyDef uni <+> "resulted in a type that refers to itself"
     EscapingVariable (Just uni) lvl -> Note $ "variable" <+> "#" <> pretty lvl.getLevel <+> "is not in scope of" <+> prettyDef uni
     EscapingVariable Nothing lvl -> Note $ "variable" <+> "#" <> pretty lvl.getLevel <+> "is not in scope of a renaming"
+    MissingFields{row, missing} -> Note $ "row" <+> prettyNoExtRow row <+> "is missing these fields:" <+> prettyNoExtRow missing
   where
+    prettyNoExtRow = prettyRow prettyDef prettyDef . NoExtRow
     prettySpine = sep . map (\(vis, val) -> withVis vis (prettyDef val))

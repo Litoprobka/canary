@@ -148,13 +148,20 @@ closeType locals body = case locals of
     Bind x ty rest -> closeType rest (C.Q Forall Visible Retained (toSimpleName_ x) ty body)
     Define x val _ty rest -> closeType rest (C.Let (toSimpleName_ x) val body)
 
-freshUniVarV :: (Labeled UniVar NameGen :> es, State UniVars :> es) => Context -> VType -> Eff es Value
+freshUniVarV :: (UniEffs es) => Context -> VType -> Eff es Value
 freshUniVarV ctx vty = do
     uniTerm <- freshUniVar ctx vty
     univars <- get
     let V.ValueEnv{..} = ctx.env
         env = ExtendedEnv{..}
     pure $ evalCore env uniTerm
+
+freshUniVarS :: (UniEffs es) => Context -> VType -> Eff es V.Stuck
+freshUniVarS ctx vty = do
+    uni <- freshUniVarV ctx vty
+    pure case uni of
+        V.Stuck stuck -> stuck
+        _ -> error "fresh univar didn't evaluate to a Stuck value"
 
 -- | extend the value environment with current UniVar state for pure evaluation
 extendEnv :: State UniVars :> es => ValueEnv -> Eff es ExtendedEnv

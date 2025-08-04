@@ -50,10 +50,11 @@ desugar = \case
                 xs
     E.Do{} -> error "todo: desugar do blocks"
     E.Q q vis er (var ::: kind) body -> C.Q q vis er var (go kind) (go body)
-    E.VariantT row -> C.VariantT $ fmap go row
-    E.RecordT row -> C.RecordT $ fmap go row
+    E.VariantT row -> C.TyCon VariantName $ oneVis $ C.Row $ fmap go row
+    E.RecordT row -> C.TyCon RecordName $ oneVis $ C.Row $ fmap go row
     E.Core coreTerm -> coreTerm
   where
+    oneVis x = (Visible, x) :< Nil
     go = desugar
 
 -- we only support non-nested patterns for now

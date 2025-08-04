@@ -7,6 +7,8 @@ module TypeChecker.Unification (unify, refine) where
 import Common
 import Data.EnumMap.Strict qualified as EMap
 import Data.EnumSet qualified as ESet
+import Data.Row (ExtRow (..), zipRows)
+import Data.Row qualified as Row
 import Data.Vector qualified as Vec
 import Diagnostic (internalError')
 import Effectful.Error.Static (Error, runErrorNoCallStack, throwError_, tryError)
@@ -40,7 +42,7 @@ import TypeChecker.TypeError (TypeError (..), UnificationError (..), typeErrorWi
 newtype ValueTopLevel = ValueTopLevel {getValues :: IdMap Name_ Value}
 newtype LocalEq = LocalEq {getLocalEq :: EnumMap Level Value}
 
-type TC' es = (TC es, ?topLevel :: ValueTopLevel, ?localEq :: LocalEq, Error UnificationError :> es)
+type TC' es = (TC es, ?topLevel :: ValueTopLevel, ?localEq :: LocalEq, ?ctx :: Context, Error UnificationError :> es)
 
 unify :: TC es => Context -> Value -> Value -> Eff es ()
 unify ctx lhs rhs = do
@@ -51,10 +53,11 @@ unify ctx lhs rhs = do
     trace $ lhsC <+> specSym "~" <+> rhsC
     result <-
         let ?localEq = LocalEq ctx.localEquality
-         in let ?topLevel = ValueTopLevel ctx.env.topLevel
-             in runErrorNoCallStack
-                    . runReader ()
-                    $ unify' ctx.level lhs rhs
+            ?topLevel = ValueTopLevel ctx.env.topLevel
+            ?ctx = ctx
+         in runErrorNoCallStack
+                . runReader ()
+                $ unify' ctx.level lhs rhs
     case result of
         Right () -> pass
         Left context ->
@@ -125,6 +128,16 @@ unify' lvl lhsTy rhsTy = do
         (Con lhs lhsArgs) (Con rhs rhsArgs)
             | lhs == rhs -> Vec.zipWithM_ (unify' lvl `on` snd) lhsArgs rhsArgs
             | otherwise -> throwError_ (NotEq (C.Con lhs Vec.empty) (C.Con rhs Vec.empty))
+        (Row lhsRow lhsExt) (Row rhsRow rhsExt) -> do
+            let (both, lhsOnly, rhsOnly) = zipRows lhsRow rhsRow
+            traverse_ (uncurry $ unify' lvl) both
+            let bothClosedAndMatching = isNothing lhsExt && isNothing rhsExt && Row.isEmpty lhsOnly && Row.isEmpty rhsOnly
+            unless bothClosedAndMatching do
+                -- using the outer context here might be overly restrictive, but it's tedious to build up a new context during unification
+                newExt <- freshUniVarS ?ctx (V.Type RowName)
+                unifyRowExtension lvl (lhsRow, lhsExt) rhsOnly newExt
+                unifyRowExtension lvl (rhsRow, rhsExt) lhsOnly newExt
+        (Record lhsRow) (Record rhsRow) -> unify' lvl (Row lhsRow Nothing) (Row rhsRow Nothing)
         (Q Forall v _e closure) (Q Forall v2 _e2 closure2) | v == v2 -> do
             unify' lvl closure.ty closure2.ty
             body <- closure `appM` Var lvl
@@ -160,6 +173,14 @@ unifySpine lvl = \cases
         unify' lvl ty1 ty2
     _ _ -> internalError' "spine length mismatch"
 
+unifyRowExtension :: TC' es => Level -> (Row VType, Maybe Stuck) -> Row VType -> Stuck -> Eff es ()
+unifyRowExtension lvl (_, Just ext) onlyInOther newExt = unify' lvl (Stuck ext) (Row onlyInOther (Just newExt))
+unifyRowExtension lvl (row, Nothing) onlyInOther _
+    | Row.isEmpty onlyInOther = pass
+    | otherwise = do
+        univars <- get
+        throwError_ $ MissingFields (fmap (quoteWhnf univars lvl) row) (fmap (quoteWhnf univars lvl) onlyInOther)
+
 refine' :: (TC es, Error UnificationError :> es) => Context -> Value -> Value -> Eff es Context
 refine' ctx lhs' rhs' = do
     lhs' <- forceM lhs'
@@ -188,9 +209,8 @@ refine' ctx lhs' rhs' = do
         (Con lhs lhsArgs) (Con rhs rhsArgs)
             | lhs == rhs -> foldlM (\ctx ((_, lhsArg), (_, rhsArg)) -> refine' ctx lhsArg rhsArg) ctx $ Vec.zip lhsArgs rhsArgs
             | otherwise -> throwError_ (NotEq (C.Con lhs Vec.empty) (C.Con rhs Vec.empty))
+        -- todo: cases for rows, records and variants
         lhs rhs -> ctx <$ unify ctx lhs rhs
-
--- lhs rhs -> internalError' $ "refine is too dumb for" <+> prettyValCtx ctx lhs <+> "and" <+> prettyValCtx ctx rhs
 
 refineSpine :: (TC es, Error UnificationError :> es) => Context -> Spine -> Spine -> Eff es Context
 refineSpine ctx = \cases
@@ -329,8 +349,8 @@ rename pren ty =
             captured <- traverse (rename pren) fn.captured
             pure $ foldr (flip $ C.App Visible) (C.Name fn.name) captured
         Record row -> C.Record <$> traverse (rename pren) row
-        RecordT row -> C.RecordT <$> traverse (rename pren) row
-        VariantT row -> C.VariantT <$> traverse (rename pren) row
+        Row row Nothing -> C.Row <$> traverse (rename pren) (NoExtRow row)
+        Row row (Just ext) -> C.Row <$> traverse (rename pren) (ExtRow row (Stuck ext))
         Sigma x y -> C.Sigma <$> rename pren x <*> rename pren y
         PrimValue lit -> pure $ C.Literal lit
         Stuck (Opaque name spine) -> renameSpine pren (C.Name name) spine

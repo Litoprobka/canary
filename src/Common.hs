@@ -87,6 +87,9 @@ data Name_
     | TextName
     | CharName
     | TypeName
+    | RowName
+    | RecordName
+    | VariantName
     deriving (Show, Eq, Generic, Hashable)
     deriving (Pretty) via (UnAnnotate Name_)
 
@@ -104,6 +107,9 @@ instance HasId Name_ where
         TextName -> -17
         CharName -> -18
         TypeName -> -19
+        RowName -> -20
+        RecordName -> -21
+        VariantName -> -22
 
 type SimpleName = Located SimpleName_
 data SimpleName_
@@ -186,6 +192,9 @@ instance PrettyAnsi Name_ where
         TextName -> "Text"
         CharName -> "Char"
         TypeName -> "Type"
+        RowName -> "Row"
+        RecordName -> "Record"
+        VariantName -> "Variant"
 
 -- | @"123" --> "₁₂₃"@
 lowerNumber :: Int -> Text
@@ -271,6 +280,9 @@ toSimpleName_ = \case
     TextName -> "Text"
     CharName -> "Char"
     TypeName -> "Type"
+    RowName -> "Row"
+    RecordName -> "Record"
+    VariantName -> "Variant"
 
 mkNotes :: [(Loc, M.Marker a)] -> [(Position, M.Marker a)]
 mkNotes = fmap \(Loc pos, marker) -> (pos, marker)

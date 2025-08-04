@@ -125,22 +125,25 @@ simplifyPatternType ty = ($ Map.empty) <$> simplifyPatternTypeWith ty
 simplifyPatternTypeWith :: forall es. (Diagnose :> es, State UniVars :> es) => VType -> Eff es (IdMap Name ExType -> ExType)
 simplifyPatternTypeWith = \case
     V.Var{} -> pure $ const OpaqueTy
+    -- todo: compress the rows wrt. solved univars
+    V.VariantType (V.Row row ext) -> do
+        fnRow <- traverse simplifyPatternTypeWith $ toExtRow row ext
+        pure \args -> ExVariant (fmap ($ args) fnRow)
+    V.RecordType (V.Row row _) -> do
+        fnRow <- traverse simplifyPatternTypeWith row
+        pure \args -> ExRecord (fmap ($ args) fnRow)
     V.TyCon name args -> do
         argFns <- traverse (simplifyPatternTypeWith . snd) args
         pure $ \env -> TyCon name $ map ($ env) (toList argFns)
-    -- todo: compress the rows wrt. solved univars
-    V.VariantT row -> do
-        fnRow <- traverse simplifyPatternTypeWith row
-        pure \args -> ExVariant (fmap ($ args) fnRow)
-    V.RecordT row -> do
-        fnRow <- traverse simplifyPatternTypeWith row
-        pure \args -> ExRecord (fmap ($ args) fnRow.row)
     V.UniVar uni -> do
         univars <- get
         case EMap.lookup uni univars of
             Just (Solved{solution}) -> simplifyPatternTypeWith solution
             _ -> pure $ const OpaqueTy
     _ -> pure $ const OpaqueTy
+  where
+    toExtRow row Nothing = NoExtRow row
+    toExtRow row (Just ext) = ExtRow row (V.Stuck ext)
 
 data Pattern
     = Con Name_ [Pattern]

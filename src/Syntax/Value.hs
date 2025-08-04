@@ -35,10 +35,8 @@ data Value
     | Variant OpenName Value
     | -- | A primitive (Text, Char or Int) value. The name 'Literal' is slightly misleading here
       PrimValue Literal
-    | -- types
-      Q Quantifier Visibility Erasure (Closure VType)
-    | VariantT (ExtRow VType)
-    | RecordT (ExtRow VType)
+    | Q Quantifier Visibility Erasure (Closure VType)
+    | Row (Row VType) (Maybe Stuck)
     | Stuck Stuck
 
 data Stuck
@@ -63,6 +61,16 @@ pattern Type :: Name_ -> Value
 pattern Type name <- TyCon name (Vec.null -> True)
     where
         Type name = TyCon name Vec.empty
+
+pattern RecordType :: Value -> Value
+pattern RecordType row <- TyCon RecordName ((_, row) :< Nil)
+    where
+        RecordType row = TyCon RecordName ((Visible, row) :< Nil)
+
+pattern VariantType :: Value -> Value
+pattern VariantType row <- TyCon VariantName ((_, row) :< Nil)
+    where
+        VariantType row = TyCon VariantName ((Visible, row) :< Nil)
 
 pattern Pi :: Closure VType -> Value
 pattern Pi closure <- Q Forall Visible Retained closure
@@ -105,8 +113,7 @@ lift n = go
         Lambda vis Closure{..} -> Lambda vis $ Closure{body = C.lift n body, env = liftEnv env, ..}
         PrimFunction fn -> PrimFunction (liftFunc fn)
         Record row -> Record (fmap go row)
-        RecordT row -> RecordT (fmap go row)
-        VariantT row -> VariantT (fmap go row)
+        Row row ext -> Row (fmap go row) (fmap liftStuck ext)
         Sigma lhs rhs -> Sigma (go lhs) (go rhs)
         Variant name arg -> Variant name (go arg)
         PrimValue prim -> PrimValue prim
