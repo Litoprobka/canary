@@ -36,7 +36,7 @@ desugar = \case
     E.Record fields -> C.Record $ fmap go fields
     E.RecordAccess record field ->
         let arg = go record
-         in C.Case arg [(C.RecordP (one (field, unLoc field)), C.Var (Index 0))]
+         in C.Case arg [(C.RecordP ((field, unLoc field) :< Nil), C.Var (Index 0))]
     {- `record.field` gets desugared to
         case record of
             {field} -> field
@@ -65,7 +65,7 @@ flattenPattern p = case p of
     E.ConstructorP name pats -> C.ConstructorP name ((fmap . fmap) asVar pats)
     E.TypeP name pats -> C.TypeP name ((fmap . fmap) asVar pats)
     E.VariantP name pat -> C.VariantP name (asVar pat)
-    E.RecordP row -> C.RecordP $ fmap asVar row
+    E.RecordP row -> C.RecordP $ fmap (second asVar) row
     E.SigmaP vis lhs rhs -> C.SigmaP vis (asVar lhs) (asVar rhs)
     E.ListP [_x] -> error "todo: list patterns need a type" -- C.ConstructorP ConsName [(Implicit, ty), (Visible, asVar x)]
     E.ListP [] -> error "todo: list patterns need a type" -- C.ConstructorP NilName [(Implicit, ty)]

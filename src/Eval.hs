@@ -28,6 +28,7 @@ import Data.EnumMap.Lazy qualified as EMap
 import Data.IdMap qualified as LMap
 import Data.List ((!!))
 import Data.Row (ExtRow (..))
+import Data.Row qualified as Row
 import Data.Vector qualified as Vec
 import Desugar (desugar)
 import Effectful.State.Static.Local (State, get)
@@ -312,9 +313,10 @@ matchCore ExtendedEnv{..} = \cases
         | pname == name -> Just ExtendedEnv{locals = reverse (map snd $ toList args) <> locals, ..}
     (C.VariantP pname _) (Variant name val)
         | pname == name -> Just ExtendedEnv{locals = val : locals, ..}
-    (C.RecordP _varRow) (Record _row) -> error "todo: row matching (must preserve original field order)"
-    -- let (pairs, _, _) = Row.zipRows varRow row
-    -- in Just $ env{locals = foldl' (flip $ uncurry LMap.insert) env.values pairs}
+    (C.RecordP vars) (Record row) ->
+        let takeField' field = fromMaybe (error "missing field in row match") . Row.takeField field
+            (values, _) = foldl' (\(acc, row) (field, _) -> first (: acc) $ takeField' field row) ([], row) vars
+         in Just ExtendedEnv{locals = values <> locals, ..}
     C.SigmaP{} (Sigma lhs rhs) -> Just ExtendedEnv{locals = rhs : lhs : locals, ..}
     (C.LiteralP lit) (PrimValue val) -> ExtendedEnv{..} <$ guard (lit == val)
     _ _ -> Nothing

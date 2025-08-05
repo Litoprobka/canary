@@ -112,7 +112,7 @@ simplifyPattern = \case
     E.TypeP{} -> error "todo: exhaustiveness checking for type patterns"
     E.ListP pats -> foldr (\x xs -> Con ConsName [simplifyPattern x, xs]) (Con NilName []) pats
     E.VariantP name arg -> VariantP (unLoc name) $ simplifyPattern arg
-    E.RecordP row -> RecordP $ fmap simplifyPattern row
+    E.RecordP row -> RecordP $ fromList . fmap (second simplifyPattern) $ toList row
     E.SigmaP{} -> Wildcard -- todo: proper support for sigma types
     E.LiteralP lit -> LiteralP lit
 

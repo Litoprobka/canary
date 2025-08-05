@@ -53,7 +53,7 @@ data EPattern
     | ConstructorP Name_ [(Visibility, EPattern)]
     | TypeP Name_ [(Visibility, EPattern)]
     | VariantP OpenName EPattern
-    | RecordP (Row EPattern)
+    | RecordP (Vector (OpenName, EPattern))
     | SigmaP Visibility EPattern EPattern
     | ListP [EPattern]
     | LiteralP Literal
@@ -91,7 +91,7 @@ patternArity = go
         ConstructorP _ args -> sum (map (go . snd) args)
         TypeP _ args -> sum (map (go . snd) args)
         VariantP _ arg -> go arg
-        RecordP row -> sum (fmap go row)
+        RecordP row -> sum (fmap (go . snd) row)
         SigmaP _ lhs rhs -> go lhs + go rhs
         ListP args -> sum (map go args)
         LiteralP{} -> 0

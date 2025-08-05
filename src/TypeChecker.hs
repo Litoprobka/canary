@@ -8,7 +8,7 @@ import Data.EnumMap.Lazy qualified as EMap
 import Data.Functor (unzip)
 import Data.IdMap qualified as Map
 import Data.List.NonEmpty qualified as NE
-import Data.Row (ExtRow (..))
+import Data.Row (ExtRow (..), OpenName)
 import Data.Row qualified as Row
 import Data.Vector qualified as Vec
 import Desugar (desugar)
@@ -504,7 +504,7 @@ infer ctx (t :@ loc) = traceScope (\(_, ty) -> prettyDef t <+> specSym "⇒" <+>
     T.VariantT row -> do
         eRow <- traverse (\field -> check ctx field type_) row
         pure (E.VariantT eRow, type_)
-    -- normal function syntax is just sugar for '(_ : a) -> b'
+    -- normal function syntax is just sugar for 'Π (_ : a) -> b'
     T.Function from to -> do
         eFrom <- check ctx from type_
         env <- extendEnv ctx.env
@@ -566,13 +566,25 @@ checkPattern ctx (pat :@ pLoc) ty = do
                 _ -> fallthroughToInfer
         T.RecordP row ->
             forceM ty >>= \case
-                V.RecordType (V.Row typeRow _ext) -> do
-                    let (both, _onlyPat, _onlyType) = Row.zipRows row typeRow
-                    (_ctx, _eBoth) <- runState ctx $ for both \(pat, ty) -> do
+                V.RecordType (V.Row typeRow ext) -> do
+                    let (both, onlyPat, _) = Row.zipRows row typeRow
+                    (eBoth, ctx) <- runState ctx $ for (Row.sortedRow both) \(field, (pat, ty)) -> do
                         ctx <- get
-                        (output, ctx) <- checkPattern ctx pat ty
-                        output <$ put ctx
-                    internalError' "wip: check RecordP"
+                        (ePat, ctx) <- checkPattern ctx pat ty
+                        put ctx
+                        pure (field, ePat)
+                    (eOnlyPat, onlyPatVals, ctx) <- case ext of
+                        _ | Row.isEmpty onlyPat -> pure ([], Row.empty, ctx)
+                        Nothing -> internalError' "missing fields in record type"
+                        Just e -> do
+                            newExt <- freshUniVarS ctx $ V.Type RowName
+                            (eOnlyPat, onlyPatVals, fieldTypes, ctx) <- inferRow ctx (Row.sortedRow onlyPat) (Just newExt)
+                            unify ctx (V.Stuck e) fieldTypes
+                            pure (eOnlyPat, onlyPatVals, ctx)
+                    let (eBoth', bothVals) = unzip $ map (\(k, (p, v)) -> ((k, p), (k, v))) eBoth
+                        eRow = eBoth' <> eOnlyPat
+                        values = fromList bothVals <> onlyPatVals
+                    pure ((E.RecordP $ fromList eRow, V.Record values), ctx)
                 _ -> fallthroughToInfer
         T.SigmaP vis lhs rhs -> do
             forceM ty >>= \case
@@ -638,10 +650,26 @@ inferPattern ctx (p :@ loc) = do
             ext <- freshUniVarS ctx (V.Type RowName)
             ((eArg, argV), patType, ctx) <- inferPattern ctx arg
             pure ((E.VariantP con eArg, V.Variant con argV), V.VariantType $ V.Row (fromList [(con, patType)]) (Just ext), ctx)
-        -- since records are non-dependent, we can't just infer field types one by one and pass the context
-        T.RecordP{} -> internalError' "todo: infer record pattern"
+        -- since records are non-dependent, inferring fields one-by-one like this and passing the context is a bit too permissive
+        -- it shouldn't lead to unsoundness, but it might produce a cryptic type error somewhere else
+        T.RecordP row -> do
+            ext <- freshUniVarS ctx $ V.Type RowName
+            (eRow, valueRow, rowType, ctx) <- inferRow ctx (Row.sortedRow row) (Just ext)
+            pure ((E.RecordP (fromList eRow), V.Record valueRow), V.RecordType rowType, ctx)
   where
     type_ = V.Type TypeName
+
+inferRow
+    :: TC es => Context -> [(OpenName, Pattern 'Fixity)] -> Maybe V.Stuck -> Eff es ([(OpenName, EPattern)], Row Value, VType, Context)
+inferRow ctx row mbExt = do
+    (eRow, ctx) <- runState ctx $ for row \(field, pat) -> do
+        ctx <- get
+        (ePat, val, ctx) <- inferPattern ctx pat
+        put ctx
+        pure (field, ePat, val)
+    let rowType = V.Row (fromList $ map (\(field, _, ty) -> (field, ty)) eRow) mbExt
+        (patRow, values) = unzip $ map (\(k, (p, v), _) -> ((k, p), (k, v))) eRow
+    pure (patRow, fromList values, rowType, ctx)
 
 inferConArgs
     :: TC es

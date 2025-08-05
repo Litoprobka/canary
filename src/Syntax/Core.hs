@@ -19,9 +19,10 @@ import Common (
     keyword,
     specSym,
     typeColor,
+    pattern L,
  )
 import Data.List ((!!))
-import Data.Row (ExtRow (..), OpenName, Row, prettyRecord, prettyRow, prettyVariant, sortedRow)
+import Data.Row (ExtRow (..), OpenName, Row, prettyRecord, prettyRow, prettyVariant)
 import Data.Vector qualified as Vec
 import LangPrelude
 import Prettyprinter
@@ -33,7 +34,7 @@ data CorePattern
     | ConstructorP Name_ [(Visibility, SimpleName_)]
     | TypeP Name_ [(Visibility, SimpleName_)]
     | VariantP OpenName SimpleName_
-    | RecordP (Row SimpleName_)
+    | RecordP (Vector (OpenName, SimpleName_))
     | SigmaP Visibility SimpleName_ SimpleName_
     | LiteralP Literal
 
@@ -45,12 +46,13 @@ instance PrettyAnsi CorePattern where
         TypeP name [] -> prettyType name
         TypeP name args -> parens $ hsep (prettyType name : map (\(vis, arg) -> withVis vis (prettyAnsi arg)) args)
         VariantP name arg -> parens $ prettyCon name <+> prettyAnsi arg
-        RecordP row -> braces . sep . punctuate comma . map recordField $ sortedRow row
+        RecordP row -> braces . sep . punctuate comma . map recordField $ toList row
         SigmaP vis lhs rhs -> parens $ withVis vis (pretty lhs) <+> "**" <+> pretty rhs
         LiteralP lit -> prettyAnsi lit
       where
         prettyCon name = conColor $ prettyAnsi name
         prettyType name = typeColor $ prettyAnsi name
+        recordField (L name, var) | name == var = prettyAnsi name
         recordField (name, pat) = prettyAnsi name <+> "=" <+> prettyAnsi pat
 
 type CoreType = CoreTerm
@@ -115,6 +117,7 @@ prettyEnv = go 0 . map prettyAnsi
         Record row -> prettyRecord "=" prettyAnsi (go 0 env) (NoExtRow row)
         Sigma x y -> parensWhen 1 $ go 0 env x <+> specSym "**" <+> go 0 env y
         Variant name arg -> parensWhen 3 $ conColor (prettyAnsi name) <+> go 3 env arg
+        Case arg [(RecordP ((field, _) :< Nil), Var (Index 0))] -> go 3 env arg <> "." <> prettyAnsi field
         Case arg matches ->
             nest
                 4
@@ -184,7 +187,7 @@ prettyEnv = go 0 . map prettyAnsi
         ConstructorP _ args -> map (prettyAnsi . snd) $ reverse args
         TypeP _ args -> map (prettyAnsi . snd) $ reverse args
         VariantP _ arg -> [prettyAnsi arg]
-        RecordP row -> map prettyAnsi . reverse $ toList row
+        RecordP row -> map (prettyAnsi . snd) . reverse $ toList row
         SigmaP _vis lhs rhs -> [prettyAnsi rhs, prettyAnsi lhs]
         LiteralP{} -> []
 

@@ -40,6 +40,11 @@ toSanityCheck =
     , "\\f g x -> f (g x)"
     , "match x _ -> x"
     , "match Int -> True; _ -> False"
+    , "\\r -> r.x"
+    , "match {x, y, z} -> [x, y, z]"
+    , "\\r -> [(case r of {x} -> x), case r of {y} -> y]"
+    , "\\f r -> case r of {x, y} -> f x y"
+    , "\\r f -> case r of {x, y} -> f x y"
     ]
 
 -- these cases do not seem to work with pattern unification.
