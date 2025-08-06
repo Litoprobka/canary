@@ -53,6 +53,8 @@ postponing :: [Text]
 postponing =
     [ "\\a b c -> c (b a) (c a a)"
     , "\\a b -> a (\\x -> b x) (\\z -> a b b) {}"
+    , "\\f r -> f r.x r.y"
+    , "[\\f r -> f r.x r.y, \\f r -> f r.x r.y]"
     ]
 
 toInfer :: [(String, Text)]

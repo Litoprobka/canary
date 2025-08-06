@@ -46,7 +46,7 @@ import TypeChecker.TypeError (TypeError (..), UnificationError (..), typeError)
 newtype ValueTopLevel = ValueTopLevel {getValues :: IdMap Name_ Value}
 newtype LocalEq = LocalEq {getLocalEq :: EnumMap Level Value}
 
-data Mode = Postpone | Fail
+data Mode = Postpone | PruneEverything deriving (Eq)
 
 type TC' es =
     (TC es, ?topLevel :: ValueTopLevel, ?localEq :: LocalEq, ?ctx :: Context, ?mode :: Mode, Error UnificationError :> es)
@@ -82,7 +82,7 @@ forceUnify ctx lvl lhs rhs = do
         let ?localEq = LocalEq EMap.empty -- todo: seems like local equalities should be stored with postponing constraints
             ?topLevel = ValueTopLevel ctx.env.topLevel
             ?ctx = ctx
-            ?mode = Fail
+            ?mode = PruneEverything
          in runErrorNoCallStack
                 . runReader ()
                 $ unify' ctx.level lhs rhs
@@ -275,6 +275,7 @@ lift PartialRenaming{uni, domain, codomain, renaming} =
 
 -- | add multiple variables to a partial renaming
 liftN :: Int -> PartialRenaming -> PartialRenaming
+liftN n | n < 0 = error "negative lift"
 liftN 0 = id
 liftN n = lift . liftN (pred n)
 
@@ -282,9 +283,17 @@ skip :: PartialRenaming -> PartialRenaming
 skip PartialRenaming{codomain, ..} = PartialRenaming{codomain = succ codomain, ..}
 
 solve :: TC' es => Level -> UniVar -> Spine -> Value -> Eff es ()
-solve ctxLevel uni spine rhs = do
-    pren <- invert ctxLevel spine
-    solveWithRenaming uni pren rhs
+solve ctxLevel uni spine rhs = case ?mode of
+    Postpone -> do
+        pren <- invert ctxLevel spine
+        solveWithRenaming uni pren rhs
+    PruneEverything ->
+        tryError @UnificationError (invert ctxLevel spine) >>= \case
+            Right pren -> solveWithRenaming uni pren rhs
+            Left (_, err@NonVarInSpine{}) -> do
+                pruneNonVars uni spine err
+                unify' ctxLevel (Stuck $ UniVarApp uni spine) rhs
+            Left (_, nonPrunable) -> throwError_ nonPrunable
 
 solveWithRenaming :: TC' es => UniVar -> (PartialRenaming, Maybe Pruning) -> Value -> Eff es ()
 solveWithRenaming uni (pren, pruneNonlinear) rhs = do
@@ -296,6 +305,21 @@ solveWithRenaming uni (pren, pruneNonlinear) rhs = do
     let solution = evalCore env $ lambdas univars pren.domain ty rhs'
     modify @UniVars $ EMap.insert uni $ Solved{solution, ty}
     for_ (ESet.toList blocked) retryPostponed
+
+{- | used in the PruneEverything mode. Prune all arguments that are not variables from a spine
+if there's nothing to prune, rethrow the given error
+-}
+pruneNonVars :: TC' es => UniVar -> Spine -> UnificationError -> Eff es ()
+pruneNonVars uni spine err = do
+    let pruning = Pruning $ fmap pruneNonVar spine
+    void
+        if all isJust pruning.getPruning
+            then throwError_ err
+            else pruneUniVar pruning uni
+  where
+    pruneNonVar = \case
+        (vis, V.Var{}) -> Just vis
+        _ -> Nothing
 
 {- | convert a spine to a partial renaming
 also returns a pruning of non-linear vars, if one is needed
@@ -329,40 +353,48 @@ invert codomain spine = do
             other -> throwError_ (NonVarInSpine $ quoteWhnf EMap.empty codomain other)
 
 data PruneStatus
-    = Renaming
-    | NonRenaming
-    | NeedsPruning
+    = -- | the spine only contains vars so far and can be pruned if needed
+      Renaming
+    | -- | the spine contains non-var arguments and cannot be pruned
+      NonRenaming
+    | -- | the spine contains variables that are out of scope of the renaming. We need to prune them
+      NeedsPruning
 
-pruneUniVarApp :: TC' es => PartialRenaming -> UniVar -> Spine -> Eff es CoreTerm
-pruneUniVarApp pren uni spine = do
-    (spine', status) <- go spine
+{- | rename a univar with a spine
+if it contains any variables not covered by the renaming, prune them
+-}
+renameUniVarApp :: TC' es => PartialRenaming -> UniVar -> Spine -> Eff es CoreTerm
+renameUniVarApp pren uni initialSpine = do
+    (spine, status) <- go initialSpine
     newUni <- case status of
         NeedsPruning ->
-            let pruning = Pruning $ map (uncurry (<$)) spine'
+            let pruning = Pruning $ map (uncurry (<$)) spine
              in pruneUniVar pruning uni
         _ -> uni <$ readUnsolvedUniVar uni
-    pure $ foldr (\(vis, mbTy) acc -> maybe acc (C.App vis acc) mbTy) (C.UniVar newUni) spine'
+    pure $ foldr (\(vis, mbTy) acc -> maybe acc (C.App vis acc) mbTy) (C.UniVar newUni) spine
   where
     go [] = pure ([], Renaming)
     go ((vis, ty) : rest) = do
-        (spine', status) <- go rest
+        (spine, status) <- go rest
         forceM ty >>= \case
             Var vlvl -> case (EMap.lookup vlvl pren.renaming, status) of
-                (Just targetLvl, _) -> pure ((vis, Just $ C.Var $ levelToIndex pren.domain targetLvl) : spine', status)
-                (Nothing, NonRenaming) -> throwError_ (PruneNonRenaming spine)
-                (Nothing, _) -> pure ((vis, Nothing) : spine', NeedsPruning)
+                (Just targetLvl, _) -> pure ((vis, Just $ C.Var $ levelToIndex pren.domain targetLvl) : spine, status)
+                (Nothing, NonRenaming) | ?mode /= PruneEverything -> throwError_ (PruneNonRenaming initialSpine)
+                (Nothing, _) -> pure ((vis, Nothing) : spine, NeedsPruning)
             other -> case status of
-                NeedsPruning -> throwError_ (PruneNonPattern spine)
+                NeedsPruning
+                    | ?mode == PruneEverything -> pure ((vis, Nothing) : spine, NeedsPruning)
+                    | otherwise -> throwError_ (PruneNonPattern initialSpine)
                 _ -> do
                     term <- rename pren other
-                    pure ((vis, Just term) : spine', NonRenaming)
+                    pure ((vis, Just term) : spine, NonRenaming)
 
 rename :: TC' es => PartialRenaming -> Value -> Eff es CoreTerm
 rename pren ty =
     forceM ty >>= \case
         Stuck (UniVarApp uni2 spine)
             | pren.uni == Just uni2 -> throwError_ (OccursCheck uni2)
-            | otherwise -> pruneUniVarApp pren uni2 spine
+            | otherwise -> renameUniVarApp pren uni2 spine
         Stuck (VarApp lvl spine) -> do
             univars <- get
             case (EMap.lookup lvl pren.renaming, EMap.lookup lvl ?localEq.getLocalEq) of
@@ -399,7 +431,7 @@ renameBranch :: TC' es => PartialRenaming -> PatternClosure a -> Eff es (CorePat
 renameBranch pren closure = do
     univars <- get
     let (bodyV, newLevel) = skolemizePatternClosure univars pren.codomain closure
-        diff = pren.codomain.getLevel - newLevel.getLevel
+        diff = newLevel.getLevel - pren.codomain.getLevel
     renamedBody <- rename (liftN diff pren) bodyV
     pure (closure.pat, renamedBody)
 
@@ -487,7 +519,7 @@ intersect lvl uni spine spine2 = do
 -- | if the current failure mode allows it, postpone in case of an ambiguity error
 postponeOnFailure :: TC' es => Level -> Value -> Value -> Eff es () -> Eff es ()
 postponeOnFailure lvl lhs rhs action = case ?mode of
-    Fail -> action
+    PruneEverything -> action
     Postpone -> catchError @UnificationError action \_ -> \case
         NonVarInSpine{} -> do
             univars <- get

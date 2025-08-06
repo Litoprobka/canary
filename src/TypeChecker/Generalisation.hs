@@ -11,10 +11,12 @@ import Effectful.Error.Static (runErrorNoCallStack)
 import Effectful.State.Static.Local
 import Eval (PostponedEntry (..), UniVarState (..), evalCore, nf, quote, quoteM)
 import LangPrelude
+import Prettyprinter (sep)
 import Syntax
 import Syntax.Core qualified as C
 import Syntax.Elaborated qualified as E
 import Syntax.Value qualified as V
+import Trace (trace, traceScope_)
 import TypeChecker.Backend
 import TypeChecker.Unification
 
@@ -42,9 +44,10 @@ zonkTerm ctx term = do
 generalise unsolved variables to new forall binders
 -}
 generalise' :: (TC es, Traversable t) => Context -> Maybe Name_ -> (t ETerm, VType) -> Eff es (t ETerm, VType)
-generalise' ctx mbName (mbTerm, ty) = do
+generalise' ctx mbName (mbTerm, ty) = traceScope_ (specSymBlue "generalise" <+> prettyDef mbName) do
     -- first, we retry all postponed constraints once again
     postponings <- get
+    trace $ "still blocked:" <+> pretty (EMap.size postponings)
     for_ postponings \(PostponedEntry lvl lhs rhs) -> forceUnify ctx lvl lhs rhs
 
     -- quote forces a term to normal form and applies all solved univars
@@ -53,6 +56,7 @@ generalise' ctx mbName (mbTerm, ty) = do
     (mbTerm, freeVarsInTerm) <- runState ESet.empty $ traverse (zonkTerm' (ctx.level, ctx.env)) mbTerm
     univars <- get
     freeVars <- execState freeVarsInTerm $ freeVarsInCore univars tyC
+    trace $ "to generalise:" <+> sep (map prettyDef $ ESet.toList freeVars)
 
     -- we collect a list of dependencies for each univar
     unisWithDependencies <- for (ESet.toList freeVars) \uni -> do
