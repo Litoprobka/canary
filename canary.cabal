@@ -51,6 +51,7 @@ library
       TypeChecker
       TypeChecker.Backend
       TypeChecker.Exhaustiveness
+      TypeChecker.Generalisation
       TypeChecker.TypeError
       TypeChecker.Unification
   other-modules:

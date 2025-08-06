@@ -2,7 +2,7 @@
 {-# LANGUAGE ImplicitParams #-}
 {-# LANGUAGE RecordWildCards #-}
 
-module TypeChecker.Unification (unify, refine) where
+module TypeChecker.Unification (unify, refine, forceUnify) where
 
 import Common
 import Data.EnumMap.Strict qualified as EMap
@@ -10,12 +10,15 @@ import Data.EnumSet qualified as ESet
 import Data.Row (ExtRow (..), zipRows)
 import Data.Row qualified as Row
 import Data.Vector qualified as Vec
-import Diagnostic (internalError')
-import Effectful.Error.Static (Error, runErrorNoCallStack, throwError_, tryError)
+import Diagnostic (currentLoc, internalError')
+import Effectful.Error.Static (Error, catchError, runErrorNoCallStack, throwError_, tryError)
+import Effectful.Labeled (labeled)
 import Effectful.Reader.Static (runReader)
-import Effectful.State.Static.Local (get, modify)
+import Effectful.State.Static.Local (execState, get, gets, modify)
 import Eval (
     ExtendedEnv (..),
+    Postponed (..),
+    PostponedEntry (..),
     UniVarState (..),
     UniVars,
     app,
@@ -25,11 +28,12 @@ import Eval (
     evalCore,
     force,
     forceM,
-    quoteM,
     quoteWhnf,
+    quoteWhnfM,
     skolemizePatternClosure,
  )
 import LangPrelude hiding (force, lift)
+import NameGen (freshId)
 import Prettyprinter (vsep)
 import Syntax
 import Syntax.Core (reversedPruning)
@@ -37,12 +41,15 @@ import Syntax.Core qualified as C
 import Syntax.Value as V hiding (lift)
 import Trace (trace, traceScope_)
 import TypeChecker.Backend hiding (ExType (..))
-import TypeChecker.TypeError (TypeError (..), UnificationError (..), typeErrorWithLoc)
+import TypeChecker.TypeError (TypeError (..), UnificationError (..), typeError)
 
 newtype ValueTopLevel = ValueTopLevel {getValues :: IdMap Name_ Value}
 newtype LocalEq = LocalEq {getLocalEq :: EnumMap Level Value}
 
-type TC' es = (TC es, ?topLevel :: ValueTopLevel, ?localEq :: LocalEq, ?ctx :: Context, Error UnificationError :> es)
+data Mode = Postpone | Fail
+
+type TC' es =
+    (TC es, ?topLevel :: ValueTopLevel, ?localEq :: LocalEq, ?ctx :: Context, ?mode :: Mode, Error UnificationError :> es)
 
 unify :: TC es => Context -> Value -> Value -> Eff es ()
 unify ctx lhs rhs = do
@@ -55,13 +62,35 @@ unify ctx lhs rhs = do
         let ?localEq = LocalEq ctx.localEquality
             ?topLevel = ValueTopLevel ctx.env.topLevel
             ?ctx = ctx
+            ?mode = Postpone
          in runErrorNoCallStack
                 . runReader ()
                 $ unify' ctx.level lhs rhs
     case result of
         Right () -> pass
-        Left context ->
-            typeErrorWithLoc \loc -> CannotUnify{loc, lhs = lhsC, rhs = rhsC, context}
+        Left context -> do
+            mbLoc <- currentLoc
+            typeError CannotUnify{mbLoc, lhs = lhsC, rhs = rhsC, context}
+
+forceUnify :: TC es => Context -> Level -> Value -> Value -> Eff es ()
+forceUnify ctx lvl lhs rhs = do
+    univars <- get
+    let lhsC = prettyDef $ quoteWhnf univars lvl lhs
+        rhsC = prettyDef $ quoteWhnf univars lvl rhs
+    trace $ lhsC <+> specSym "~" <+> rhsC
+    result <-
+        let ?localEq = LocalEq EMap.empty -- todo: seems like local equalities should be stored with postponing constraints
+            ?topLevel = ValueTopLevel ctx.env.topLevel
+            ?ctx = ctx
+            ?mode = Fail
+         in runErrorNoCallStack
+                . runReader ()
+                $ unify' ctx.level lhs rhs
+    case result of
+        Right () -> pass
+        Left context -> do
+            mbLoc <- currentLoc
+            typeError CannotUnify{mbLoc, lhs = lhsC, rhs = rhsC, context}
 
 {- | given two values of the same type, add local equality constraints to the given context such that the values become equal
 note that refinement is not symmetrical wrt. local equality constraints and unification variables,
@@ -76,8 +105,11 @@ refine ctx lhs rhs = do
         result <- runErrorNoCallStack $ refine' ctx lhs rhs
         case result of
             Right ctx -> pure ctx
-            Left context ->
-                typeErrorWithLoc \loc -> CannotUnify{loc, lhs = lhsC, rhs = rhsC, context}
+            Left context -> do
+                mbLoc <- currentLoc
+                typeError CannotUnify{mbLoc, lhs = lhsC, rhs = rhsC, context}
+
+-- todo: 'refine' should get its own type error that uses the same error context
 
 unify' :: TC' es => Level -> Value -> Value -> Eff es ()
 unify' lvl lhsTy rhsTy = do
@@ -146,23 +178,24 @@ unify' lvl lhsTy rhsTy = do
         (Stuck (VarApp vlvl spine)) (Stuck (VarApp vlvl2 spine2))
             | vlvl == vlvl2 -> unifySpine lvl spine spine2
             | otherwise -> do
-                lhs <- quoteM lvl (V.Var vlvl)
-                rhs <- quoteM lvl (V.Var vlvl2)
+                lhs <- quoteWhnfM lvl (V.Var vlvl)
+                rhs <- quoteWhnfM lvl (V.Var vlvl2)
                 throwError_ (NotEq lhs rhs)
         (Stuck (Opaque name spine)) (Stuck (Opaque name2 spine2))
             | name == name2 -> unifySpine lvl spine spine2
             | otherwise -> throwError_ $ NotEq (C.Name name) (C.Name name2)
-        (Stuck (UniVarApp uni spine)) (Stuck (UniVarApp uni2 spine2)) | uni == uni2 -> intersect lvl uni spine spine2
-        (Stuck (UniVarApp uni spine)) (Stuck (UniVarApp uni2 spine2)) -> uniUni lvl uni spine uni2 spine2
-        (Stuck (UniVarApp uni spine)) ty -> solve lvl uni spine ty
-        ty (Stuck (UniVarApp uni spine)) -> solve lvl uni spine ty
+        lhs@(Stuck (UniVarApp uni spine)) rhs@(Stuck (UniVarApp uni2 spine2))
+            | uni == uni2 -> postponeOnFailure lvl lhs rhs $ intersect lvl uni spine spine2
+            | otherwise -> postponeOnFailure lvl lhs rhs $ uniUni lvl uni spine uni2 spine2
+        lhs@(Stuck (UniVarApp uni spine)) rhs -> postponeOnFailure lvl lhs rhs $ solve lvl uni spine rhs
+        lhs rhs@(Stuck (UniVarApp uni spine)) -> postponeOnFailure lvl lhs rhs $ solve lvl uni spine lhs
         (Stuck (Fn fn arg)) (Stuck (Fn fn2 arg2))
             | fn.name == fn2.name && length fn.captured == length fn2.captured -> do
                 zipWithM_ (unify' lvl) fn.captured fn2.captured
                 unify' lvl (Stuck arg) (Stuck arg2)
         lhs rhs -> do
-            lhsC <- quoteM lvl lhs
-            rhsC <- quoteM lvl rhs
+            lhsC <- quoteWhnfM lvl lhs
+            rhsC <- quoteWhnfM lvl rhs
             throwError_ (NotEq lhsC rhsC)
 
 unifySpine :: TC' es => Level -> Spine -> Spine -> Eff es ()
@@ -256,12 +289,13 @@ solve ctxLevel uni spine rhs = do
 solveWithRenaming :: TC' es => UniVar -> (PartialRenaming, Maybe Pruning) -> Value -> Eff es ()
 solveWithRenaming uni (pren, pruneNonlinear) rhs = do
     univars <- get @UniVars
-    ty <- typeOfUnsolvedUniVar uni
+    (blocked, ty) <- readUnsolvedUniVar uni
     for_ pruneNonlinear \pruning -> pruneType (reversedPruning pruning) ty
     rhs' <- rename pren{uni = Just uni} rhs
     let env = ExtendedEnv{univars, topLevel = ?topLevel.getValues, locals = []}
     let solution = evalCore env $ lambdas univars pren.domain ty rhs'
     modify @UniVars $ EMap.insert uni $ Solved{solution, ty}
+    for_ (ESet.toList blocked) retryPostponed
 
 {- | convert a spine to a partial renaming
 also returns a pruning of non-linear vars, if one is needed
@@ -292,7 +326,7 @@ invert codomain spine = do
                 | otherwise ->
                     pure (succ domain, EMap.insert vlvl domain renaming, nonLinears, (vis, vlvl) : rest)
             -- TODO: Level 0 is obviously incorrect here, but I'm not sure whether we should use the domain or the codomain
-            other -> throwError_ (NonVarInSpine $ quoteWhnf EMap.empty (Level 0) other)
+            other -> throwError_ (NonVarInSpine $ quoteWhnf EMap.empty codomain other)
 
 data PruneStatus
     = Renaming
@@ -306,7 +340,7 @@ pruneUniVarApp pren uni spine = do
         NeedsPruning ->
             let pruning = Pruning $ map (uncurry (<$)) spine'
              in pruneUniVar pruning uni
-        _ -> uni <$ typeOfUnsolvedUniVar uni
+        _ -> uni <$ readUnsolvedUniVar uni
     pure $ foldr (\(vis, mbTy) acc -> maybe acc (C.App vis acc) mbTy) (C.UniVar newUni) spine'
   where
     go [] = pure ([], Renaming)
@@ -405,14 +439,15 @@ pruneType (ReversedPruning initPruning) =
 pruneUniVar :: TC' es => Pruning -> UniVar -> Eff es UniVar
 pruneUniVar pruning uni = do
     univars <- get
-    ty <- typeOfUnsolvedUniVar uni
+    (blocked, ty) <- readUnsolvedUniVar uni
     let env = ExtendedEnv{locals = [], topLevel = ?topLevel.getValues, ..}
     prunedType <- evalCore env <$> pruneType (reversedPruning pruning) ty
     newUni <- newUniVar prunedType
     univars' <- get
     let env' = ExtendedEnv{locals = [], univars = univars', topLevel = ?topLevel.getValues}
         solution = evalCore env' $ lambdas univars (Level $ length pruning.getPruning) ty $ C.AppPruning (C.UniVar newUni) pruning
-    modify $ EMap.insert uni $ Solved{solution, ty}
+    modify @UniVars $ EMap.insert uni $ Solved{solution, ty}
+    for_ (ESet.toList blocked) retryPostponed
     pure newUni
 
 -- try to solve the inner univar with the outer one
@@ -448,3 +483,38 @@ intersect lvl uni spine spine2 = do
                  in (visOrPrune :) <$> go univars rest rest2
             _ -> Nothing
         _ _ -> error "spine length mismatch"
+
+-- | if the current failure mode allows it, postpone in case of an ambiguity error
+postponeOnFailure :: TC' es => Level -> Value -> Value -> Eff es () -> Eff es ()
+postponeOnFailure lvl lhs rhs action = case ?mode of
+    Fail -> action
+    Postpone -> catchError @UnificationError action \_ -> \case
+        NonVarInSpine{} -> do
+            univars <- get
+            let blockingUnivars = ESet.toList $ runPureEff $ execState ESet.empty do
+                    freeVarsInCore univars (quoteWhnf univars lvl lhs)
+                    freeVarsInCore univars (quoteWhnf univars lvl rhs)
+            trace $ specSym "postpone" <+> foldr ((<+>) . prettyDef) mempty blockingUnivars
+            postpone lvl blockingUnivars lhs rhs
+        nonPostponable -> throwError_ nonPostponable
+
+-- | postpone a unification check, block on the given list of univars
+postpone :: TC' es => Level -> [UniVar] -> Value -> Value -> Eff es ()
+postpone lvl univars lhs rhs = do
+    pId <- Postponed <$> labeled @Postponed freshId
+    modify $ EMap.insert pId (PostponedEntry lvl lhs rhs)
+    let addBlock = \case
+            Solved{} -> error "unexpected solved univar"
+            Unsolved{blocks, ty} -> Unsolved{blocks = ESet.insert pId blocks, ty}
+
+    for_ univars (modify . EMap.adjust addBlock)
+
+-- | try to solve a postponed constraint
+retryPostponed :: TC' es => Postponed -> Eff es ()
+retryPostponed pId =
+    gets (EMap.lookup pId) >>= \case
+        Nothing -> pass
+        Just (PostponedEntry lvl lhs rhs) -> do
+            trace $ specSymBlue "retry" <+> pretty pId
+            modify $ EMap.delete pId
+            unify' lvl lhs rhs

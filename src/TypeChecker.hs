@@ -13,13 +13,12 @@ import Data.Row qualified as Row
 import Data.Vector qualified as Vec
 import Desugar (desugar)
 import Diagnostic
-import Effectful.Labeled (Labeled, runLabeled)
 import Effectful.Reader.Static
-import Effectful.State.Static.Local (State, evalState, get, modify, put, runState)
-import Eval (ExtendedEnv (univars), UniVars, app, appM, eval, evalCore, forceM, mkTyCon, quote, quoteM)
+import Effectful.State.Static.Local (State, get, modify, put, runState)
+import Eval (ExtendedEnv (univars), app, appM, eval, evalCore, forceM, mkTyCon, quote, quoteM)
 import GHC.IsList qualified as IsList
 import LangPrelude hiding (unzip)
-import NameGen (NameGen, freshName, freshName_, runNameGen)
+import NameGen (NameGen, freshName, freshName_)
 import Syntax
 import Syntax.Core qualified as C
 import Syntax.Declaration qualified as D
@@ -28,15 +27,15 @@ import Syntax.Term qualified as T
 import Syntax.Value qualified as V
 import Trace
 import TypeChecker.Backend
+import TypeChecker.Generalisation
 import TypeChecker.TypeError (TypeError (..), typeError)
 import TypeChecker.Unification (refine, unify)
 
 type DeclTC es =
-    ( Labeled UniVar NameGen :> es
-    , NameGen :> es
+    ( NameGen :> es
     , Diagnose :> es
     , Trace :> es
-    , State UniVars :> es
+    , UniEffs es
     , State TopLevel :> es
     , State ConMetaTable :> es
     )
@@ -46,8 +45,8 @@ processDeclaration'
     => ValueEnv
     -> Declaration 'Fixity
     -> Eff es (EDeclaration, ValueEnv)
-processDeclaration' env decl = runLabeled @UniVar runNameGen do
-    (eDecl, diff) <- evalState EMap.empty $ processDeclaration (emptyContext env) decl
+processDeclaration' env decl = runUniEffs do
+    (eDecl, diff) <- processDeclaration (emptyContext env) decl
     pure (eDecl, env{V.topLevel = diff env.topLevel})
 
 processDeclaration

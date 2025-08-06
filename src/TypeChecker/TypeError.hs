@@ -16,7 +16,7 @@ import Syntax.Term (withVis)
 type CType = Located CoreType
 
 data TypeError
-    = CannotUnify {loc :: Loc, lhs :: Doc AnsiStyle, rhs :: Doc AnsiStyle, context :: UnificationError}
+    = CannotUnify {mbLoc :: Maybe Loc, lhs :: Doc AnsiStyle, rhs :: Doc AnsiStyle, context :: UnificationError}
     | MissingField (Either CType (Term 'Fixity)) OpenName
     | MissingVariant CType OpenName
     | EmptyMatch Loc
@@ -52,11 +52,11 @@ typeErrorWithLoc mkTypeError =
 typeError :: Diagnose :> es => TypeError -> Eff es a
 typeError =
     fatal . one . \case
-        CannotUnify{loc, lhs, rhs, context} ->
+        CannotUnify{mbLoc, lhs, rhs, context} ->
             Err
                 Nothing
                 "Type error"
-                (mkNotes [(loc, This "when typechecking this")])
+                (mkNotes $ maybeToList $ (,This "when typechecking this") <$> mbLoc)
                 [ Note $ vsep ["when trying to unify", lhs, rhs]
                 , noteFromUnificationError context
                 ]
@@ -124,8 +124,8 @@ typeError =
                 Nothing
                 "visibility mismatch in dependent pair argument"
                 (mkNotes [(loc, This "in this pattern")])
-                [ Note $ "the pattern is expected to be" <+> pretty (show @Text expectedVis)
-                , Note $ "but it is" <+> pretty (show @Text actualVis)
+                [ Note $ "the pattern is expected to be" <+> show expectedVis
+                , Note $ "but it is" <+> show actualVis
                 ]
         ConstructorVisibilityMismatch{loc} ->
             Err

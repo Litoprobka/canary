@@ -10,6 +10,7 @@
 module Eval where
 
 import Common (
+    Id,
     Index (..),
     Level (..),
     Name_,
@@ -42,9 +43,17 @@ import Syntax.Value as Reexport
 
 data UniVarState
     = Solved {solution :: Value, ty :: ~VType}
-    | Unsolved {ty :: ~VType}
+    | Unsolved {blocks :: EnumSet Postponed, ty :: ~VType}
     deriving (Show)
 type UniVars = EnumMap UniVar UniVarState
+
+newtype Postponed = Postponed Id deriving (Eq, Show, Enum)
+instance Pretty Postponed where
+    pretty (Postponed id') = "#" <> pretty id'
+
+data PostponedEntry = PostponedEntry Level Value Value
+
+type Postponings = EnumMap Postponed PostponedEntry
 
 data ExtendedEnv = ExtendedEnv
     { locals :: [Value]
@@ -106,6 +115,11 @@ quoteM lvl value = do
     univars <- get
     pure $ quote univars lvl value
 
+quoteWhnfM :: State UniVars :> es => Level -> Value -> Eff es CoreTerm
+quoteWhnfM lvl value = do
+    univars <- get
+    pure $ quoteWhnf univars lvl value
+
 quote :: UniVars -> Level -> Value -> CoreTerm
 quote univars = go
   where
@@ -119,9 +133,7 @@ quote univars = go
         let (bodyV, newLevel) = skolemizePatternClosure univars lvl closure
          in (closure.pat, go newLevel bodyV)
 
-{- | quote a value without reducing anything under lambdas
-todo: 'quoteWhnf' is 90% the same as 'quote', I think they can be merged into one function
--}
+-- | quote a value without reducing anything under lambdas
 quoteWhnf :: UniVars -> Level -> Value -> CoreTerm
 quoteWhnf univars = go
   where

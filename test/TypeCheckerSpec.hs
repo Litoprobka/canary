@@ -28,6 +28,7 @@ import Test.Hspec
 import Trace
 import TypeChecker qualified as TC
 import TypeChecker.Backend qualified as TC
+import TypeChecker.Generalisation
 
 toSanityCheck :: [Text]
 toSanityCheck =
@@ -47,12 +48,10 @@ toSanityCheck =
     , "\\r f -> case r of {x, y} -> f x y"
     ]
 
--- these cases do not seem to work with pattern unification.
--- generally, it fails on non-variables in meta spines. That could be worked around by postponing and aggerssively pruning later on
-unificationShenanigans :: [Text]
-unificationShenanigans =
-    [ "\\x y -> x (\\a -> x (y a a))"
-    , "\\a b c -> c (b a) (c a a)"
+-- these tests require unification postponing to work
+postponing :: [Text]
+postponing =
+    [ "\\a b c -> c (b a) (c a a)"
     , "\\a b -> a (\\x -> b x) (\\z -> a b b) {}"
     ]
 
@@ -75,9 +74,7 @@ spec = do
     describe "typecheck" do
         for_ toInfer \(name, input) -> it ("infers " <> name) $ knownFailingDecls input
     describe "unification shenanigans" do
-        for_ unificationShenanigans \input -> it ("infers a consistent type for " <> toString input) do
-            pendingWith "smarter unification and postponing"
-            sanityCheck input
+        for_ postponing \input -> it ("infers a consistent type for " <> toString input) $ sanityCheck input
     describe "should reject some invalid programs" do
         for_ toReject \(name, input) -> it ("rejects " <> name) $ rejectsDecls input
 
@@ -101,7 +98,7 @@ sanityCheck input =
                 Fixity.run env.fixityMap env.operatorPriorities $ Fixity.parse afterDepRes
             skipTrace $ runDiagnose' [("test", input)] $ TC.run env.types env.conMetadata do
                 let ctx = TC.emptyContext env.values
-                (_, vTy) <- TC.generaliseTerm ctx =<< TC.infer ctx afterFixityRes
+                (_, vTy) <- generaliseTerm ctx =<< TC.infer ctx afterFixityRes
                 TC.check ctx afterFixityRes vTy
      in case mbResult of
             Nothing -> expectationFailure . show $ ShowDiagnostic diagnostic

@@ -55,6 +55,7 @@ import Trace
 import TypeChecker qualified as TC
 import TypeChecker.Backend (emptyContext)
 import TypeChecker.Backend qualified as TC
+import TypeChecker.Generalisation
 
 data ReplCommand
     = Decls [Declaration 'Parse]
@@ -272,7 +273,7 @@ processExpr env expr = do
     afterFixityRes <- Fixity.run env.fixityMap env.operatorPriorities $ Fixity.parse skippedDepRes
     TC.run env.types env.conMetadata do
         let ctx = emptyContext env.values
-        (eExpr, vTy) <- TC.generaliseTerm ctx =<< TC.infer ctx afterFixityRes
+        (eExpr, vTy) <- generaliseTerm ctx =<< TC.infer ctx afterFixityRes
         pure (eExpr, vTy)
 
 -- takes a line of input, or a bunch of lines in :{ }:
