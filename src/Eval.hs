@@ -274,10 +274,12 @@ forceM val = do
 force :: UniVars -> Value -> Value
 force !univars = \case
     Row row Nothing -> Row row Nothing
-    Row row (Just ext) -> case force univars (Stuck ext) of
-        Stuck stillStuck -> Row row (Just stillStuck)
-        (Row innerRow innerExt) -> force univars $ Row (row <> innerRow) innerExt
-        nonRow -> error . show $ "[eval] non-row value in a row:" <+> pretty nonRow
+    Row row (Just ext)
+        | Row.isEmpty row -> force univars $ Stuck ext
+        | otherwise -> case force univars (Stuck ext) of
+            Stuck stillStuck -> Row row (Just stillStuck)
+            (Row innerRow innerExt) -> force univars $ Row (row <> innerRow) innerExt
+            nonRow -> error . show $ "[eval] non-row value in a row:" <+> pretty nonRow
     RecordType row -> RecordType $ force univars row
     VariantType row -> VariantType $ force univars row
     Stuck (UniVarApp uni spine) -> case EMap.lookup uni univars of

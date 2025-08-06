@@ -32,6 +32,8 @@ generaliseRecursiveTerm ctx name (term, ty) = first runIdentity <$> generalise' 
 -- | zonk unification variables from a term, report an error on leftover free variables
 zonkTerm :: TC es => Context -> ETerm -> Eff es ETerm
 zonkTerm ctx term = do
+    forceSolvePostponed ctx
+
     (term, freeVars) <- runState ESet.empty $ zonkTerm' (ctx.level, ctx.env) term
 
     -- todo: this reports only the first variable
@@ -40,15 +42,19 @@ zonkTerm ctx term = do
         internalError' $ "ambiguous unification variable" <+> pretty freeUni
     pure term
 
+forceSolvePostponed :: TC es => Context -> Eff es ()
+forceSolvePostponed ctx = do
+    postponings <- get
+    trace $ "still blocked:" <+> pretty (EMap.size postponings)
+    for_ postponings \(PostponedEntry lvl lhs rhs) -> forceUnify ctx lvl lhs rhs
+
 {- | zonk unification variables from a term and its type,
 generalise unsolved variables to new forall binders
 -}
 generalise' :: (TC es, Traversable t) => Context -> Maybe Name_ -> (t ETerm, VType) -> Eff es (t ETerm, VType)
 generalise' ctx mbName (mbTerm, ty) = traceScope_ (specSymBlue "generalise" <+> prettyDef mbName) do
     -- first, we retry all postponed constraints once again
-    postponings <- get
-    trace $ "still blocked:" <+> pretty (EMap.size postponings)
-    for_ postponings \(PostponedEntry lvl lhs rhs) -> forceUnify ctx lvl lhs rhs
+    forceSolvePostponed ctx
 
     -- quote forces a term to normal form and applies all solved univars
     -- quoteWhnf would also work here, I'm not sure which one is better in this case

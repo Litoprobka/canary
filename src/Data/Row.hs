@@ -22,6 +22,7 @@ module Data.Row (
     prettyRecord,
     prettyVariant,
     prettyRow,
+    mkExtRow,
 ) where
 
 import Common (SimpleName)
@@ -45,6 +46,10 @@ data ExtRow a
 
 empty :: Row a
 empty = Row HashMap.empty
+
+mkExtRow :: Row a -> Maybe a -> ExtRow a
+mkExtRow row Nothing = NoExtRow row
+mkExtRow row (Just ext) = ExtRow row ext
 
 isEmpty :: Row a -> Bool
 isEmpty (Row fields) = HashMap.null fields

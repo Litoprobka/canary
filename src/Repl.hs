@@ -141,7 +141,7 @@ mkDefaultEnv = do
     mkPreprelude = do
         false <- freshName' "False"
         a <- freshName' "a"
-        let builtinTypes = [C.TypeName, C.IntName, C.NatName, C.TextName, C.CharName]
+        let builtinTypes = [C.TypeName, C.RowName, C.IntName, C.NatName, C.TextName, C.CharName]
             decls =
                 map (\name -> noLoc $ D.Type (noLoc name) [] []) builtinTypes
                     <> map
@@ -158,6 +158,7 @@ mkDefaultEnv = do
             scope =
                 Scope . HashMap.fromList . map (first C.Name') $
                     [ ("Type", noLoc C.TypeName)
+                    , ("Row", noLoc C.RowName)
                     , ("Bool", noLoc C.BoolName)
                     , ("True", noLoc C.TrueName)
                     , ("False", false)

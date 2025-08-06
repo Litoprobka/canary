@@ -61,6 +61,7 @@ toInfer :: [(String, Text)]
 toInfer =
     [ ("null", "null = match Nil -> True; (Cons _ _) -> False")
     , ("map", "map f xs = case xs of Nil -> Nil; Cons x xs -> Cons (f x) (map f xs)")
+    , ("map (match)", "map f = match Nil -> Nil; Cons x xs -> Cons (f x) (map f xs)")
     , ("len", "type Peano = S Peano | Z\nlen xs = case xs of Nil -> Z; Cons _ xs -> S (len xs)")
     ]
 

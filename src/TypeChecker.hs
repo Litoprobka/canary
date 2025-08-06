@@ -498,11 +498,13 @@ infer ctx (t :@ loc) = traceScope (\(_, ty) -> prettyDef t <+> specSym "⇒" <+>
         eItems <- traverse (\item -> check ctx item itemTyV) items
         pure (E.List (E.Core itemTy) eItems, V.TyCon ListName $ fromList [(Visible, itemTyV)])
     T.RecordT row -> do
-        eRow <- traverse (\field -> check ctx field type_) row
-        pure (E.RecordT eRow, type_)
+        eRow <- traverse (\field -> check ctx field type_) row.row
+        eExt <- traverse (\ext -> check ctx ext $ V.Type RowName) (Row.extension row)
+        pure (E.RecordT $ Row.mkExtRow eRow eExt, type_)
     T.VariantT row -> do
-        eRow <- traverse (\field -> check ctx field type_) row
-        pure (E.VariantT eRow, type_)
+        eRow <- traverse (\field -> check ctx field type_) row.row
+        eExt <- traverse (\ext -> check ctx ext $ V.Type RowName) (Row.extension row)
+        pure (E.VariantT $ Row.mkExtRow eRow eExt, type_)
     -- normal function syntax is just sugar for 'Π (_ : a) -> b'
     T.Function from to -> do
         eFrom <- check ctx from type_

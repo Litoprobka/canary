@@ -193,6 +193,14 @@ unify' lvl lhsTy rhsTy = do
             | fn.name == fn2.name && length fn.captured == length fn2.captured -> do
                 zipWithM_ (unify' lvl) fn.captured fn2.captured
                 unify' lvl (Stuck arg) (Stuck arg2)
+        -- unifying stuck case branches is hard in general; I've special cased record access for now
+        (Stuck (Case (VarApp vlvl []) [lhsBranch])) (Stuck (Case (VarApp vlvl2 []) [rhsBranch]))
+            | vlvl == vlvl2
+            , C.RecordP (_ :< Nil) <- lhsBranch.pat
+            , C.RecordP (_ :< Nil) <- rhsBranch.pat
+            , C.Var (Index 0) <- lhsBranch.body
+            , C.Var (Index 0) <- rhsBranch.body ->
+                pass
         lhs rhs -> do
             lhsC <- quoteWhnfM lvl lhs
             rhsC <- quoteWhnfM lvl rhs
