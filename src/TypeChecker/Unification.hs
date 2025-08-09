@@ -170,7 +170,7 @@ unify' lvl lhsTy rhsTy = do
                 unifyRowExtension lvl (lhsRow, lhsExt) rhsOnly newExt
                 unifyRowExtension lvl (rhsRow, rhsExt) lhsOnly newExt
         (Record lhsRow) (Record rhsRow) -> unify' lvl (Row lhsRow Nothing) (Row rhsRow Nothing)
-        (Q Forall v _e closure) (Q Forall v2 _e2 closure2) | v == v2 -> do
+        (Q q v _e closure) (Q q2 v2 _e2 closure2) | q == q2 && v == v2 -> do
             unify' lvl closure.ty closure2.ty
             body <- closure `appM` Var lvl
             body2 <- closure2 `appM` Var lvl

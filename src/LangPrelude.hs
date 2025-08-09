@@ -54,10 +54,14 @@ pattern Nil <- (Vec.null -> True)
     where
         Nil = Vec.empty
 
+{-# COMPLETE Nil, (:<) #-}
+
 pattern (:<) :: a -> Vector a -> Vector a
 pattern x :< xs <- (Vec.uncons -> Just (x, xs))
     where
         (:<) = Vec.cons
+
+{-# COMPLETE Nil, (:>) #-}
 
 pattern (:>) :: Vector a -> a -> Vector a
 pattern xs :> x <- (Vec.unsnoc -> Just (xs, x))
