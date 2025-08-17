@@ -9,7 +9,7 @@ import Data.Poset qualified as Poset
 import Diagnostic (internalError')
 import Effectful.Error.Static (runErrorNoCallStack)
 import Effectful.State.Static.Local
-import Eval (PostponedEntry (..), UniVarState (..), evalCore, nf, quote, quoteM)
+import Eval (PostponedEntry (..), Postponings, UniVarState (..), evalCore, nf, quote, quoteM)
 import LangPrelude
 import Prettyprinter (sep)
 import Syntax
@@ -47,6 +47,7 @@ forceSolvePostponed ctx = do
     postponings <- get
     trace $ "still blocked:" <+> pretty (EMap.size postponings)
     for_ postponings \(PostponedEntry lvl lhs rhs) -> forceUnify ctx lvl lhs rhs
+    put @Postponings EMap.empty
 
 {- | zonk unification variables from a term and its type,
 generalise unsolved variables to new forall binders

@@ -1,0 +1,5 @@
+type Pair a b = (:*) a b
+
+and p = case p of
+    True :* True -> True
+    _ -> False

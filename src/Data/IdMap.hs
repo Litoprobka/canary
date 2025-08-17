@@ -8,7 +8,7 @@ import Data.IntMap.Strict qualified as IntMap
 -- todo: strict tuples
 
 -- | a newtype wrapper of IntMap for keys that have a lossy but 1-to-1 conversion to Int
-newtype IdMap k v = IdMap (IntMap (k, v)) deriving (Functor, Foldable, Traversable, Semigroup, Monoid)
+newtype IdMap k v = IdMap (IntMap (k, v)) deriving (Show, Functor, Foldable, Traversable, Semigroup, Monoid)
 
 class HasId k where
     toId :: k -> Int
@@ -60,3 +60,6 @@ keys = map fst . toList
 
 merge :: (a -> b -> c) -> (a -> c) -> (b -> c) -> IdMap k a -> IdMap k b -> IdMap k c
 merge both onlyA onlyB (IdMap as) (IdMap bs) = IdMap $ IntMap.mergeWithKey (\_ (k, a) (_, b) -> Just (k, both a b)) ((fmap . fmap) onlyA) ((fmap . fmap) onlyB) as bs
+
+unionWith :: (a -> a -> a) -> IdMap k a -> IdMap k a -> IdMap k a
+unionWith f (IdMap lhs) (IdMap rhs) = IdMap $ IntMap.unionWith (\(k, l) (_, r) -> (k, f l r)) lhs rhs

@@ -102,7 +102,7 @@ sanityCheck input =
             skipTrace $ runDiagnose' [("test", input)] $ TC.run env.types env.conMetadata do
                 let ctx = TC.emptyContext env.values
                 (_, vTy) <- generaliseTerm ctx =<< TC.infer ctx afterFixityRes
-                TC.check ctx afterFixityRes vTy
+                zonkTerm ctx =<< TC.check ctx afterFixityRes vTy
      in case mbResult of
             Nothing -> expectationFailure . show $ ShowDiagnostic diagnostic
             Just{} -> pass
