@@ -28,7 +28,7 @@ import Common (
 import Data.EnumMap.Lazy qualified as EMap
 import Data.IdMap qualified as LMap
 import Data.List ((!!))
-import Data.Row (ExtRow (..))
+import Data.Row (ExtRow (..), OpenName)
 import Data.Row qualified as Row
 import Data.Vector qualified as Vec
 import Desugar (desugar)
@@ -106,6 +106,7 @@ quoteWith quoteClosure quotePatternClosure unroll = go
                 nonStuck -> go lvl nonStuck
         Opaque name spine -> quoteSpine (C.Name name) spine
         Fn fn acc -> C.App Visible (go lvl $ PrimFunction fn) (quoteStuck lvl acc)
+        RecordAccess record field -> C.RecordAccess (quoteStuck lvl record) field
         Case arg matches -> C.Case (quoteStuck lvl arg) (fmap (quotePatternClosure lvl) matches)
       where
         quoteSpine = foldr (\(vis, arg) acc -> C.App vis acc (go lvl arg))
@@ -161,6 +162,7 @@ quoteWhnf univars = go
         C.App vis lhs rhs -> C.App vis (subst lvl env lhs) (subst lvl env rhs)
         C.Case arg branches -> C.Case (subst lvl env arg) $ fmap (substBranch lvl env) branches
         C.Let name expr body -> C.Let name (subst lvl env expr) (subst (succ lvl) (Var lvl : env) body)
+        C.RecordAccess record field -> C.RecordAccess (subst lvl env record) field
         C.Record row -> C.Record (fmap (subst lvl env) row)
         C.Row row -> C.Row (fmap (subst lvl env) row)
         C.Sigma lhs rhs -> C.Sigma (subst lvl env lhs) (subst lvl env rhs)
@@ -207,6 +209,7 @@ evalCore env@ExtendedEnv{..} = \case
                 $ matches <&> \(pat, body) -> evalCore <$> matchCore env pat val <*> pure body
     C.Let _name expr body -> evalCore (ExtendedEnv{locals = evalCore env expr : env.locals, ..}) body
     C.Literal lit -> PrimValue lit
+    C.RecordAccess record field -> evalRecordAccess (evalCore env record) field
     C.Record row -> Record $ evalCore env <$> row
     C.Sigma x y -> Sigma (evalCore env x) (evalCore env y)
     C.Q q vis e var ty body -> Q q vis e $ Closure{var, ty = evalCore env ty, env = ValueEnv{..}, body}
@@ -265,6 +268,14 @@ evalApp univars vis = \cases
     -- todo: seems like this would error on primitive functions with multiple stuck arguments
     nonFunc arg -> error . show $ "attempted to apply" <+> pretty nonFunc <+> "to" <+> pretty arg
 
+evalRecordAccess :: Value -> OpenName -> Value
+evalRecordAccess record field = case record of
+    Record row -> case Row.lookup field row of
+        Just val -> val
+        Nothing -> error . show $ "field" <+> pretty field <+> "not found in" <+> pretty record
+    Stuck stuck -> Stuck (RecordAccess stuck field)
+    nonRecord -> error . show $ "expected a record in record access expression: " <+> pretty nonRecord
+
 forceM :: State UniVars :> es => Value -> Eff es Value
 forceM val = do
     univars <- get @UniVars
@@ -290,6 +301,9 @@ force !univars = \case
     Stuck (Fn fn arg) -> case force univars (Stuck arg) of
         Stuck stillStuck -> Stuck (Fn fn stillStuck)
         noLongerStuck -> force univars $ evalApp univars Visible (PrimFunction fn) noLongerStuck
+    Stuck (RecordAccess record field) -> case force univars (Stuck record) of
+        Stuck stillStuck -> Stuck (RecordAccess stillStuck field)
+        noLongerStuck -> force univars $ evalRecordAccess noLongerStuck field
     Stuck (Case arg matches) -> case force univars (Stuck arg) of
         Stuck stillStuck -> Stuck (Case stillStuck matches)
         noLongerStuck -> fromMaybe (error "couldn't match") $ asum $ fmap (\closure -> tryApplyPatternClosure univars closure noLongerStuck) matches
@@ -327,10 +341,6 @@ matchCore ExtendedEnv{..} = \cases
         | pname == name -> Just ExtendedEnv{locals = reverse (map snd $ toList args) <> locals, ..}
     (C.VariantP pname _) (Variant name val)
         | pname == name -> Just ExtendedEnv{locals = val : locals, ..}
-    (C.RecordP vars) (Record row) ->
-        let takeField' field = fromMaybe (error "missing field in row match") . Row.takeField field
-            (values, _) = foldl' (\(acc, row) (field, _) -> first (: acc) $ takeField' field row) ([], row) vars
-         in Just ExtendedEnv{locals = values <> locals, ..}
     C.SigmaP{} (Sigma lhs rhs) -> Just ExtendedEnv{locals = rhs : lhs : locals, ..}
     (C.LiteralP lit) (PrimValue val) -> ExtendedEnv{..} <$ guard (lit == val)
     _ _ -> Nothing

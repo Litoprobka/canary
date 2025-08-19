@@ -19,7 +19,6 @@ import Common (
     keyword,
     specSym,
     typeColor,
-    pattern L,
  )
 import Data.List ((!!))
 import Data.Row (ExtRow (..), OpenName, Row, prettyRecord, prettyRow, prettyVariant)
@@ -34,7 +33,6 @@ data CorePattern
     | ConstructorP Name_ [(Visibility, SimpleName_)]
     | TypeP Name_ [(Visibility, SimpleName_)]
     | VariantP OpenName SimpleName_
-    | RecordP (Vector (OpenName, SimpleName_))
     | SigmaP Visibility SimpleName_ SimpleName_
     | LiteralP Literal
 
@@ -46,14 +44,11 @@ instance PrettyAnsi CorePattern where
         TypeP name [] -> prettyType name
         TypeP name args -> parens $ hsep (prettyType name : map (\(vis, arg) -> withVis vis (prettyAnsi arg)) args)
         VariantP name arg -> parens $ prettyCon name <+> prettyAnsi arg
-        RecordP row -> braces . sep . punctuate comma . map recordField $ toList row
         SigmaP vis lhs rhs -> parens $ withVis vis (pretty lhs) <+> "**" <+> pretty rhs
         LiteralP lit -> prettyAnsi lit
       where
         prettyCon name = conColor $ prettyAnsi name
         prettyType name = typeColor $ prettyAnsi name
-        recordField (L name, var) | name == var = prettyAnsi name
-        recordField (name, pat) = prettyAnsi name <+> "=" <+> prettyAnsi pat
 
 type CoreType = CoreTerm
 
@@ -72,6 +67,7 @@ data CoreTerm
     | Case CoreTerm [(CorePattern, CoreTerm)]
     | Let SimpleName_ CoreTerm CoreTerm
     | Literal Literal
+    | RecordAccess CoreTerm OpenName
     | Record (Row CoreTerm)
     | Sigma CoreTerm CoreTerm
     | Q Quantifier Visibility Erasure SimpleName_ CoreType CoreTerm
@@ -115,10 +111,10 @@ prettyEnv = go 0 . map prettyAnsi
         Con name args -> parensWhen 3 $ hsep (conColor (prettyAnsi name) : map (\(vis, t) -> withVis vis (go 3 env t)) (Vec.toList args))
         lambda@Lambda{} -> parensWhen 1 $ specSym "λ" <> compressLambda env lambda
         App vis lhs rhs -> parensWhen 3 $ go 2 env lhs <+> withVis vis (go 3 env rhs)
+        RecordAccess record field -> go 3 env record <> "." <> prettyAnsi field
         Record row -> prettyRecord "=" prettyAnsi (go 0 env) (NoExtRow row)
         Sigma x y -> parensWhen 1 $ go 0 env x <+> specSym "**" <+> go 0 env y
         Variant name arg -> parensWhen 3 $ conColor (prettyAnsi name) <+> go 3 env arg
-        Case arg [(RecordP ((field, _) :< Nil), Var (Index 0))] -> go 3 env arg <> "." <> prettyAnsi field
         Case arg matches ->
             nest
                 4
@@ -188,7 +184,6 @@ prettyEnv = go 0 . map prettyAnsi
         ConstructorP _ args -> map (prettyAnsi . snd) $ reverse args
         TypeP _ args -> map (prettyAnsi . snd) $ reverse args
         VariantP _ arg -> [prettyAnsi arg]
-        RecordP row -> map (prettyAnsi . snd) . reverse $ toList row
         SigmaP _vis lhs rhs -> [prettyAnsi rhs, prettyAnsi lhs]
         LiteralP{} -> []
 
@@ -214,6 +209,7 @@ coreTraversalWithLevel recur lvl = \case
     Case arg matches ->
         Case <$> recur lvl arg <*> traverse (\(pat, body) -> (pat,) <$> recur (lvl `incLevel` patternArity pat) body) matches
     Let name defn body -> Let name <$> recur lvl defn <*> recur (succ lvl) body
+    RecordAccess record field -> RecordAccess <$> recur lvl record <*> pure field
     Record row -> Record <$> traverse (recur lvl) row
     Row row -> Row <$> traverse (recur lvl) row
     Sigma x y -> Sigma <$> recur lvl x <*> recur lvl y
@@ -262,7 +258,6 @@ patternArity = \case
     ConstructorP _ args -> length args
     TypeP _ args -> length args
     VariantP{} -> 1
-    RecordP row -> length row
     SigmaP{} -> 2
     LiteralP{} -> 0
 

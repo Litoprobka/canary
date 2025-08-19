@@ -44,13 +44,7 @@ desugar = \case
             ]
     E.Variant name -> C.Lambda Visible "x" $ C.Variant name (C.Var $ Index 0)
     E.Record fields -> C.Record $ fmap go fields
-    E.RecordAccess record field ->
-        let arg = go record
-         in C.Case arg [(C.RecordP ((field, unLoc field) :< Nil), C.Var (Index 0))]
-    {- `record.field` gets desugared to
-        case record of
-            {field} -> field
-    -}
+    E.RecordAccess record field -> C.RecordAccess (go record) field
     E.Sigma x y -> C.Sigma (go x) (go y)
     E.List ty xs ->
         let cty = go ty

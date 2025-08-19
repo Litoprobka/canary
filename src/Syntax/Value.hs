@@ -45,6 +45,7 @@ data Stuck
       Opaque Name_ Spine
     | UniVarApp UniVar Spine
     | Fn PrimFunc Stuck
+    | RecordAccess Stuck OpenName
     | Case Stuck [PatternClosure ()]
 
 pattern Var :: Level -> Value
@@ -125,6 +126,7 @@ lift n = go
         UniVarApp uni spine -> UniVarApp uni ((fmap . fmap) go spine)
         Opaque name spine -> Opaque name ((fmap . fmap) go spine)
         Fn fn stuck -> Fn (liftFunc fn) (liftStuck stuck)
+        RecordAccess stuck field -> RecordAccess (liftStuck stuck) field
         Case stuck branches -> Case (liftStuck stuck) (fmap liftPatternClosure branches)
 
     liftEnv ValueEnv{locals, ..} = ValueEnv{locals = fmap go locals, ..}

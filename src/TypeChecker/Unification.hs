@@ -193,14 +193,13 @@ unify' lvl lhsTy rhsTy = do
             | fn.name == fn2.name && length fn.captured == length fn2.captured -> do
                 zipWithM_ (unify' lvl) fn.captured fn2.captured
                 unify' lvl (Stuck arg) (Stuck arg2)
-        -- unifying stuck case branches is hard in general; I've special cased record access for now
-        (Stuck (Case (VarApp vlvl []) [lhsBranch])) (Stuck (Case (VarApp vlvl2 []) [rhsBranch]))
-            | vlvl == vlvl2
-            , C.RecordP (_ :< Nil) <- lhsBranch.pat
-            , C.RecordP (_ :< Nil) <- rhsBranch.pat
-            , C.Var (Index 0) <- lhsBranch.body
-            , C.Var (Index 0) <- rhsBranch.body ->
-                pass
+        -- unifying record fields is kinda hard, we only handle the simplest case for now
+        --
+        -- when we get `?a.x ~ ?b.x`, do we want `?a ~ ?b`? Definitely not.
+        -- Seems like this is a case where having row extensions in record values would have been handy, because
+        -- we would have done `?a = { x = ?x | ?aExt }`, `?b = {x = ?x | ?bExt}`
+        (Stuck (RecordAccess (VarApp vlvl []) lhsField)) (Stuck (RecordAccess (VarApp vlvl2 []) rhsField))
+            | vlvl == vlvl2, lhsField == rhsField -> pass
         lhs rhs -> do
             lhsC <- quoteWhnfM lvl lhs
             rhsC <- quoteWhnfM lvl rhs
@@ -429,6 +428,7 @@ rename pren ty =
         PrimValue lit -> pure $ C.Literal lit
         Stuck (Opaque name spine) -> renameSpine pren (C.Name name) spine
         Stuck (Fn fn stuck) -> C.App Visible <$> rename pren (PrimFunction fn) <*> rename pren (Stuck stuck)
+        Stuck (RecordAccess record field) -> C.RecordAccess <$> rename pren (Stuck record) <*> pure field
         Stuck (Case arg branches) -> C.Case <$> rename pren (Stuck arg) <*> traverse (renameBranch pren) branches
 
 renameSpine :: TC' es => PartialRenaming -> CoreTerm -> Spine -> Eff es CoreTerm
