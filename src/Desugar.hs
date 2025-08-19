@@ -34,7 +34,7 @@ desugar = \case
         let len = length pats
             mkBranch (pats, body) = toTreeNested (toList $ fmap E.unTyped pats) (go body)
             tree = foldl1' (mergeNested const) $ fmap mkBranch (m :| rest)
-            body = fromNested (\_ term -> term) (Level 0) (fmap Level [0 .. pred len]) tree
+            body = fromNested (\_ term -> term) (Level len) (fmap Level [0 .. pred len]) tree
          in foldr (\i -> C.Lambda Visible (Name' $ "x" <> show i)) body [0 .. pred len]
     E.If cond true false ->
         C.Case

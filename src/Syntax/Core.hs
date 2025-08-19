@@ -9,7 +9,7 @@ import Common (
     Literal,
     Name_ (ConsName, NilName, RecordName, TypeName, VariantName),
     PrettyAnsi (..),
-    PrettyOptions,
+    PrettyOptions (..),
     SimpleName_,
     UnAnnotate (..),
     UniVar,
@@ -97,6 +97,7 @@ prettyEnv = go 0 . map prettyAnsi
     go n env term = case term of
         Var index
             | index.getIndex >= length env || index.getIndex < 0 -> "#" <> pretty index.getIndex
+            | ?opts.printIds -> env !! index.getIndex <> "#" <> pretty (length env - index.getIndex)
             | otherwise -> env !! index.getIndex
         Name name -> prettyAnsi name
         TyCon name Nil -> typeColor $ prettyAnsi name
