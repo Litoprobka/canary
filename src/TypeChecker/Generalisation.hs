@@ -167,7 +167,7 @@ zonkTerm' c@(lvl, env@V.ValueEnv{..}) = \case
     E.VariantT row -> E.VariantT <$> traverse (zonkTerm' c) row
     E.RecordAccess term field -> E.RecordAccess <$> zonkTerm' c term <*> pure field
     E.List ty items -> E.List <$> zonkTerm' c ty <*> traverse (zonkTerm' c) items
-    E.Sigma lhs rhs -> E.Sigma <$> zonkTerm' c lhs <*> zonkTerm' c rhs
+    E.Sigma vis lhs rhs -> E.Sigma vis <$> zonkTerm' c lhs <*> zonkTerm' c rhs
     E.Do{} -> internalError' "zonkTerm: do notation not supported yet"
     E.Q q v e (var ::: ty) body -> do
         ty <- zonkTerm' c ty

@@ -31,7 +31,7 @@ data Value
     | -- | an escape hatch for interpreter primitives and similar stuff
       PrimFunction PrimFunc
     | Record (Row Value)
-    | Sigma Value Value
+    | Sigma Visibility Value Value
     | Variant OpenName Value
     | -- | A primitive (Text, Char or Int) value. The name 'Literal' is slightly misleading here
       PrimValue Literal
@@ -114,7 +114,7 @@ lift n = go
         PrimFunction fn -> PrimFunction (liftFunc fn)
         Record row -> Record (fmap go row)
         Row row ext -> Row (fmap go row) (fmap liftStuck ext)
-        Sigma lhs rhs -> Sigma (go lhs) (go rhs)
+        Sigma vis lhs rhs -> Sigma vis (go lhs) (go rhs)
         Variant name arg -> Variant name (go arg)
         PrimValue prim -> PrimValue prim
         Q q v e Closure{..} -> Q q v e $ Closure{body = C.lift n body, ty = go ty, env = liftEnv env, ..}

@@ -87,7 +87,7 @@ quoteWith quoteClosure quotePatternClosure unroll = go
             -- captured names are stored as a stack, i.e. backwards, so we fold right rather than left here
             foldr (\arg acc -> C.App Visible acc (go lvl arg)) (C.Name name) captured
         Record vals -> C.Record $ fmap (go lvl) vals
-        Sigma x y -> C.Sigma (go lvl x) (go lvl y)
+        Sigma vis x y -> C.Sigma vis (go lvl x) (go lvl y)
         Variant name val -> C.Variant name (go lvl val)
         PrimValue lit -> C.Literal lit
         Q q v e closure -> C.Q q v e closure.var (go lvl closure.ty) $ quoteClosure lvl closure
@@ -163,7 +163,7 @@ quoteWhnf univars = go
         C.Let name expr body -> C.Let name (subst lvl env expr) (subst (succ lvl) (Var lvl : env) body)
         C.Record row -> C.Record (fmap (subst lvl env) row)
         C.Row row -> C.Row (fmap (subst lvl env) row)
-        C.Sigma lhs rhs -> C.Sigma (subst lvl env lhs) (subst lvl env rhs)
+        C.Sigma vis lhs rhs -> C.Sigma vis (subst lvl env lhs) (subst lvl env rhs)
         C.Q q vis e var ty body -> C.Q q vis e var (subst lvl env ty) (subst (succ lvl) (Var lvl : env) body)
         C.UniVar uni -> case EMap.lookup uni univars of
             Just Solved{solution} -> go lvl solution
@@ -208,7 +208,7 @@ evalCore env@ExtendedEnv{..} = \case
     C.Let _name expr body -> evalCore (ExtendedEnv{locals = evalCore env expr : env.locals, ..}) body
     C.Literal lit -> PrimValue lit
     C.Record row -> Record $ evalCore env <$> row
-    C.Sigma x y -> Sigma (evalCore env x) (evalCore env y)
+    C.Sigma vis x y -> Sigma vis (evalCore env x) (evalCore env y)
     C.Q q vis e var ty body -> Q q vis e $ Closure{var, ty = evalCore env ty, env = ValueEnv{..}, body}
     C.Row (NoExtRow row) -> Row (fmap (evalCore env) row) Nothing
     C.Row (ExtRow row ext) -> case evalCore env ext of
@@ -331,7 +331,7 @@ matchCore ExtendedEnv{..} = \cases
         let takeField' field = fromMaybe (error "missing field in row match") . Row.takeField field
             (values, _) = foldl' (\(acc, row) (field, _) -> first (: acc) $ takeField' field row) ([], row) vars
          in Just ExtendedEnv{locals = values <> locals, ..}
-    C.SigmaP{} (Sigma lhs rhs) -> Just ExtendedEnv{locals = rhs : lhs : locals, ..}
+    C.SigmaP{} (Sigma _ lhs rhs) -> Just ExtendedEnv{locals = rhs : lhs : locals, ..}
     (C.LiteralP lit) (PrimValue val) -> ExtendedEnv{..} <$ guard (lit == val)
     _ _ -> Nothing
 

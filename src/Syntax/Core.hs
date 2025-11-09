@@ -73,7 +73,7 @@ data CoreTerm
     | Let SimpleName_ CoreTerm CoreTerm
     | Literal Literal
     | Record (Row CoreTerm)
-    | Sigma CoreTerm CoreTerm
+    | Sigma Visibility CoreTerm CoreTerm
     | Q Quantifier Visibility Erasure SimpleName_ CoreType CoreTerm
     | Row (ExtRow CoreType)
     | UniVar UniVar
@@ -115,7 +115,7 @@ prettyEnv = go 0 . map prettyAnsi
         lambda@Lambda{} -> parensWhen 1 $ specSym "λ" <> compressLambda env lambda
         App vis lhs rhs -> parensWhen 3 $ go 2 env lhs <+> withVis vis (go 3 env rhs)
         Record row -> prettyRecord "=" prettyAnsi (go 0 env) (NoExtRow row)
-        Sigma x y -> parensWhen 1 $ go 0 env x <+> specSym "**" <+> go 0 env y
+        Sigma vis x y -> parensWhen 1 $ withVis vis (go 3 env x) <+> specSym "**" <+> go 0 env y
         Variant name arg -> parensWhen 3 $ conColor (prettyAnsi name) <+> go 3 env arg
         Case arg [(RecordP ((field, _) :< Nil), Var (Index 0))] -> go 3 env arg <> "." <> prettyAnsi field
         Case arg matches ->
@@ -215,7 +215,7 @@ coreTraversalWithLevel recur lvl = \case
     Let name defn body -> Let name <$> recur lvl defn <*> recur (succ lvl) body
     Record row -> Record <$> traverse (recur lvl) row
     Row row -> Row <$> traverse (recur lvl) row
-    Sigma x y -> Sigma <$> recur lvl x <*> recur lvl y
+    Sigma vis x y -> Sigma vis <$> recur lvl x <*> recur lvl y
     Q q v e name ty body -> Q q v e name <$> recur lvl ty <*> recur (succ lvl) body
     Var index -> pure $ Var index
     Name name -> pure $ Name name

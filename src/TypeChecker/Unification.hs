@@ -425,7 +425,7 @@ rename pren ty =
         Record row -> C.Record <$> traverse (rename pren) row
         Row row Nothing -> C.Row <$> traverse (rename pren) (NoExtRow row)
         Row row (Just ext) -> C.Row <$> traverse (rename pren) (ExtRow row (Stuck ext))
-        Sigma x y -> C.Sigma <$> rename pren x <*> rename pren y
+        Sigma vis x y -> C.Sigma vis <$> rename pren x <*> rename pren y
         PrimValue lit -> pure $ C.Literal lit
         Stuck (Opaque name spine) -> renameSpine pren (C.Name name) spine
         Stuck (Fn fn stuck) -> C.App Visible <$> rename pren (PrimFunction fn) <*> rename pren (Stuck stuck)

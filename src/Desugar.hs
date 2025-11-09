@@ -41,7 +41,7 @@ desugar = \case
         case record of
             {field} -> field
     -}
-    E.Sigma x y -> C.Sigma (go x) (go y)
+    E.Sigma vis x y -> C.Sigma vis (go x) (go y)
     E.List ty xs ->
         let cty = go ty
          in foldr

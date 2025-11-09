@@ -327,6 +327,22 @@ check ctx (t :@ loc) ty = traceScope_ (prettyDef t <+> specSymBlue "⇐" <+> pre
                         E.Record row -> pure row
                         _ -> internalError' "elaborated a record to a non-record"
             pure $ E.Record (eBoth <> eOnlyExpr)
+        (T.Sigma lhs rhs, V.Q Exists Visible _ closure) -> do
+            eLhs <- check ctx lhs closure.ty
+            env <- extendEnv ctx.env
+            let lhsV = eval env eLhs
+            rhsTy <- closure `appM` lhsV
+            eRhs <- check ctx rhs rhsTy
+            pure $ E.Sigma Visible eLhs eRhs
+        (T.List items, V.TyCon ListName ((_, itemTy) :< Nil)) -> do
+            eItems <- traverse (\item -> check ctx item itemTy) items
+            eItemTy <- quoteM ctx.level itemTy
+            pure $ E.List (E.Core eItemTy) eItems
+        (expr, V.Q Exists vis _ closure) | vis /= Visible -> do
+            argV <- freshUniVarV ctx closure.ty
+            ty <- closure `appM` argV
+            eArg <- E.Core <$> quoteM ctx.level argV
+            E.Sigma vis eArg <$> check ctx (expr :@ loc) ty
         (other, expected) -> do
             -- this case happens after the implicit forall case, so we know that we're checking against a monomorphic type here
             --
@@ -490,7 +506,7 @@ infer ctx (t :@ loc) = traceScope (\(_, ty) -> prettyDef t <+> specSym "⇒" <+>
         univars <- get
         -- I *think* we have to quote with increased level here, but I'm not sure
         let body = quote univars (succ ctx.level) rhsTy
-        pure (E.Sigma eLhs eRhs, V.Q Exists Visible Retained $ V.Closure{ty = lhsTy, var = "x", env = ctx.env, body})
+        pure (E.Sigma Visible eLhs eRhs, V.Q Exists Visible Retained $ V.Closure{ty = lhsTy, var = "x", env = ctx.env, body})
     T.List items -> do
         itemTy <- freshUniVar ctx type_
         env <- extendEnv ctx.env
@@ -594,7 +610,7 @@ checkPattern ctx (pat :@ pLoc) ty = do
                     | otherwise -> do
                         ((eLhs, lhsV), ctx) <- checkPattern ctx lhs closure.ty
                         ((eRhs, rhsV), ctx) <- checkPattern ctx rhs =<< closure `appM` lhsV
-                        pure ((E.SigmaP vis eLhs eRhs, V.Sigma lhsV rhsV), ctx)
+                        pure ((E.SigmaP vis eLhs eRhs, V.Sigma vis lhsV rhsV), ctx)
                 _ -> fallthroughToInfer
         _ -> fallthroughToInfer
   where
