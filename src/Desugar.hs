@@ -43,7 +43,7 @@ desugar = \case
     E.Variant name -> C.Lambda Visible "x" $ C.Variant name (C.Var $ Index 0)
     E.Record fields -> C.Record $ fmap go fields
     E.RecordAccess record field -> C.RecordAccess (go record) field
-    E.Sigma x y -> C.Sigma (go x) (go y)
+    E.Sigma vis x y -> C.Sigma vis (go x) (go y)
     E.List ty xs ->
         let cty = go ty
          in foldr

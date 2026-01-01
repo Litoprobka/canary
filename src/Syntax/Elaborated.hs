@@ -36,7 +36,7 @@ data ETerm
     | Record (Row ETerm)
     | RecordAccess ETerm OpenName
     | List EType [ETerm]
-    | Sigma ETerm ETerm
+    | Sigma Visibility ETerm ETerm
     | Do [EStatement] ETerm
     | Q Quantifier Visibility Erasure (Typed SimpleName_) ETerm
     | VariantT (ExtRow ETerm)
@@ -139,7 +139,7 @@ elabTraversalWithLevel recur recurCore lvl = \case
     Record row -> Record <$> traverse (recur lvl) row
     RecordAccess lhs field -> RecordAccess <$> recur lvl lhs <*> pure field
     List itemType items -> List <$> recur lvl itemType <*> traverse (recur lvl) items
-    Sigma lhs rhs -> Sigma <$> recur lvl lhs <*> recur lvl rhs
+    Sigma vis lhs rhs -> Sigma vis <$> recur lvl lhs <*> recur lvl rhs
     Do{} -> error "elabTraversal: do-notation not supported yet"
     Q q v e var body -> Q q v e var <$> recur (succ lvl) body
     VariantT row -> VariantT <$> traverse (recur lvl) row

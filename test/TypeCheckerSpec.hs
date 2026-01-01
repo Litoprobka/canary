@@ -46,6 +46,9 @@ toSanityCheck =
     , "\\r -> [(case r of {x} -> x), case r of {y} -> y]"
     , "\\f r -> case r of {x, y} -> f x y"
     , "\\r f -> case r of {x, y} -> f x y"
+    , "1 : exists a. a"
+    , "[1, 'a', \\x -> x] : List (exists a. a)"
+    , "[\\x -> x, \\_ -> 1] : List (exists a. a -> a)"
     ]
 
 -- these tests require unification postponing to work
@@ -68,6 +71,7 @@ toInfer =
 toReject :: [(String, Text)]
 toReject =
     [ ("pattern matching on existentials", "type Any where MkAny : 'a -> Any\ninvalid (MkAny 11) = True")
+    , ("invalid existential", "test = 1 : exists a. a -> a")
     ]
 
 spec :: Spec
