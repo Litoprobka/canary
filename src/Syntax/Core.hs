@@ -20,6 +20,7 @@ import Common (
     specSym,
     typeColor,
  )
+import Data.HashMap.Strict qualified as HashMap
 import Data.List ((!!))
 import Data.Row (ExtRow (..), OpenName, Row, prettyRecord, prettyRow, prettyVariant)
 import Data.Vector qualified as Vec
@@ -64,7 +65,7 @@ data CoreTerm
     | Variant OpenName CoreTerm
     | Lambda Visibility SimpleName_ CoreTerm
     | App Visibility CoreTerm CoreTerm
-    | Case CoreTerm [(CorePattern, CoreTerm)]
+    | Case CoreTerm CaseWithDefault
     | Let SimpleName_ CoreTerm CoreTerm
     | Literal Literal
     | RecordAccess CoreTerm OpenName
@@ -75,6 +76,17 @@ data CoreTerm
     | UniVar UniVar
     | AppPruning CoreTerm Pruning
     deriving (Pretty, Show) via (UnAnnotate CoreTerm)
+
+data CaseWithDefault = CaseWD
+    { branches :: Case
+    , def :: Maybe (SimpleName_, CoreTerm)
+    }
+
+data Case
+    = ConCase (IdMap Name_ (CorePattern, CoreTerm)) -- here, CorePattern is only used for pretty-printing
+    | TypeCase (IdMap Name_ (CorePattern, CoreTerm)) -- same as above
+    | VariantCase (HashMap OpenName (SimpleName_, CoreTerm)) -- a hashmap feels suboptimal here, but I'm not sure what else to use
+    | LitCase [(Literal, CoreTerm)]
 
 newtype Pruning = Pruning {getPruning :: [Maybe Visibility]}
 newtype ReversedPruning = ReversedPruning [Maybe Visibility]
@@ -120,7 +132,7 @@ prettyEnv = go 0 . map prettyAnsi
                 4
                 ( vsep $
                     (keyword "case" <+> go 0 env arg <+> keyword "of" :) $
-                        matches <&> \(pat, body) -> prettyAnsi pat <+> specSym "->" <+> go 0 (patternVars pat <> env) body
+                        toCases matches <&> \(pat, body) -> prettyAnsi pat <+> specSym "->" <+> go 0 (patternVars pat <> env) body
                 )
         Let name body expr -> keyword "let" <+> prettyAnsi name <+> specSym "=" <+> go 0 env body <> ";" <+> go 0 env expr
         Literal lit -> prettyAnsi lit
@@ -187,6 +199,15 @@ prettyEnv = go 0 . map prettyAnsi
         SigmaP _vis lhs rhs -> [prettyAnsi rhs, prettyAnsi lhs]
         LiteralP{} -> []
 
+    toCases CaseWD{branches, def} =
+        ( case branches of
+            ConCase branches -> toList branches
+            TypeCase branches -> toList branches
+            VariantCase branches -> map (\(con, (arg, body)) -> (VariantP con arg, body)) $ HashMap.toList branches
+            LitCase branches -> map (first LiteralP) branches
+        )
+            <> maybeToList (fmap (first VarP) def)
+
 instance PrettyAnsi CoreTerm where
     prettyAnsi = prettyEnv []
 
@@ -206,8 +227,8 @@ coreTraversalWithLevel recur lvl = \case
     Variant name arg -> Variant name <$> recur lvl arg
     Lambda vis var body -> Lambda vis var <$> recur (succ lvl) body
     App vis lhs rhs -> App vis <$> recur lvl lhs <*> recur lvl rhs
-    Case arg matches ->
-        Case <$> recur lvl arg <*> traverse (\(pat, body) -> (pat,) <$> recur (lvl `incLevel` patternArity pat) body) matches
+    Case arg branches -> Case arg <$> traverseCaseWD recur lvl branches
+    -- Case <$> recur lvl arg <*> traverse (\(pat, body) -> (pat,) <$> recur (lvl `incLevel` patternArity pat) body) matches
     Let name defn body -> Let name <$> recur lvl defn <*> recur (succ lvl) body
     RecordAccess record field -> RecordAccess <$> recur lvl record <*> pure field
     Record row -> Record <$> traverse (recur lvl) row
@@ -219,6 +240,16 @@ coreTraversalWithLevel recur lvl = \case
     Literal lit -> pure $ Literal lit
     UniVar uni -> pure $ UniVar uni
     AppPruning lhs pruning -> AppPruning <$> recur lvl lhs <*> pure pruning
+
+traverseCaseWD :: Applicative f => (Level -> CoreTerm -> f CoreTerm) -> Level -> CaseWithDefault -> f CaseWithDefault
+traverseCaseWD recur lvl CaseWD{branches, def} = do
+    branches <- case branches of
+        ConCase branches -> ConCase <$> traverse (\(pat, body) -> (pat,) <$> recur (lvl `incLevel` patternArity pat) body) branches
+        TypeCase branches -> TypeCase <$> traverse (\(pat, body) -> (pat,) <$> recur (lvl `incLevel` patternArity pat) body) branches
+        VariantCase branches -> VariantCase <$> (traverse . traverse) (recur (succ lvl)) branches
+        LitCase branches -> LitCase <$> (traverse . traverse) (recur lvl) branches
+    def <- (traverse . traverse) (recur lvl) def
+    pure $ CaseWD{branches, def}
 
 coreTraversal :: Applicative f => (CoreTerm -> f CoreTerm) -> CoreTerm -> f CoreTerm
 coreTraversal recur = coreTraversalWithLevel (const recur) (Level 0)

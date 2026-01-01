@@ -26,6 +26,7 @@ import Common (
 -- IdMap is currently lazy anyway, but it's up to change
 
 import Data.EnumMap.Lazy qualified as EMap
+import Data.HashMap.Strict qualified as HashMap
 import Data.IdMap qualified as LMap
 import Data.List ((!!))
 import Data.Row (ExtRow (..), OpenName)
@@ -34,8 +35,9 @@ import Data.Vector qualified as Vec
 import Desugar (desugar)
 import Effectful.State.Static.Local (State, get)
 import LangPrelude hiding (force)
-import Prettyprinter (line, vsep)
+import Prettyprinter (line)
 import Syntax
+import Syntax.Core (CaseWithDefault)
 import Syntax.Core qualified as C
 import Syntax.Elaborated qualified as D
 import Syntax.Elaborated qualified as E
@@ -72,12 +74,12 @@ data UnrollUniVars = NoUnroll | DeepUnroll UniVars
 
 quoteWith
     :: (forall ty. Level -> Closure ty -> CoreTerm)
-    -> (Level -> PatternClosure () -> (CorePattern, CoreTerm))
+    -> (Level -> ValueEnv -> CaseWithDefault -> CaseWithDefault)
     -> UnrollUniVars
     -> Level
     -> Value
     -> CoreTerm
-quoteWith quoteClosure quotePatternClosure unroll = go
+quoteWith quoteClosure quoteStuckCase unroll = go
   where
     go lvl = \case
         TyCon name args -> C.TyCon name $ (fmap . fmap) (go lvl) args
@@ -107,7 +109,7 @@ quoteWith quoteClosure quotePatternClosure unroll = go
         Opaque name spine -> quoteSpine (C.Name name) spine
         Fn fn acc -> C.App Visible (go lvl $ PrimFunction fn) (quoteStuck lvl acc)
         RecordAccess record field -> C.RecordAccess (quoteStuck lvl record) field
-        Case arg matches -> C.Case (quoteStuck lvl arg) (fmap (quotePatternClosure lvl) matches)
+        Case arg env matches -> C.Case (quoteStuck lvl arg) (quoteStuckCase lvl env matches)
       where
         quoteSpine = foldr (\(vis, arg) acc -> C.App vis acc (go lvl arg))
 
@@ -124,28 +126,22 @@ quoteWhnfM lvl value = do
 quote :: UniVars -> Level -> Value -> CoreTerm
 quote univars = go
   where
-    go = quoteWith quoteClosure quotePatternClosure (DeepUnroll univars)
+    go = quoteWith quoteClosure quoteStuckCase (DeepUnroll univars)
 
     quoteClosure :: Level -> Closure a -> CoreTerm
     quoteClosure lvl closure = go (succ lvl) $ app univars closure (Var lvl)
 
-    quotePatternClosure :: Level -> PatternClosure a -> (CorePattern, CoreTerm)
-    quotePatternClosure lvl closure =
-        let (bodyV, newLevel) = skolemizePatternClosure univars lvl closure
-         in (closure.pat, go newLevel bodyV)
+    quoteStuckCase :: Level -> ValueEnv -> CaseWithDefault -> CaseWithDefault
+    quoteStuckCase lvl ValueEnv{..} = nfCase lvl ExtendedEnv{..}
 
 -- | quote a value without reducing anything under lambdas
 quoteWhnf :: UniVars -> Level -> Value -> CoreTerm
 quoteWhnf univars = go
   where
-    go = quoteWith quoteClosure quotePatternClosure (DeepUnroll univars)
+    go = quoteWith quoteClosure quoteStuckCase (DeepUnroll univars)
 
-    -- we can't reuse `skolemizePatternClosure`, because it calls `evalCore` inside. Meh.
-    quotePatternClosure lvl closure = (closure.pat, subst newLevel env closure.body)
-      where
-        env = freeVars <> closure.env.locals
-        freeVars = Var <$> [pred newLevel, pred (pred newLevel) .. lvl]
-        newLevel = lvl `incLevel` C.patternArity closure.pat
+    quoteStuckCase :: Level -> ValueEnv -> CaseWithDefault -> CaseWithDefault
+    quoteStuckCase lvl env = substCaseWD lvl env.locals
 
     quoteClosure lvl Closure{env, body} = subst (succ lvl) (Var lvl : env.locals) body
 
@@ -160,7 +156,7 @@ quoteWhnf univars = go
         C.Variant name arg -> C.Variant name $ subst lvl env arg
         C.Lambda vis var body -> C.Lambda vis var $ subst (succ lvl) (Var lvl : env) body
         C.App vis lhs rhs -> C.App vis (subst lvl env lhs) (subst lvl env rhs)
-        C.Case arg branches -> C.Case (subst lvl env arg) $ fmap (substBranch lvl env) branches
+        C.Case arg casewd -> C.Case (subst lvl env arg) $ substCaseWD lvl env casewd
         C.Let name expr body -> C.Let name (subst lvl env expr) (subst (succ lvl) (Var lvl : env) body)
         C.RecordAccess record field -> C.RecordAccess (subst lvl env record) field
         C.Record row -> C.Record (fmap (subst lvl env) row)
@@ -178,13 +174,26 @@ quoteWhnf univars = go
             (_ : env, Nothing : pruning) -> substPruning env lhs pruning
             (env, pruning) -> error $ "[subst] pruning-env length mismatch (" <> show (length pruning) <> " != " <> show (length env) <> ")"
 
+    substCaseWD :: Level -> [Value] -> CaseWithDefault -> CaseWithDefault
+    substCaseWD lvl env C.CaseWD{branches, def} =
+        C.CaseWD
+            { branches = substCase lvl env branches
+            , def = second (subst (succ lvl) (Var lvl : env)) <$> def
+            }
+
+    substCase :: Level -> [Value] -> C.Case -> C.Case
+    substCase lvl env = \case
+        C.ConCase branches -> C.ConCase $ substBranch lvl env <$> branches
+        C.TypeCase branches -> C.TypeCase $ substBranch lvl env <$> branches
+        C.VariantCase branches -> C.VariantCase $ branches <&> second (subst (succ lvl) (Var lvl : env))
+        C.LitCase branches -> C.LitCase $ second (subst lvl env) <$> branches
+
     -- in terms of the printed output, it might be cleaner to evaluate nested pattern matches,
     -- because pattern matching only reduces the size of the output
     -- however, to properly apply a pattern we'd have to evaluate the scrutinee, which is exactly what we were trying to avoid
     substBranch :: Level -> [Value] -> (CorePattern, CoreTerm) -> (CorePattern, CoreTerm)
     substBranch lvl env (pat, body) =
-        let diff = C.patternArity pat
-            newLevel = lvl `incLevel` diff
+        let newLevel = lvl `incLevel` C.patternArity pat
             freeVars = Var <$> [pred newLevel, pred (pred newLevel) .. lvl]
          in (pat, subst newLevel (freeVars <> env) body)
 
@@ -200,14 +209,8 @@ evalCore env@ExtendedEnv{..} = \case
     C.Variant name arg -> Variant name (evalCore env arg)
     C.Lambda vis var body -> Lambda vis $ Closure{var, ty = (), env = ValueEnv{..}, body}
     C.App vis lhs rhs -> evalApp univars vis (evalCore env lhs) (evalCore env rhs)
-    C.Case arg matches -> case evalCore env arg of
-        Stuck stuck -> Stuck $ Case stuck (mkStuckBranches matches)
-        val ->
-            fromMaybe
-                (error $ show $ "pattern mismatch when matching" <+> prettyDef val <+> "with:" <> line <> vsep (map (prettyDef . fst) matches))
-                . asum
-                $ matches <&> \(pat, body) -> evalCore <$> matchCore env pat val <*> pure body
-    C.Let _name expr body -> evalCore (ExtendedEnv{locals = evalCore env expr : env.locals, ..}) body
+    C.Case arg matches -> evalPatternMatch env (evalCore env arg) matches
+    C.Let _name expr body -> evalCore (ExtendedEnv{locals = evalCore env expr : locals, ..}) body
     C.Literal lit -> PrimValue lit
     C.RecordAccess record field -> evalRecordAccess (evalCore env record) field
     C.Record row -> Record $ evalCore env <$> row
@@ -221,14 +224,43 @@ evalCore env@ExtendedEnv{..} = \case
     C.UniVar uni -> force univars (UniVar uni)
     C.AppPruning lhs pruning -> evalAppPruning env.locals (evalCore env lhs) pruning.getPruning
   where
-    mkStuckBranches :: [(CorePattern, CoreTerm)] -> [PatternClosure ()]
-    mkStuckBranches = map \(pat, body) -> PatternClosure{pat, ty = (), env = ValueEnv{..}, body}
-
     evalAppPruning ls val pruning = case (ls, pruning) of
         ([], []) -> val
         (t : ls, Just vis : pruning) -> evalApp env.univars vis (evalAppPruning ls val pruning) t
         (_ : ls, Nothing : pruning) -> evalAppPruning ls val pruning
         (env, pruning) -> error $ "[eval] pruning-env length mismatch (" <> show (length pruning) <> " != " <> show (length env) <> ")"
+
+-- | evaluate a case expression
+evalPatternMatch :: ExtendedEnv -> Value -> C.CaseWithDefault -> Value
+evalPatternMatch ExtendedEnv{..} (Stuck stuck) branches = Stuck $ Case stuck ValueEnv{..} branches
+evalPatternMatch env@ExtendedEnv{..} val casewd =
+    fromMaybe
+        (error $ show $ "[eval] pattern mismatch when matching" <+> prettyDef val <+> "with: <TODO: prettyprint standalone cases>")
+        $ fmap (uncurry evalCore) (matchBranch env val casewd.branches)
+            <|> fmap (evalCore ExtendedEnv{locals = val : env.locals, ..} . snd) casewd.def
+
+-- | try to match a value with a case expression branch, returning the new env and body expression
+matchBranch :: ExtendedEnv -> Value -> C.Case -> Maybe (ExtendedEnv, CoreTerm)
+matchBranch env = \cases
+    (Con name args) (C.ConCase branches) -> do
+        (_, branch) <- LMap.lookup name branches
+        pure (catEnv args env, branch)
+    (TyCon name args) (C.TypeCase branches) -> do
+        (_, branch) <- LMap.lookup name branches
+        pure (catEnv args env, branch)
+    (Variant name arg) (C.VariantCase branches) -> do
+        (_, branch) <- HashMap.lookup name branches
+        pure (catEnv (((), arg) :< Nil) env, branch)
+    (PrimValue val) (C.LitCase branches) ->
+        asum $
+            branches <&> \(lit, body) -> do
+                guard (val == lit)
+                pure (env, body) -- TODO: I don't remember whether matching against a literal introduces a new binding (and a new index)
+    _ _ -> Nothing
+  where
+    catEnv :: Vector (a, Value) -> ExtendedEnv -> ExtendedEnv
+    catEnv newVals ExtendedEnv{..} =
+        ExtendedEnv{locals = reverse (map snd $ toList newVals) <> locals, ..}
 
 nf :: Level -> ExtendedEnv -> CoreTerm -> CoreTerm
 nf lvl env term = quote env.univars lvl $ evalCore env term
@@ -304,9 +336,9 @@ force !univars = \case
     Stuck (RecordAccess record field) -> case force univars (Stuck record) of
         Stuck stillStuck -> Stuck (RecordAccess stillStuck field)
         noLongerStuck -> force univars $ evalRecordAccess noLongerStuck field
-    Stuck (Case arg matches) -> case force univars (Stuck arg) of
-        Stuck stillStuck -> Stuck (Case stillStuck matches)
-        noLongerStuck -> fromMaybe (error "couldn't match") $ asum $ fmap (\closure -> tryApplyPatternClosure univars closure noLongerStuck) matches
+    Stuck (Case arg env@ValueEnv{..} matches) -> case force univars (Stuck arg) of
+        Stuck stillStuck -> Stuck (Case stillStuck env matches)
+        noLongerStuck -> evalPatternMatch ExtendedEnv{..} noLongerStuck matches
     other -> other
 
 applySpine :: UniVars -> Value -> Spine -> Value
@@ -320,14 +352,22 @@ appM closure arg = do
     univars <- get @UniVars
     pure $ app univars closure arg
 
--- | convert a pattern closure to a value with free variables
-skolemizePatternClosure :: UniVars -> Level -> PatternClosure a -> (Value, Level)
-skolemizePatternClosure univars level closure = (evalCore env closure.body, newLevel)
+nfCase :: Level -> ExtendedEnv -> C.CaseWithDefault -> C.CaseWithDefault
+nfCase lvl env@ExtendedEnv{..} C.CaseWD{branches, def} =
+    C.CaseWD
+        { branches = case branches of
+            C.ConCase b -> C.ConCase $ nfCaseBranch lvl env <$> b
+            C.TypeCase b -> C.TypeCase $ nfCaseBranch lvl env <$> b
+            C.VariantCase b -> C.VariantCase $ b <&> second (nf (succ lvl) ExtendedEnv{locals = Var lvl : locals, ..})
+            C.LitCase b -> C.LitCase $ second (nf lvl env) <$> b
+        , def = (fmap . second) (nf (succ lvl) ExtendedEnv{locals = Var lvl : locals, ..}) def
+        }
   where
-    ValueEnv{..} = closure.env
-    env = ExtendedEnv{locals = freeVars <> locals, ..}
-    freeVars = Var <$> [pred newLevel, pred (pred newLevel) .. level]
-    newLevel = level `incLevel` C.patternArity closure.pat
+    nfCaseBranch :: Level -> ExtendedEnv -> (CorePattern, CoreTerm) -> (CorePattern, CoreTerm)
+    nfCaseBranch lvl ExtendedEnv{..} (pat, body) =
+        let newLevel = lvl `incLevel` C.patternArity pat
+            freeVars = Var <$> [pred newLevel, pred (pred newLevel) .. lvl]
+         in (pat, nf newLevel (ExtendedEnv{locals = freeVars <> locals, ..}) body)
 
 -- | try to apply a pattern to a value, updating the given value env
 matchCore :: ExtendedEnv -> CorePattern -> Value -> Maybe ExtendedEnv
@@ -344,11 +384,6 @@ matchCore ExtendedEnv{..} = \cases
     C.SigmaP{} (Sigma lhs rhs) -> Just ExtendedEnv{locals = rhs : lhs : locals, ..}
     (C.LiteralP lit) (PrimValue val) -> ExtendedEnv{..} <$ guard (lit == val)
     _ _ -> Nothing
-
-tryApplyPatternClosure :: UniVars -> PatternClosure ty -> Value -> Maybe Value
-tryApplyPatternClosure univars PatternClosure{pat, env = ValueEnv{..}, body} arg = do
-    newEnv <- matchCore ExtendedEnv{..} pat arg
-    pure $ evalCore newEnv body
 
 eval :: ExtendedEnv -> ETerm -> Value
 eval env term = evalCore env $ desugar term

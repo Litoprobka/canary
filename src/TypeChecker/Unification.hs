@@ -30,13 +30,12 @@ import Eval (
     forceM,
     quoteWhnf,
     quoteWhnfM,
-    skolemizePatternClosure,
  )
 import LangPrelude hiding (force, lift)
 import NameGen (freshId)
 import Prettyprinter (vsep)
 import Syntax
-import Syntax.Core (reversedPruning)
+import Syntax.Core (CaseWithDefault (..), reversedPruning)
 import Syntax.Core qualified as C
 import Syntax.Value as V hiding (lift)
 import Trace (trace, traceScope_)
@@ -79,7 +78,7 @@ forceUnify ctx lvl lhs rhs = do
         rhsC = prettyDef $ quoteWhnf univars lvl rhs
     trace $ lhsC <+> specSym "~" <+> rhsC
     result <-
-        let ?localEq = LocalEq EMap.empty -- todo: seems like local equalities should be stored with postponing constraints
+        let ?localEq = LocalEq EMap.empty
             ?topLevel = ValueTopLevel ctx.env.topLevel
             ?ctx = ctx
             ?mode = PruneEverything
@@ -429,19 +428,38 @@ rename pren ty =
         Stuck (Opaque name spine) -> renameSpine pren (C.Name name) spine
         Stuck (Fn fn stuck) -> C.App Visible <$> rename pren (PrimFunction fn) <*> rename pren (Stuck stuck)
         Stuck (RecordAccess record field) -> C.RecordAccess <$> rename pren (Stuck record) <*> pure field
-        Stuck (Case arg branches) -> C.Case <$> rename pren (Stuck arg) <*> traverse (renameBranch pren) branches
+        Stuck (Case arg env casewd) -> C.Case <$> rename pren (Stuck arg) <*> renameCaseWD pren env casewd
 
 renameSpine :: TC' es => PartialRenaming -> CoreTerm -> Spine -> Eff es CoreTerm
 renameSpine _ term [] = pure term
 renameSpine pren term ((vis, ty) : spine) = C.App vis <$> renameSpine pren term spine <*> rename pren ty
 
-renameBranch :: TC' es => PartialRenaming -> PatternClosure a -> Eff es (CorePattern, CoreTerm)
-renameBranch pren closure = do
-    univars <- get
-    let (bodyV, newLevel) = skolemizePatternClosure univars pren.codomain closure
-        diff = newLevel.getLevel - pren.codomain.getLevel
-    renamedBody <- rename (liftN diff pren) bodyV
-    pure (closure.pat, renamedBody)
+renameCaseWD :: TC' es => PartialRenaming -> ValueEnv -> CaseWithDefault -> Eff es CaseWithDefault
+renameCaseWD pren venv CaseWD{branches, def} = do
+    env <- extendEnv venv
+    branches <- case branches of
+        C.ConCase b -> C.ConCase <$> traverse (renameBranch env) b
+        C.TypeCase b -> C.TypeCase <$> traverse (renameBranch env) b
+        C.VariantCase b -> C.VariantCase <$> (traverse . traverse) (renameNf1 env) b
+        C.LitCase b -> C.LitCase <$> (traverse . traverse) (renameNf0 env) b
+    def <- def & (traverse . traverse) (renameNf1 env)
+    pure CaseWD{branches, def}
+  where
+    -- evaluate and rename a term without introducing new bindings
+    renameNf0 env = rename pren . evalCore env
+
+    -- introduce one new binding, evaluate and rename the term
+    renameNf1 ExtendedEnv{..} =
+        rename (lift pren) . evalCore (ExtendedEnv{locals = Var pren.codomain : locals, ..})
+
+    renameBranch :: TC' es => ExtendedEnv -> (CorePattern, CoreTerm) -> Eff es (CorePattern, CoreTerm)
+    renameBranch ExtendedEnv{..} (pat, body) =
+        (pat,) <$> do
+            let diff = C.patternArity pat
+                newLevel = pren.codomain `incLevel` diff
+                freeVars = Var <$> [pred newLevel, pred (pred newLevel) .. pren.codomain]
+                bodyV = evalCore ExtendedEnv{locals = freeVars <> locals, ..} body
+            rename (liftN diff pren) bodyV
 
 -- wrap a term in lambdas
 lambdas :: UniVars -> Level -> VType -> CoreTerm -> CoreTerm

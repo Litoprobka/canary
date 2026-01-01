@@ -10,7 +10,7 @@ import Common hiding (UniVar)
 import Data.Row
 import Data.Vector qualified as Vec
 import LangPrelude
-import Syntax.Core (CorePattern, CoreTerm)
+import Syntax.Core (CaseWithDefault, CoreTerm)
 import Syntax.Core qualified as C
 import Syntax.Term (Erasure (..), Quantifier (..), Visibility (Visible))
 
@@ -46,7 +46,7 @@ data Stuck
     | UniVarApp UniVar Spine
     | Fn PrimFunc Stuck
     | RecordAccess Stuck OpenName
-    | Case Stuck [PatternClosure ()]
+    | Case Stuck ValueEnv CaseWithDefault
 
 pattern Var :: Level -> Value
 pattern Var lvl <- Stuck (VarApp lvl [])
@@ -95,12 +95,6 @@ data Closure ty = Closure
     , env :: ValueEnv
     , body :: CoreTerm
     }
-data PatternClosure ty = PatternClosure
-    { pat :: CorePattern
-    , ty :: ty
-    , env :: ValueEnv
-    , body :: CoreTerm
-    }
 
 -- I have a feeling that it's safer to stick to CoreTerm in the cases where I have to introduce new binders
 
@@ -127,9 +121,7 @@ lift n = go
         Opaque name spine -> Opaque name ((fmap . fmap) go spine)
         Fn fn stuck -> Fn (liftFunc fn) (liftStuck stuck)
         RecordAccess stuck field -> RecordAccess (liftStuck stuck) field
-        Case stuck branches -> Case (liftStuck stuck) (fmap liftPatternClosure branches)
+        Case stuck env branches -> Case (liftStuck stuck) (liftEnv env) $ runIdentity (C.traverseCaseWD (\lvl t -> pure $ C.liftAt n lvl t) (Level 0) branches)
 
     liftEnv ValueEnv{locals, ..} = ValueEnv{locals = fmap go locals, ..}
     liftFunc PrimFunc{captured, ..} = PrimFunc{captured = fmap go captured, ..}
-
-    liftPatternClosure PatternClosure{body, env, ..} = PatternClosure{body = C.lift n body, env = liftEnv env, ..}

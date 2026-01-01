@@ -1,12 +1,9 @@
 module Desugar where
 
 import Common
-import Control.Monad.ST
 import Data.Foldable1 (foldl1')
 import Data.IdMap qualified as IdMap
-import Data.IntMap.Strict qualified as IntMap
-import Data.Map.Strict qualified as Map
-import Data.Row (OpenName)
+import Data.IdMap qualified as Map
 import LangPrelude
 import Syntax
 import Syntax.Core qualified as C
@@ -27,7 +24,7 @@ desugar = \case
           where
             asLambda = foldr (uncurry E.Lambda) body args
     E.LetRec _bindings _body -> error "todo: letrec desugar"
-    E.Case arg [] -> C.Case (go arg) []
+    E.Case arg [] -> C.Case (go arg) C.CaseWD{branches = C.ConCase Map.empty, def = Nothing}
     E.Case arg (m : rest) -> fromTree' (go arg) $ foldl1' (merge const) $ fmap (uncurry toTree . second go) (m :| rest)
     E.Match [] -> error "empty match"
     E.Match (m@(pats, _) : rest) ->
@@ -39,9 +36,10 @@ desugar = \case
     E.If cond true false ->
         C.Case
             (go cond)
-            [ (C.ConstructorP TrueName [], go true)
-            , (C.VarP (Wildcard' "_"), C.lift 1 $ go false)
-            ]
+            C.CaseWD
+                { branches = C.ConCase $ Map.one TrueName (C.ConstructorP TrueName [], go true)
+                , def = Just (Wildcard' "_", C.lift 1 $ go false)
+                }
     E.Variant name -> C.Lambda Visible "x" $ C.Variant name (C.Var $ Index 0)
     E.Record fields -> C.Record $ fmap go fields
     E.RecordAccess record field -> C.RecordAccess (go record) field
@@ -78,6 +76,10 @@ newtype CaseTreeNE a
     = ConB (IdMap Name_ (Args, Nested a))
     deriving (Show)
 
+-- todo: all branch bodies should be extracted to outer scoped let-bound lambdas
+-- that way, we'd be able to avoid renaming shenanigans
+-- extracting their types may prove to be... complicated
+
 toTree :: EPattern -> a -> CaseTree a
 toTree pat body = case pat of
     E.VarP _ -> Leaf body
@@ -101,14 +103,12 @@ fromTree' arg = fromTree (\_ term -> term) arg (Level 0)
 fromTree :: (Level -> a -> CoreTerm) -> CoreTerm -> Level -> CaseTree a -> CoreTerm
 fromTree toTerm arg lvl = \case
     Leaf body -> toTerm lvl body
-    Branch cases Nothing -> C.Case arg $ mkBranches cases
-    Branch cases (Just def) -> C.Case arg $ mkBranches cases <> [(C.VarP (Wildcard' "_"), toTerm lvl def)]
+    Branch cases Nothing -> C.Case arg $ C.CaseWD (mkBranches cases) Nothing
+    Branch cases (Just def) -> C.Case arg $ C.CaseWD (mkBranches cases) (Just (Wildcard' "_", toTerm lvl def))
   where
     mkBranches (ConB cases) =
-        fmap
-            ( \(name, (Args n args, nested)) -> (C.ConstructorP name args, fromNested toTerm (lvl `incLevel` n) [lvl .. lvl `incLevel` pred n] nested)
-            )
-            (IdMap.toList cases)
+        C.ConCase $
+            cases & Map.mapWithKey \name (Args n args, nested) -> (C.ConstructorP name args, fromNested toTerm (lvl `incLevel` n) [lvl .. lvl `incLevel` pred n] nested)
 
 -- this should pass the indexes
 {-
