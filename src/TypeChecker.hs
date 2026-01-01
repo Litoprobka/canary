@@ -15,7 +15,7 @@ import Desugar (desugar)
 import Diagnostic
 import Effectful.Reader.Static
 import Effectful.State.Static.Local (State, get, modify, put, runState)
-import Eval (ExtendedEnv (univars), app, appM, eval, evalCore, forceM, mkTyCon, quote, quoteM)
+import Eval (ExtendedEnv (univars), app, appM, eval, evalCoreM, evalM, forceM, mkTyCon, quote, quoteM)
 import GHC.IsList qualified as IsList
 import LangPrelude hiding (unzip)
 import NameGen (NameGen, freshName, freshName_)
@@ -235,8 +235,7 @@ insertApp ctx = go
         forceM ty >>= \case
             V.Q Forall vis _e closure | vis /= Visible -> do
                 arg <- freshUniVar ctx closure.ty
-                env <- extendEnv ctx.env
-                let argV = evalCore env arg
+                argV <- evalCoreM ctx.env arg
                 innerTy <- closure `appM` argV
                 go (E.App vis term (E.Core arg), innerTy)
             ty' -> pure (term, ty')
@@ -280,8 +279,7 @@ check ctx (t :@ loc) ty = traceScope_ (prettyDef t <+> specSymBlue "⇐" <+> pre
             pure $ E.Lambda vis (E.VarP closure.var) eBody
         (T.Case arg branches, result) -> do
             (eArg, argTy) <- infer ctx arg
-            env <- extendEnv ctx.env
-            let argV = eval env eArg
+            argV <- evalM ctx.env eArg
             eBranches <- for branches \(pat, body) -> do
                 ((ePat, patV), ctx) <- checkPattern ctx pat argTy
                 ctx <- refine ctx patV argV
@@ -448,8 +446,7 @@ infer ctx (t :@ loc) = traceScope (\(_, ty) -> prettyDef t <+> specSym "⇒" <+>
         -- into non-pattern unification cases, which we don't handle yet
         --
         -- inferring a non-dependent type seems like a reasonable compromise
-        env <- extendEnv ctx.env
-        fullType <- evalCore env <$> mkNonDependentPi ctx (length branch)
+        fullType <- evalCoreM ctx.env =<< mkNonDependentPi ctx (length branch)
         eBody <- check ctx (t :@ loc) fullType
         pure (eBody, fullType)
     -- we don't infer dependent if, because that would mask type errors a lot of the time
@@ -493,8 +490,7 @@ infer ctx (t :@ loc) = traceScope (\(_, ty) -> prettyDef t <+> specSym "⇒" <+>
         pure (E.Sigma eLhs eRhs, V.Q Exists Visible Retained $ V.Closure{ty = lhsTy, var = "x", env = ctx.env, body})
     T.List items -> do
         itemTy <- freshUniVar ctx type_
-        env <- extendEnv ctx.env
-        let itemTyV = evalCore env itemTy
+        itemTyV <- evalCoreM ctx.env itemTy
         eItems <- traverse (\item -> check ctx item itemTyV) items
         pure (E.List (E.Core itemTy) eItems, V.TyCon ListName $ fromList [(Visible, itemTyV)])
     T.RecordT row -> do
@@ -533,8 +529,7 @@ infer ctx (t :@ loc) = traceScope (\(_, ty) -> prettyDef t <+> specSym "⇒" <+>
 typeFromTerm :: TC es => Context -> Term 'Fixity -> Eff es VType
 typeFromTerm ctx term = do
     eTerm <- check ctx term (V.Type TypeName)
-    env <- extendEnv ctx.env
-    pure $ eval env eTerm
+    evalM ctx.env eTerm
 
 checkPattern :: TC es => Context -> Pattern 'Fixity -> VType -> Eff es ((EPattern, Value), Context)
 checkPattern ctx (pat :@ pLoc) ty = do

@@ -197,6 +197,11 @@ quoteWhnf univars = go
             freeVars = Var <$> [pred newLevel, pred (pred newLevel) .. lvl]
          in (pat, subst newLevel (freeVars <> env) body)
 
+evalCoreM :: State UniVars :> es => ValueEnv -> CoreTerm -> Eff es Value
+evalCoreM ValueEnv{..} term = do
+    univars <- get
+    pure $ evalCore ExtendedEnv{..} term
+
 evalCore :: ExtendedEnv -> CoreTerm -> Value
 evalCore env@ExtendedEnv{..} = \case
     -- note that env.topLevel is a lazy IdMap, so we only force the outer structure here
@@ -387,6 +392,11 @@ matchCore ExtendedEnv{..} = \cases
 
 eval :: ExtendedEnv -> ETerm -> Value
 eval env term = evalCore env $ desugar term
+
+evalM :: State UniVars :> es => ValueEnv -> ETerm -> Eff es Value
+evalM ValueEnv{..} term = do
+    univars <- get
+    pure $ eval ExtendedEnv{..} term
 
 modifyEnv
     :: ValueEnv
