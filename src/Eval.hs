@@ -63,6 +63,12 @@ data ExtendedEnv = ExtendedEnv
     , univars :: UniVars
     }
 
+-- a helper to make working with ExtendedEnv less verbose
+-- honestly, I should probably just give in to lens
+
+overLocals :: ([Value] -> [Value]) -> ExtendedEnv -> ExtendedEnv
+overLocals f ExtendedEnv{..} = ExtendedEnv{locals = f locals, ..}
+
 -- an orphan instance, since I don't want to merge 'Value.hs' and 'Eval.hs'
 instance PrettyAnsi Value where
     prettyAnsi = prettyAnsi . quoteWhnf EMap.empty (Level 0)
@@ -215,7 +221,7 @@ evalCore env@ExtendedEnv{..} = \case
     C.Lambda vis var body -> Lambda vis $ Closure{var, ty = (), env = ValueEnv{..}, body}
     C.App vis lhs rhs -> evalApp univars vis (evalCore env lhs) (evalCore env rhs)
     C.Case arg matches -> evalPatternMatch env (evalCore env arg) matches
-    C.Let _name expr body -> evalCore (ExtendedEnv{locals = evalCore env expr : locals, ..}) body
+    C.Let _name expr body -> evalCore (overLocals (evalCore env expr :) env) body
     C.Literal lit -> PrimValue lit
     C.RecordAccess record field -> evalRecordAccess (evalCore env record) field
     C.Record row -> Record $ evalCore env <$> row
@@ -238,11 +244,11 @@ evalCore env@ExtendedEnv{..} = \case
 -- | evaluate a case expression
 evalPatternMatch :: ExtendedEnv -> Value -> C.CaseWithDefault -> Value
 evalPatternMatch ExtendedEnv{..} (Stuck stuck) branches = Stuck $ Case stuck ValueEnv{..} branches
-evalPatternMatch env@ExtendedEnv{..} val casewd =
+evalPatternMatch env val casewd =
     fromMaybe
         (error $ show $ "[eval] pattern mismatch when matching" <+> prettyDef val <+> "with: <TODO: prettyprint standalone cases>")
         $ fmap (uncurry evalCore) (matchBranch env val casewd.branches)
-            <|> fmap (evalCore ExtendedEnv{locals = val : env.locals, ..} . snd) casewd.def
+            <|> fmap (evalCore (overLocals (val :) env) . snd) casewd.def
 
 -- | try to match a value with a case expression branch, returning the new env and body expression
 matchBranch :: ExtendedEnv -> Value -> C.Case -> Maybe (ExtendedEnv, CoreTerm)
@@ -255,17 +261,14 @@ matchBranch env = \cases
         pure (catEnv args env, branch)
     (Variant name arg) (C.VariantCase branches) -> do
         (_, branch) <- HashMap.lookup name branches
-        pure (catEnv (((), arg) :< Nil) env, branch)
+        pure (overLocals (arg :) env, branch)
     (PrimValue val) (C.LitCase branches) ->
-        asum $
-            branches <&> \(lit, body) -> do
-                guard (val == lit)
-                pure (env, body) -- TODO: I don't remember whether matching against a literal introduces a new binding (and a new index)
+        asum $ branches <&> \(lit, body) -> (env, body) <$ guard (val == lit)
+    -- TODO: I don't remember whether matching against a literal introduces a new binding (and a new index)
     _ _ -> Nothing
   where
     catEnv :: Vector (a, Value) -> ExtendedEnv -> ExtendedEnv
-    catEnv newVals ExtendedEnv{..} =
-        ExtendedEnv{locals = reverse (map snd $ toList newVals) <> locals, ..}
+    catEnv newVals = overLocals (reverse (map snd $ toList newVals) <>)
 
 nf :: Level -> ExtendedEnv -> CoreTerm -> CoreTerm
 nf lvl env term = quote env.univars lvl $ evalCore env term
@@ -350,7 +353,7 @@ applySpine :: UniVars -> Value -> Spine -> Value
 applySpine !univars = foldr (\(vis, arg) acc -> evalApp univars vis acc arg)
 
 app :: UniVars -> Closure ty -> Value -> Value
-app univars Closure{env = ValueEnv{..}, body} arg = evalCore (ExtendedEnv{locals = arg : locals, ..}) body
+app univars Closure{env = ValueEnv{..}, body} arg = evalCore (overLocals (arg :) $ ExtendedEnv{..}) body
 
 appM :: State UniVars :> es => Closure ty -> Value -> Eff es Value
 appM closure arg = do
@@ -358,36 +361,36 @@ appM closure arg = do
     pure $ app univars closure arg
 
 nfCase :: Level -> ExtendedEnv -> C.CaseWithDefault -> C.CaseWithDefault
-nfCase lvl env@ExtendedEnv{..} C.CaseWD{branches, def} =
+nfCase lvl env C.CaseWD{branches, def} =
     C.CaseWD
         { branches = case branches of
             C.ConCase b -> C.ConCase $ nfCaseBranch lvl env <$> b
             C.TypeCase b -> C.TypeCase $ nfCaseBranch lvl env <$> b
-            C.VariantCase b -> C.VariantCase $ b <&> second (nf (succ lvl) ExtendedEnv{locals = Var lvl : locals, ..})
+            C.VariantCase b -> C.VariantCase $ b <&> second (nf (succ lvl) (overLocals (Var lvl :) env))
             C.LitCase b -> C.LitCase $ second (nf lvl env) <$> b
-        , def = (fmap . second) (nf (succ lvl) ExtendedEnv{locals = Var lvl : locals, ..}) def
+        , def = (fmap . second) (nf (succ lvl) (overLocals (Var lvl :) env)) def
         }
   where
     nfCaseBranch :: Level -> ExtendedEnv -> (CorePattern, CoreTerm) -> (CorePattern, CoreTerm)
-    nfCaseBranch lvl ExtendedEnv{..} (pat, body) =
+    nfCaseBranch lvl env (pat, body) =
         let newLevel = lvl `incLevel` C.patternArity pat
             freeVars = Var <$> [pred newLevel, pred (pred newLevel) .. lvl]
-         in (pat, nf newLevel (ExtendedEnv{locals = freeVars <> locals, ..}) body)
+         in (pat, nf newLevel (overLocals (freeVars <>) env) body)
 
 -- | try to apply a pattern to a value, updating the given value env
 matchCore :: ExtendedEnv -> CorePattern -> Value -> Maybe ExtendedEnv
-matchCore ExtendedEnv{..} = \cases
-    C.VarP{} val -> Just $ ExtendedEnv{locals = val : locals, ..}
+matchCore env = \cases
+    C.VarP{} val -> Just $ overLocals (val :) env
     (C.ConstructorP pname _) (Con name args)
         | pname == name ->
             -- since locals is a SnocList, we have to reverse args before appending
-            Just ExtendedEnv{locals = reverse (map snd $ toList args) <> locals, ..}
+            Just $ overLocals (reverse (map snd $ toList args) <>) env
     (C.TypeP pname _) (TyCon name args)
-        | pname == name -> Just ExtendedEnv{locals = reverse (map snd $ toList args) <> locals, ..}
+        | pname == name -> Just $ overLocals (reverse (map snd $ toList args) <>) env
     (C.VariantP pname _) (Variant name val)
-        | pname == name -> Just ExtendedEnv{locals = val : locals, ..}
-    C.SigmaP{} (Sigma _ lhs rhs) -> Just ExtendedEnv{locals = rhs : lhs : locals, ..}
-    (C.LiteralP lit) (PrimValue val) -> ExtendedEnv{..} <$ guard (lit == val)
+        | pname == name -> Just $ overLocals (val :) env
+    C.SigmaP{} (Sigma _ lhs rhs) -> Just $ overLocals ((rhs :) . (lhs :)) env
+    (C.LiteralP lit) (PrimValue val) -> env <$ guard (lit == val)
     _ _ -> Nothing
 
 eval :: ExtendedEnv -> ETerm -> Value

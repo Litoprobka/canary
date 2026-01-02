@@ -28,6 +28,7 @@ import Eval (
     evalCore,
     force,
     forceM,
+    overLocals,
     quoteWhnf,
     quoteWhnfM,
  )
@@ -449,16 +450,15 @@ renameCaseWD pren venv CaseWD{branches, def} = do
     renameNf0 env = rename pren . evalCore env
 
     -- introduce one new binding, evaluate and rename the term
-    renameNf1 ExtendedEnv{..} =
-        rename (lift pren) . evalCore (ExtendedEnv{locals = Var pren.codomain : locals, ..})
+    renameNf1 env = rename (lift pren) . evalCore (overLocals (Var pren.codomain :) env)
 
     renameBranch :: TC' es => ExtendedEnv -> (CorePattern, CoreTerm) -> Eff es (CorePattern, CoreTerm)
-    renameBranch ExtendedEnv{..} (pat, body) =
+    renameBranch env (pat, body) =
         (pat,) <$> do
             let diff = C.patternArity pat
                 newLevel = pren.codomain `incLevel` diff
                 freeVars = Var <$> [pred newLevel, pred (pred newLevel) .. pren.codomain]
-                bodyV = evalCore ExtendedEnv{locals = freeVars <> locals, ..} body
+                bodyV = evalCore (overLocals (freeVars <>) env) body
             rename (liftN diff pren) bodyV
 
 -- wrap a term in lambdas

@@ -161,9 +161,7 @@ closeType locals body = case locals of
 freshUniVarV :: (UniEffs es) => Context -> VType -> Eff es Value
 freshUniVarV ctx vty = do
     uniTerm <- freshUniVar ctx vty
-    univars <- get
-    let V.ValueEnv{..} = ctx.env
-        env = ExtendedEnv{..}
+    env <- extendEnv ctx.env
     pure $ evalCore env uniTerm
 
 freshUniVarS :: (UniEffs es) => Context -> VType -> Eff es V.Stuck
