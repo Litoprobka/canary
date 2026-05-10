@@ -53,7 +53,7 @@ import Syntax.Value qualified as V
 import System.Console.Isocline
 import Trace
 import TypeChecker qualified as TC
-import TypeChecker.Backend (emptyContext, getAdjConstructors')
+import TypeChecker.Backend (emptyContext)
 import TypeChecker.Backend qualified as TC
 import TypeChecker.Generalisation
 
@@ -119,8 +119,7 @@ mkDefaultEnv = do
     fixityDecls <- Fixity.resolveFixity fixityMap operatorPriorities depResOutput.declarations
     ((values, types), conMetadata) <- runState emptyEnv.conMetadata $ runState emptyEnv.types $ (\f -> foldlM f emptyEnv.values fixityDecls) \values decl -> do
         (eDecl, newValues) <- skipTrace $ TC.processDeclaration' values decl
-        constrs <- getAdjConstructors'
-        modifyEnv constrs newValues [eDecl]
+        modifyEnv newValues [eDecl]
     guardNoErrors
     let newEnv =
             ReplEnv
@@ -140,14 +139,13 @@ mkDefaultEnv = do
   where
     mkPreprelude :: NameGen :> es => Eff es ([Declaration 'NameRes], Scope)
     mkPreprelude = do
-        false <- freshName' "False"
         a <- freshName' "a"
         let builtinTypes = [C.TypeName, C.RowName, C.IntName, C.NatName, C.TextName, C.CharName]
             decls =
                 map (\name -> noLoc $ D.Type (noLoc name) [] []) builtinTypes
                     <> map
                         noLoc
-                        [ D.Type (noLoc C.BoolName) [] [D.Constructor builtin (noLoc C.TrueName) [], D.Constructor builtin false []]
+                        [ D.Type (noLoc C.BoolName) [] [D.Constructor builtin (noLoc C.TrueName) [], D.Constructor builtin (noLoc C.FalseName) []]
                         , D.Type
                             (noLoc C.ListName)
                             [plainBinder a]
@@ -162,7 +160,7 @@ mkDefaultEnv = do
                     , ("Row", noLoc C.RowName)
                     , ("Bool", noLoc C.BoolName)
                     , ("True", noLoc C.TrueName)
-                    , ("False", false)
+                    , ("False", noLoc C.FalseName)
                     , ("List", noLoc C.ListName)
                     , ("Cons", noLoc C.ConsName)
                     , ("Nil", noLoc C.NilName)
@@ -197,13 +195,12 @@ run debug env = do
         | otherwise = skipTrace
 
 replStep :: forall es. (ReplCtx es, Diagnose :> es, Trace :> es) => ReplEnv -> ReplCommand -> Eff es (Maybe ReplEnv)
-replStep env@ReplEnv{loadedFiles, conMetadata} = \case
+replStep env@ReplEnv{loadedFiles} = \case
     Decls decls -> Just <$> processDecls env decls
     Expr expr -> do
         (checkedExpr, _) <- processExpr env expr
         guardNoErrors
-        let constrs = fmap (.adjConstructors) conMetadata
-        prettyVal $ eval constrs V.ExtendedEnv{locals = [], topLevel = env.values.topLevel, univars = EMap.empty} checkedExpr
+        prettyVal $ eval V.ExtendedEnv{locals = [], topLevel = env.values.topLevel, univars = EMap.empty} checkedExpr
         pure $ Just env
     Type_ expr -> do
         (_, ty) <- processExpr env expr
@@ -252,8 +249,7 @@ processDecls env@ReplEnv{loadedFiles} decls = do
     fixityDecls <- Fixity.resolveFixity fixityMap operatorPriorities depResOutput.declarations
     ((values, types), conMetadata) <- runState env.conMetadata $ runState env.types $ (\f -> foldlM f env.values fixityDecls) \values decl -> do
         (eDecl, newValues) <- TC.processDeclaration' values decl
-        constrs <- getAdjConstructors'
-        modifyEnv constrs newValues [eDecl]
+        modifyEnv newValues [eDecl]
     guardNoErrors
     pure
         ReplEnv
@@ -270,7 +266,7 @@ processDecls env@ReplEnv{loadedFiles} decls = do
             -- , constructorTable
             }
 
-processExpr :: (Diagnose :> es, Trace :> es, NameGen :> es) => ReplEnv -> Term 'Parse -> Eff es (ETerm, VType)
+processExpr :: (Diagnose :> es, Trace :> es, NameGen :> es) => ReplEnv -> Term 'Parse -> Eff es (CoreTerm, VType)
 processExpr env expr = do
     afterNameRes <- NameResolution.run env.scope $ resolveTerm expr
     skippedDepRes <- cast.term afterNameRes

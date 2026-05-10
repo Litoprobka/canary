@@ -21,6 +21,7 @@ import Common (
     incLevel,
     levelToIndex,
     prettyDef,
+    toSimpleName_,
  )
 
 -- IdMap is currently lazy anyway, but it's up to change
@@ -32,7 +33,6 @@ import Data.List ((!!))
 import Data.Row (ExtRow (..), OpenName)
 import Data.Row qualified as Row
 import Data.Vector qualified as Vec
-import Desugar (AdjConstructors, desugar)
 import Effectful.State.Static.Local (State, get)
 import LangPrelude hiding (force)
 import Prettyprinter (line)
@@ -169,6 +169,7 @@ quoteWhnf univars = go
         C.Row row -> C.Row (fmap (subst lvl env) row)
         C.Sigma vis lhs rhs -> C.Sigma vis (subst lvl env lhs) (subst lvl env rhs)
         C.Q q vis e var ty body -> C.Q q vis e var (subst lvl env ty) (subst (succ lvl) (Var lvl : env) body)
+        C.ElabInsert core -> C.ElabInsert $ subst lvl env core
         C.UniVar uni -> case EMap.lookup uni univars of
             Just Solved{solution} -> go lvl solution
             _ -> C.UniVar uni
@@ -227,6 +228,7 @@ evalCore env@ExtendedEnv{..} = \case
     C.Record row -> Record $ evalCore env <$> row
     C.Sigma vis x y -> Sigma vis (evalCore env x) (evalCore env y)
     C.Q q vis e var ty body -> Q q vis e $ Closure{var, ty = evalCore env ty, env = ValueEnv{..}, body}
+    C.ElabInsert core -> evalCore env core
     C.Row (NoExtRow row) -> Row (fmap (evalCore env) row) Nothing
     C.Row (ExtRow row ext) -> case evalCore env ext of
         Stuck stuck -> Row (fmap (evalCore env) row) (Just stuck)
@@ -393,29 +395,26 @@ matchCore env = \cases
     (C.LiteralP lit) (PrimValue val) -> env <$ guard (lit == val)
     _ _ -> Nothing
 
-eval :: AdjConstructors -> ExtendedEnv -> ETerm -> Value
-eval constrs env term = evalCore env $ desugar constrs term
+eval :: ExtendedEnv -> CoreTerm -> Value
+eval = evalCore
 
-evalM :: (State UniVars :> es) => AdjConstructors -> ValueEnv -> ETerm -> Eff es Value
-evalM constrs ValueEnv{..} term = do
-    univars <- get
-    pure $ eval constrs ExtendedEnv{..} term
+evalM :: (State UniVars :> es) => ValueEnv -> CoreTerm -> Eff es Value
+evalM = evalCoreM
 
 modifyEnv
-    :: AdjConstructors
-    -> ValueEnv
+    :: ValueEnv
     -> [EDeclaration]
     -> Eff es ValueEnv
-modifyEnv constrs ValueEnv{..} decls = do
-    desugared <- (fmap . fmap) (desugar constrs) . LMap.fromList <$> foldMapM collectBindings decls
+modifyEnv ValueEnv{..} decls = do
+    desugared <- LMap.fromList <$> foldMapM collectBindings decls
     let newEnv = ExtendedEnv{topLevel = newTopLevel, univars = EMap.empty, locals = []}
         newTopLevel = fmap (either id (evalCore newEnv)) desugared <> topLevel
     pure ValueEnv{topLevel = newTopLevel, ..}
   where
-    collectBindings :: EDeclaration -> Eff es [(Name_, Either Value ETerm)]
+    collectBindings :: EDeclaration -> Eff es [(Name_, Either Value CoreTerm)]
     collectBindings decl = case decl of
         D.ValueD (E.ValueB name body) -> pure [(name, Right body)]
-        D.ValueD (E.FunctionB name args body) -> pure [(name, Right $ foldr (uncurry E.Lambda) body args)]
+        D.ValueD (E.FunctionB name args body) -> pure [(name, Right $ foldr (\(vis, arg) -> C.Lambda vis (toSimpleName_ arg)) body args)]
         -- todo: value constructors have to be in scope by the time we typecheck definitions that depend on them (say, GADTs)
         -- the easiest way is to just apply `typecheck` and `modifyEnv` declaration-by-declaration
         D.TypeD _ constrs -> pure $ fmap mkConstr constrs

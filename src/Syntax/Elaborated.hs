@@ -6,46 +6,18 @@ module Syntax.Elaborated where
 import Common hiding (Name)
 import Data.Row
 import LangPrelude
-import Syntax.Core (CoreTerm)
-import Syntax.Core qualified as C
-import Syntax.Term (Erasure, Quantifier, Visibility)
+import Syntax.Core (CoreTerm, CoreType)
+import Syntax.Term (Visibility)
 
 {-x
 The elaborated AST is halfway between core and pre-typecheck passes
 -}
 
 infix 3 :::
-data Typed a = a ::: EType deriving (Show)
-type EType = ETerm
+data Typed a = a ::: CoreType deriving (Show)
 
 unTyped :: Typed a -> a
 unTyped (x ::: _) = x
-
-data ETerm
-    = Var Index
-    | Name Name_ -- top-level binding
-    | Literal Literal
-    | App Visibility ETerm ETerm
-    | Lambda Visibility EPattern ETerm
-    | Let EBinding ETerm
-    | LetRec (NonEmpty EBinding) ETerm
-    | Case ETerm [(EPattern, ETerm)]
-    | Match [(NonEmpty (Typed EPattern), ETerm)]
-    | If ETerm ETerm ETerm
-    | Variant OpenName
-    | Record (Row ETerm)
-    | RecordAccess ETerm OpenName
-    | List EType [ETerm]
-    | Sigma Visibility ETerm ETerm
-    | Do [EStatement] ETerm
-    | Q Quantifier Visibility Erasure (Typed SimpleName_) ETerm
-    | VariantT (ExtRow ETerm)
-    | RecordT (ExtRow ETerm)
-    | -- when inserting implicit applications, the inferred arg is usually already a CoreTerm
-      -- the old solution was a 'resugar' function that transformed core term back into elaborated terms,
-      -- but it makes more sense to just keep inserted core as is
-      Core CoreTerm
-    deriving (Show)
 
 data EPattern
     = VarP SimpleName_
@@ -61,22 +33,15 @@ data EPattern
 
 -- where should the type info be?
 data EBinding
-    = ValueB {name :: Name_, body :: ETerm}
-    | FunctionB {name :: Name_, args :: NonEmpty (Visibility, EPattern), body :: ETerm}
-    deriving (Show)
-
-data EStatement
-    = Bind EPattern ETerm
-    | With EPattern ETerm
-    | DoLet EBinding
-    | Action ETerm
+    = ValueB {name :: Name_, body :: CoreTerm}
+    | FunctionB {name :: Name_, args :: NonEmpty (Visibility, Name_), body :: CoreTerm}
     deriving (Show)
 
 data EDeclaration
     = ValueD EBinding -- no local bindings for now
     -- I'm not sure which representation for typechecked constructors makes more sense, this is the bare minimum
     | TypeD Name_ [(Name_, Vector Visibility)]
-    | SignatureD Name_ EType
+    | SignatureD Name_ CoreType
 
 instance HasLoc a => HasLoc (Typed a) where
     getLoc (x ::: _) = getLoc x
@@ -95,6 +60,8 @@ patternArity = go
         SigmaP _ lhs rhs -> go lhs + go rhs
         ListP args -> sum (map go args)
         LiteralP{} -> 0
+
+{-
 
 lift :: Int -> ETerm -> ETerm
 lift n = liftAt n (Level 0)
@@ -155,3 +122,4 @@ elabTraversalPureWithLevel recur recurCore lvl = runIdentity . elabTraversalWith
 
 elabTraversalPure :: (ETerm -> ETerm) -> (CoreTerm -> CoreTerm) -> ETerm -> ETerm
 elabTraversalPure recur recurCore = elabTraversalPureWithLevel (const recur) (const recurCore) (Level 0)
+-}

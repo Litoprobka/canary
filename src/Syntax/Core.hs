@@ -73,6 +73,7 @@ data CoreTerm
     | Sigma Visibility CoreTerm CoreTerm
     | Q Quantifier Visibility Erasure SimpleName_ CoreType CoreTerm
     | Row (ExtRow CoreType)
+    | ElabInsert CoreTerm -- code inserted by elaboration. Eagerly evaluated during generalisation
     | UniVar UniVar
     | AppPruning CoreTerm Pruning
     deriving (Pretty, Show) via (UnAnnotate CoreTerm)
@@ -140,6 +141,7 @@ prettyEnv = go 0 . map prettyAnsi
         Q Forall Visible _e var ty body | not (occurs (Index 0) body) -> parensWhen 1 $ go 1 env ty <+> specSym "->" <+> go 0 (prettyAnsi var : env) body
         qq@(Q q vis er _ _ _) -> parensWhen 1 $ kw q er <+> compressQ env q vis er qq
         Row row -> prettyRow prettyAnsi (go 0 env) row
+        ElabInsert core -> go n env core
         UniVar uni -> prettyAnsi uni
         AppPruning lhs pruning -> parensWhen 3 $ go 2 env lhs <> prettyPruning env pruning.getPruning
       where
@@ -235,6 +237,7 @@ coreTraversalWithLevel recur lvl = \case
     Row row -> Row <$> traverse (recur lvl) row
     Sigma vis x y -> Sigma vis <$> recur lvl x <*> recur lvl y
     Q q v e name ty body -> Q q v e name <$> recur lvl ty <*> recur (succ lvl) body
+    ElabInsert core -> ElabInsert <$> recur lvl core
     Var index -> pure $ Var index
     Name name -> pure $ Name name
     Literal lit -> pure $ Literal lit

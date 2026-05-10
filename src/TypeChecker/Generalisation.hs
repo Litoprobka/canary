@@ -14,7 +14,6 @@ import LangPrelude
 import Prettyprinter (sep)
 import Syntax
 import Syntax.Core qualified as C
-import Syntax.Elaborated qualified as E
 import Syntax.Value qualified as V
 import Trace (trace, traceScope_)
 import TypeChecker.Backend
@@ -23,14 +22,14 @@ import TypeChecker.Unification
 generalise :: TC es => Context -> VType -> Eff es VType
 generalise ctx ty = snd <$> generalise' ctx Nothing (Nothing, ty)
 
-generaliseTerm :: TC es => Context -> (ETerm, VType) -> Eff es (ETerm, VType)
+generaliseTerm :: TC es => Context -> (CoreTerm, VType) -> Eff es (CoreTerm, VType)
 generaliseTerm ctx (term, ty) = first runIdentity <$> generalise' ctx Nothing (Identity term, ty)
 
-generaliseRecursiveTerm :: TC es => Context -> Name_ -> (ETerm, VType) -> Eff es (ETerm, VType)
+generaliseRecursiveTerm :: TC es => Context -> Name_ -> (CoreTerm, VType) -> Eff es (CoreTerm, VType)
 generaliseRecursiveTerm ctx name (term, ty) = first runIdentity <$> generalise' ctx (Just name) (Identity term, ty)
 
 -- | zonk unification variables from a term, report an error on leftover free variables
-zonkTerm :: TC es => Context -> ETerm -> Eff es ETerm
+zonkTerm :: TC es => Context -> CoreTerm -> Eff es CoreTerm
 zonkTerm ctx term = do
     forceSolvePostponed ctx
 
@@ -52,7 +51,7 @@ forceSolvePostponed ctx = do
 {- | zonk unification variables from a term and its type,
 generalise unsolved variables to new forall binders
 -}
-generalise' :: (TC es, Traversable t) => Context -> Maybe Name_ -> (t ETerm, VType) -> Eff es (t ETerm, VType)
+generalise' :: (TC es, Traversable t) => Context -> Maybe Name_ -> (t CoreTerm, VType) -> Eff es (t CoreTerm, VType)
 generalise' ctx mbName (mbTerm, ty) = traceScope_ (specSymBlue "generalise" <+> prettyDef mbName) do
     -- first, we retry all postponed constraints once again
     forceSolvePostponed ctx
@@ -99,7 +98,7 @@ generalise' ctx mbName (mbTerm, ty) = traceScope_ (specSymBlue "generalise" <+> 
 
     univars <- get
     (innerTerm, freeVars) <- runState ESet.empty do
-        innerTerm <- traverse (zonkTerm' (newLevel, innerEnv) . E.lift newBinderCount) mbTerm
+        innerTerm <- traverse (zonkTerm' (newLevel, innerEnv) . C.lift newBinderCount) mbTerm
         freeVarsInCore univars innerType
         pure innerTerm
 
@@ -112,7 +111,7 @@ generalise' ctx mbName (mbTerm, ty) = traceScope_ (specSymBlue "generalise" <+> 
         pure (Name' (mkName i), uniType)
 
     let finalType = foldr (uncurry (C.Q Forall Implicit Retained)) innerType newNames
-        wrapInLambdas body = foldr (\(name, _) -> E.Lambda Implicit (E.VarP name)) body newNames
+        wrapInLambdas body = foldr (\(name, _) -> C.Lambda Implicit name) body newNames
         withApps lvl name =
             foldl' (\acc vlvl -> C.App Implicit acc (C.Var $ levelToIndex lvl vlvl)) (C.Name name) [Level 0 .. pred (Level newBinderCount)]
 
@@ -125,58 +124,69 @@ generalise' ctx mbName (mbTerm, ty) = traceScope_ (specSymBlue "generalise" <+> 
     env <- extendEnv ctx.env
     pure (wrapInLambdas . withFixedCalls <$> innerTerm, evalCore env finalType)
   where
+    -- this function is applied after zonking, so ElabInsert should not matter here anymore
     replaceRecursiveCalls fnName fixTerm lvl = \case
-        E.Name name | name == fnName -> E.Core (fixTerm lvl)
-        other -> E.elabTraversalPureWithLevel (replaceRecursiveCalls fnName fixTerm) (replaceRecursiveCallsCore fnName fixTerm) lvl other
-    replaceRecursiveCallsCore fnName fixTerm lvl = \case
         C.Name name | name == fnName -> fixTerm lvl
-        other -> C.coreTraversalPureWithLevel (replaceRecursiveCallsCore fnName fixTerm) lvl other
+        other -> C.coreTraversalPureWithLevel (replaceRecursiveCalls fnName fixTerm) lvl other
 
--- the only important case is E.Core, which may actually contain univars
+-- the only important case is C.ElabInsert, which may actually contain univars
 -- the rest are just plain traversal logic
--- unfortunately, it doesn't quite fit 'elabTraversal', since the env logic is unique
-zonkTerm' :: TC es => (Level, ValueEnv) -> ETerm -> Eff (State (EnumSet UniVar) : es) ETerm
+-- unfortunately, it doesn't quite fit 'coreTraversal', since the env logic is unique
+zonkTerm' :: TC es => (Level, ValueEnv) -> CoreTerm -> Eff (State (EnumSet UniVar) : es) CoreTerm
 zonkTerm' c@(lvl, env@V.ValueEnv{..}) = \case
-    E.Core coreTerm -> do
+    C.ElabInsert coreTerm -> do
         env <- extendEnv env
         let zonkedCore = nf lvl env coreTerm
         univars <- get
         freeVarsInCore univars zonkedCore
-        pure $ E.Core zonkedCore
-    E.App vis lhs rhs -> E.App vis <$> zonkTerm' c lhs <*> zonkTerm' c rhs
-    E.Lambda vis pat body -> do
-        let env = V.ValueEnv{locals = freeVars <> locals, ..}
-            (freeVars, newLevel) = liftLevel lvl (E.patternArity pat)
-        E.Lambda vis pat <$> zonkTerm' (newLevel, env) body
-    E.Let{} -> internalError' "zonkTerm': let bindings are not supported yet"
-    E.LetRec{} -> internalError' "zonkTerm': let rec bindings are not supported yet"
-    E.Case arg branches -> E.Case <$> zonkTerm' c arg <*> traverse zonkBranch branches
+        pure $ C.ElabInsert zonkedCore
+    C.TyCon name args -> C.TyCon name <$> traverse (bitraverse pure $ zonkTerm' c) args
+    C.Con name args -> C.Con name <$> traverse (bitraverse pure $ zonkTerm' c) args
+    C.App vis lhs rhs -> C.App vis <$> zonkTerm' c lhs <*> zonkTerm' c rhs
+    C.Lambda vis arg body ->
+        let env = V.ValueEnv{locals = V.Var lvl : locals, ..}
+         in C.Lambda vis arg <$> zonkTerm' (succ lvl, env) body
+    C.Let name body expr ->
+        -- is it safe to eval the binding here? I'm not sure
+        let newEnv = V.ValueEnv{locals = V.Var lvl : locals, ..}
+         in C.Let name <$> zonkTerm' (lvl, env) body <*> zonkTerm' (succ lvl, newEnv) expr
+    C.Case arg C.CaseWD{branches, def} -> do
+        arg <- zonkTerm' c arg
+        branches <- zonkBranches branches
+        def <- traverse (bitraverse pure $ zonkTerm' (succ lvl, V.ValueEnv{locals = V.Var lvl : locals, ..})) def
+        pure $ C.Case arg C.CaseWD{branches, def}
       where
-        zonkBranch (pat, body) =
-            let env = V.ValueEnv{locals = freeVars <> locals, ..}
-                (freeVars, newLevel) = liftLevel lvl (E.patternArity pat)
-             in (pat,) <$> zonkTerm' (newLevel, env) body
-    E.Match branches -> E.Match <$> traverse zonkBranch branches
-      where
-        zonkBranch (pats, body) =
-            let env = V.ValueEnv{locals = freeVars <> locals, ..}
-                (freeVars, newLevel) = liftLevel lvl (sum (fmap (E.patternArity . E.unTyped) pats))
-             in (pats,) <$> zonkTerm' (newLevel, env) body
-    E.If cond true false -> E.If <$> zonkTerm' c cond <*> zonkTerm' c true <*> zonkTerm' c false
-    E.Record row -> E.Record <$> traverse (zonkTerm' c) row
-    E.RecordT row -> E.RecordT <$> traverse (zonkTerm' c) row
-    E.VariantT row -> E.VariantT <$> traverse (zonkTerm' c) row
-    E.RecordAccess term field -> E.RecordAccess <$> zonkTerm' c term <*> pure field
-    E.List ty items -> E.List <$> zonkTerm' c ty <*> traverse (zonkTerm' c) items
-    E.Sigma vis lhs rhs -> E.Sigma vis <$> zonkTerm' c lhs <*> zonkTerm' c rhs
-    E.Do{} -> internalError' "zonkTerm: do notation not supported yet"
-    E.Q q v e (var ::: ty) body -> do
+        -- C.Case <$> zonkTerm' c arg <*> traverse zonkBranch branches
+
+        zonkBranches = \case
+            C.ConCase idmap ->
+                C.ConCase <$> for idmap \(pat, body) ->
+                    let env = V.ValueEnv{locals = freeVars <> locals, ..}
+                        (freeVars, newLevel) = liftLevel lvl (C.patternArity pat)
+                     in (pat,) <$> zonkTerm' (newLevel, env) body
+            C.TypeCase idmap ->
+                C.TypeCase <$> for idmap \(pat, body) ->
+                    let env = V.ValueEnv{locals = freeVars <> locals, ..}
+                        (freeVars, newLevel) = liftLevel lvl (C.patternArity pat)
+                     in (pat,) <$> zonkTerm' (newLevel, env) body
+            C.VariantCase hmap ->
+                C.VariantCase <$> for hmap \(name, body) ->
+                    let env = V.ValueEnv{locals = V.Var lvl : locals, ..}
+                     in (name,) <$> zonkTerm' (succ lvl, env) body
+            C.LitCase lits -> C.LitCase <$> for lits \(lit, body) -> (lit,) <$> zonkTerm' c body
+    C.Record row -> C.Record <$> traverse (zonkTerm' c) row
+    C.Row row -> C.Row <$> traverse (zonkTerm' c) row
+    C.RecordAccess term field -> C.RecordAccess <$> zonkTerm' c term <*> pure field
+    C.Sigma vis lhs rhs -> C.Sigma vis <$> zonkTerm' c lhs <*> zonkTerm' c rhs
+    C.Q q v e var ty body -> do
         ty <- zonkTerm' c ty
-        E.Q q v e (var ::: ty) <$> zonkTerm' (succ lvl, V.ValueEnv{locals = V.Var lvl : locals, ..}) body
-    v@E.Var{} -> pure v
-    n@E.Name{} -> pure n
-    v@E.Variant{} -> pure v
-    l@E.Literal{} -> pure l
+        C.Q q v e var ty <$> zonkTerm' (succ lvl, V.ValueEnv{locals = V.Var lvl : locals, ..}) body
+    v@C.Var{} -> pure v
+    n@C.Name{} -> pure n
+    v@C.Variant{} -> pure v
+    l@C.Literal{} -> pure l
+    C.UniVar{} -> internalError' "univar outside of ElabInsert"
+    C.AppPruning{} -> internalError' "pruning outside of ElabInsert"
 
 liftLevel :: Level -> Int -> ([Value], Level)
 liftLevel lvl diff = (freeVars, newLevel)

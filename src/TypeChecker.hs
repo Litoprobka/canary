@@ -12,7 +12,7 @@ import Data.List.NonEmpty qualified as NE
 import Data.Row (ExtRow (..), OpenName)
 import Data.Row qualified as Row
 import Data.Vector qualified as Vec
-import Desugar (desugar)
+import Desugar qualified
 import Diagnostic
 import Effectful.Reader.Static
 import Effectful.State.Static.Local (State, get, modify, put, runState)
@@ -62,7 +62,7 @@ processSignature :: DeclTC es => Context -> Name -> Term 'Fixity -> Eff es EDecl
 processSignature ctx name sig = do
     sigV <- withTopLevel $ generalise ctx =<< typeFromTerm ctx sig
     univars <- get
-    let eSig = E.Core $ quote univars ctx.level sigV
+    let eSig = quote univars ctx.level sigV -- do we need ElabInsert?
     modify $ Map.insert (unLoc name) sigV
     pure (E.SignatureD (unLoc name) eSig)
 
@@ -240,7 +240,7 @@ withTopLevel action = do
     runReader topLevel $ runReader metaTable action
 
 -- todo: this should also handle implicit pattern matches on existentials
-insertApp :: TC es => Context -> (ETerm, VType) -> Eff es (ETerm, VType)
+insertApp :: TC es => Context -> (CoreTerm, VType) -> Eff es (CoreTerm, VType)
 insertApp ctx = go
   where
     go (term, ty) =
@@ -249,15 +249,15 @@ insertApp ctx = go
                 arg <- freshUniVar ctx closure.ty
                 argV <- evalCoreM ctx.env arg
                 innerTy <- closure `appM` argV
-                go (E.App vis term (E.Core arg), innerTy)
+                go (C.App vis term (C.ElabInsert arg), innerTy)
             ty' -> pure (term, ty')
 
-insertNeutralApp :: TC es => Context -> (ETerm, VType) -> Eff es (ETerm, VType)
+insertNeutralApp :: TC es => Context -> (CoreTerm, VType) -> Eff es (CoreTerm, VType)
 insertNeutralApp ctx (term, ty) = case term of
-    E.Lambda vis _ _ | vis /= Visible -> pure (term, ty)
+    C.Lambda vis _ _ | vis /= Visible -> pure (term, ty)
     _ -> insertApp ctx (term, ty)
 
-check :: TC es => Context -> Term 'Fixity -> VType -> Eff es ETerm
+check :: TC es => Context -> Term 'Fixity -> VType -> Eff es CoreTerm
 check ctx (t :@ loc) ty = traceScope_ (prettyDef t <+> specSymBlue "⇐" <+> prettyValCtx ctx ty) $ localLoc loc do
     ty' <- forceM ty
     univars <- get
@@ -265,7 +265,7 @@ check ctx (t :@ loc) ty = traceScope_ (prettyDef t <+> specSymBlue "⇐" <+> pre
         (T.Lambda vis (L (T.VarP arg)) body, V.Q Forall qvis _e closure) | vis == qvis -> do
             bodyTy <- closure `appM` V.Var ctx.level
             eBody <- check (bind univars (unLoc arg) closure.ty ctx) body bodyTy
-            pure $ E.Lambda vis (E.VarP (toSimpleName_ $ unLoc arg)) eBody
+            pure $ C.Lambda vis (toSimpleName_ $ unLoc arg) eBody
         -- this case doesn't work at the moment, because the new var is not
         -- present in the elaborated term, and the indices no longer line up
         {-
@@ -282,27 +282,32 @@ check ctx (t :@ loc) ty = traceScope_ (prettyDef t <+> specSymBlue "⇐" <+> pre
             eCond <- check ctx cond $ V.Type BoolName
             eTrue <- check ctx true ty'
             eFalse <- check ctx false ty'
-            pure (E.If eCond eTrue eFalse)
+            pure (Desugar.if_ eCond eTrue eFalse)
         -- insert implicit / hidden lambda
         (_, V.Q Forall vis _e closure) | vis /= Visible -> do
             x <- freshName_ closure.var
             closureBody <- closure `appM` V.Var ctx.level
             eBody <- check (bind univars x closure.ty ctx) (t :@ loc) closureBody
-            pure $ E.Lambda vis (E.VarP closure.var) eBody
+            pure $ C.Lambda vis closure.var eBody
         (T.Case arg branches, result) -> do
             (eArg, argTy) <- infer ctx arg
-            constrs <- getAdjConstructors
-            argV <- evalM constrs ctx.env eArg
+            argV <- evalM ctx.env eArg
             eBranches <- for branches \(pat, body) -> do
                 ((ePat, patV), ctx) <- checkPattern ctx pat argTy
                 ctx <- refine ctx patV argV
                 (ePat,) <$> check ctx body result
-            pure (E.Case eArg eBranches)
+            adjConstructors <- getAdjConstructors
+            pure (Desugar.case_ adjConstructors eArg eBranches)
         -- an empty match checks against any type
         -- it should be later caught by the exhaustiveness check, though
-        (T.Match [], _) -> pure $ E.Match []
-        (T.Match branches@((pats, _) : _), ty) ->
-            E.Match <$> for branches \(pats, body) -> do
+        --
+        -- how does one desugar it without a type?
+        (T.Match [], _) -> do
+            adjConstructors <- getAdjConstructors
+            pure $ Desugar.match adjConstructors []
+        (T.Match branches@((pats, _) : _), ty) -> do
+            adjConstructors <- getAdjConstructors
+            Desugar.match adjConstructors <$> for branches \(pats, body) -> do
                 (ePats, ctx, bodyTy) <- checkPatterns 0 ctx pats ty
                 (ePats,) <$> check ctx body bodyTy
           where
@@ -314,7 +319,7 @@ check ctx (t :@ loc) ty = traceScope_ (prettyDef t <+> specSymBlue "⇐" <+> pre
                 closure <- ensurePi ctx (errorMsg n) fnTy
                 -- I'm not sure whether we should quote with
                 -- the old context or with the updated context
-                let patTy = E.Core $ quote univars ctx.level closure.ty
+                let patTy = quote univars ctx.level closure.ty -- ElabInsert or no?
                 ((ePat, patVal), ctx) <- checkPattern ctx pat closure.ty
                 innerTy <- closure `appM` patVal
                 case nonEmpty pats of
@@ -335,26 +340,25 @@ check ctx (t :@ loc) ty = traceScope_ (prettyDef t <+> specSymBlue "⇐" <+> pre
                 Just ext -> do
                     onlyExprAsRec <- check ctx (T.Record onlyExpr :@ loc) (V.RecordType (V.Stuck ext))
                     case onlyExprAsRec of
-                        E.Record row -> pure row
+                        C.Record row -> pure row
                         _ -> internalError' "elaborated a record to a non-record"
-            pure $ E.Record (eBoth <> eOnlyExpr)
+            pure $ C.Record (eBoth <> eOnlyExpr)
         (T.Sigma lhs rhs, V.Q Exists Visible _ closure) -> do
             eLhs <- check ctx lhs closure.ty
             env <- extendEnv ctx.env
-            constrs <- getAdjConstructors
-            let lhsV = eval constrs env eLhs
+            let lhsV = eval env eLhs
             rhsTy <- closure `appM` lhsV
             eRhs <- check ctx rhs rhsTy
-            pure $ E.Sigma Visible eLhs eRhs
+            pure $ C.Sigma Visible eLhs eRhs
         (T.List items, V.TyCon ListName ((_, itemTy) :< Nil)) -> do
             eItems <- traverse (\item -> check ctx item itemTy) items
             eItemTy <- quoteM ctx.level itemTy
-            pure $ E.List (E.Core eItemTy) eItems
+            pure $ Desugar.list (C.ElabInsert eItemTy) eItems -- do we need ElabInsert here?
         (expr, V.Q Exists vis _ closure) | vis /= Visible -> do
             argV <- freshUniVarV ctx closure.ty
             ty <- closure `appM` argV
-            eArg <- E.Core <$> quoteM ctx.level argV
-            E.Sigma vis eArg <$> check ctx (expr :@ loc) ty
+            eArg <- C.ElabInsert <$> quoteM ctx.level argV -- do we need ElabInsert here?
+            C.Sigma vis eArg <$> check ctx (expr :@ loc) ty
         (other, expected) -> do
             -- this case happens after the implicit forall case, so we know that we're checking against a monomorphic type here
             --
@@ -378,13 +382,13 @@ check ctx (t :@ loc) ty = traceScope_ (prettyDef t <+> specSymBlue "⇐" <+> pre
                 pure closure
             _ -> typeError errorMsg
 
-infer :: TC es => Context -> Term 'Fixity -> Eff es (ETerm, VType)
+infer :: TC es => Context -> Term 'Fixity -> Eff es (CoreTerm, VType)
 infer ctx (t :@ loc) = traceScope (\(_, ty) -> prettyDef t <+> specSym "⇒" <+> prettyValCtx ctx ty) $ localLoc loc case t of
     T.Name name -> lookupSig name ctx
     T.Annotation term ty -> do
         vty <- typeFromTerm ctx ty
         (,vty) <$> check ctx term vty
-    T.Literal lit -> pure (E.Literal lit, litType)
+    T.Literal lit -> pure (C.Literal lit, litType)
       where
         litType = V.Type case lit of
             IntLiteral{} -> IntName
@@ -396,7 +400,7 @@ infer ctx (t :@ loc) = traceScope (\(_, ty) -> prettyDef t <+> specSym "⇒" <+>
         (ePayload, payloadTy) <- infer ctx payload
         rowExt <- freshUniVarS ctx type_
         let ty = V.VariantType $ V.Row (fromList [(con, payloadTy)]) (Just rowExt)
-        pure (E.App Visible (E.Variant con) ePayload, ty)
+        pure (C.Variant con ePayload, ty)
     T.App vis lhs rhs -> do
         (eLhs, lhsTy) <- case vis of
             Visible -> insertApp ctx =<< infer ctx lhs
@@ -415,9 +419,8 @@ infer ctx (t :@ loc) = traceScope (\(_, ty) -> prettyDef t <+> specSym "⇒" <+>
                     pure closure
         eRhs <- check ctx rhs closure.ty
         env <- extendEnv ctx.env
-        constrs <- getAdjConstructors
-        resultTy <- closure `appM` eval constrs env eRhs
-        pure (E.App vis eLhs eRhs, resultTy)
+        resultTy <- closure `appM` eval env eRhs
+        pure (C.App vis eLhs eRhs, resultTy)
     T.Lambda vis (T.WildcardP txt :@ patLoc) body -> do
         name <- freshName $ Name' txt :@ patLoc
         infer ctx $ T.Lambda vis (T.VarP name :@ patLoc) body :@ loc
@@ -428,7 +431,7 @@ infer ctx (t :@ loc) = traceScope (\(_, ty) -> prettyDef t <+> specSym "⇒" <+>
         (eBody, bodyTy) <- insertNeutralApp bodyCtx =<< infer bodyCtx body
         let var = toSimpleName_ arg
             quotedBody = quote univars (succ ctx.level) bodyTy
-        pure (E.Lambda vis (E.VarP var) eBody, V.Q Forall vis Retained V.Closure{ty, var, env = ctx.env, body = quotedBody})
+        pure (C.Lambda vis var eBody, V.Q Forall vis Retained V.Closure{ty, var, env = ctx.env, body = quotedBody})
     -- a special case for an annotation, since it doesn't require a case at type level, unlike other patterns
     T.Lambda vis (L (T.AnnotationP (L (T.VarP (L arg))) ty)) body -> do
         ty <- typeFromTerm ctx ty
@@ -437,7 +440,7 @@ infer ctx (t :@ loc) = traceScope (\(_, ty) -> prettyDef t <+> specSym "⇒" <+>
         (eBody, bodyTy) <- insertNeutralApp bodyCtx =<< infer bodyCtx body
         let var = toSimpleName_ arg
             quotedBody = quote univars (succ ctx.level) bodyTy
-        pure (E.Lambda vis (E.VarP var) eBody, V.Q Forall vis Retained V.Closure{ty, var, env = ctx.env, body = quotedBody})
+        pure (C.Lambda vis var eBody, V.Q Forall vis Retained V.Closure{ty, var, env = ctx.env, body = quotedBody})
     T.Lambda{} -> internalError' "can't infer a type for a non-trivial pattern lambda (yet)"
     -- the type of a pattern lambda has the shape '(x : argTy) -> (case x of pat -> bodyTy)'
     -- this case is broken for the same reason as the `check` case for pattern lambdas
@@ -463,10 +466,9 @@ infer ctx (t :@ loc) = traceScope (\(_, ty) -> prettyDef t <+> specSym "⇒" <+>
     T.Let (T.ValueB (T.VarP name :@ _) definition) body -> do
         (eDef, ty) <- infer ctx definition
         env <- extendEnv ctx.env
-        constrs <- getAdjConstructors
         (eBody, bodyTy) <-
-            infer (define (unLoc name) (desugar constrs eDef) (eval constrs env eDef) (quote env.univars ctx.level ty) ty ctx) body
-        pure (E.Let (E.ValueB (unLoc name) eDef) eBody, bodyTy)
+            infer (define (unLoc name) eDef (eval env eDef) (quote env.univars ctx.level ty) ty ctx) body
+        pure (Desugar.let_ (E.ValueB (unLoc name) eDef) eBody, bodyTy)
     T.Let{} -> internalError' "destructuring bindings and function bindings are not supported yet"
     T.LetRec{} -> internalError' "let rec not supported yet"
     T.Do{} -> internalError' "do notation not supported yet"
@@ -488,7 +490,7 @@ infer ctx (t :@ loc) = traceScope (\(_, ty) -> prettyDef t <+> specSym "⇒" <+>
         (eTrue, trueTy) <- infer ctx true
         (eFalse, falseTy) <- infer ctx false
         unify ctx trueTy falseTy
-        pure (E.If eCond eTrue eFalse, trueTy)
+        pure (Desugar.if_ eCond eTrue eFalse, trueTy)
     T.Variant con -> do
         payloadTy <- freshUniVarV ctx type_
         payload <- freshName_ "payload"
@@ -497,7 +499,7 @@ infer ctx (t :@ loc) = traceScope (\(_, ty) -> prettyDef t <+> specSym "⇒" <+>
         let mkVariant row = C.TyCon RowName ((Visible, row) :< Nil)
         let body = mkVariant $ C.Row $ ExtRow (fromList [(con, quote univars ctx.level payloadTy)]) rowExt
         -- '(x : ?a) -> [| Con ?a | ?r x ]'
-        pure (E.Variant con, V.Pi V.Closure{env = ctx.env, ty = payloadTy, var = toSimpleName_ payload, body})
+        pure (Desugar.variant con, V.Pi V.Closure{env = ctx.env, ty = payloadTy, var = toSimpleName_ payload, body})
     T.RecordAccess record field -> do
         (eRecord, recordType) <- infer ctx record
         fieldType <- case recordType of
@@ -508,50 +510,47 @@ infer ctx (t :@ loc) = traceScope (\(_, ty) -> prettyDef t <+> specSym "⇒" <+>
                 fieldExt <- freshUniVarS ctx (V.Type RowName)
                 unify ctx (V.RecordType $ V.Row (fromList [(field, fieldType)]) (Just fieldExt)) other
                 pure fieldType
-        pure (E.RecordAccess eRecord field, fieldType)
+        pure (C.RecordAccess eRecord field, fieldType)
     T.Record row -> do
         (fields, types) <- unzip <$> traverse (infer ctx) row
-        pure (E.Record fields, V.RecordType $ V.Row types Nothing)
+        pure (C.Record fields, V.RecordType $ V.Row types Nothing)
     T.Sigma lhs rhs -> do
         (eLhs, lhsTy) <- infer ctx lhs
         env <- extendEnv ctx.env
         x <- freshName_ "x"
-        constrs <- getAdjConstructors
         (eRhs, rhsTy) <-
-            infer (define x (desugar constrs eLhs) (eval constrs env eLhs) (quote env.univars ctx.level lhsTy) lhsTy ctx) rhs
+            infer (define x eLhs (eval env eLhs) (quote env.univars ctx.level lhsTy) lhsTy ctx) rhs
         univars <- get
         -- I *think* we have to quote with increased level here, but I'm not sure
         let body = quote univars (succ ctx.level) rhsTy
-        pure (E.Sigma Visible eLhs eRhs, V.Q Exists Visible Retained $ V.Closure{ty = lhsTy, var = "x", env = ctx.env, body})
+        pure (C.Sigma Visible eLhs eRhs, V.Q Exists Visible Retained $ V.Closure{ty = lhsTy, var = "x", env = ctx.env, body})
     T.List items -> do
         itemTy <- freshUniVar ctx type_
         itemTyV <- evalCoreM ctx.env itemTy
         eItems <- traverse (\item -> check ctx item itemTyV) items
-        pure (E.List (E.Core itemTy) eItems, V.TyCon ListName $ fromList [(Visible, itemTyV)])
+        pure (Desugar.list (C.ElabInsert itemTy) eItems, V.TyCon ListName $ fromList [(Visible, itemTyV)])
     T.RecordT row -> do
         eRow <- traverse (\field -> check ctx field type_) row.row
         eExt <- traverse (\ext -> check ctx ext $ V.Type RowName) (Row.extension row)
-        pure (E.RecordT $ Row.mkExtRow eRow eExt, type_)
+        pure (Desugar.recordType $ Row.mkExtRow eRow eExt, type_)
     T.VariantT row -> do
         eRow <- traverse (\field -> check ctx field type_) row.row
         eExt <- traverse (\ext -> check ctx ext $ V.Type RowName) (Row.extension row)
-        pure (E.VariantT $ Row.mkExtRow eRow eExt, type_)
+        pure (Desugar.variantType $ Row.mkExtRow eRow eExt, type_)
     -- normal function syntax is just sugar for 'Π (_ : a) -> b'
     T.Function from to -> do
         eFrom <- check ctx from type_
         env <- extendEnv ctx.env
         x <- freshName_ "_"
         univars <- get
-        constrs <- getAdjConstructors
-        eTo <- check (bind univars x (eval constrs env eFrom) ctx) to type_
-        pure (E.Q Forall Visible Retained (toSimpleName_ x ::: eFrom) eTo, type_)
+        eTo <- check (bind univars x (eval env eFrom) ctx) to type_
+        pure (C.Q Forall Visible Retained (toSimpleName_ x) eFrom eTo, type_)
     T.Q q v e binder body -> do
-        eTy <- maybe (E.Core <$> freshUniVar ctx type_) (\term -> check ctx term type_) binder.kind
+        eTy <- maybe (C.ElabInsert <$> freshUniVar ctx type_) (\term -> check ctx term type_) binder.kind
         env <- extendEnv ctx.env
         univars <- get
-        constrs <- getAdjConstructors
-        eBody <- check (bind univars (unLoc binder.var) (eval constrs env eTy) ctx) body type_
-        pure (E.Q q v e (unLoc (toSimpleName binder.var) ::: eTy) eBody, type_)
+        eBody <- check (bind univars (unLoc binder.var) (eval env eTy) ctx) body type_
+        pure (C.Q q v e (unLoc (toSimpleName binder.var)) eTy eBody, type_)
   where
     type_ = V.Type TypeName
 
@@ -566,8 +565,7 @@ infer ctx (t :@ loc) = traceScope (\(_, ty) -> prettyDef t <+> specSym "⇒" <+>
 typeFromTerm :: TC es => Context -> Term 'Fixity -> Eff es VType
 typeFromTerm ctx term = do
     eTerm <- check ctx term (V.Type TypeName)
-    constrs <- getAdjConstructors
-    evalM constrs ctx.env eTerm
+    evalM ctx.env eTerm
 
 checkPattern :: TC es => Context -> Pattern 'Fixity -> VType -> Eff es ((EPattern, Value), Context)
 checkPattern ctx (pat :@ pLoc) ty = do

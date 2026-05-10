@@ -44,6 +44,7 @@ toSanityCheck =
     , "\\r -> r.x"
     , "match {x, y, z} -> [x, y, z]"
     , "\\r -> [(case r of {x} -> x), case r of {y} -> y]"
+    , "\\r -> [r.x, r.y]"
     , "\\f r -> case r of {x, y} -> f x y"
     , "\\r f -> case r of {x, y} -> f x y"
     , "1 : exists a. a"
@@ -64,7 +65,7 @@ toInfer :: [(String, Text)]
 toInfer =
     [ ("null", "null = match Nil -> True; (Cons _ _) -> False")
     , ("map", "map f xs = case xs of Nil -> Nil; Cons x xs -> Cons (f x) (map f xs)")
-    , ("map (match)", "map f = match Nil -> Nil; Cons x xs -> Cons (f x) (map f xs)")
+    , ("map (match)", "map f = match Nil -> Nil; (Cons x xs) -> Cons (f x) (map f xs)")
     , ("len", "type Peano = S Peano | Z\nlen xs = case xs of Nil -> Z; Cons _ xs -> S (len xs)")
     ]
 

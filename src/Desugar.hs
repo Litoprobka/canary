@@ -6,63 +6,64 @@ import Common
 import Data.Foldable1 (foldl1')
 import Data.IdMap qualified as IdMap
 import Data.IdMap qualified as Map
+import Data.Row (ExtRow, OpenName)
 import LangPrelude
 import Syntax
 import Syntax.Core qualified as C
+import Syntax.Elaborated (EBinding)
 import Syntax.Elaborated qualified as E
 
-desugar :: AdjConstructors -> ETerm -> CoreTerm
-desugar adjConstructors = \case
-    E.Var index -> C.Var index
-    E.Name name -> C.Name name
-    E.Literal lit -> C.Literal lit
-    E.App vis lhs rhs -> C.App vis (go lhs) (go rhs)
-    E.Lambda vis (E.VarP arg) body -> C.Lambda vis arg (go body)
-    E.Lambda vis (E.WildcardP arg) body -> C.Lambda vis (Name' arg) (go body)
-    E.Lambda vis pat body -> C.Lambda vis "x" $ go (E.Case (E.Var (Index 0)) [(pat, E.liftAt 1 (Level $ E.patternArity pat) body)])
-    E.Let binding expr -> case binding of
-        E.ValueB name body -> C.Let (toSimpleName_ name) (go body) (go expr)
-        E.FunctionB name args body -> go $ E.Let (E.ValueB name asLambda) expr
-          where
-            asLambda = foldr (uncurry E.Lambda) body args
-    E.LetRec _bindings _body -> error "todo: letrec desugar"
-    E.Case arg [] -> C.Case (go arg) C.CaseWD{branches = C.ConCase Map.empty, def = Nothing}
-    E.Case arg (m : rest) ->
-        let ?adjConstructors = adjConstructors
-         in fromTree' (go arg) $ foldl1' (merge const) $ fmap (uncurry toTree . second go) (m :| rest)
-    E.Match [] -> error "empty match"
-    E.Match (m@(pats, _) : rest) ->
-        let ?adjConstructors = adjConstructors
-         in let len = length pats
-                mkBranch (pats, body) = toTreeNested (toList $ fmap E.unTyped pats) (go body)
-                tree = foldl1' (mergeNested const) $ fmap mkBranch (m :| rest)
-                body = fromNested (\_ term -> term) (Level len) (fmap Level [0 .. pred len]) tree
-             in foldr (\i -> C.Lambda Visible (Name' $ "x" <> show i)) body [0 .. pred len]
-    E.If cond true false ->
-        C.Case
-            (go cond)
-            C.CaseWD
-                { branches = C.ConCase $ Map.one TrueName (C.ConstructorP TrueName [], go true)
-                , def = Just (Wildcard' "_", C.lift 1 $ go false)
-                }
-    E.Variant name -> C.Lambda Visible "x" $ C.Variant name (C.Var $ Index 0)
-    E.Record fields -> C.Record $ fmap go fields
-    E.RecordAccess record field -> C.RecordAccess (go record) field
-    E.Sigma vis x y -> C.Sigma vis (go x) (go y)
-    E.List ty xs ->
-        let cty = go ty
-         in foldr
-                (\x xs -> C.Con ConsName $ fromList [(Implicit, cty), (Visible, go x), (Visible, xs)])
-                (C.Con NilName $ fromList [(Implicit, cty)])
-                xs
-    E.Do{} -> error "todo: desugar do blocks"
-    E.Q q vis er (var ::: kind) body -> C.Q q vis er var (go kind) (go body)
-    E.VariantT row -> C.TyCon VariantName $ oneVis $ C.Row $ fmap go row
-    E.RecordT row -> C.TyCon RecordName $ oneVis $ C.Row $ fmap go row
-    E.Core coreTerm -> coreTerm
-  where
-    oneVis x = (Visible, x) :< Nil
-    go = desugar adjConstructors
+if_ :: CoreTerm -> CoreTerm -> CoreTerm -> CoreTerm
+if_ cond true false =
+    C.Case cond $
+        C.CaseWD
+            { branches =
+                ( C.ConCase $
+                    IdMap.fromList
+                        [ (TrueName, (C.ConstructorP TrueName [], true))
+                        , (FalseName, (C.ConstructorP FalseName [], false))
+                        ]
+                )
+            , def = Nothing
+            }
+
+case_ :: AdjConstructors -> CoreTerm -> [(EPattern, CoreTerm)] -> CoreTerm
+case_ _ arg [] = C.Case arg C.CaseWD{branches = C.ConCase Map.empty, def = Nothing}
+case_ adjConstructors arg (m : rest) =
+    let ?adjConstructors = adjConstructors
+     in fromTree' arg $ foldl1' (merge const) $ fmap (uncurry toTree) (m :| rest)
+
+match :: AdjConstructors -> [(NonEmpty (Typed EPattern), CoreTerm)] -> CoreTerm
+match _ [] = error "empty match"
+match adjConstructors (m@(pats, _) : rest) =
+    let ?adjConstructors = adjConstructors
+     in let len = length pats
+            mkBranch (pats, body) = toTreeNested (toList $ fmap E.unTyped pats) body
+            tree = foldl1' (mergeNested const) $ fmap mkBranch (m :| rest)
+            body = fromNested (\_ term -> term) (Level len) (fmap Level [0 .. pred len]) tree
+         in foldr (\i -> C.Lambda Visible (Name' $ "x" <> show i)) body [0 .. pred len]
+
+list :: CoreTerm -> [CoreTerm] -> CoreTerm
+list ty =
+    foldr
+        (\x xs -> C.Con ConsName $ fromList [(Implicit, ty), (Visible, x), (Visible, xs)])
+        (C.Con NilName $ fromList [(Implicit, ty)])
+
+let_ :: EBinding -> CoreTerm -> CoreTerm
+let_ binding expr = case binding of
+    E.ValueB name body -> C.Let (toSimpleName_ name) body expr
+    E.FunctionB name args body -> C.Let (toSimpleName_ name) asLambda expr
+      where
+        asLambda = foldr (uncurry C.Lambda) body (fmap (second toSimpleName_) args)
+
+variant :: OpenName -> CoreTerm
+variant name = C.Lambda Visible "x" $ C.Variant name (C.Var $ Index 0)
+
+variantType :: ExtRow CoreType -> CoreTerm
+variantType row = C.TyCon VariantName $ (Visible, C.Row row) :< Nil
+
+recordType :: ExtRow CoreType -> CoreTerm
+recordType row = C.TyCon RecordName $ (Visible, C.Row row) :< Nil
 
 data Nested a
     = NotNested a
@@ -95,7 +96,7 @@ toTree pat body = case pat of
     E.VarP _ -> Leaf body
     E.WildcardP _ -> Leaf body
     E.ConstructorP con args -> Branch (ConB $ IdMap.one con (mkArgs args, toTreeNested (snd <$> toList args) body)) Nothing
-    _ -> error "todo"
+    _ -> error "desugar other patterns: todo"
   where
     mkArgs args = Args (length args) (zipWith (\i (vis, argPat) -> (vis, argName i argPat)) [0 ..] args)
     argName (i :: Int) = \case

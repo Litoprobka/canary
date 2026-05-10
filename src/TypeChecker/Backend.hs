@@ -20,7 +20,6 @@ import NameGen (NameGen, freshId, runNameGen)
 import Prettyprinter.Render.Terminal (AnsiStyle)
 import Syntax
 import Syntax.Core qualified as C
-import Syntax.Elaborated qualified as E
 import Syntax.Value qualified as V
 import Trace
 
@@ -206,15 +205,15 @@ define name val vval ty vty Context{env = V.ValueEnv{locals = vlocals, ..}, ..} 
         , ..
         }
 
-lookupSig :: (Reader TopLevel :> es, UniEffs es) => Name -> Context -> Eff es (ETerm, VType)
+lookupSig :: (Reader TopLevel :> es, UniEffs es) => Name -> Context -> Eff es (CoreTerm, VType)
 lookupSig name ctx = do
     topLevel <- ask
     case (Map.lookup (unLoc name) ctx.types, Map.lookup (unLoc name) topLevel) of
-        (Just (lvl, ty), _) -> pure (E.Var (levelToIndex ctx.level lvl), ty)
-        (_, Just ty) -> pure (E.Name $ unLoc name, ty)
+        (Just (lvl, ty), _) -> pure (C.Var (levelToIndex ctx.level lvl), ty)
+        (_, Just ty) -> pure (C.Name $ unLoc name, ty)
         (Nothing, Nothing) -> do
             ty <- freshUniVarV ctx (V.Type TypeName)
-            (E.Name $ unLoc name,) <$> freshUniVarV ctx ty
+            (C.Name $ unLoc name,) <$> freshUniVarV ctx ty
 
 -- | collect all free vars in a zonked CoreTerm
 freeVarsInCore :: UniVars -> CoreTerm -> Eff (State (EnumSet UniVar) : es) ()

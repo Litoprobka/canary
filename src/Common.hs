@@ -79,6 +79,7 @@ data Name_
     | Wildcard Text Id
     | BoolName
     | TrueName
+    | FalseName
     | ListName
     | ConsName
     | NilName
@@ -99,17 +100,18 @@ instance HasId Name_ where
         Wildcard _ (Id id') -> id'
         BoolName -> -10
         TrueName -> -11
-        ListName -> -12
-        ConsName -> -13
-        NilName -> -14
-        IntName -> -15
-        NatName -> -16
-        TextName -> -17
-        CharName -> -18
-        TypeName -> -19
-        RowName -> -20
-        RecordName -> -21
-        VariantName -> -22
+        FalseName -> -12
+        ListName -> -13
+        ConsName -> -14
+        NilName -> -15
+        IntName -> -16
+        NatName -> -17
+        TextName -> -18
+        CharName -> -19
+        TypeName -> -20
+        RowName -> -21
+        RecordName -> -22
+        VariantName -> -23
 
 type SimpleName = Located SimpleName_
 data SimpleName_
@@ -184,6 +186,7 @@ instance PrettyAnsi Name_ where
             | otherwise -> pretty txt
         BoolName -> "Bool"
         TrueName -> "True"
+        FalseName -> "False"
         ListName -> "List"
         ConsName -> "Cons"
         NilName -> "Nil"
@@ -272,6 +275,7 @@ toSimpleName_ = \case
     Wildcard n _ -> Wildcard' n
     BoolName -> "Bool"
     TrueName -> "True"
+    FalseName -> "False"
     ListName -> "List"
     ConsName -> "Cons"
     NilName -> "Nil"
