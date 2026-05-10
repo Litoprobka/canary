@@ -6,6 +6,7 @@ module TypeChecker where
 import Common
 import Data.EnumMap.Lazy qualified as EMap
 import Data.Functor (unzip)
+import Data.IdMap (IdSet)
 import Data.IdMap qualified as Map
 import Data.List.NonEmpty qualified as NE
 import Data.Row (ExtRow (..), OpenName)
@@ -110,11 +111,12 @@ processGadt ctx name mbKind constructors = do
     modify $ Map.insert (unLoc name) kind
     modify $ Map.insert (unLoc name) (mkTypeConstructorMetadata (getLoc name) kind)
     let newCtx = ctx{env = ctx.env{V.topLevel = Map.insert (unLoc name) tyCon ctx.env.topLevel}}
+        conNames = Map.fromList $ (\c -> (unLoc c.name, ())) <$> constructors
     constructors <- withTopLevel $ for constructors \con -> do
         conSig <- generalise newCtx =<< typeFromTerm newCtx con.sig
         checkGadtConstructor ctx.level (unLoc name) con.name conSig
         modify $ Map.insert (unLoc con.name) conSig
-        modify $ Map.insert (unLoc con.name) (mkConstructorMetadata (name, kind) conSig)
+        modify $ Map.insert (unLoc con.name) (mkConstructorMetadata conNames (name, kind) conSig)
         pure (con, quote EMap.empty (Level 0) conSig)
     pure (E.TypeD (unLoc name) (map (\(con, conSig) -> (unLoc con.name, C.functionTypeArity conSig)) constructors), tyCon)
   where
@@ -141,10 +143,11 @@ processType ctx name binders constructors = do
     modify $ Map.insert (unLoc name) kind
     modify $ Map.insert (unLoc name) (mkTypeConstructorMetadata (getLoc name) kind)
     let newCtx = ctx{env = ctx.env{V.topLevel = Map.insert (unLoc name) tyCon ctx.env.topLevel}}
+        conNames = Map.fromList $ (\c -> (unLoc c.name, ())) <$> constructors
     withTopLevel $ for_ (mkConstrSigs name binders constructors) \(con, sig) -> do
         sigV <- generalise newCtx =<< typeFromTerm newCtx sig
         modify $ Map.insert (unLoc con) sigV
-        modify $ Map.insert (unLoc con) (mkConstructorMetadata (name, kind) sigV)
+        modify $ Map.insert (unLoc con) (mkConstructorMetadata conNames (name, kind) sigV)
     -- _conMapEntry <- mkConstructorTableEntry (map (.var) binders) (map (\con -> (con.name, con.args)) constrs)
     let argVisibilities con = (Implicit <$ C.functionTypeArity kindC) <> fromList (Visible <$ con.args)
     pure
@@ -173,16 +176,25 @@ processType ctx name binders constructors = do
         fullType loc' = foldl' (\lhs -> (:@ loc') . T.App Visible lhs) (T.Name name :@ getLoc name) ((:@ loc') . T.Name . (.var) <$> binders)
 
 mkTypeConstructorMetadata :: Loc -> VType -> ConMetadata
-mkTypeConstructorMetadata loc = mkConstructorMetadata (TypeName :@ loc, V.Type TypeName)
+mkTypeConstructorMetadata loc = mkConstructorMetadata Map.empty (TypeName :@ loc, V.Type TypeName)
 
-mkConstructorMetadata :: (Name, VType) -> VType -> ConMetadata
-mkConstructorMetadata (L typeName, kind) conType = ConMetadata \ctx -> do
-    params <- getTypeParams ctx.level conType
-    (lvlMap, uniParams) <- instantiate ctx EMap.empty kind params
-    let goalType = V.TyCon typeName $ fromList uniParams
-    univars <- get
-    pure (goalType, go univars lvlMap ctx.level conType)
+mkConstructorMetadata
+    :: IdSet Name_
+    -- ^ constructor names of the type (e.g. `[True, False]`)
+    -> (Name, VType)
+    -- ^ type name and kind (e.g. `Bool` and `Type`)
+    -> VType
+    -- ^ type of the value constructor of that type (e.g. `True :: Bool`)
+    -> ConMetadata
+mkConstructorMetadata adjConstructors (L typeName, kind) conType = ConMetadata{mkMeta, adjConstructors}
   where
+    mkMeta ctx = do
+        params <- getTypeParams ctx.level conType
+        (lvlMap, uniParams) <- instantiate ctx EMap.empty kind params
+        let goalType = V.TyCon typeName $ fromList uniParams
+        univars <- get
+        pure (goalType, go univars lvlMap ctx.level conType)
+
     getTypeParams lvl = \case
         V.Q Forall _vis _e closure -> getTypeParams (succ lvl) =<< closure `appM` V.Var lvl
         V.TyCon name params | typeName == name -> pure $ toList params
@@ -279,7 +291,8 @@ check ctx (t :@ loc) ty = traceScope_ (prettyDef t <+> specSymBlue "⇐" <+> pre
             pure $ E.Lambda vis (E.VarP closure.var) eBody
         (T.Case arg branches, result) -> do
             (eArg, argTy) <- infer ctx arg
-            argV <- evalM ctx.env eArg
+            constrs <- getAdjConstructors
+            argV <- evalM constrs ctx.env eArg
             eBranches <- for branches \(pat, body) -> do
                 ((ePat, patV), ctx) <- checkPattern ctx pat argTy
                 ctx <- refine ctx patV argV
@@ -328,7 +341,8 @@ check ctx (t :@ loc) ty = traceScope_ (prettyDef t <+> specSymBlue "⇐" <+> pre
         (T.Sigma lhs rhs, V.Q Exists Visible _ closure) -> do
             eLhs <- check ctx lhs closure.ty
             env <- extendEnv ctx.env
-            let lhsV = eval env eLhs
+            constrs <- getAdjConstructors
+            let lhsV = eval constrs env eLhs
             rhsTy <- closure `appM` lhsV
             eRhs <- check ctx rhs rhsTy
             pure $ E.Sigma Visible eLhs eRhs
@@ -401,7 +415,8 @@ infer ctx (t :@ loc) = traceScope (\(_, ty) -> prettyDef t <+> specSym "⇒" <+>
                     pure closure
         eRhs <- check ctx rhs closure.ty
         env <- extendEnv ctx.env
-        resultTy <- closure `appM` eval env eRhs
+        constrs <- getAdjConstructors
+        resultTy <- closure `appM` eval constrs env eRhs
         pure (E.App vis eLhs eRhs, resultTy)
     T.Lambda vis (T.WildcardP txt :@ patLoc) body -> do
         name <- freshName $ Name' txt :@ patLoc
@@ -448,7 +463,9 @@ infer ctx (t :@ loc) = traceScope (\(_, ty) -> prettyDef t <+> specSym "⇒" <+>
     T.Let (T.ValueB (T.VarP name :@ _) definition) body -> do
         (eDef, ty) <- infer ctx definition
         env <- extendEnv ctx.env
-        (eBody, bodyTy) <- infer (define (unLoc name) (desugar eDef) (eval env eDef) (quote env.univars ctx.level ty) ty ctx) body
+        constrs <- getAdjConstructors
+        (eBody, bodyTy) <-
+            infer (define (unLoc name) (desugar constrs eDef) (eval constrs env eDef) (quote env.univars ctx.level ty) ty ctx) body
         pure (E.Let (E.ValueB (unLoc name) eDef) eBody, bodyTy)
     T.Let{} -> internalError' "destructuring bindings and function bindings are not supported yet"
     T.LetRec{} -> internalError' "let rec not supported yet"
@@ -499,7 +516,9 @@ infer ctx (t :@ loc) = traceScope (\(_, ty) -> prettyDef t <+> specSym "⇒" <+>
         (eLhs, lhsTy) <- infer ctx lhs
         env <- extendEnv ctx.env
         x <- freshName_ "x"
-        (eRhs, rhsTy) <- infer (define x (desugar eLhs) (eval env eLhs) (quote env.univars ctx.level lhsTy) lhsTy ctx) rhs
+        constrs <- getAdjConstructors
+        (eRhs, rhsTy) <-
+            infer (define x (desugar constrs eLhs) (eval constrs env eLhs) (quote env.univars ctx.level lhsTy) lhsTy ctx) rhs
         univars <- get
         -- I *think* we have to quote with increased level here, but I'm not sure
         let body = quote univars (succ ctx.level) rhsTy
@@ -523,13 +542,15 @@ infer ctx (t :@ loc) = traceScope (\(_, ty) -> prettyDef t <+> specSym "⇒" <+>
         env <- extendEnv ctx.env
         x <- freshName_ "_"
         univars <- get
-        eTo <- check (bind univars x (eval env eFrom) ctx) to type_
+        constrs <- getAdjConstructors
+        eTo <- check (bind univars x (eval constrs env eFrom) ctx) to type_
         pure (E.Q Forall Visible Retained (toSimpleName_ x ::: eFrom) eTo, type_)
     T.Q q v e binder body -> do
         eTy <- maybe (E.Core <$> freshUniVar ctx type_) (\term -> check ctx term type_) binder.kind
         env <- extendEnv ctx.env
         univars <- get
-        eBody <- check (bind univars (unLoc binder.var) (eval env eTy) ctx) body type_
+        constrs <- getAdjConstructors
+        eBody <- check (bind univars (unLoc binder.var) (eval constrs env eTy) ctx) body type_
         pure (E.Q q v e (unLoc (toSimpleName binder.var) ::: eTy) eBody, type_)
   where
     type_ = V.Type TypeName
@@ -545,7 +566,8 @@ infer ctx (t :@ loc) = traceScope (\(_, ty) -> prettyDef t <+> specSym "⇒" <+>
 typeFromTerm :: TC es => Context -> Term 'Fixity -> Eff es VType
 typeFromTerm ctx term = do
     eTerm <- check ctx term (V.Type TypeName)
-    evalM ctx.env eTerm
+    constrs <- getAdjConstructors
+    evalM constrs ctx.env eTerm
 
 checkPattern :: TC es => Context -> Pattern 'Fixity -> VType -> Eff es ((EPattern, Value), Context)
 checkPattern ctx (pat :@ pLoc) ty = do

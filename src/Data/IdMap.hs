@@ -10,6 +10,8 @@ import Data.IntMap.Strict qualified as IntMap
 -- | a newtype wrapper of IntMap for keys that have a lossy but 1-to-1 conversion to Int
 newtype IdMap k v = IdMap (IntMap (k, v)) deriving (Show, Functor, Foldable, Traversable, Semigroup, Monoid)
 
+type IdSet k = IdMap k ()
+
 class HasId k where
     toId :: k -> Int
 
@@ -18,6 +20,9 @@ empty = IdMap IntMap.empty
 
 null :: IdMap k v -> Bool
 null (IdMap idmap) = IntMap.null idmap
+
+size :: IdMap k v -> Int
+size (IdMap idmap) = IntMap.size idmap
 
 insert :: HasId k => k -> v -> IdMap k v -> IdMap k v
 insert !k v (IdMap idmap) = IdMap $ IntMap.insert (toId k) (k, v) idmap
@@ -63,3 +68,6 @@ merge both onlyA onlyB (IdMap as) (IdMap bs) = IdMap $ IntMap.mergeWithKey (\_ (
 
 unionWith :: (a -> a -> a) -> IdMap k a -> IdMap k a -> IdMap k a
 unionWith f (IdMap lhs) (IdMap rhs) = IdMap $ IntMap.unionWith (\(k, l) (_, r) -> (k, f l r)) lhs rhs
+
+difference :: IdMap k a -> IdMap k b -> IdMap k a
+difference (IdMap lhs) (IdMap rhs) = IdMap (IntMap.difference lhs rhs)

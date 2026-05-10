@@ -9,7 +9,7 @@ import Common
 import Data.EnumMap.Strict qualified as EMap
 import Data.EnumSet qualified as ESet
 import Data.IdMap qualified as Map
-import Data.Row
+import Desugar (AdjConstructors)
 import Diagnostic (Diagnose, internalError')
 import Effectful.Labeled (Labeled, labeled, runLabeled)
 import Effectful.Reader.Static
@@ -24,15 +24,10 @@ import Syntax.Elaborated qualified as E
 import Syntax.Value qualified as V
 import Trace
 
-newtype ConstructorTable = ConstructorTable
-    { table :: IdMap Name_ (IdMap Name_ ([ExType] -> [ExType]))
+data ConMetadata = ConMetadata
+    { mkMeta :: forall es. (UniEffs es, Reader TopLevel :> es, Diagnose :> es, NameGen :> es) => Context -> Eff es (VType, ConArgList)
+    , adjConstructors :: IdMap Name_ ()
     }
-data ExType = TyCon Name_ [ExType] | ExVariant (ExtRow ExType) | ExRecord (Row ExType) | OpaqueTy
-    deriving (Show)
-
-newtype ConMetadata
-    = ConMetadata
-        (forall es. (UniEffs es, Reader TopLevel :> es, Diagnose :> es, NameGen :> es) => Context -> Eff es (VType, ConArgList))
 
 getConMetadata
     :: forall es
@@ -40,7 +35,13 @@ getConMetadata
     => ConMetadata
     -> Context
     -> Eff es (VType, ConArgList)
-getConMetadata (ConMetadata f) = f
+getConMetadata (ConMetadata f _) = f
+
+getAdjConstructors :: (Reader ConMetaTable :> es) => Eff es AdjConstructors
+getAdjConstructors = asks @ConMetaTable (fmap (.adjConstructors))
+
+getAdjConstructors' :: (State ConMetaTable :> es) => Eff es AdjConstructors
+getAdjConstructors' = gets @ConMetaTable (fmap (.adjConstructors))
 
 type UniEffs es = (State UniVars :> es, Labeled UniVar NameGen :> es, State Postponings :> es, Labeled Postponed NameGen :> es)
 

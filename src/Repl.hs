@@ -53,7 +53,7 @@ import Syntax.Value qualified as V
 import System.Console.Isocline
 import Trace
 import TypeChecker qualified as TC
-import TypeChecker.Backend (emptyContext)
+import TypeChecker.Backend (emptyContext, getAdjConstructors')
 import TypeChecker.Backend qualified as TC
 import TypeChecker.Generalisation
 
@@ -119,7 +119,8 @@ mkDefaultEnv = do
     fixityDecls <- Fixity.resolveFixity fixityMap operatorPriorities depResOutput.declarations
     ((values, types), conMetadata) <- runState emptyEnv.conMetadata $ runState emptyEnv.types $ (\f -> foldlM f emptyEnv.values fixityDecls) \values decl -> do
         (eDecl, newValues) <- skipTrace $ TC.processDeclaration' values decl
-        modifyEnv newValues [eDecl]
+        constrs <- getAdjConstructors'
+        modifyEnv constrs newValues [eDecl]
     guardNoErrors
     let newEnv =
             ReplEnv
@@ -196,12 +197,13 @@ run debug env = do
         | otherwise = skipTrace
 
 replStep :: forall es. (ReplCtx es, Diagnose :> es, Trace :> es) => ReplEnv -> ReplCommand -> Eff es (Maybe ReplEnv)
-replStep env@ReplEnv{loadedFiles} = \case
+replStep env@ReplEnv{loadedFiles, conMetadata} = \case
     Decls decls -> Just <$> processDecls env decls
     Expr expr -> do
         (checkedExpr, _) <- processExpr env expr
         guardNoErrors
-        prettyVal $ eval V.ExtendedEnv{locals = [], topLevel = env.values.topLevel, univars = EMap.empty} checkedExpr
+        let constrs = fmap (.adjConstructors) conMetadata
+        prettyVal $ eval constrs V.ExtendedEnv{locals = [], topLevel = env.values.topLevel, univars = EMap.empty} checkedExpr
         pure $ Just env
     Type_ expr -> do
         (_, ty) <- processExpr env expr
@@ -250,7 +252,8 @@ processDecls env@ReplEnv{loadedFiles} decls = do
     fixityDecls <- Fixity.resolveFixity fixityMap operatorPriorities depResOutput.declarations
     ((values, types), conMetadata) <- runState env.conMetadata $ runState env.types $ (\f -> foldlM f env.values fixityDecls) \values decl -> do
         (eDecl, newValues) <- TC.processDeclaration' values decl
-        modifyEnv newValues [eDecl]
+        constrs <- getAdjConstructors'
+        modifyEnv constrs newValues [eDecl]
     guardNoErrors
     pure
         ReplEnv

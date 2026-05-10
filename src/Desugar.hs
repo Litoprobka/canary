@@ -1,3 +1,5 @@
+{-# LANGUAGE ImplicitParams #-}
+
 module Desugar where
 
 import Common
@@ -9,8 +11,8 @@ import Syntax
 import Syntax.Core qualified as C
 import Syntax.Elaborated qualified as E
 
-desugar :: ETerm -> CoreTerm
-desugar = \case
+desugar :: AdjConstructors -> ETerm -> CoreTerm
+desugar adjConstructors = \case
     E.Var index -> C.Var index
     E.Name name -> C.Name name
     E.Literal lit -> C.Literal lit
@@ -19,20 +21,23 @@ desugar = \case
     E.Lambda vis (E.WildcardP arg) body -> C.Lambda vis (Name' arg) (go body)
     E.Lambda vis pat body -> C.Lambda vis "x" $ go (E.Case (E.Var (Index 0)) [(pat, E.liftAt 1 (Level $ E.patternArity pat) body)])
     E.Let binding expr -> case binding of
-        E.ValueB name body -> C.Let (toSimpleName_ name) (desugar body) (desugar expr)
-        E.FunctionB name args body -> desugar $ E.Let (E.ValueB name asLambda) expr
+        E.ValueB name body -> C.Let (toSimpleName_ name) (go body) (go expr)
+        E.FunctionB name args body -> go $ E.Let (E.ValueB name asLambda) expr
           where
             asLambda = foldr (uncurry E.Lambda) body args
     E.LetRec _bindings _body -> error "todo: letrec desugar"
     E.Case arg [] -> C.Case (go arg) C.CaseWD{branches = C.ConCase Map.empty, def = Nothing}
-    E.Case arg (m : rest) -> fromTree' (go arg) $ foldl1' (merge const) $ fmap (uncurry toTree . second go) (m :| rest)
+    E.Case arg (m : rest) ->
+        let ?adjConstructors = adjConstructors
+         in fromTree' (go arg) $ foldl1' (merge const) $ fmap (uncurry toTree . second go) (m :| rest)
     E.Match [] -> error "empty match"
     E.Match (m@(pats, _) : rest) ->
-        let len = length pats
-            mkBranch (pats, body) = toTreeNested (toList $ fmap E.unTyped pats) (go body)
-            tree = foldl1' (mergeNested const) $ fmap mkBranch (m :| rest)
-            body = fromNested (\_ term -> term) (Level len) (fmap Level [0 .. pred len]) tree
-         in foldr (\i -> C.Lambda Visible (Name' $ "x" <> show i)) body [0 .. pred len]
+        let ?adjConstructors = adjConstructors
+         in let len = length pats
+                mkBranch (pats, body) = toTreeNested (toList $ fmap E.unTyped pats) (go body)
+                tree = foldl1' (mergeNested const) $ fmap mkBranch (m :| rest)
+                body = fromNested (\_ term -> term) (Level len) (fmap Level [0 .. pred len]) tree
+             in foldr (\i -> C.Lambda Visible (Name' $ "x" <> show i)) body [0 .. pred len]
     E.If cond true false ->
         C.Case
             (go cond)
@@ -57,7 +62,7 @@ desugar = \case
     E.Core coreTerm -> coreTerm
   where
     oneVis x = (Visible, x) :< Nil
-    go = desugar
+    go = desugar adjConstructors
 
 data Nested a
     = NotNested a
@@ -65,7 +70,10 @@ data Nested a
     deriving (Show)
 
 data CaseTree a
-    = Leaf a
+    = Leaf a -- do we need something akin to as-patterns? if we merge a var-branch with a con-branch,
+    -- we'd have to shift indices in both
+    -- although we'd have to shift indices either way
+    -- when merging a var-branch with different con-branches (e.g. Just and Nothing)
     | Branch (CaseTreeNE a) (Maybe a)
     deriving (Show)
 
@@ -74,6 +82,8 @@ data Args = Args Int [(Visibility, SimpleName_)] deriving (Show)
 
 newtype CaseTreeNE a
     = ConB (IdMap Name_ (Args, Nested a))
+    -- we don't really need 'Nested', because branches for a specific constructor always have the same amount of arguments
+    -- and when merging a Branch with a wildcard, we also know how many subbranches to skip
     deriving (Show)
 
 -- todo: all branch bodies should be extracted to outer scoped let-bound lambdas
@@ -97,16 +107,45 @@ toTreeNested :: [EPattern] -> a -> Nested a
 toTreeNested [] x = NotNested x
 toTreeNested (pat : pats) x = Nested $ toTree pat (toTreeNested pats x)
 
-fromTree' :: CoreTerm -> CaseTree CoreTerm -> CoreTerm
+fromTree' :: (?adjConstructors :: AdjConstructors) => CoreTerm -> CaseTree CoreTerm -> CoreTerm
 fromTree' arg = fromTree (\_ term -> term) arg (Level 0)
 
-fromTree :: (Level -> a -> CoreTerm) -> CoreTerm -> Level -> CaseTree a -> CoreTerm
+type AdjConstructors =
+    IdMap
+        Name_ -- any constructor of a type
+        (IdMap Name_ ())
+
+fromTree :: (?adjConstructors :: AdjConstructors) => (Level -> a -> CoreTerm) -> CoreTerm -> Level -> CaseTree a -> CoreTerm
 fromTree toTerm arg lvl = \case
     Leaf body -> toTerm lvl body
-    Branch cases Nothing -> C.Case arg $ C.CaseWD (mkBranches cases) Nothing
-    Branch cases (Just def) -> C.Case arg $ C.CaseWD (mkBranches cases) (Just (Wildcard' "_", toTerm lvl def))
+    Branch (ConB cases) Nothing -> C.Case arg $ C.CaseWD (mkBranches cases) Nothing
+    -- ideally, we should drop the catch-all case when all patterns are covered,
+    -- and turn the catch-all case into a normal case when all but one are covered
+    --
+    -- e.g.
+    -- `match True -> 1; False -> 2; _ -> 3`
+    -- should turn into
+    -- `match True -> 1; False -> 2`
+    --
+    -- `match True -> 1; _ -> 2`
+    -- `match True -> 1; False -> 2`
+    Branch (ConB cases) (Just def) ->
+        let mbConstrs = do
+                anyCon <- listToMaybe $ IdMap.keys cases
+                IdMap.lookup anyCon ?adjConstructors
+         in case mbConstrs of
+                Just constrs
+                    | IdMap.size cases == IdMap.size constrs ->
+                        C.Case arg $ C.CaseWD (mkBranches cases) Nothing
+                -- this case needs an arg count to construct the proper Nested
+                {-
+                  | IdMap.size cases == IdMap.size constrs - 1 ->
+                    let lastCase = _ <$ IdMap.difference constrs cases
+                    in C.Case arg $ C.CaseWD (mkBranches $ cases <> lastCase) Nothing
+                -}
+                _ -> C.Case arg $ C.CaseWD (mkBranches cases) (Just (Wildcard' "_", toTerm lvl def))
   where
-    mkBranches (ConB cases) =
+    mkBranches cases =
         C.ConCase $
             cases & Map.mapWithKey \name (Args n args, nested) -> (C.ConstructorP name args, fromNested toTerm (lvl `incLevel` n) [lvl .. lvl `incLevel` pred n] nested)
 
@@ -117,7 +156,7 @@ fromTree toTerm arg lvl = \case
       w -> case x@3 of
         _ -> _
 -}
-fromNested :: (Level -> a -> CoreTerm) -> Level -> [Level] -> Nested a -> CoreTerm
+fromNested :: (?adjConstructors :: AdjConstructors) => (Level -> a -> CoreTerm) -> Level -> [Level] -> Nested a -> CoreTerm
 fromNested toTerm lvl = \cases
     _ (NotNested term) -> toTerm lvl term
     (argLvl : lvls) (Nested nested) -> fromTree (flip (fromNested toTerm) lvls) (C.Var $ levelToIndex lvl argLvl) lvl nested
@@ -129,6 +168,7 @@ merge f = \cases
     (Branch (ConB lhs) lhsDef) (Leaf x) -> Branch (ConB $ (fmap . fmap) (flip (mergeNested f) (NotNested x)) lhs) (Just $ mergeDefaultR f lhsDef x)
     (Leaf x) (Branch (ConB rhs) rhsDef) -> Branch (ConB $ (fmap . fmap) (mergeNested f (NotNested x)) rhs) (Just $ mergeDefaultL f x rhsDef)
     -- is this right? should we also merge the default case into the branches?
+    -- probably not, because the per-constructor branches are always at least as specific as the fallback branch
     (Branch lhs lhsDef) (Branch rhs rhsDef) -> Branch (mergeNE f (lhs, lhsDef) (rhs, rhsDef)) mergedDefaults
       where
         mergedDefaults = case (lhsDef, rhsDef) of

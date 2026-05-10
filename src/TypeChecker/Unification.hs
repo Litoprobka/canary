@@ -40,7 +40,7 @@ import Syntax.Core (CaseWithDefault (..), reversedPruning)
 import Syntax.Core qualified as C
 import Syntax.Value as V hiding (lift)
 import Trace (trace, traceScope_)
-import TypeChecker.Backend hiding (ExType (..))
+import TypeChecker.Backend
 import TypeChecker.TypeError (TypeError (..), UnificationError (..), typeError)
 
 newtype ValueTopLevel = ValueTopLevel {getValues :: IdMap Name_ Value}

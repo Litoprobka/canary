@@ -1,0 +1,6 @@
+test = match
+    _     True  _     -> 1
+    True  _     False -> 2
+    False False _     -> 3
+    _     _     True  -> 4
+    _     _     False -> 5

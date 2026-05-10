@@ -25,8 +25,13 @@ import Prettyprinter (hsep, parens, vsep)
 import Syntax hiding (Pattern)
 import Syntax.Elaborated qualified as E
 import Syntax.Value qualified as V
-import TypeChecker.Backend hiding (Locals (..))
 import Prelude qualified (show)
+
+newtype ConstructorTable = ConstructorTable
+    { table :: IdMap Name_ (IdMap Name_ ([ExType] -> [ExType]))
+    }
+data ExType = TyCon Name_ [ExType] | ExVariant (ExtRow ExType) | ExRecord (Row ExType) | OpaqueTy
+    deriving (Show)
 
 type Ctx es = (Diagnose :> es, State UniVars :> es, State ConstructorTable :> es)
 

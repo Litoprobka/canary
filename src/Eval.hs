@@ -32,7 +32,7 @@ import Data.List ((!!))
 import Data.Row (ExtRow (..), OpenName)
 import Data.Row qualified as Row
 import Data.Vector qualified as Vec
-import Desugar (desugar)
+import Desugar (AdjConstructors, desugar)
 import Effectful.State.Static.Local (State, get)
 import LangPrelude hiding (force)
 import Prettyprinter (line)
@@ -393,20 +393,21 @@ matchCore env = \cases
     (C.LiteralP lit) (PrimValue val) -> env <$ guard (lit == val)
     _ _ -> Nothing
 
-eval :: ExtendedEnv -> ETerm -> Value
-eval env term = evalCore env $ desugar term
+eval :: AdjConstructors -> ExtendedEnv -> ETerm -> Value
+eval constrs env term = evalCore env $ desugar constrs term
 
-evalM :: State UniVars :> es => ValueEnv -> ETerm -> Eff es Value
-evalM ValueEnv{..} term = do
+evalM :: (State UniVars :> es) => AdjConstructors -> ValueEnv -> ETerm -> Eff es Value
+evalM constrs ValueEnv{..} term = do
     univars <- get
-    pure $ eval ExtendedEnv{..} term
+    pure $ eval constrs ExtendedEnv{..} term
 
 modifyEnv
-    :: ValueEnv
+    :: AdjConstructors
+    -> ValueEnv
     -> [EDeclaration]
     -> Eff es ValueEnv
-modifyEnv ValueEnv{..} decls = do
-    desugared <- (fmap . fmap) desugar . LMap.fromList <$> foldMapM collectBindings decls
+modifyEnv constrs ValueEnv{..} decls = do
+    desugared <- (fmap . fmap) (desugar constrs) . LMap.fromList <$> foldMapM collectBindings decls
     let newEnv = ExtendedEnv{topLevel = newTopLevel, univars = EMap.empty, locals = []}
         newTopLevel = fmap (either id (evalCore newEnv)) desugared <> topLevel
     pure ValueEnv{topLevel = newTopLevel, ..}
