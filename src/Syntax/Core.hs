@@ -1,5 +1,6 @@
 {-# LANGUAGE DerivingVia #-}
 {-# LANGUAGE ImplicitParams #-}
+{-# OPTIONS_GHC -Wno-partial-fields #-}
 
 module Syntax.Core where
 
@@ -63,7 +64,7 @@ data CoreTerm
       TyCon Name_ (Vector (Visibility, CoreTerm))
     | Con Name_ (Vector (Visibility, CoreTerm))
     | Variant OpenName CoreTerm
-    | Lambda Visibility SimpleName_ CoreTerm
+    | Lambda {vis :: Visibility, argName :: SimpleName_, argType :: CoreType, body :: CoreTerm}
     | App Visibility CoreTerm CoreTerm
     | Case CoreTerm CaseWithDefault
     | Let SimpleName_ CoreTerm CoreTerm
@@ -160,7 +161,7 @@ prettyEnv = go 0 . map prettyAnsi
             _ -> Nothing
 
     compressLambda env term = case term of
-        Lambda vis name body -> withVis vis (prettyAnsi name) <+> compressLambda (prettyAnsi name : env) body
+        Lambda{vis, argName, argType, body} -> withVis vis (prettyBinder env argName argType) <+> compressLambda (prettyAnsi argName : env) body
         other -> specSym "->" <+> go 0 env other
 
     compressQ :: [Doc AnsiStyle] -> Quantifier -> Visibility -> Erasure -> CoreTerm -> Doc AnsiStyle
@@ -227,7 +228,7 @@ coreTraversalWithLevel recur lvl = \case
     Con name args -> Con name <$> (traverse . traverse) (recur lvl) args
     TyCon name args -> TyCon name <$> (traverse . traverse) (recur lvl) args
     Variant name arg -> Variant name <$> recur lvl arg
-    Lambda vis var body -> Lambda vis var <$> recur (succ lvl) body
+    Lambda{vis, argName, argType, body} -> Lambda vis argName <$> recur lvl argType <*> recur (succ lvl) body
     App vis lhs rhs -> App vis <$> recur lvl lhs <*> recur lvl rhs
     Case arg branches -> Case arg <$> traverseCaseWD recur lvl branches
     -- Case <$> recur lvl arg <*> traverse (\(pat, body) -> (pat,) <$> recur (lvl `incLevel` patternArity pat) body) matches
@@ -296,10 +297,10 @@ patternArity = \case
     LiteralP{} -> 0
 
 -- invariant: the term must not contain unsolved univars in tail position
-functionTypeArity :: CoreTerm -> Vector Visibility
+functionTypeArity :: CoreTerm -> Vector (Visibility, CoreType)
 functionTypeArity = fromList . go
   where
     go = \case
-        Q Forall vis _ _ _ body -> vis : go body
+        Q Forall vis _ _ ty body -> (vis, ty) : go body
         UniVar{} -> error "functionTypeArity called on a term with unsolved univars"
         _ -> []

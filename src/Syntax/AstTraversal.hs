@@ -112,12 +112,9 @@ partialTravPattern trav (pat' :@ loc) =
 
 defTravDeclaration
     :: forall p q m. (DepResAgrees p q, Applicative m) => AstTraversal p q m -> Declaration p -> m (Declaration q)
-defTravDeclaration trav = traverse \case
-    D.Value binding locals -> D.Value <$> trav.binding binding <*> traverse trav.declaration locals -- does a reversed order make more sense?
-    D.Type name binders constrs -> D.Type <$> trav.name name <*> traverse trav.binder binders <*> traverse (travConstructor trav) constrs
-    D.GADT name mbSig constrs -> D.GADT <$> trav.name name <*> traverse trav.term mbSig <*> traverse (travGadtConstructor trav) constrs
-    D.Signature name ty -> D.Signature <$> trav.name name <*> trav.term ty
-    D.Fixity fixity op relations -> castFixity @p fixity <$> trav.name op <*> traverse trav.name relations
+defTravDeclaration trav (decl :@ loc) = case decl of
+    D.Fixity fixity op relations -> fmap (:@ loc) $ castFixity @p fixity <$> trav.name op <*> traverse trav.name relations
+    nonFixity -> partialTravDeclaration trav (nonFixity :@ loc)
 
 -- | doesn't handle Fixity
 partialTravDeclaration :: Applicative m => AstTraversal p q m -> Declaration p -> m (Declaration q)

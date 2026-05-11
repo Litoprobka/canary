@@ -27,7 +27,7 @@ data Value
       TyCon Name_ (Vector (Visibility, Value))
     | -- | a fully-applied counstructor
       Con Name_ (Vector (Visibility, Value))
-    | Lambda Visibility (Closure ())
+    | Lambda Visibility (Closure VType)
     | -- | an escape hatch for interpreter primitives and similar stuff
       PrimFunction PrimFunc
     | Record (Row Value)

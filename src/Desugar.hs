@@ -38,10 +38,11 @@ match _ [] = error "empty match"
 match adjConstructors (m@(pats, _) : rest) =
     let ?adjConstructors = adjConstructors
      in let len = length pats
+            types = toList $ fmap (\(_ ::: ty) -> ty) pats
             mkBranch (pats, body) = toTreeNested (toList $ fmap E.unTyped pats) body
             tree = foldl1' (mergeNested const) $ fmap mkBranch (m :| rest)
             body = fromNested (\_ term -> term) (Level len) (fmap Level [0 .. pred len]) tree
-         in foldr (\i -> C.Lambda Visible (Name' $ "x" <> show i)) body [0 .. pred len]
+         in foldr (\(i, ty) -> C.Lambda Visible (Name' $ "x" <> show @_ @Int i) ty) body (zip [0 ..] types)
 
 list :: CoreTerm -> [CoreTerm] -> CoreTerm
 list ty =
@@ -54,10 +55,10 @@ let_ binding expr = case binding of
     E.ValueB name body -> C.Let (toSimpleName_ name) body expr
     E.FunctionB name args body -> C.Let (toSimpleName_ name) asLambda expr
       where
-        asLambda = foldr (uncurry C.Lambda) body (fmap (second toSimpleName_) args)
+        asLambda = foldr (\(vis, name) -> C.Lambda vis name (error "todo: let arg types?")) body (fmap (second toSimpleName_) args)
 
-variant :: OpenName -> CoreTerm
-variant name = C.Lambda Visible "x" $ C.Variant name (C.Var $ Index 0)
+variant :: OpenName -> CoreType -> CoreTerm
+variant name argType = C.Lambda Visible "x" argType $ C.Variant name (C.Var $ Index 0)
 
 variantType :: ExtRow CoreType -> CoreTerm
 variantType row = C.TyCon VariantName $ (Visible, C.Row row) :< Nil

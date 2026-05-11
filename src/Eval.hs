@@ -90,7 +90,7 @@ quoteWith quoteClosure quoteStuckCase unroll = go
     go lvl = \case
         TyCon name args -> C.TyCon name $ (fmap . fmap) (go lvl) args
         Con con args -> C.Con con $ (fmap . fmap) (go lvl) args
-        Lambda vis closure -> C.Lambda vis closure.var $ quoteClosure lvl closure
+        Lambda vis closure -> C.Lambda vis closure.var (go lvl closure.ty) $ quoteClosure lvl closure
         PrimFunction PrimFunc{name, captured} ->
             -- captured names are stored as a stack, i.e. backwards, so we fold right rather than left here
             foldr (\arg acc -> C.App Visible acc (go lvl arg)) (C.Name name) captured
@@ -160,7 +160,7 @@ quoteWhnf univars = go
         C.TyCon name args -> C.TyCon name $ (fmap . fmap) (subst lvl env) args
         C.Con name args -> C.Con name $ (fmap . fmap) (subst lvl env) args
         C.Variant name arg -> C.Variant name $ subst lvl env arg
-        C.Lambda vis var body -> C.Lambda vis var $ subst (succ lvl) (Var lvl : env) body
+        C.Lambda{vis, argName, argType, body} -> C.Lambda vis argName (subst lvl env argType) $ subst (succ lvl) (Var lvl : env) body
         C.App vis lhs rhs -> C.App vis (subst lvl env lhs) (subst lvl env rhs)
         C.Case arg casewd -> C.Case (subst lvl env arg) $ substCaseWD lvl env casewd
         C.Let name expr body -> C.Let name (subst lvl env expr) (subst (succ lvl) (Var lvl : env) body)
@@ -219,7 +219,7 @@ evalCore env@ExtendedEnv{..} = \case
     C.TyCon name args -> TyCon name $ (fmap . fmap) (evalCore env) args
     C.Con name args -> Con name $ (fmap . fmap) (evalCore env) args
     C.Variant name arg -> Variant name (evalCore env arg)
-    C.Lambda vis var body -> Lambda vis $ Closure{var, ty = (), env = ValueEnv{..}, body}
+    C.Lambda{vis, argName = var, argType, body} -> Lambda vis $ Closure{var, ty = evalCore env argType, env = ValueEnv{..}, body}
     C.App vis lhs rhs -> evalApp univars vis (evalCore env lhs) (evalCore env rhs)
     C.Case arg matches -> evalPatternMatch env (evalCore env arg) matches
     C.Let _name expr body -> evalCore (overLocals (evalCore env expr :) env) body
@@ -414,7 +414,8 @@ modifyEnv ValueEnv{..} decls = do
     collectBindings :: EDeclaration -> Eff es [(Name_, Either Value CoreTerm)]
     collectBindings decl = case decl of
         D.ValueD (E.ValueB name body) -> pure [(name, Right body)]
-        D.ValueD (E.FunctionB name args body) -> pure [(name, Right $ foldr (\(vis, arg) -> C.Lambda vis (toSimpleName_ arg)) body args)]
+        D.ValueD (E.FunctionB name args body) ->
+            pure [(name, Right $ foldr (\(vis, arg) -> C.Lambda vis (toSimpleName_ arg) (error "todo: function binding types")) body args)]
         -- todo: value constructors have to be in scope by the time we typecheck definitions that depend on them (say, GADTs)
         -- the easiest way is to just apply `typecheck` and `modifyEnv` declaration-by-declaration
         D.TypeD _ constrs -> pure $ fmap mkConstr constrs
@@ -423,13 +424,13 @@ modifyEnv ValueEnv{..} decls = do
     mkConstr (name, vises) = (name, Left $ mkConLambda vises (C.Con name))
 
 -- todo: [Visibility] -> Name -> Value
-mkConLambda :: Vector Visibility -> (Vector (Visibility, CoreTerm) -> CoreTerm) -> Value
-mkConLambda vises con = evalCore emptyEnv lambdas
+mkConLambda :: Vector (Visibility, CoreType) -> (Vector (Visibility, CoreTerm) -> CoreTerm) -> Value
+mkConLambda args con = evalCore emptyEnv lambdas
   where
-    n = Vec.length vises
-    names = zipWith (\vis i -> (vis, Name' $ "x" <> show i)) (toList vises) [1 .. n]
-    lambdas = foldr (uncurry C.Lambda) body names
-    body = con $ Vec.zipWith (\vis ix -> (vis, C.Var (Index ix))) vises (Vec.fromListN n [n - 1, n - 2 .. 0])
+    n = Vec.length args
+    namedArgs = zipWith (\(vis, ty) i -> (vis, Name' $ "x" <> show i, ty)) (toList args) [1 .. n]
+    lambdas = foldr (\(vis, var, ty) -> C.Lambda vis var ty) body namedArgs
+    body = con $ Vec.zipWith (\(vis, _) ix -> (vis, C.Var (Index ix))) args (Vec.fromListN n [n - 1, n - 2 .. 0])
     emptyEnv = ExtendedEnv{univars = EMap.empty, topLevel = LMap.empty, locals = []}
 
 mkTyCon :: CoreType -> Name_ -> Value

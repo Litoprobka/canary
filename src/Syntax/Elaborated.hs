@@ -40,7 +40,7 @@ data EBinding
 data EDeclaration
     = ValueD EBinding -- no local bindings for now
     -- I'm not sure which representation for typechecked constructors makes more sense, this is the bare minimum
-    | TypeD Name_ [(Name_, Vector Visibility)]
+    | TypeD Name_ [(Name_, Vector (Visibility, CoreType))]
     | SignatureD Name_ CoreType
 
 instance HasLoc a => HasLoc (Typed a) where

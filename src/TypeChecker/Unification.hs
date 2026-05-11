@@ -29,6 +29,7 @@ import Eval (
     force,
     forceM,
     overLocals,
+    quote,
     quoteWhnf,
     quoteWhnfM,
  )
@@ -410,7 +411,7 @@ rename pren ty =
                 (Nothing, Just refined) -> rename pren (applySpine univars refined spine)
         Lambda vis closure -> do
             bodyToRename <- closure `appM` Var pren.codomain
-            C.Lambda vis closure.var <$> rename (lift pren) bodyToRename
+            C.Lambda vis closure.var <$> rename pren closure.ty <*> rename (lift pren) bodyToRename
         Q q v e closure -> do
             argTy <- rename pren closure.ty
             bodyToRename <- closure `appM` Var pren.codomain
@@ -468,7 +469,7 @@ lambdas univars targetLvl initTy body = go initTy (Level 0)
     go :: VType -> Level -> CoreTerm
     go _ lvl | lvl == targetLvl = body
     go ty lvl = case force univars ty of
-        Q Forall vis _e closure -> C.Lambda vis closure.var $ go (app univars closure (Var lvl)) (succ lvl)
+        Q Forall vis _e closure -> C.Lambda vis closure.var (quote univars lvl closure.ty) $ go (app univars closure (Var lvl)) (succ lvl)
         _nonPi ->
             error . show $
                 vsep

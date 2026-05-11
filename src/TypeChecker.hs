@@ -144,14 +144,13 @@ processType ctx name binders constructors = do
     modify $ Map.insert (unLoc name) (mkTypeConstructorMetadata (getLoc name) kind)
     let newCtx = ctx{env = ctx.env{V.topLevel = Map.insert (unLoc name) tyCon ctx.env.topLevel}}
         conNames = Map.fromList $ (\c -> (unLoc c.name, ())) <$> constructors
-    withTopLevel $ for_ (mkConstrSigs name binders constructors) \(con, sig) -> do
+    constructors <- withTopLevel $ for (mkConstrSigs name binders constructors) \(con, sig) -> do
         sigV <- generalise newCtx =<< typeFromTerm newCtx sig
         modify $ Map.insert (unLoc con) sigV
         modify $ Map.insert (unLoc con) (mkConstructorMetadata conNames (name, kind) sigV)
-    -- _conMapEntry <- mkConstructorTableEntry (map (.var) binders) (map (\con -> (con.name, con.args)) constrs)
-    let argVisibilities con = (Implicit <$ C.functionTypeArity kindC) <> fromList (Visible <$ con.args)
-    pure
-        (E.TypeD (unLoc name) (map (\con -> (unLoc con.name, argVisibilities con)) constructors), tyCon)
+        pure (con, quote EMap.empty (Level 0) sigV)
+
+    pure (E.TypeD (unLoc name) (map (\(con, conSig) -> (unLoc con, C.functionTypeArity conSig)) constructors), tyCon)
   where
     -- convert a list of binders to a type expression
     -- e.g. a b (c : Int) d
@@ -254,7 +253,7 @@ insertApp ctx = go
 
 insertNeutralApp :: TC es => Context -> (CoreTerm, VType) -> Eff es (CoreTerm, VType)
 insertNeutralApp ctx (term, ty) = case term of
-    C.Lambda vis _ _ | vis /= Visible -> pure (term, ty)
+    C.Lambda{vis} | vis /= Visible -> pure (term, ty)
     _ -> insertApp ctx (term, ty)
 
 check :: TC es => Context -> Term 'Fixity -> VType -> Eff es CoreTerm
@@ -265,7 +264,7 @@ check ctx (t :@ loc) ty = traceScope_ (prettyDef t <+> specSymBlue "⇐" <+> pre
         (T.Lambda vis (L (T.VarP arg)) body, V.Q Forall qvis _e closure) | vis == qvis -> do
             bodyTy <- closure `appM` V.Var ctx.level
             eBody <- check (bind univars (unLoc arg) closure.ty ctx) body bodyTy
-            pure $ C.Lambda vis (toSimpleName_ $ unLoc arg) eBody
+            pure $ C.Lambda vis (toSimpleName_ $ unLoc arg) (quote univars ctx.level closure.ty) eBody
         -- this case doesn't work at the moment, because the new var is not
         -- present in the elaborated term, and the indices no longer line up
         {-
@@ -288,7 +287,7 @@ check ctx (t :@ loc) ty = traceScope_ (prettyDef t <+> specSymBlue "⇐" <+> pre
             x <- freshName_ closure.var
             closureBody <- closure `appM` V.Var ctx.level
             eBody <- check (bind univars x closure.ty ctx) (t :@ loc) closureBody
-            pure $ C.Lambda vis closure.var eBody
+            pure $ C.Lambda vis closure.var (quote univars ctx.level closure.ty) eBody
         (T.Case arg branches, result) -> do
             (eArg, argTy) <- infer ctx arg
             argV <- evalM ctx.env eArg
@@ -431,7 +430,8 @@ infer ctx (t :@ loc) = traceScope (\(_, ty) -> prettyDef t <+> specSym "⇒" <+>
         (eBody, bodyTy) <- insertNeutralApp bodyCtx =<< infer bodyCtx body
         let var = toSimpleName_ arg
             quotedBody = quote univars (succ ctx.level) bodyTy
-        pure (C.Lambda vis var eBody, V.Q Forall vis Retained V.Closure{ty, var, env = ctx.env, body = quotedBody})
+            argType = C.ElabInsert $ quote univars ctx.level ty
+        pure (C.Lambda vis var argType eBody, V.Q Forall vis Retained V.Closure{ty, var, env = ctx.env, body = quotedBody})
     -- a special case for an annotation, since it doesn't require a case at type level, unlike other patterns
     T.Lambda vis (L (T.AnnotationP (L (T.VarP (L arg))) ty)) body -> do
         ty <- typeFromTerm ctx ty
@@ -440,7 +440,8 @@ infer ctx (t :@ loc) = traceScope (\(_, ty) -> prettyDef t <+> specSym "⇒" <+>
         (eBody, bodyTy) <- insertNeutralApp bodyCtx =<< infer bodyCtx body
         let var = toSimpleName_ arg
             quotedBody = quote univars (succ ctx.level) bodyTy
-        pure (C.Lambda vis var eBody, V.Q Forall vis Retained V.Closure{ty, var, env = ctx.env, body = quotedBody})
+            argType = quote univars ctx.level ty
+        pure (C.Lambda vis var argType eBody, V.Q Forall vis Retained V.Closure{ty, var, env = ctx.env, body = quotedBody})
     T.Lambda{} -> internalError' "can't infer a type for a non-trivial pattern lambda (yet)"
     -- the type of a pattern lambda has the shape '(x : argTy) -> (case x of pat -> bodyTy)'
     -- this case is broken for the same reason as the `check` case for pattern lambdas
@@ -493,13 +494,14 @@ infer ctx (t :@ loc) = traceScope (\(_, ty) -> prettyDef t <+> specSym "⇒" <+>
         pure (Desugar.if_ eCond eTrue eFalse, trueTy)
     T.Variant con -> do
         payloadTy <- freshUniVarV ctx type_
+        payloadTyC <- quoteM ctx.level payloadTy
         payload <- freshName_ "payload"
         univars <- get
         rowExt <- freshUniVar (bind univars payload payloadTy ctx) type_
         let mkVariant row = C.TyCon RowName ((Visible, row) :< Nil)
         let body = mkVariant $ C.Row $ ExtRow (fromList [(con, quote univars ctx.level payloadTy)]) rowExt
         -- '(x : ?a) -> [| Con ?a | ?r x ]'
-        pure (Desugar.variant con, V.Pi V.Closure{env = ctx.env, ty = payloadTy, var = toSimpleName_ payload, body})
+        pure (Desugar.variant con payloadTyC, V.Pi V.Closure{env = ctx.env, ty = payloadTy, var = toSimpleName_ payload, body})
     T.RecordAccess record field -> do
         (eRecord, recordType) <- infer ctx record
         fieldType <- case recordType of

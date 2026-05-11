@@ -111,7 +111,7 @@ generalise' ctx mbName (mbTerm, ty) = traceScope_ (specSymBlue "generalise" <+> 
         pure (Name' (mkName i), uniType)
 
     let finalType = foldr (uncurry (C.Q Forall Implicit Retained)) innerType newNames
-        wrapInLambdas body = foldr (\(name, _) -> C.Lambda Implicit name) body newNames
+        wrapInLambdas body = foldr (uncurry (C.Lambda Implicit)) body newNames
         withApps lvl name =
             foldl' (\acc vlvl -> C.App Implicit acc (C.Var $ levelToIndex lvl vlvl)) (C.Name name) [Level 0 .. pred (Level newBinderCount)]
 
@@ -140,12 +140,16 @@ zonkTerm' c@(lvl, env@V.ValueEnv{..}) = \case
         univars <- get
         freeVarsInCore univars zonkedCore
         pure $ C.ElabInsert zonkedCore
+    -- this case is a bit of a crutch and indicates that I probably forgot to wrap types with ElabInsert somewhere
+    -- however, ElabInsert is also something that I'm not 100% sold on, so this will do for now
+    u@C.UniVar{} -> zonkTerm' c (C.ElabInsert u)
+    C.AppPruning{} -> internalError' "pruning outside of ElabInsert"
     C.TyCon name args -> C.TyCon name <$> traverse (bitraverse pure $ zonkTerm' c) args
     C.Con name args -> C.Con name <$> traverse (bitraverse pure $ zonkTerm' c) args
     C.App vis lhs rhs -> C.App vis <$> zonkTerm' c lhs <*> zonkTerm' c rhs
-    C.Lambda vis arg body ->
-        let env = V.ValueEnv{locals = V.Var lvl : locals, ..}
-         in C.Lambda vis arg <$> zonkTerm' (succ lvl, env) body
+    C.Lambda{vis, argName, argType, body} ->
+        let newEnv = V.ValueEnv{locals = V.Var lvl : locals, ..}
+         in C.Lambda vis argName <$> zonkTerm' (lvl, env) argType <*> zonkTerm' (succ lvl, newEnv) body
     C.Let name body expr ->
         -- is it safe to eval the binding here? I'm not sure
         let newEnv = V.ValueEnv{locals = V.Var lvl : locals, ..}
@@ -156,8 +160,6 @@ zonkTerm' c@(lvl, env@V.ValueEnv{..}) = \case
         def <- traverse (bitraverse pure $ zonkTerm' (succ lvl, V.ValueEnv{locals = V.Var lvl : locals, ..})) def
         pure $ C.Case arg C.CaseWD{branches, def}
       where
-        -- C.Case <$> zonkTerm' c arg <*> traverse zonkBranch branches
-
         zonkBranches = \case
             C.ConCase idmap ->
                 C.ConCase <$> for idmap \(pat, body) ->
@@ -185,8 +187,6 @@ zonkTerm' c@(lvl, env@V.ValueEnv{..}) = \case
     n@C.Name{} -> pure n
     v@C.Variant{} -> pure v
     l@C.Literal{} -> pure l
-    C.UniVar{} -> internalError' "univar outside of ElabInsert"
-    C.AppPruning{} -> internalError' "pruning outside of ElabInsert"
 
 liftLevel :: Level -> Int -> ([Value], Level)
 liftLevel lvl diff = (freeVars, newLevel)
