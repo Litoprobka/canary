@@ -9,7 +9,7 @@ import Data.Poset qualified as Poset
 import Diagnostic (internalError')
 import Effectful.Error.Static (runErrorNoCallStack)
 import Effectful.State.Static.Local
-import Eval (PostponedEntry (..), Postponings, UniVarState (..), evalCore, nf, quote, quoteM)
+import Eval (PostponedEntry (..), Postponings, UniVarState (..), eval, nf, quote, quoteM)
 import LangPrelude
 import Prettyprinter (sep)
 import Syntax
@@ -122,7 +122,7 @@ generalise' ctx mbName (mbTerm, ty) = traceScope_ (specSymBlue "generalise" <+> 
             Just name -> replaceRecursiveCalls name (`withApps` name) (Level newBinderCount)
 
     env <- extendEnv ctx.env
-    pure (wrapInLambdas . withFixedCalls <$> innerTerm, evalCore env finalType)
+    pure (wrapInLambdas . withFixedCalls <$> innerTerm, eval env finalType)
   where
     -- this function is applied after zonking, so ElabInsert should not matter here anymore
     replaceRecursiveCalls fnName fixTerm lvl = \case

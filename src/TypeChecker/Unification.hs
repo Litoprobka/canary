@@ -24,8 +24,8 @@ import Eval (
     app,
     appM,
     applySpine,
+    eval,
     evalAppM,
-    evalCore,
     force,
     forceM,
     overLocals,
@@ -310,7 +310,7 @@ solveWithRenaming uni (pren, pruneNonlinear) rhs = do
     for_ pruneNonlinear \pruning -> pruneType (reversedPruning pruning) ty
     rhs' <- rename pren{uni = Just uni} rhs
     let env = ExtendedEnv{univars, topLevel = ?topLevel.getValues, locals = []}
-    let solution = evalCore env $ lambdas univars pren.domain ty rhs'
+    let solution = eval env $ lambdas univars pren.domain ty rhs'
     modify @UniVars $ EMap.insert uni $ Solved{solution, ty}
     for_ (ESet.toList blocked) retryPostponed
 
@@ -448,10 +448,10 @@ renameCaseWD pren venv CaseWD{branches, def} = do
     pure CaseWD{branches, def}
   where
     -- evaluate and rename a term without introducing new bindings
-    renameNf0 env = rename pren . evalCore env
+    renameNf0 env = rename pren . eval env
 
     -- introduce one new binding, evaluate and rename the term
-    renameNf1 env = rename (lift pren) . evalCore (overLocals (Var pren.codomain :) env)
+    renameNf1 env = rename (lift pren) . eval (overLocals (Var pren.codomain :) env)
 
     renameBranch :: TC' es => ExtendedEnv -> (CorePattern, CoreTerm) -> Eff es (CorePattern, CoreTerm)
     renameBranch env (pat, body) =
@@ -459,7 +459,7 @@ renameCaseWD pren venv CaseWD{branches, def} = do
             let diff = C.patternArity pat
                 newLevel = pren.codomain `incLevel` diff
                 freeVars = Var <$> [pred newLevel, pred (pred newLevel) .. pren.codomain]
-                bodyV = evalCore (overLocals (freeVars <>) env) body
+                bodyV = eval (overLocals (freeVars <>) env) body
             rename (liftN diff pren) bodyV
 
 -- wrap a term in lambdas
@@ -500,11 +500,11 @@ pruneUniVar pruning uni = do
     univars <- get
     (blocked, ty) <- readUnsolvedUniVar uni
     let env = ExtendedEnv{locals = [], topLevel = ?topLevel.getValues, ..}
-    prunedType <- evalCore env <$> pruneType (reversedPruning pruning) ty
+    prunedType <- eval env <$> pruneType (reversedPruning pruning) ty
     newUni <- newUniVar prunedType
     univars' <- get
     let env' = ExtendedEnv{locals = [], univars = univars', topLevel = ?topLevel.getValues}
-        solution = evalCore env' $ lambdas univars (Level $ length pruning.getPruning) ty $ C.AppPruning (C.UniVar newUni) pruning
+        solution = eval env' $ lambdas univars (Level $ length pruning.getPruning) ty $ C.AppPruning (C.UniVar newUni) pruning
     modify @UniVars $ EMap.insert uni $ Solved{solution, ty}
     for_ (ESet.toList blocked) retryPostponed
     pure newUni

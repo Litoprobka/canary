@@ -204,38 +204,38 @@ quoteWhnf univars = go
             freeVars = Var <$> [pred newLevel, pred (pred newLevel) .. lvl]
          in (pat, subst newLevel (freeVars <> env) body)
 
-evalCoreM :: State UniVars :> es => ValueEnv -> CoreTerm -> Eff es Value
-evalCoreM ValueEnv{..} term = do
+evalM :: State UniVars :> es => ValueEnv -> CoreTerm -> Eff es Value
+evalM ValueEnv{..} term = do
     univars <- get
-    pure $ evalCore ExtendedEnv{..} term
+    pure $ eval ExtendedEnv{..} term
 
-evalCore :: ExtendedEnv -> CoreTerm -> Value
-evalCore env@ExtendedEnv{..} = \case
+eval :: ExtendedEnv -> CoreTerm -> Value
+eval env@ExtendedEnv{..} = \case
     -- note that env.topLevel is a lazy IdMap, so we only force the outer structure here
     C.Name name -> LMap.lookupDefault (Stuck $ Opaque name []) name env.topLevel
     C.Var index
         | index.getIndex < length env.locals -> env.locals !! index.getIndex
         | otherwise -> error . show $ "index" <+> pretty index.getIndex <+> "out of scope of env@" <> pretty (length env.locals)
-    C.TyCon name args -> TyCon name $ (fmap . fmap) (evalCore env) args
-    C.Con name args -> Con name $ (fmap . fmap) (evalCore env) args
-    C.Variant name arg -> Variant name (evalCore env arg)
-    C.Lambda{vis, argName = var, argType, body} -> Lambda vis $ Closure{var, ty = evalCore env argType, env = ValueEnv{..}, body}
-    C.App vis lhs rhs -> evalApp univars vis (evalCore env lhs) (evalCore env rhs)
-    C.Case arg matches -> evalPatternMatch env (evalCore env arg) matches
-    C.Let _name expr body -> evalCore (overLocals (evalCore env expr :) env) body
+    C.TyCon name args -> TyCon name $ (fmap . fmap) (eval env) args
+    C.Con name args -> Con name $ (fmap . fmap) (eval env) args
+    C.Variant name arg -> Variant name (eval env arg)
+    C.Lambda{vis, argName = var, argType, body} -> Lambda vis $ Closure{var, ty = eval env argType, env = ValueEnv{..}, body}
+    C.App vis lhs rhs -> evalApp univars vis (eval env lhs) (eval env rhs)
+    C.Case arg matches -> evalPatternMatch env (eval env arg) matches
+    C.Let _name expr body -> eval (overLocals (eval env expr :) env) body
     C.Literal lit -> PrimValue lit
-    C.RecordAccess record field -> evalRecordAccess (evalCore env record) field
-    C.Record row -> Record $ evalCore env <$> row
-    C.Sigma vis x y -> Sigma vis (evalCore env x) (evalCore env y)
-    C.Q q vis e var ty body -> Q q vis e $ Closure{var, ty = evalCore env ty, env = ValueEnv{..}, body}
-    C.ElabInsert core -> evalCore env core
-    C.Row (NoExtRow row) -> Row (fmap (evalCore env) row) Nothing
-    C.Row (ExtRow row ext) -> case evalCore env ext of
-        Stuck stuck -> Row (fmap (evalCore env) row) (Just stuck)
-        Row innerRow innerExt -> Row (fmap (evalCore env) row <> innerRow) innerExt
+    C.RecordAccess record field -> evalRecordAccess (eval env record) field
+    C.Record row -> Record $ eval env <$> row
+    C.Sigma vis x y -> Sigma vis (eval env x) (eval env y)
+    C.Q q vis e var ty body -> Q q vis e $ Closure{var, ty = eval env ty, env = ValueEnv{..}, body}
+    C.ElabInsert core -> eval env core
+    C.Row (NoExtRow row) -> Row (fmap (eval env) row) Nothing
+    C.Row (ExtRow row ext) -> case eval env ext of
+        Stuck stuck -> Row (fmap (eval env) row) (Just stuck)
+        Row innerRow innerExt -> Row (fmap (eval env) row <> innerRow) innerExt
         nonRow -> error . show $ "[eval] non-row value in a row:" <+> pretty nonRow
     C.UniVar uni -> force univars (UniVar uni)
-    C.AppPruning lhs pruning -> evalAppPruning env.locals (evalCore env lhs) pruning.getPruning
+    C.AppPruning lhs pruning -> evalAppPruning env.locals (eval env lhs) pruning.getPruning
   where
     evalAppPruning ls val pruning = case (ls, pruning) of
         ([], []) -> val
@@ -249,8 +249,8 @@ evalPatternMatch ExtendedEnv{..} (Stuck stuck) branches = Stuck $ Case stuck Val
 evalPatternMatch env val casewd =
     fromMaybe
         (error $ show $ "[eval] pattern mismatch when matching" <+> prettyDef val <+> "with: <TODO: prettyprint standalone cases>")
-        $ fmap (uncurry evalCore) (matchBranch env val casewd.branches)
-            <|> fmap (evalCore (overLocals (val :) env) . snd) casewd.def
+        $ fmap (uncurry eval) (matchBranch env val casewd.branches)
+            <|> fmap (eval (overLocals (val :) env) . snd) casewd.def
 
 -- | try to match a value with a case expression branch, returning the new env and body expression
 matchBranch :: ExtendedEnv -> Value -> C.Case -> Maybe (ExtendedEnv, CoreTerm)
@@ -273,10 +273,10 @@ matchBranch env = \cases
     catEnv newVals = overLocals (reverse (map snd $ toList newVals) <>)
 
 nf :: Level -> ExtendedEnv -> CoreTerm -> CoreTerm
-nf lvl env term = quote env.univars lvl $ evalCore env term
+nf lvl env term = quote env.univars lvl $ eval env term
 
 whnf :: Level -> ExtendedEnv -> CoreTerm -> CoreTerm
-whnf lvl env term = quoteWhnf env.univars lvl $ evalCore env term
+whnf lvl env term = quoteWhnf env.univars lvl $ eval env term
 
 evalAppM :: State UniVars :> es => Visibility -> Value -> Value -> Eff es Value
 evalAppM vis lhs rhs = do
@@ -355,7 +355,7 @@ applySpine :: UniVars -> Value -> Spine -> Value
 applySpine !univars = foldr (\(vis, arg) acc -> evalApp univars vis acc arg)
 
 app :: UniVars -> Closure ty -> Value -> Value
-app univars Closure{env = ValueEnv{..}, body} arg = evalCore (overLocals (arg :) $ ExtendedEnv{..}) body
+app univars Closure{env = ValueEnv{..}, body} arg = eval (overLocals (arg :) $ ExtendedEnv{..}) body
 
 appM :: State UniVars :> es => Closure ty -> Value -> Eff es Value
 appM closure arg = do
@@ -379,28 +379,6 @@ nfCase lvl env C.CaseWD{branches, def} =
             freeVars = Var <$> [pred newLevel, pred (pred newLevel) .. lvl]
          in (pat, nf newLevel (overLocals (freeVars <>) env) body)
 
--- | try to apply a pattern to a value, updating the given value env
-matchCore :: ExtendedEnv -> CorePattern -> Value -> Maybe ExtendedEnv
-matchCore env = \cases
-    C.VarP{} val -> Just $ overLocals (val :) env
-    (C.ConstructorP pname _) (Con name args)
-        | pname == name ->
-            -- since locals is a SnocList, we have to reverse args before appending
-            Just $ overLocals (reverse (map snd $ toList args) <>) env
-    (C.TypeP pname _) (TyCon name args)
-        | pname == name -> Just $ overLocals (reverse (map snd $ toList args) <>) env
-    (C.VariantP pname _) (Variant name val)
-        | pname == name -> Just $ overLocals (val :) env
-    C.SigmaP{} (Sigma _ lhs rhs) -> Just $ overLocals ((rhs :) . (lhs :)) env
-    (C.LiteralP lit) (PrimValue val) -> env <$ guard (lit == val)
-    _ _ -> Nothing
-
-eval :: ExtendedEnv -> CoreTerm -> Value
-eval = evalCore
-
-evalM :: (State UniVars :> es) => ValueEnv -> CoreTerm -> Eff es Value
-evalM = evalCoreM
-
 modifyEnv
     :: ValueEnv
     -> [EDeclaration]
@@ -408,7 +386,7 @@ modifyEnv
 modifyEnv ValueEnv{..} decls = do
     desugared <- LMap.fromList <$> foldMapM collectBindings decls
     let newEnv = ExtendedEnv{topLevel = newTopLevel, univars = EMap.empty, locals = []}
-        newTopLevel = fmap (either id (evalCore newEnv)) desugared <> topLevel
+        newTopLevel = fmap (either id (eval newEnv)) desugared <> topLevel
     pure ValueEnv{topLevel = newTopLevel, ..}
   where
     collectBindings :: EDeclaration -> Eff es [(Name_, Either Value CoreTerm)]
@@ -425,7 +403,7 @@ modifyEnv ValueEnv{..} decls = do
 
 -- todo: [Visibility] -> Name -> Value
 mkConLambda :: Vector (Visibility, CoreType) -> (Vector (Visibility, CoreTerm) -> CoreTerm) -> Value
-mkConLambda args con = evalCore emptyEnv lambdas
+mkConLambda args con = eval emptyEnv lambdas
   where
     n = Vec.length args
     namedArgs = zipWith (\(vis, ty) i -> (vis, Name' $ "x" <> show i, ty)) (toList args) [1 .. n]

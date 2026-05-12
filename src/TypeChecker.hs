@@ -16,7 +16,7 @@ import Desugar qualified
 import Diagnostic
 import Effectful.Reader.Static
 import Effectful.State.Static.Local (State, get, modify, put, runState)
-import Eval (ExtendedEnv (univars), app, appM, eval, evalCoreM, evalM, forceM, mkTyCon, quote, quoteM)
+import Eval (ExtendedEnv (univars), app, appM, eval, evalM, forceM, mkTyCon, quote, quoteM)
 import GHC.IsList qualified as IsList
 import LangPrelude hiding (unzip)
 import NameGen (NameGen, freshName, freshName_)
@@ -246,7 +246,7 @@ insertApp ctx = go
         forceM ty >>= \case
             V.Q Forall vis _e closure | vis /= Visible -> do
                 arg <- freshUniVar ctx closure.ty
-                argV <- evalCoreM ctx.env arg
+                argV <- evalM ctx.env arg
                 innerTy <- closure `appM` argV
                 go (C.App vis term (C.ElabInsert arg), innerTy)
             ty' -> pure (term, ty')
@@ -482,7 +482,7 @@ infer ctx (t :@ loc) = traceScope (\(_, ty) -> prettyDef t <+> specSym "⇒" <+>
         -- into non-pattern unification cases, which we don't handle yet
         --
         -- inferring a non-dependent type seems like a reasonable compromise
-        fullType <- evalCoreM ctx.env =<< mkNonDependentPi ctx (length branch)
+        fullType <- evalM ctx.env =<< mkNonDependentPi ctx (length branch)
         eBody <- check ctx (t :@ loc) fullType
         pure (eBody, fullType)
     -- we don't infer dependent if, because that would mask type errors a lot of the time
@@ -528,7 +528,7 @@ infer ctx (t :@ loc) = traceScope (\(_, ty) -> prettyDef t <+> specSym "⇒" <+>
         pure (C.Sigma Visible eLhs eRhs, V.Q Exists Visible Retained $ V.Closure{ty = lhsTy, var = "x", env = ctx.env, body})
     T.List items -> do
         itemTy <- freshUniVar ctx type_
-        itemTyV <- evalCoreM ctx.env itemTy
+        itemTyV <- evalM ctx.env itemTy
         eItems <- traverse (\item -> check ctx item itemTyV) items
         pure (Desugar.list (C.ElabInsert itemTy) eItems, V.TyCon ListName $ fromList [(Visible, itemTyV)])
     T.RecordT row -> do

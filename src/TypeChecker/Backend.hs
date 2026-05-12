@@ -14,7 +14,7 @@ import Diagnostic (Diagnose, internalError')
 import Effectful.Labeled (Labeled, labeled, runLabeled)
 import Effectful.Reader.Static
 import Effectful.State.Static.Local
-import Eval (ExtendedEnv (..), Postponed, Postponings, UniVarState (..), UniVars, evalCore, quote, quoteWhnf)
+import Eval (ExtendedEnv (..), Postponed, Postponings, UniVarState (..), UniVars, eval, quote, quoteWhnf)
 import LangPrelude
 import NameGen (NameGen, freshId, runNameGen)
 import Prettyprinter.Render.Terminal (AnsiStyle)
@@ -127,7 +127,7 @@ runUniEffs = runLabeled runNameGen . evalState EMap.empty . runLabeled runNameGe
 freshUniVar :: UniEffs es => Context -> VType -> Eff es CoreTerm
 freshUniVar ctx vty = do
     env <- extendEnv ctx.env
-    let fullType = evalCore env $ closeType ctx.locals (quote env.univars ctx.level vty)
+    let fullType = eval env $ closeType ctx.locals (quote env.univars ctx.level vty)
     uni <- newUniVar fullType
     pure $ C.AppPruning (C.UniVar uni) ctx.pruning
 
@@ -162,7 +162,7 @@ freshUniVarV :: (UniEffs es) => Context -> VType -> Eff es Value
 freshUniVarV ctx vty = do
     uniTerm <- freshUniVar ctx vty
     env <- extendEnv ctx.env
-    pure $ evalCore env uniTerm
+    pure $ eval env uniTerm
 
 freshUniVarS :: (UniEffs es) => Context -> VType -> Eff es V.Stuck
 freshUniVarS ctx vty = do
