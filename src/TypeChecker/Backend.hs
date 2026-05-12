@@ -25,7 +25,7 @@ import Trace
 
 data ConMetadata = ConMetadata
     { mkMeta :: forall es. (UniEffs es, Reader TopLevel :> es, Diagnose :> es, NameGen :> es) => Context -> Eff es (VType, ConArgList)
-    , adjConstructors :: IdMap Name_ ()
+    , adjConstructors :: IdMap Name_ (Vector (Visibility, CoreType))
     }
 
 getConMetadata

@@ -6,7 +6,6 @@ module TypeChecker where
 import Common
 import Data.EnumMap.Lazy qualified as EMap
 import Data.Functor (unzip)
-import Data.IdMap (IdSet)
 import Data.IdMap qualified as Map
 import Data.List.NonEmpty qualified as NE
 import Data.Row (ExtRow (..), OpenName)
@@ -102,26 +101,40 @@ checkBinding ctx binding [] = do
     -- ideally, we should unwrap the body and construct a FunctionB if the original binding was a function
     pure (E.ValueD (E.ValueB (unLoc name) eBody))
 
-processGadt :: DeclTC es => Context -> Name -> Maybe (Type 'Fixity) -> [GadtConstructor 'Fixity] -> Eff es (EDeclaration, VType)
-processGadt ctx name mbKind constructors = do
+processType'
+    :: DeclTC es
+    => Context
+    -> Name
+    -> Maybe (Type 'Fixity)
+    -> [(Name, Type 'Fixity)]
+    -> (forall es. TC es => Level -> Name_ -> Name -> VType -> Eff es ())
+    -> Eff es (EDeclaration, VType)
+processType' ctx name mbKind constructors checkConstructor = do
     -- we can probably infer the kind of a type from its constructors, but we don't do that for now
-    kind <- withTopLevel $ maybe (pure $ V.Type TypeName) (typeFromTerm ctx) mbKind
+    kind <- withTopLevel $ maybe (pure $ V.Type TypeName) (generalise ctx <=< typeFromTerm ctx) mbKind
     kindC <- quoteM ctx.level kind
     let tyCon = mkTyCon kindC (unLoc name)
     modify $ Map.insert (unLoc name) kind
     modify $ Map.insert (unLoc name) (mkTypeConstructorMetadata (getLoc name) kind)
     let newCtx = ctx{env = ctx.env{V.topLevel = Map.insert (unLoc name) tyCon ctx.env.topLevel}}
-        conNames = Map.fromList $ (\c -> (unLoc c.name, ())) <$> constructors
-    constructors <- withTopLevel $ for constructors \con -> do
-        conSig <- generalise newCtx =<< typeFromTerm newCtx con.sig
-        checkGadtConstructor ctx.level (unLoc name) con.name conSig
-        modify $ Map.insert (unLoc con.name) conSig
-        modify $ Map.insert (unLoc con.name) (mkConstructorMetadata conNames (name, kind) conSig)
-        pure (con, quote EMap.empty (Level 0) conSig)
-    pure (E.TypeD (unLoc name) (map (\(con, conSig) -> (unLoc con.name, C.functionTypeArity conSig)) constructors), tyCon)
+    constructors <- withTopLevel $ for constructors \(con, sig) -> do
+        sigV <- generalise newCtx =<< typeFromTerm newCtx sig
+        checkConstructor ctx.level (unLoc name) con sigV
+        modify $ Map.insert (unLoc con) sigV
+        pure (con, quote EMap.empty (Level 0) sigV, sigV)
+
+    let conArities = (\(name, conSig, _) -> (unLoc name, C.functionTypeArity conSig)) <$> constructors
+    for_ constructors \(con, _, sigV) -> do
+        modify $ Map.insert (unLoc con) (mkConstructorMetadata (Map.fromList conArities) (name, kind) sigV)
+
+    pure (E.TypeD (unLoc name) conArities, tyCon)
+
+processGadt :: DeclTC es => Context -> Name -> Maybe (Type 'Fixity) -> [GadtConstructor 'Fixity] -> Eff es (EDeclaration, VType)
+processGadt ctx name mbKind constructors =
+    processType' ctx name mbKind ((\c -> (c.name, c.sig)) <$> constructors) checkGadtConstructor
   where
     -- check that a GADT constructor actually returns the declared type
-    checkGadtConstructor :: TC es => Level -> Name_ -> Name -> VType -> Eff es ()
+    checkGadtConstructor :: forall es. TC es => Level -> Name_ -> Name -> VType -> Eff es ()
     checkGadtConstructor lvl typeName con conType = do
         univars <- get
         case fnResult (quote univars lvl conType) of
@@ -135,22 +148,8 @@ processGadt ctx name mbKind constructors = do
             other -> other
 
 processType :: DeclTC es => Context -> Name -> [VarBinder 'Fixity] -> [Constructor 'Fixity] -> Eff es (EDeclaration, VType)
-processType ctx name binders constructors = do
-    kind <- withTopLevel $ generalise ctx =<< typeFromTerm ctx (mkTypeKind binders)
-    univars <- get
-    let kindC = quote univars ctx.level kind
-        tyCon = mkTyCon kindC (unLoc name)
-    modify $ Map.insert (unLoc name) kind
-    modify $ Map.insert (unLoc name) (mkTypeConstructorMetadata (getLoc name) kind)
-    let newCtx = ctx{env = ctx.env{V.topLevel = Map.insert (unLoc name) tyCon ctx.env.topLevel}}
-        conNames = Map.fromList $ (\c -> (unLoc c.name, ())) <$> constructors
-    constructors <- withTopLevel $ for (mkConstrSigs name binders constructors) \(con, sig) -> do
-        sigV <- generalise newCtx =<< typeFromTerm newCtx sig
-        modify $ Map.insert (unLoc con) sigV
-        modify $ Map.insert (unLoc con) (mkConstructorMetadata conNames (name, kind) sigV)
-        pure (con, quote EMap.empty (Level 0) sigV)
-
-    pure (E.TypeD (unLoc name) (map (\(con, conSig) -> (unLoc con, C.functionTypeArity conSig)) constructors), tyCon)
+processType ctx name binders constructors =
+    processType' ctx name (Just $ mkTypeKind binders) (mkConstrSigs name binders constructors) (\_ _ _ _ -> pass)
   where
     -- convert a list of binders to a type expression
     -- e.g. a b (c : Int) d
@@ -178,7 +177,7 @@ mkTypeConstructorMetadata :: Loc -> VType -> ConMetadata
 mkTypeConstructorMetadata loc = mkConstructorMetadata Map.empty (TypeName :@ loc, V.Type TypeName)
 
 mkConstructorMetadata
-    :: IdSet Name_
+    :: IdMap Name_ (Vector (Visibility, CoreType))
     -- ^ constructor names of the type (e.g. `[True, False]`)
     -> (Name, VType)
     -- ^ type name and kind (e.g. `Bool` and `Type`)

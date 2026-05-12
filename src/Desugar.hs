@@ -7,6 +7,7 @@ import Data.Foldable1 (foldl1')
 import Data.IdMap qualified as IdMap
 import Data.IdMap qualified as Map
 import Data.Row (ExtRow, OpenName)
+import Data.Vector qualified as Vec
 import LangPrelude
 import Syntax
 import Syntax.Core qualified as C
@@ -115,21 +116,23 @@ fromTree' arg = fromTree (\_ term -> term) arg (Level 0)
 type AdjConstructors =
     IdMap
         Name_ -- any constructor of a type
-        (IdMap Name_ ())
+        (IdMap Name_ (Vector (Visibility, CoreType)))
 
 fromTree :: (?adjConstructors :: AdjConstructors) => (Level -> a -> CoreTerm) -> CoreTerm -> Level -> CaseTree a -> CoreTerm
 fromTree toTerm arg lvl = \case
     Leaf body -> toTerm lvl body
     Branch (ConB cases) Nothing -> C.Case arg $ C.CaseWD (mkBranches cases) Nothing
-    -- ideally, we should drop the catch-all case when all patterns are covered,
+    -- we drop the catch-all case when all patterns are covered,
     -- and turn the catch-all case into a normal case when all but one are covered
+    -- see `test/nested-pattern-matching/three-bools` for an example of how this works in practice
     --
     -- e.g.
     -- `match True -> 1; False -> 2; _ -> 3`
-    -- should turn into
+    -- ==>
     -- `match True -> 1; False -> 2`
     --
     -- `match True -> 1; _ -> 2`
+    -- ==>
     -- `match True -> 1; False -> 2`
     Branch (ConB cases) (Just def) ->
         let mbConstrs = do
@@ -139,17 +142,15 @@ fromTree toTerm arg lvl = \case
                 Just constrs
                     | IdMap.size cases == IdMap.size constrs ->
                         C.Case arg $ C.CaseWD (mkBranches cases) Nothing
-                -- this case needs an arg count to construct the proper Nested
-                {-
-                  | IdMap.size cases == IdMap.size constrs - 1 ->
-                    let lastCase = _ <$ IdMap.difference constrs cases
-                    in C.Case arg $ C.CaseWD (mkBranches $ cases <> lastCase) Nothing
-                -}
+                    | IdMap.size cases == IdMap.size constrs - 1 ->
+                        let lastCase = (\vises -> (mkArgs vises, NotNested def)) <$> IdMap.difference constrs cases
+                         in C.Case arg $ C.CaseWD (mkBranches $ cases <> lastCase) Nothing
                 _ -> C.Case arg $ C.CaseWD (mkBranches cases) (Just (Wildcard' "_", toTerm lvl def))
   where
     mkBranches cases =
         C.ConCase $
             cases & Map.mapWithKey \name (Args n args, nested) -> (C.ConstructorP name args, fromNested toTerm (lvl `incLevel` n) [lvl .. lvl `incLevel` pred n] nested)
+    mkArgs vises = Args (Vec.length vises) $ ((,Wildcard' "_") . fst) <$> toList vises
 
 -- this should pass the indexes
 {-
