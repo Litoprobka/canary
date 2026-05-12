@@ -21,7 +21,6 @@ import Common (
     incLevel,
     levelToIndex,
     prettyDef,
-    toSimpleName_,
  )
 
 -- IdMap is currently lazy anyway, but it's up to change
@@ -40,7 +39,6 @@ import Syntax
 import Syntax.Core (CaseWithDefault)
 import Syntax.Core qualified as C
 import Syntax.Elaborated qualified as D
-import Syntax.Elaborated qualified as E
 import Syntax.Value as Reexport
 
 data UniVarState
@@ -391,9 +389,7 @@ modifyEnv ValueEnv{..} decls = do
   where
     collectBindings :: EDeclaration -> Eff es [(Name_, Either Value CoreTerm)]
     collectBindings decl = case decl of
-        D.ValueD (E.ValueB name body) -> pure [(name, Right body)]
-        D.ValueD (E.FunctionB name args body) ->
-            pure [(name, Right $ foldr (\(vis, arg) -> C.Lambda vis (toSimpleName_ arg) (error "todo: function binding types")) body args)]
+        D.ValueD name body -> pure [(name, Right body)]
         -- todo: value constructors have to be in scope by the time we typecheck definitions that depend on them (say, GADTs)
         -- the easiest way is to just apply `typecheck` and `modifyEnv` declaration-by-declaration
         D.TypeD _ constrs -> pure $ fmap mkConstr constrs

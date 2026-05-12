@@ -31,14 +31,8 @@ data EPattern
     | LiteralP Literal
     deriving (Show)
 
--- where should the type info be?
-data EBinding
-    = ValueB {name :: Name_, body :: CoreTerm}
-    | FunctionB {name :: Name_, args :: NonEmpty (Visibility, Name_), body :: CoreTerm}
-    deriving (Show)
-
 data EDeclaration
-    = ValueD EBinding -- no local bindings for now
+    = ValueD Name_ CoreTerm -- no local bindings for now
     -- I'm not sure which representation for typechecked constructors makes more sense, this is the bare minimum
     | TypeD Name_ [(Name_, Vector (Visibility, CoreType))]
     | SignatureD Name_ CoreType

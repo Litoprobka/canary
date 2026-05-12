@@ -99,7 +99,7 @@ checkBinding ctx binding [] = do
             modify $ Map.insert (unLoc name) ty
             pure eBody
     -- ideally, we should unwrap the body and construct a FunctionB if the original binding was a function
-    pure (E.ValueD (E.ValueB (unLoc name) eBody))
+    pure (E.ValueD (unLoc name) eBody)
 
 processType'
     :: DeclTC es
@@ -468,7 +468,7 @@ infer ctx (t :@ loc) = traceScope (\(_, ty) -> prettyDef t <+> specSym "⇒" <+>
         env <- extendEnv ctx.env
         (eBody, bodyTy) <-
             infer (define (unLoc name) eDef (eval env eDef) (quote env.univars ctx.level ty) ty ctx) body
-        pure (Desugar.let_ (E.ValueB (unLoc name) eDef) eBody, bodyTy)
+        pure (Desugar.let_ (unLoc name) eDef eBody, bodyTy)
     T.Let{} -> internalError' "destructuring bindings and function bindings are not supported yet"
     T.LetRec{} -> internalError' "let rec not supported yet"
     T.Do{} -> internalError' "do notation not supported yet"

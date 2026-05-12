@@ -11,7 +11,6 @@ import Data.Vector qualified as Vec
 import LangPrelude
 import Syntax
 import Syntax.Core qualified as C
-import Syntax.Elaborated (EBinding)
 import Syntax.Elaborated qualified as E
 
 if_ :: CoreTerm -> CoreTerm -> CoreTerm -> CoreTerm
@@ -51,12 +50,8 @@ list ty =
         (\x xs -> C.Con ConsName $ fromList [(Implicit, ty), (Visible, x), (Visible, xs)])
         (C.Con NilName $ fromList [(Implicit, ty)])
 
-let_ :: EBinding -> CoreTerm -> CoreTerm
-let_ binding expr = case binding of
-    E.ValueB name body -> C.Let (toSimpleName_ name) body expr
-    E.FunctionB name args body -> C.Let (toSimpleName_ name) asLambda expr
-      where
-        asLambda = foldr (\(vis, name) -> C.Lambda vis name (error "todo: let arg types?")) body (fmap (second toSimpleName_) args)
+let_ :: Name_ -> CoreTerm -> CoreTerm -> CoreTerm
+let_ name body expr = C.Let (toSimpleName_ name) body expr
 
 variant :: OpenName -> CoreType -> CoreTerm
 variant name argType = C.Lambda Visible "x" argType $ C.Variant name (C.Var $ Index 0)
