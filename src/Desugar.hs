@@ -32,7 +32,7 @@ case_ :: AdjConstructors -> CoreTerm -> [(EPattern, CoreTerm)] -> CoreTerm
 case_ _ arg [] = C.Case arg C.CaseWD{branches = C.ConCase Map.empty, def = Nothing}
 case_ adjConstructors arg (m : rest) =
     let ?adjConstructors = adjConstructors
-     in fromTree' arg $ foldl1' (merge const) $ fmap (uncurry toTree) (m :| rest)
+     in fromTree' arg $ foldl1' (merge const (const True)) $ fmap (uncurry toTree) (m :| rest)
 
 match :: AdjConstructors -> [(NonEmpty (Typed EPattern), CoreTerm)] -> CoreTerm
 match _ [] = error "empty match"
@@ -41,7 +41,7 @@ match adjConstructors (m@(pats, _) : rest) =
      in let len = length pats
             types = toList $ fmap (\(_ ::: ty) -> ty) pats
             mkBranch (pats, body) = toTreeNested (toList $ fmap E.unTyped pats) body
-            tree = foldl1' (mergeNested const) $ fmap mkBranch (m :| rest)
+            tree = foldl1' (mergeNested const (const True)) $ fmap mkBranch (m :| rest)
             body = fromNested (\_ term -> term) (Level len) (fmap Level [0 .. pred len]) tree
          in foldr (\(i, ty) -> C.Lambda Visible (Name' $ "x" <> show @_ @Int i) ty) body (zip [0 ..] types)
 
@@ -77,6 +77,9 @@ data CaseTree a
     -- we'd have to shift indices in both
     -- although we'd have to shift indices either way
     -- when merging a var-branch with different con-branches (e.g. Just and Nothing)
+    --
+    -- 'Leaf' seems kinda redundant, given that it represents the same thing as an empty branch with a default case
+    -- what about `newtype CaseTree = CaseTree (These (CaseTreeNE a) a)`?
     | Branch (CaseTreeNE a) (Maybe a)
     deriving (Show)
 
@@ -165,30 +168,35 @@ fromNested toTerm lvl = \cases
     (argLvl : lvls) (Nested nested) -> fromTree (flip (fromNested toTerm) lvls) (C.Var $ levelToIndex lvl argLvl) lvl nested
     _ _ -> error "nested-pattern length mismatch"
 
-merge :: (a -> a -> a) -> CaseTree a -> CaseTree a -> CaseTree a
-merge f = \cases
+merge :: (a -> a -> a) -> (a -> Bool) -> CaseTree a -> CaseTree a -> CaseTree a
+merge f isCovering = \cases
     (Leaf lhs) (Leaf rhs) -> Leaf $ f lhs rhs
-    (Branch (ConB lhs) lhsDef) (Leaf x) -> Branch (ConB $ (fmap . fmap) (flip (mergeNested f) (NotNested x)) lhs) (Just $ mergeDefaultR f lhsDef x)
-    (Leaf x) (Branch (ConB rhs) rhsDef) -> Branch (ConB $ (fmap . fmap) (mergeNested f (NotNested x)) rhs) (Just $ mergeDefaultL f x rhsDef)
+    (Branch (ConB lhs) lhsDef) (Leaf x) -> Branch (ConB $ (fmap . fmap) (flip mergeNested' (NotNested x)) lhs) (Just $ mergeDefaultR f lhsDef x)
+    (Leaf x) (Branch (ConB rhs) rhsDef)
+        | isCovering x -> Leaf x
+        | otherwise -> Branch (ConB $ (fmap . fmap) (mergeNested' (NotNested x)) rhs) (Just $ mergeDefaultL f x rhsDef)
     -- is this right? should we also merge the default case into the branches?
     -- probably not, because the per-constructor branches are always at least as specific as the fallback branch
-    (Branch lhs lhsDef) (Branch rhs rhsDef) -> Branch (mergeNE f (lhs, lhsDef) (rhs, rhsDef)) mergedDefaults
+    (Branch lhs lhsDef) (Branch rhs rhsDef) -> Branch (mergeNE f isCovering (lhs, lhsDef) (rhs, rhsDef)) mergedDefaults
       where
         mergedDefaults = case (lhsDef, rhsDef) of
             (Just lhsDef, Just rhsDef) -> Just $ f lhsDef rhsDef
             (lhsDef, Nothing) -> lhsDef
             (Nothing, rhsDef) -> rhsDef
+  where
+    mergeNested' = mergeNested f isCovering
 
-mergeNE :: (a -> a -> a) -> (CaseTreeNE a, Maybe a) -> (CaseTreeNE a, Maybe a) -> CaseTreeNE a
-mergeNE f (ConB lhs, lhsDef) (ConB rhs, rhsDef) =
+mergeNE :: (a -> a -> a) -> (a -> Bool) -> (CaseTreeNE a, Maybe a) -> (CaseTreeNE a, Maybe a) -> CaseTreeNE a
+mergeNE f isCovering (ConB lhs, lhsDef) (ConB rhs, rhsDef) =
     ConB $
         IdMap.merge
-            (leftBiasedArg $ mergeNested f)
-            (fmap $ \l -> mergeDefaultL (mergeNested f) l (fmap NotNested rhsDef))
-            (fmap $ \r -> mergeDefaultR (mergeNested f) (fmap NotNested lhsDef) r)
+            (leftBiasedArg mergeNested')
+            (fmap \l -> mergeDefaultL mergeNested' l (fmap NotNested rhsDef))
+            (fmap \r -> mergeDefaultR mergeNested' (fmap NotNested lhsDef) r)
             lhs
             rhs
   where
+    mergeNested' = mergeNested f isCovering
     leftBiasedArg :: (a -> a -> a) -> (b, a) -> (b, a) -> (b, a)
     leftBiasedArg f (arg, l) (_, r) = (arg, f l r)
 
@@ -198,9 +206,21 @@ mergeDefaultL = foldl'
 mergeDefaultR :: (a -> b -> b) -> Maybe a -> b -> b
 mergeDefaultR f = flip (foldr f)
 
-mergeNested :: (a -> a -> a) -> Nested a -> Nested a -> Nested a
-mergeNested f = \cases
+mergeNested :: (a -> a -> a) -> (a -> Bool) -> Nested a -> Nested a -> Nested a
+mergeNested f isCovering = \cases
+    (NotNested lhs) _ | isCovering lhs -> NotNested lhs
     (NotNested lhs) (NotNested rhs) -> NotNested $ f lhs rhs
-    (Nested lhs) (NotNested x) -> Nested $ merge (mergeNested f) lhs (Leaf (NotNested x))
-    (NotNested x) (Nested rhs) -> Nested $ merge (mergeNested f) (Leaf (NotNested x)) rhs
-    (Nested lhs) (Nested rhs) -> Nested $ merge (mergeNested f) lhs rhs
+    (Nested lhs) (NotNested x) -> Nested $ innerMerge lhs (Leaf (NotNested x))
+    (NotNested x) (Nested rhs) -> Nested $ innerMerge (Leaf (NotNested x)) rhs
+    (Nested lhs) (Nested rhs) -> Nested $ innerMerge lhs rhs
+  where
+    innerMerge = merge (mergeNested f isCovering) isCoveringNested
+    isCoveringNested = \case
+        NotNested x -> isCovering x
+        Nested (Leaf x) -> isCoveringNested x
+        Nested (Branch _ (Just def)) -> isCoveringNested def
+        Nested _ -> False
+
+-- if this proves to not be enough, we can check that:
+-- - all cases are covered or there's a default branch
+-- - all branches are covering or default branch is covering
