@@ -140,16 +140,16 @@ zonkTerm' c@(lvl, env@V.ValueEnv{..}) = \case
         univars <- get
         freeVarsInCore univars zonkedCore
         pure $ C.ElabInsert zonkedCore
-    -- this case is a bit of a crutch and indicates that I probably forgot to wrap types with ElabInsert somewhere
-    -- however, ElabInsert is also something that I'm not 100% sold on, so this will do for now
-    u@C.UniVar{} -> zonkTerm' c (C.ElabInsert u)
-    C.AppPruning{} -> internalError' "pruning outside of ElabInsert"
     C.TyCon name args -> C.TyCon name <$> traverse (bitraverse pure $ zonkTerm' c) args
     C.Con name args -> C.Con name <$> traverse (bitraverse pure $ zonkTerm' c) args
     C.App vis lhs rhs -> C.App vis <$> zonkTerm' c lhs <*> zonkTerm' c rhs
+    -- wrapping argument types in ElabInsert is a bit of a crutch, but we generally want types in nf
+    -- the main reason this crutch is required is lambdas produced by the `match` desugar.
+    -- When inferring the type of a match, we produce a multi-arg function type, which is used to construct a lambda later on
+    -- the function type then gets normalized, so we can't it in C.ElabInsert before that point
     C.Lambda{vis, argName, argType, body} ->
         let newEnv = V.ValueEnv{locals = V.Var lvl : locals, ..}
-         in C.Lambda vis argName <$> zonkTerm' (lvl, env) argType <*> zonkTerm' (succ lvl, newEnv) body
+         in C.Lambda vis argName <$> zonkTerm' (lvl, env) (C.ElabInsert argType) <*> zonkTerm' (succ lvl, newEnv) body
     C.Let name body expr ->
         -- is it safe to eval the binding here? I'm not sure
         let newEnv = V.ValueEnv{locals = V.Var lvl : locals, ..}
@@ -187,6 +187,8 @@ zonkTerm' c@(lvl, env@V.ValueEnv{..}) = \case
     n@C.Name{} -> pure n
     v@C.Variant{} -> pure v
     l@C.Literal{} -> pure l
+    C.UniVar{} -> internalError' "univar outside of ElabInsert" -- zonkTerm' c (C.ElabInsert u)
+    C.AppPruning{} -> internalError' "pruning outside of ElabInsert"
 
 liftLevel :: Level -> Int -> ([Value], Level)
 liftLevel lvl diff = (freeVars, newLevel)
