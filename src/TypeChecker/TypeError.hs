@@ -20,7 +20,7 @@ data TypeError
     | MissingField (Either CType (Term 'Fixity)) OpenName
     | MissingVariant CType OpenName
     | EmptyMatch Loc
-    | ArgCountMismatch Loc -- "different amount of arguments in a match expression"
+    | ArgCountMismatch {loc :: Loc, firstBranch :: (Loc, Int), mismatchingBranch :: (Loc, Int)}
     | NotEnoughArgumentsInTypeOfMatch {loc :: Loc, expectedArgCount :: Int, actualArgCount :: Int, ty :: CoreType}
     | ArgCountMismatchPattern (Pattern 'Fixity) Int Int
     | NotAFunction Loc CType
@@ -78,11 +78,16 @@ typeError =
                 "empty match expression"
                 (mkNotes [(loc, Blank)])
                 []
-        ArgCountMismatch loc ->
+        ArgCountMismatch{loc, firstBranch = (fbLoc, fbCount), mismatchingBranch = (mbLoc, mbCount)} ->
             Err
                 Nothing
                 "different amount of arguments in a match expression"
-                (mkNotes [(loc, Blank)])
+                ( mkNotes
+                    [ (loc, Blank)
+                    , (fbLoc, This ("this branch has" <+> pretty fbCount <+> "arguments"))
+                    , (mbLoc, This ("whereas this branch has" <+> pretty mbCount <+> "arguments"))
+                    ]
+                )
                 []
         ArgCountMismatchPattern pat expected got ->
             Err

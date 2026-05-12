@@ -5,6 +5,7 @@ module TypeChecker where
 
 import Common
 import Data.EnumMap.Lazy qualified as EMap
+import Data.Foldable1 (foldMap1)
 import Data.Functor (unzip)
 import Data.IdMap qualified as Map
 import Data.List.NonEmpty qualified as NE
@@ -28,7 +29,7 @@ import Syntax.Value qualified as V
 import Trace
 import TypeChecker.Backend
 import TypeChecker.Generalisation
-import TypeChecker.TypeError (TypeError (..), typeError)
+import TypeChecker.TypeError (TypeError (..), typeError, typeErrorWithLoc)
 import TypeChecker.Unification (refine, unify)
 
 type DeclTC es =
@@ -305,7 +306,13 @@ check ctx (t :@ loc) ty = traceScope_ (prettyDef t <+> specSymBlue "⇐" <+> pre
             pure $ Desugar.match adjConstructors []
         (T.Match branches@((pats, _) : _), ty) -> do
             adjConstructors <- getAdjConstructors
+
+            let baseLen = length pats
+                baseLoc = foldMap1 getLoc pats
+
             Desugar.match adjConstructors <$> for branches \(pats, body) -> do
+                unless (length pats == baseLen) do
+                    typeErrorWithLoc \loc -> ArgCountMismatch loc (baseLoc, baseLen) (foldMap1 getLoc pats, length pats)
                 (ePats, ctx, bodyTy) <- checkPatterns 0 ctx pats ty
                 (ePats,) <$> check ctx body bodyTy
           where
