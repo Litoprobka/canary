@@ -1,0 +1,23 @@
+type Either a = L a | R a
+
+test : Either (Either (Either Int)) -> Int
+test = match
+    (L (L (L _))) -> 1
+    (L (L (R _))) -> 2
+    (L (R (L _))) -> 3
+    (L (R (R _))) -> 4
+    (R (L (L _))) -> 5
+    (R (L (R _))) -> 6
+    (R (R (L _))) -> 7
+    (R (R (R _))) -> 8
+
+testCase : Either (Either (Either Int)) -> Int
+testCase e = case e of
+    L (L (L _)) -> 1
+    L (L (R _)) -> 2
+    L (R (L _)) -> 3
+    L (R (R _)) -> 4
+    R (L (L _)) -> 5
+    R (L (R _)) -> 6
+    R (R (L _)) -> 7
+    R (R (R _)) -> 8

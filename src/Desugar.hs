@@ -31,7 +31,8 @@ case_ :: AdjConstructors -> CoreTerm -> [(EPattern, CoreTerm)] -> CoreTerm
 case_ _ arg [] = C.Case arg C.CaseWD{branches = C.ConCase Map.empty, def = Nothing}
 case_ adjConstructors arg (m : rest) =
     let ?adjConstructors = adjConstructors
-     in fromTree' arg $ foldl1' (merge const (const True)) $ fmap (uncurry toTree) (m :| rest)
+     in let caseTree = foldl1' (merge const (const True)) $ fmap (uncurry toTree) (m :| rest)
+         in fromTree (\_ term -> term) arg (Level 0) caseTree
 
 match :: AdjConstructors -> [(NonEmpty (Typed EPattern), CoreTerm)] -> CoreTerm
 match _ [] = error "empty match"
@@ -41,7 +42,7 @@ match adjConstructors (m@(pats, _) : rest) =
             types = toList $ fmap (\(_ ::: ty) -> ty) pats
             mkBranch (pats, body) = toTreeNested (toList $ fmap E.unTyped pats) body
             tree = foldl1' (mergeNested const (const True)) $ fmap mkBranch (m :| rest)
-            body = fromNested (\_ term -> term) (Level len) (fmap Level [0 .. pred len]) tree
+            body = fromNested (\lvl term -> C.liftAt lvl.getLevel (Level len) term) (Level len) (fmap Level [0 .. pred len]) tree
          in foldr (\(i, ty) -> C.Lambda Visible (Name' $ "x" <> show @_ @Int i) ty) body (zip [0 ..] types)
 
 list :: CoreTerm -> [CoreTerm] -> CoreTerm
@@ -102,14 +103,11 @@ toTree pat body = case pat of
     argName (i :: Int) = \case
         E.VarP name -> name
         E.WildcardP txt -> Wildcard' txt
-        _ -> Name' $ "x" <> show i
+        _ -> Name' $ "y" <> show i
 
 toTreeNested :: [EPattern] -> a -> Nested a
 toTreeNested [] x = NotNested x
 toTreeNested (pat : pats) x = Nested $ toTree pat (toTreeNested pats x)
-
-fromTree' :: (?adjConstructors :: AdjConstructors) => CoreTerm -> CaseTree CoreTerm -> CoreTerm
-fromTree' arg = fromTree (\_ term -> term) arg (Level 0)
 
 type AdjConstructors =
     IdMap
@@ -141,6 +139,7 @@ fromTree toTerm arg lvl = \case
                     | IdMap.size cases == IdMap.size constrs ->
                         C.Case arg $ C.CaseWD (mkBranches cases) Nothing
                     | IdMap.size cases == IdMap.size constrs - 1 ->
+                        -- maybe we should construct a nested tree of the proper length here, I'm not sure
                         let lastCase = (\vises -> (mkArgs vises, NotNested def)) <$> IdMap.difference constrs cases
                          in C.Case arg $ C.CaseWD (mkBranches $ cases <> lastCase) Nothing
                 _ -> C.Case arg $ C.CaseWD (mkBranches cases) (Just (Wildcard' "_", toTerm lvl def))
@@ -163,6 +162,9 @@ fromNested toTerm lvl = \cases
     (argLvl : lvls) (Nested nested) -> fromTree (flip (fromNested toTerm) lvls) (C.Var $ levelToIndex lvl argLvl) lvl nested
     _ _ -> error "nested-pattern length mismatch"
 
+{- | merge two CaseTrees
+@merge mergeSubtree isSubtreeCovering@
+-}
 merge :: (a -> a -> a) -> (a -> Bool) -> CaseTree a -> CaseTree a -> CaseTree a
 merge f isCovering = \cases
     (Leaf lhs) (Leaf rhs) -> Leaf $ f lhs rhs
@@ -181,6 +183,9 @@ merge f isCovering = \cases
   where
     mergeNested' = mergeNested f isCovering
 
+{- | merge two CaseTreeNEs with optional default cases
+@mergeNE mergeSubtree isSubtreeCovering@
+-}
 mergeNE :: (a -> a -> a) -> (a -> Bool) -> (CaseTreeNE a, Maybe a) -> (CaseTreeNE a, Maybe a) -> CaseTreeNE a
 mergeNE f isCovering (ConB lhs, lhsDef) (ConB rhs, rhsDef) =
     ConB $

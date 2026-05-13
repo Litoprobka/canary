@@ -1,0 +1,13 @@
+type Proxy a = MkProxy
+type Boba = MkBoba
+
+proxyOk : Proxy Int -> Proxy Int
+proxyOk = match MkProxy -> MkProxy @Int
+
+-- this case fails when an infallible match gets simplified
+eitherThisWorks : Boba -> Proxy Int
+eitherThisWorks = match _ -> MkProxy
+
+-- this case fails when we don't lift the branches correctly
+orThis : Boba -> Proxy Int
+orThis = match MkBoba -> MkProxy

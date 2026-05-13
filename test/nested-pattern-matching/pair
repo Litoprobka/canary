@@ -1,0 +1,9 @@
+type Pair a b = MkPair a b
+
+test : Pair (List Int) (List Int) -> Int
+test = match
+    (MkPair Nil Nil) -> 0
+    (MkPair (Cons _ Nil) (Cons _ Nil)) -> 1
+    (MkPair Nil _) -> 2
+    (MkPair _ Nil) -> 3
+    _ -> 4
