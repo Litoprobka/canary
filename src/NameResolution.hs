@@ -27,7 +27,6 @@ import Common hiding (Name, Scope)
 import Data.DList (DList)
 import Data.DList qualified as DList
 import Data.HashMap.Strict qualified as Map
-import Data.List (partition)
 import Data.List qualified as List
 import Data.List.NonEmpty qualified as NE
 import Diagnostic
@@ -185,10 +184,7 @@ run env = evalState env . evalState [] . evalState NotInTypeScope . runDeclare
 resolveNames :: (NameResCtx es, Declare :> es) => [Declaration 'Parse] -> Eff es [Declaration 'NameRes]
 resolveNames decls = do
     parentScope <- mkGlobalScope
-    let (valueDecls, rest) = partition isValueDecl decls
-    otherDecls <- traverse (resolveDec parentScope) rest
-    valueDecls' <- traverse (resolveDec parentScope) valueDecls
-    pure $ otherDecls <> valueDecls'
+    traverse (resolveDec parentScope) decls
   where
     -- this is going to handle imports at some point
     mkGlobalScope :: (NameResCtx es, Declare :> es) => Eff es (HashMap SimpleName_ Name)
@@ -196,9 +192,6 @@ resolveNames decls = do
         parentScope <- gets @Scope (.table)
         collectNames decls
         pure parentScope
-
-    isValueDecl (L D.Value{}) = True
-    isValueDecl _ = False
 
 {- | adds declarations to the current scope
 this function should be used very carefully, since it will
@@ -208,6 +201,8 @@ collectNames :: (NameResCtx es, Declare :> es) => [Declaration 'Parse] -> Eff es
 collectNames decls = for_ decls $ traverse_ \case
     D.Value (FunctionB name _ _) _ -> void $ declare name
     D.Value (ValueB pat _) _ -> void $ declarePat pat
+    -- todo: when I come back to allowing free definition order (rather than define-before-use, as it is now),
+    -- I'd also have to traverse and declare constructor names here
     D.Type name _ _ -> void $ declare name
     D.GADT name _ _ -> void $ declare name
     D.Signature{} -> pass

@@ -1,0 +1,15 @@
+type Pair a b = MkPair a b
+
+p1 = Pair Int Int
+p2 = Pair p1 p1
+p3 = Pair p2 p2
+
+t1 : p3
+t1 =
+    let x1 = MkPair 1 1
+    let x2 = MkPair x1 x1
+    MkPair x2 x2
+
+t2 : p3 -> Int
+t2 p = case p of
+    (MkPair (MkPair (MkPair x _) _) _) -> x
