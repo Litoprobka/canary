@@ -171,14 +171,21 @@ quoteWhnf univars = go
         C.UniVar uni -> case EMap.lookup uni univars of
             Just Solved{solution} -> go lvl solution
             _ -> C.UniVar uni
-        C.AppPruning lhs pruning -> substPruning env (subst lvl env lhs) pruning.getPruning
-      where
-        substPruning env lhs pruning = case (env, pruning) of
-            ([], []) -> lhs
-            (v : env, Just vis : pruning) -> C.App vis (substPruning env lhs pruning) (go lvl v)
-            (_ : env, Nothing : pruning) -> substPruning env lhs pruning
-            (env, pruning) -> error $ "[subst] pruning-env length mismatch (" <> show (length pruning) <> " != " <> show (length env) <> ")"
-
+        pr@(C.AppPruning lhs pruning) -> substPruning env (subst lvl env lhs) pruning.getPruning
+          where
+            substPruning env lhs pruning = case (env, pruning) of
+                ([], []) -> lhs
+                (v : env, Just vis : pruning) -> C.App vis (substPruning env lhs pruning) (go lvl v)
+                (_ : env, Nothing : pruning) -> substPruning env lhs pruning
+                (env, pruning) ->
+                    error $
+                        show $
+                            "[subst] pruning-env length mismatch ("
+                                <> pretty (length pruning)
+                                <+> "!="
+                                <+> pretty (length env)
+                                <> ")\nin the pruning spine"
+                                <+> show (prettyDef pr)
     substCaseWD :: Level -> [Value] -> CaseWithDefault -> CaseWithDefault
     substCaseWD lvl env C.CaseWD{branches, def} =
         C.CaseWD
@@ -233,13 +240,21 @@ eval env@ExtendedEnv{..} = \case
         Row innerRow innerExt -> Row (fmap (eval env) row <> innerRow) innerExt
         nonRow -> error . show $ "[eval] non-row value in a row:" <+> pretty nonRow
     C.UniVar uni -> force univars (UniVar uni)
-    C.AppPruning lhs pruning -> evalAppPruning env.locals (eval env lhs) pruning.getPruning
-  where
-    evalAppPruning ls val pruning = case (ls, pruning) of
-        ([], []) -> val
-        (t : ls, Just vis : pruning) -> evalApp env.univars vis (evalAppPruning ls val pruning) t
-        (_ : ls, Nothing : pruning) -> evalAppPruning ls val pruning
-        (env, pruning) -> error $ "[eval] pruning-env length mismatch (" <> show (length pruning) <> " != " <> show (length env) <> ")"
+    pr@(C.AppPruning lhs pruning) -> evalAppPruning env.locals (eval env lhs) pruning.getPruning
+      where
+        evalAppPruning ls val pruning = case (ls, pruning) of
+            ([], []) -> val
+            (t : ls, Just vis : pruning) -> evalApp env.univars vis (evalAppPruning ls val pruning) t
+            (_ : ls, Nothing : pruning) -> evalAppPruning ls val pruning
+            (env, pruning) ->
+                error $
+                    show $
+                        "[eval] pruning-env length mismatch ("
+                            <> pretty (length pruning)
+                            <+> "!="
+                            <+> pretty (length env)
+                            <> ")\nin the pruning spine"
+                            <+> prettyDef pr
 
 -- | evaluate a case expression
 evalPatternMatch :: ExtendedEnv -> Value -> C.CaseWithDefault -> Value

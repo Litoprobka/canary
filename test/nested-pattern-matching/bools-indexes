@@ -1,5 +1,5 @@
-test : Int -> Int -> Int -> Int -> Int -> Bool -> Bool -> Bool -> List Int
-test a b c d e = match
+test : Int -> Int -> Int -> Int -> Bool -> Bool -> Bool -> List Int
+test a b c d = match
     _     True  _     -> [1, a]
     True  _     False -> [2, b]
     False False _     -> [3, c]

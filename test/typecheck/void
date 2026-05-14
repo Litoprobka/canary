@@ -1,0 +1,4 @@
+type Void
+
+absurd : forall a. Void -> a
+absurd x = case x of

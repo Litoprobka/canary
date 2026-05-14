@@ -40,11 +40,11 @@ match adjConstructors (m@(pats, _) : rest) =
     let ?adjConstructors = adjConstructors
      in let len = length pats
             types = toList $ fmap (\(_ ::: ty) -> ty) pats
-            mkBranch (pats, body) = toTree (toList $ fmap E.unTyped pats) body
+            mkBranch (pats, body) = toTree (toList $ fmap E.unTyped pats) (C.liftAt len (Level $ sum $ fmap (E.patternArity . E.unTyped) pats) body)
             tree = foldl1' merge $ fmap mkBranch (m :| rest)
             args = (\argLvl newLvl -> C.Var $ levelToIndex newLvl (Level argLvl)) <$> [0 .. pred len]
-            body = fromTree args (Level len) tree
-         in foldr (\(i, ty) -> C.Lambda Visible (Name' $ "x" <> show @_ @Int i) ty) body (zip [0 ..] types)
+            termTree = fromTree args (Level len) tree
+         in foldr (\(i, ty) -> C.Lambda Visible (Name' $ "x" <> show @_ @Int i) ty) termTree (zip [0 ..] types)
 
 list :: CoreTerm -> [CoreTerm] -> CoreTerm
 list ty =
@@ -90,7 +90,8 @@ toTree :: [EPattern] -> a -> CaseTree a
 toTree [] body = Leaf body
 toTree (pat : pats) body = case pat of
     E.VarP name -> Var (Just name) (toTree pats body)
-    E.WildcardP name -> Var (Just $ Wildcard' name) (toTree pats body)
+    E.WildcardP{} -> Var Nothing (toTree pats body)
+    -- E.WildcardP name -> Var (Just $ Wildcard' name) (toTree pats body)
     E.ConstructorP con args ->
         let conPats = snd <$> toList args
             subtree = toTree (conPats <> pats) body
@@ -108,8 +109,8 @@ fromTree [] _lvl (Leaf body) = body
 fromTree [] _lvl _ = error "fromTree: tree requires more arguments than given"
 fromTree (mkArg : args) lvl tree = case tree of
     Leaf body -> body -- short-circuit case. Do we need to do something with the index?
-    Var (Just name) subtree -> C.Let name arg (fromTree args (succ lvl) subtree)
-    Var Nothing subtree -> fromTree args lvl subtree
+    -- Var (Just name) subtree -> C.Let name arg $ C.lift 1 (fromTree args (succ lvl) subtree)
+    Var _ subtree -> fromTree args lvl subtree
     Branch (ConB cases) Nothing -> C.Case arg $ C.CaseWD (mkBranches cases) Nothing
     -- we drop the catch-all case when all patterns are covered,
     -- and turn the catch-all case into a normal case when all but one are covered
