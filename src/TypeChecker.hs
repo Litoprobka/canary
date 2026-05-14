@@ -12,6 +12,7 @@ import Data.List.NonEmpty qualified as NE
 import Data.Row (ExtRow (..), OpenName)
 import Data.Row qualified as Row
 import Data.Vector qualified as Vec
+import Desugar (TypeOrValueCon (..))
 import Desugar qualified
 import Diagnostic
 import Effectful.Reader.Static
@@ -126,7 +127,7 @@ processType' ctx name mbKind constructors checkConstructor = do
 
     let conArities = (\(name, conSig, _) -> (unLoc name, C.functionTypeArity conSig)) <$> constructors
     for_ constructors \(con, _, sigV) -> do
-        modify $ Map.insert (unLoc con) (mkConstructorMetadata (Map.fromList conArities) (name, kind) sigV)
+        modify $ Map.insert (unLoc con) (mkConstructorMetadata (Map.fromList conArities) ValueCon (name, kind) sigV)
 
     pure (E.TypeD (unLoc name) conArities, tyCon)
 
@@ -175,17 +176,19 @@ processType ctx name binders constructors =
         fullType loc' = foldl' (\lhs -> (:@ loc') . T.App Visible lhs) (T.Name name :@ getLoc name) ((:@ loc') . T.Name . (.var) <$> binders)
 
 mkTypeConstructorMetadata :: Loc -> VType -> ConMetadata
-mkTypeConstructorMetadata loc = mkConstructorMetadata Map.empty (TypeName :@ loc, V.Type TypeName)
+mkTypeConstructorMetadata loc = mkConstructorMetadata Map.empty TypeCon (TypeName :@ loc, V.Type TypeName)
 
 mkConstructorMetadata
     :: IdMap Name_ (Vector (Visibility, CoreType))
     -- ^ constructor names of the type (e.g. `[True, False]`)
+    -> TypeOrValueCon
+    -- ^ is this a type constructor or a value constructor?
     -> (Name, VType)
     -- ^ type name and kind (e.g. `Bool` and `Type`)
     -> VType
     -- ^ type of the value constructor of that type (e.g. `True :: Bool`)
     -> ConMetadata
-mkConstructorMetadata adjConstructors (L typeName, kind) conType = ConMetadata{mkMeta, adjConstructors}
+mkConstructorMetadata adjConstructors typeOrValue (L typeName, kind) conType = ConMetadata{mkMeta, adjConstructors, typeOrValue}
   where
     mkMeta ctx = do
         params <- getTypeParams ctx.level conType
@@ -597,7 +600,10 @@ checkPattern ctx (pat :@ pLoc) ty = do
             ctx <- refine ctx actualType ty
             let (eArgs, argVals) = unzip argsWithVals
                 valsWithVis = zip (map fst eArgs) argVals
-            pure ((E.ConstructorP name eArgs, V.Con name (fromList valsWithVis)), ctx)
+                (conP, vCon) = case conMeta.typeOrValue of
+                    TypeCon -> (E.TypeP, V.TyCon)
+                    ValueCon -> (E.ConstructorP, V.Con)
+            pure ((conP name eArgs, vCon name (fromList valsWithVis)), ctx)
         T.VariantP con arg ->
             forceM ty >>= \case
                 V.VariantType (V.Row row _) | Just argType <- Row.lookup con row -> do

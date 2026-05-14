@@ -73,8 +73,9 @@ data CaseTree a
 -- here, visibilities and names are only preserved for pretty-printing
 data Args = Args Int [(Visibility, SimpleName_)] deriving (Show)
 
-newtype CaseBranch a
-    = ConB (IdMap Name_ (Args, CaseTree a))
+data TypeOrValueCon = TypeCon | ValueCon deriving (Eq, Show)
+data CaseBranch a
+    = ConB TypeOrValueCon (IdMap Name_ (Args, CaseTree a))
     deriving (Show)
 
 -- todo: all branch bodies should be extracted to outer scoped let-bound lambdas
@@ -95,7 +96,11 @@ toTree (pat : pats) body = case pat of
     E.ConstructorP con args ->
         let conPats = snd <$> toList args
             subtree = toTree (conPats <> pats) body
-         in Branch (ConB $ IdMap.one con (mkArgs args, subtree)) Nothing
+         in Branch (ConB ValueCon $ IdMap.one con (mkArgs args, subtree)) Nothing
+    E.TypeP con args ->
+        let conPats = snd <$> toList args
+            subtree = toTree (conPats <> pats) body
+         in Branch (ConB TypeCon $ IdMap.one con (mkArgs args, subtree)) Nothing
     _ -> error "desugar other patterns: todo"
   where
     mkArgs args = Args (length args) (zipWith (\i (vis, argPat) -> (vis, argName i argPat)) [0 ..] args)
@@ -111,7 +116,8 @@ fromTree (mkArg : args) lvl tree = case tree of
     Leaf body -> body -- short-circuit case. Do we need to do something with the index?
     -- Var (Just name) subtree -> C.Let name arg $ C.lift 1 (fromTree args (succ lvl) subtree)
     Var _ subtree -> fromTree args lvl subtree
-    Branch (ConB cases) Nothing -> C.Case arg $ C.CaseWD (mkBranches cases) Nothing
+    Branch (ConB TypeCon cases) mbDef -> C.Case arg $ C.CaseWD (mkBranches cases TypeCon) ((\def -> (Wildcard' "_", fromTree args (succ lvl) def)) <$> mbDef)
+    Branch (ConB ValueCon cases) Nothing -> C.Case arg $ C.CaseWD (mkBranches cases ValueCon) Nothing
     -- we drop the catch-all case when all patterns are covered,
     -- and turn the catch-all case into a normal case when all but one are covered
     -- see `test/nested-pattern-matching/three-bools` for an example of how this works in practice
@@ -124,26 +130,29 @@ fromTree (mkArg : args) lvl tree = case tree of
     -- `match True -> 1; _ -> 2`
     -- ==>
     -- `match True -> 1; False -> 2`
-    Branch (ConB cases) (Just def) ->
+    Branch (ConB ValueCon cases) (Just def) ->
         let mbConstrs = do
                 anyCon <- listToMaybe $ IdMap.keys cases
                 IdMap.lookup anyCon ?adjConstructors
          in case mbConstrs of
                 Just constrs
                     | IdMap.size cases == IdMap.size constrs ->
-                        C.Case arg $ C.CaseWD (mkBranches cases) Nothing
+                        C.Case arg $ C.CaseWD (mkBranches cases ValueCon) Nothing
                     | IdMap.size cases == IdMap.size constrs - 1 ->
                         let lastCase = (\vises -> (mkArgs vises, wrapInVars (Vec.length vises) def)) <$> IdMap.difference constrs cases
-                         in C.Case arg $ C.CaseWD (mkBranches $ cases <> lastCase) Nothing
-                _ -> C.Case arg $ C.CaseWD (mkBranches cases) (Just (Wildcard' "_", fromTree args (succ lvl) def))
+                         in C.Case arg $ C.CaseWD (mkBranches (cases <> lastCase) ValueCon) Nothing
+                _ -> C.Case arg $ C.CaseWD (mkBranches cases ValueCon) (Just (Wildcard' "_", fromTree args (succ lvl) def))
   where
     arg = mkArg lvl
 
-    mkBranches cases =
-        C.ConCase $
+    mkBranches cases = \case
+        ValueCon -> C.ConCase $ newCases C.ConstructorP
+        TypeCon -> C.TypeCase $ newCases C.TypeP
+      where
+        newCases conCase =
             cases & Map.mapWithKey \name (Args n argNames, subtree) ->
                 let conArgs = (\argLvl newLvl -> C.Var $ levelToIndex newLvl argLvl) <$> [lvl .. lvl `incLevel` pred n]
-                 in (C.ConstructorP name argNames, fromTree (conArgs <> args) (lvl `incLevel` n) subtree)
+                 in (conCase name argNames, fromTree (conArgs <> args) (lvl `incLevel` n) subtree)
 
     mkArgs vises = Args (Vec.length vises) $ ((,Wildcard' "_") . fst) <$> toList vises
 
@@ -157,16 +166,16 @@ merge = \cases
     lhs _ | isCovering lhs -> lhs
     (Var lhsName lhs) (Var rhsName rhs) -> Var (lhsName <|> rhsName) (merge lhs rhs)
     (Var name lhs) leaf@Leaf{} -> Var name (merge lhs leaf) -- may cause a level mismatch
-    (Branch (ConB lhs) lhsDef) leaf@Leaf{} ->
+    (Branch (ConB torv lhs) lhsDef) leaf@Leaf{} ->
         let cases = lhs & (fmap . fmap) (`merge` leaf)
-         in Branch (ConB cases) (Just $ mergeDefaultR merge lhsDef leaf)
+         in Branch (ConB torv cases) (Just $ mergeDefaultR merge lhsDef leaf)
     -- these two cases may cause a level mismatch, I'm not sure
-    (Branch (ConB lhs) lhsDef) (Var _ rhs) ->
+    (Branch (ConB torv lhs) lhsDef) (Var _ rhs) ->
         let cases = lhs & (fmap . fmap) (`merge` rhs)
-         in Branch (ConB cases) (Just $ mergeDefaultR merge lhsDef rhs)
-    (Var _ lhs) (Branch (ConB rhs) rhsDef) ->
+         in Branch (ConB torv cases) (Just $ mergeDefaultR merge lhsDef rhs)
+    (Var _ lhs) (Branch (ConB torv rhs) rhsDef) ->
         let cases = rhs & (fmap . fmap) (merge lhs)
-         in Branch (ConB cases) (Just $ mergeDefaultL merge lhs rhsDef)
+         in Branch (ConB torv cases) (Just $ mergeDefaultL merge lhs rhsDef)
     (Branch lhs lhsDef) (Branch rhs rhsDef) -> Branch (mergeBranch (lhs, lhsDef) (rhs, rhsDef)) mergedDefaults
       where
         mergedDefaults = case (lhsDef, rhsDef) of
@@ -183,17 +192,19 @@ merge = \cases
         _ -> False
 
 mergeBranch :: (CaseBranch a, Maybe (CaseTree a)) -> (CaseBranch a, Maybe (CaseTree a)) -> CaseBranch a
-mergeBranch (ConB lhs, lhsDef) (ConB rhs, rhsDef) =
-    ConB $
-        Map.merge
-            (leftBiasedArg merge)
-            (\(args@(Args n _), l) -> (args, mergeDefaultL merge l (wrapInVars n <$> rhsDef)))
-            (\(args@(Args n _), r) -> (args, mergeDefaultR merge (wrapInVars n <$> lhsDef) r))
-            lhs
-            rhs
+mergeBranch (ConB torv1 lhs, lhsDef) (ConB torv2 rhs, rhsDef)
+    | torv1 == torv2 =
+        ConB torv1 $
+            Map.merge
+                (leftBiasedArg merge)
+                (\(args@(Args n _), l) -> (args, mergeDefaultL merge l (wrapInVars n <$> rhsDef)))
+                (\(args@(Args n _), r) -> (args, mergeDefaultR merge (wrapInVars n <$> lhsDef) r))
+                lhs
+                rhs
   where
     leftBiasedArg :: (a -> a -> a) -> (b, a) -> (b, a) -> (b, a)
     leftBiasedArg f (arg, l) (_, r) = (arg, f l r)
+mergeBranch _ _ = error "branch type mismatch (should have been caught by typecheck)"
 
 mergeDefaultL :: (a -> b -> a) -> a -> Maybe b -> a
 mergeDefaultL = foldl'

@@ -9,7 +9,7 @@ import Common
 import Data.EnumMap.Strict qualified as EMap
 import Data.EnumSet qualified as ESet
 import Data.IdMap qualified as Map
-import Desugar (AdjConstructors)
+import Desugar (AdjConstructors, TypeOrValueCon)
 import Diagnostic (Diagnose, internalError')
 import Effectful.Labeled (Labeled, labeled, runLabeled)
 import Effectful.Reader.Static
@@ -26,6 +26,7 @@ import Trace
 data ConMetadata = ConMetadata
     { mkMeta :: forall es. (UniEffs es, Reader TopLevel :> es, Diagnose :> es, NameGen :> es) => Context -> Eff es (VType, ConArgList)
     , adjConstructors :: IdMap Name_ (Vector (Visibility, CoreType))
+    , typeOrValue :: TypeOrValueCon
     }
 
 getConMetadata
@@ -34,7 +35,7 @@ getConMetadata
     => ConMetadata
     -> Context
     -> Eff es (VType, ConArgList)
-getConMetadata (ConMetadata f _) = f
+getConMetadata (ConMetadata f _ _) = f
 
 getAdjConstructors :: (Reader ConMetaTable :> es) => Eff es AdjConstructors
 getAdjConstructors = asks @ConMetaTable (fmap (.adjConstructors))
