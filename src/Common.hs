@@ -67,12 +67,6 @@ type family NameAt (pass :: Pass) where
     NameAt other = Name
 
 -- a disambiguated name
--- I haven't decided whether ids should be global or per-name
--- a slight problem with global ids is that anything that uses builtins
--- should take a list of their names
---
--- it is also convenient to pretty print local ids as `name` or `name#10`, which is
--- not really an option with global ids
 type Name = Located Name_
 data Name_
     = Name Text Id
@@ -88,7 +82,9 @@ data Name_
     | TextName
     | CharName
     | TypeName
-    | RowName
+    | -- currently rows are monomorphic and only accept types, but I guess nobody stops me from
+      -- making them polymorphic and turning them into comptime dicts
+      RowName
     | RecordName
     | VariantName
     deriving (Show, Eq, Generic, Hashable)

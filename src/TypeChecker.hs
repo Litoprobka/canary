@@ -507,7 +507,7 @@ infer ctx (t :@ loc) = traceScope (\(_, ty) -> prettyDef t <+> specSym "⇒" <+>
         payload <- freshName_ "payload"
         univars <- get
         rowExt <- freshUniVar (bind univars payload payloadTy ctx) type_
-        let mkVariant row = C.TyCon RowName ((Visible, row) :< Nil)
+        let mkVariant row = C.TyCon VariantName ((Visible, row) :< Nil)
         let body = mkVariant $ C.Row $ ExtRow (fromList [(con, quote univars ctx.level payloadTy)]) rowExt
         -- '(x : ?a) -> [| Con ?a | ?r x ]'
         pure (Desugar.variant con payloadTyC, V.Pi V.Closure{env = ctx.env, ty = payloadTy, var = toSimpleName_ payload, body})
